@@ -60,7 +60,9 @@ mod native {
     use rocktree::{BulkRequest, Client, MemoryCache, NodeRequest};
 
     use super::LoaderState;
-    use crate::mesh::{RocktreeMeshMarker, convert_mesh, convert_texture, matrix_to_transform};
+    use crate::mesh::{
+        RocktreeMeshMarker, convert_mesh, convert_texture, matrix_to_world_position_and_transform,
+    };
 
     /// Start loading the initial planetoid data (native).
     #[allow(clippy::needless_pass_by_value)]
@@ -173,12 +175,16 @@ mod native {
                                     ..Default::default()
                                 });
 
-                                let transform = matrix_to_transform(&node.matrix_globe_from_mesh);
+                                let (world_position, transform) =
+                                    matrix_to_world_position_and_transform(
+                                        &node.matrix_globe_from_mesh,
+                                    );
 
                                 world.spawn((
                                     Mesh3d(mesh_handle),
                                     MeshMaterial3d(material),
                                     transform,
+                                    world_position,
                                     RocktreeMeshMarker {
                                         path: node.path.clone(),
                                         meters_per_texel: node.meters_per_texel,
@@ -209,7 +215,9 @@ mod wasm {
     use rocktree::{BulkMetadata, BulkRequest, Client, MemoryCache, Node, NodeRequest, Planetoid};
 
     use super::LoaderState;
-    use crate::mesh::{RocktreeMeshMarker, convert_mesh, convert_texture, matrix_to_transform};
+    use crate::mesh::{
+        RocktreeMeshMarker, convert_mesh, convert_texture, matrix_to_world_position_and_transform,
+    };
 
     /// Component for tracking async planetoid load task.
     #[derive(Component)]
@@ -380,12 +388,16 @@ mod wasm {
                                 ..Default::default()
                             });
 
-                            let transform = matrix_to_transform(&node.matrix_globe_from_mesh);
+                            let (world_position, transform) =
+                                matrix_to_world_position_and_transform(
+                                    &node.matrix_globe_from_mesh,
+                                );
 
                             commands.spawn((
                                 Mesh3d(mesh_handle),
                                 MeshMaterial3d(material),
                                 transform,
+                                world_position,
                                 RocktreeMeshMarker {
                                     path: node.path.clone(),
                                     meters_per_texel: node.meters_per_texel,

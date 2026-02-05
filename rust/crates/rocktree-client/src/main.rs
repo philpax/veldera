@@ -4,6 +4,7 @@
 //! 3D terrain data, with LOD-based loading and frustum culling.
 
 mod camera;
+mod floating_origin;
 mod loader;
 mod lod;
 mod mesh;
@@ -12,6 +13,8 @@ mod ui;
 use bevy::core_pipeline::tonemapping::Tonemapping;
 use bevy::prelude::*;
 use camera::{CameraControllerPlugin, FlightCamera};
+use floating_origin::{FloatingOriginCamera, FloatingOriginPlugin};
+use glam::DVec3;
 use loader::DataLoaderPlugin;
 use lod::LodPlugin;
 use ui::DebugUiPlugin;
@@ -22,6 +25,7 @@ pub struct AppPlugin;
 impl Plugin for AppPlugin {
     fn build(&self, app: &mut App) {
         app.add_plugins((
+            FloatingOriginPlugin,
             CameraControllerPlugin,
             DataLoaderPlugin,
             LodPlugin,
@@ -35,24 +39,28 @@ impl Plugin for AppPlugin {
 fn setup_scene(mut commands: Commands) {
     // Starting position: above NYC (similar to original C++ client).
     // ECEF coordinates for approximately (40.7°N, 74°W) at ~600km altitude.
-    let start_position = Vec3::new(1_329_866.0, -4_643_494.0, 4_154_677.0);
+    // Note: magnitude should be ~6,971 km for 600km altitude above Earth radius (6,371 km).
+    let start_position = DVec3::new(1_455_097.0, -5_080_627.0, 4_545_616.0);
     let start_direction = Vec3::new(0.219_862, 0.419_329, 0.312_226).normalize();
 
     // Calculate up vector (from Earth center towards camera).
-    let up = start_position.normalize();
+    let up = start_position.normalize().as_vec3();
 
-    // Spawn a 3D camera positioned above the Earth's surface.
+    // Spawn a 3D camera at the origin (floating origin system handles positioning).
+    // The camera's Transform is always at origin; everything else is rendered relative to it.
     commands.spawn((
         Camera3d::default(),
-        Transform::from_translation(start_position).looking_to(start_direction, up),
+        Transform::from_translation(Vec3::ZERO).looking_to(start_direction, up),
         Projection::Perspective(PerspectiveProjection {
             fov: std::f32::consts::FRAC_PI_4,
-            near: 50.0,
+            near: 1.0,
             far: 100_000_000.0, // 100,000 km to see the whole Earth.
             ..Default::default()
         }),
         // Disable tonemapping since we use unlit materials.
         Tonemapping::None,
+        // High-precision camera position for floating origin system.
+        FloatingOriginCamera::new(start_position),
         FlightCamera {
             direction: start_direction,
         },

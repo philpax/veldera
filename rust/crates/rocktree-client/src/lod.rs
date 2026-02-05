@@ -48,6 +48,8 @@ pub struct LodState {
     loaded_nodes: HashSet<String>,
     /// Paths of bulks that are currently being loaded.
     loading_bulks: HashSet<String>,
+    /// Paths of bulks that failed to load (to avoid retrying).
+    failed_bulks: HashSet<String>,
     /// Cached bulk metadata by path.
     bulks: HashMap<String, BulkMetadata>,
     /// Current view frustum (updated each frame).
@@ -85,7 +87,9 @@ mod native {
 
     use super::LodState;
     use crate::loader::LoaderState;
-    use crate::mesh::{RocktreeMeshMarker, convert_mesh, convert_texture, matrix_to_transform};
+    use crate::mesh::{
+        RocktreeMeshMarker, convert_mesh, convert_texture, matrix_to_world_position_and_transform,
+    };
 
     /// Channels for receiving loaded data from background tasks.
     #[derive(Resource)]
@@ -175,6 +179,7 @@ mod native {
                 let full_path = format!("{bulk_path}{child_path}");
                 if lod_state.bulks.contains_key(&full_path)
                     || lod_state.loading_bulks.contains(&full_path)
+                    || lod_state.failed_bulks.contains(&full_path)
                 {
                     continue;
                 }
@@ -250,6 +255,7 @@ mod native {
                 }
                 Err(e) => {
                     tracing::warn!("LOD: Failed to load bulk '{}': {}", path, e);
+                    lod_state.failed_bulks.insert(path);
                 }
             }
         }
@@ -292,12 +298,14 @@ mod native {
                             ..Default::default()
                         });
 
-                        let transform = matrix_to_transform(&node.matrix_globe_from_mesh);
+                        let (world_position, transform) =
+                            matrix_to_world_position_and_transform(&node.matrix_globe_from_mesh);
 
                         commands.spawn((
                             Mesh3d(mesh_handle),
                             MeshMaterial3d(material),
                             transform,
+                            world_position,
                             RocktreeMeshMarker {
                                 path: node.path.clone(),
                                 meters_per_texel: node.meters_per_texel,
@@ -328,7 +336,9 @@ mod wasm {
 
     use super::LodState;
     use crate::loader::LoaderState;
-    use crate::mesh::{RocktreeMeshMarker, convert_mesh, convert_texture, matrix_to_transform};
+    use crate::mesh::{
+        RocktreeMeshMarker, convert_mesh, convert_texture, matrix_to_world_position_and_transform,
+    };
 
     /// Component for tracking async bulk load tasks for LOD.
     #[derive(Component)]
@@ -405,6 +415,7 @@ mod wasm {
                 let full_path = format!("{bulk_path}{child_path}");
                 if lod_state.bulks.contains_key(&full_path)
                     || lod_state.loading_bulks.contains(&full_path)
+                    || lod_state.failed_bulks.contains(&full_path)
                 {
                     continue;
                 }
@@ -478,6 +489,7 @@ mod wasm {
                     }
                     Err(e) => {
                         tracing::warn!("LOD: Failed to load bulk '{}': {}", path, e);
+                        lod_state.failed_bulks.insert(path);
                     }
                 }
             }
@@ -523,12 +535,16 @@ mod wasm {
                                 ..Default::default()
                             });
 
-                            let transform = matrix_to_transform(&node.matrix_globe_from_mesh);
+                            let (world_position, transform) =
+                                matrix_to_world_position_and_transform(
+                                    &node.matrix_globe_from_mesh,
+                                );
 
                             commands.spawn((
                                 Mesh3d(mesh_handle),
                                 MeshMaterial3d(material),
                                 transform,
+                                world_position,
                                 RocktreeMeshMarker {
                                     path: node.path.clone(),
                                     meters_per_texel: node.meters_per_texel,
@@ -554,13 +570,24 @@ mod wasm {
 #[allow(clippy::needless_pass_by_value)]
 fn update_frustum(
     mut lod_state: ResMut<LodState>,
-    camera_query: Query<(&Transform, &Projection), With<Camera3d>>,
+    camera_query: Query<
+        (
+            &Transform,
+            &Projection,
+            &crate::floating_origin::FloatingOriginCamera,
+        ),
+        With<Camera3d>,
+    >,
 ) {
-    let Ok((transform, projection)) = camera_query.single() else {
+    let Ok((transform, projection, floating_camera)) = camera_query.single() else {
         return;
     };
 
-    // Build the view matrix.
+    // Get the camera's high-precision world position.
+    let camera_pos_d = floating_camera.position;
+
+    // Build the view matrix using rotation from transform.
+    // The translation is at origin in render space, but we use world position for LOD.
     let view = transform.to_matrix().inverse();
     let view_d = DMat4::from_cols_array(&view.to_cols_array().map(f64::from));
 
@@ -581,15 +608,7 @@ fn update_frustum(
     let vp = proj_d * view_d;
     lod_state.frustum = Some(Frustum::from_matrix(vp));
 
-    // Update LOD metrics.
-    let camera_pos = transform.translation;
-    let camera_pos_d = DVec3::new(
-        f64::from(camera_pos.x),
-        f64::from(camera_pos.y),
-        f64::from(camera_pos.z),
-    );
-
-    // Get screen height from window (default to 720 if not available).
+    // Update LOD metrics using high-precision camera position.
     let screen_height = 720.0;
     lod_state.lod_metrics = Some(LodMetrics::new(
         camera_pos_d,
@@ -602,16 +621,19 @@ fn update_frustum(
 #[allow(clippy::needless_pass_by_value)]
 fn cull_meshes(
     lod_state: Res<LodState>,
-    mut query: Query<(&Transform, &mut Visibility, &RocktreeMeshMarker)>,
+    mut query: Query<(
+        &crate::floating_origin::WorldPosition,
+        &mut Visibility,
+        &RocktreeMeshMarker,
+    )>,
 ) {
     let Some(ref frustum) = lod_state.frustum else {
         return;
     };
 
-    for (transform, mut visibility, _marker) in &mut query {
-        // Simple sphere-based culling for now.
-        let pos = transform.translation;
-        let center = DVec3::new(f64::from(pos.x), f64::from(pos.y), f64::from(pos.z));
+    for (world_pos, mut visibility, _marker) in &mut query {
+        // Use world position for culling since frustum is in world space.
+        let center = world_pos.position;
 
         // Approximate with a point + small radius.
         let obb = rocktree::OrientedBoundingBox {

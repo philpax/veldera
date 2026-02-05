@@ -171,17 +171,25 @@ pub fn convert_texture(rocktree_mesh: &RocktreeMesh) -> Image {
     )
 }
 
-/// Convert a 4x4 double-precision matrix to a Bevy Transform.
+use crate::floating_origin::WorldPosition;
+
+/// Convert a 4x4 double-precision matrix to `WorldPosition` and Transform.
 ///
-/// Note: This loses precision for large coordinates. For Earth-scale rendering,
-/// consider using a camera-relative coordinate system.
+/// Returns:
+/// - `WorldPosition`: High-precision world position (ECEF coordinates)
+/// - `Transform`: Local transform with scale and rotation (translation is zeroed,
+///   will be computed relative to floating origin at render time)
 #[allow(clippy::cast_possible_truncation)]
-pub fn matrix_to_transform(matrix: &glam::DMat4) -> Transform {
+pub fn matrix_to_world_position_and_transform(matrix: &glam::DMat4) -> (WorldPosition, Transform) {
     // Extract translation, rotation, and scale from the matrix.
     let (scale, rotation, translation) = matrix.to_scale_rotation_translation();
 
-    Transform {
-        translation: translation.as_vec3(),
+    let world_position = WorldPosition::from_dvec3(translation);
+
+    // Transform has zero translation (will be computed relative to camera).
+    // Only scale and rotation are preserved.
+    let transform = Transform {
+        translation: Vec3::ZERO,
         rotation: Quat::from_xyzw(
             rotation.x as f32,
             rotation.y as f32,
@@ -189,7 +197,9 @@ pub fn matrix_to_transform(matrix: &glam::DMat4) -> Transform {
             rotation.w as f32,
         ),
         scale: scale.as_vec3(),
-    }
+    };
+
+    (world_position, transform)
 }
 
 /// Component marking an entity as a rocktree mesh.

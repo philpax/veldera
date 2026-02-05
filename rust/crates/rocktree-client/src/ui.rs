@@ -7,6 +7,7 @@ use bevy::prelude::*;
 use bevy::ui::{IsDefaultUiCamera, Node as UiNode, PositionType, Val};
 
 use crate::camera::CameraSettings;
+use crate::floating_origin::FloatingOriginCamera;
 use crate::lod::LodState;
 use crate::mesh::RocktreeMeshMarker;
 
@@ -62,7 +63,7 @@ fn update_debug_ui(
     diagnostics: Res<DiagnosticsStore>,
     settings: Res<CameraSettings>,
     lod_state: Res<LodState>,
-    camera_query: Query<&Transform, With<Camera3d>>,
+    camera_query: Query<&FloatingOriginCamera>,
     mesh_query: Query<&RocktreeMeshMarker>,
     mut text_query: Query<&mut Text, With<DebugText>>,
 ) {
@@ -76,13 +77,13 @@ fn update_debug_ui(
         .and_then(bevy::diagnostic::Diagnostic::smoothed)
         .unwrap_or(0.0);
 
-    // Get camera position and altitude.
-    let (position, altitude) = if let Ok(transform) = camera_query.single() {
-        let pos = transform.translation;
-        let alt_m = f64::from(pos.length()) - settings.earth_radius;
+    // Get camera position and altitude from high-precision coordinates.
+    let (position, altitude) = if let Ok(camera) = camera_query.single() {
+        let pos = camera.position;
+        let alt_m = pos.length() - settings.earth_radius;
         (pos, alt_m)
     } else {
-        (Vec3::ZERO, 0.0)
+        (glam::DVec3::ZERO, 0.0)
     };
 
     // Format altitude nicely.
