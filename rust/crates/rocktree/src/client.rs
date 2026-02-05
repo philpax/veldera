@@ -462,14 +462,17 @@ impl<C: Cache> Client<C> {
         }
 
         let tex_data = &texture.data[0];
-        let width = texture.width.unwrap_or(256);
-        let height = texture.height.unwrap_or(256);
-
         let format = texture.format.unwrap_or(proto::texture::Format::Jpg as i32);
         match format {
             f if f == proto::texture::Format::Jpg as i32 => {
                 let decoded = rocktree_decode::texture::decode_jpeg_to_rgba(tex_data)?;
-                Ok((decoded.data, TextureFormat::Rgb, width, height))
+                // Return as RGBA since we fully decode JPEG.
+                Ok((
+                    decoded.data,
+                    TextureFormat::Rgba,
+                    decoded.width,
+                    decoded.height,
+                ))
             }
             f if f == proto::texture::Format::CrnDxt1 as i32 => {
                 let decoded = rocktree_decode::texture::decode_crn_to_rgba(tex_data)?;

@@ -85,7 +85,7 @@ mod native {
 
     use super::LodState;
     use crate::loader::LoaderState;
-    use crate::mesh::{convert_mesh, convert_texture, matrix_to_transform, RocktreeMeshMarker};
+    use crate::mesh::{RocktreeMeshMarker, convert_mesh, convert_texture, matrix_to_transform};
 
     /// Channels for receiving loaded data from background tasks.
     #[derive(Resource)]
@@ -321,14 +321,14 @@ mod native {
 #[cfg(target_family = "wasm")]
 mod wasm {
     use bevy::prelude::*;
-    use bevy::tasks::{block_on, futures_lite::future, AsyncComputeTaskPool, Task};
+    use bevy::tasks::{AsyncComputeTaskPool, Task, block_on, futures_lite::future};
     use std::sync::Arc;
 
     use rocktree::{BulkMetadata, BulkRequest, Node, NodeMetadata, NodeRequest};
 
     use super::LodState;
     use crate::loader::LoaderState;
-    use crate::mesh::{convert_mesh, convert_texture, matrix_to_transform, RocktreeMeshMarker};
+    use crate::mesh::{RocktreeMeshMarker, convert_mesh, convert_texture, matrix_to_transform};
 
     /// Component for tracking async bulk load tasks for LOD.
     #[derive(Component)]

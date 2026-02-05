@@ -9,6 +9,7 @@ mod lod;
 mod mesh;
 mod ui;
 
+use bevy::core_pipeline::tonemapping::Tonemapping;
 use bevy::prelude::*;
 use camera::{CameraControllerPlugin, FlightCamera};
 use loader::DataLoaderPlugin;
@@ -50,6 +51,8 @@ fn setup_scene(mut commands: Commands) {
             far: 100_000_000.0, // 100,000 km to see the whole Earth.
             ..Default::default()
         }),
+        // Disable tonemapping since we use unlit materials.
+        Tonemapping::None,
         FlightCamera {
             direction: start_direction,
         },

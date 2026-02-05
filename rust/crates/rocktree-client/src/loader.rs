@@ -60,7 +60,7 @@ mod native {
     use rocktree::{BulkRequest, Client, MemoryCache, NodeRequest};
 
     use super::LoaderState;
-    use crate::mesh::{convert_mesh, convert_texture, matrix_to_transform, RocktreeMeshMarker};
+    use crate::mesh::{RocktreeMeshMarker, convert_mesh, convert_texture, matrix_to_transform};
 
     /// Start loading the initial planetoid data (native).
     #[allow(clippy::needless_pass_by_value)]
@@ -123,9 +123,7 @@ mod native {
             .iter()
             .filter(|n| n.has_data)
             .take(3) // Limit for testing.
-            .map(|n| {
-                NodeRequest::new(n.path.clone(), n.epoch, n.texture_format, n.imagery_epoch)
-            })
+            .map(|n| NodeRequest::new(n.path.clone(), n.epoch, n.texture_format, n.imagery_epoch))
             .collect();
 
         // Store bulk in LoaderState.
@@ -205,13 +203,13 @@ mod native {
 #[cfg(target_family = "wasm")]
 mod wasm {
     use bevy::prelude::*;
-    use bevy::tasks::{block_on, futures_lite::future, AsyncComputeTaskPool, Task};
+    use bevy::tasks::{AsyncComputeTaskPool, Task, block_on, futures_lite::future};
     use std::sync::Arc;
 
     use rocktree::{BulkMetadata, BulkRequest, Client, MemoryCache, Node, NodeRequest, Planetoid};
 
     use super::LoaderState;
-    use crate::mesh::{convert_mesh, convert_texture, matrix_to_transform, RocktreeMeshMarker};
+    use crate::mesh::{RocktreeMeshMarker, convert_mesh, convert_texture, matrix_to_transform};
 
     /// Component for tracking async planetoid load task.
     #[derive(Component)]
