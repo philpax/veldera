@@ -74,3 +74,9 @@ client/.nix-wrappers
 *.pb.cc
 client/cache
 *.o
+
+# Test vector decoder binary
+client/decode_test_vectors
+
+# Generated test vectors (can be regenerated)
+rust/test_vectors/
