@@ -86,15 +86,20 @@ fn main() {
             .init();
     }
 
-    App::new()
-        .add_plugins(DefaultPlugins.set(WindowPlugin {
-            primary_window: Some(Window {
-                title: "rocktree-client".to_string(),
-                resolution: (1280, 720).into(),
-                ..Default::default()
-            }),
+    let mut app = App::new();
+
+    app.add_plugins(DefaultPlugins.set(WindowPlugin {
+        primary_window: Some(Window {
+            title: "rocktree-client".to_string(),
+            resolution: (1280, 720).into(),
             ..Default::default()
-        }))
-        .add_plugins(AppPlugin)
-        .run();
+        }),
+        ..Default::default()
+    }));
+
+    // Native: Add Tokio runtime plugin (reqwest requires it).
+    #[cfg(not(target_family = "wasm"))]
+    app.add_plugins(bevy_tokio_tasks::TokioTasksPlugin::default());
+
+    app.add_plugins(AppPlugin).run();
 }

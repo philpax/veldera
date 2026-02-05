@@ -273,6 +273,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "bevy-tokio-tasks"
+version = "0.18.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "e4c797894ef3e17ded1e970898a4761b8c790a5cd55e671cf5b8f774f0470932"
+dependencies = [
+ "bevy_app",
+ "bevy_ecs",
+ "tokio",
+]
+
+[[package]]
 name = "bevy_a11y"
 version = "0.18.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3633,6 +3644,8 @@ dependencies = [
  "reqwest",
  "rocktree-decode",
  "rocktree-proto",
+ "serde_json",
+ "tokio",
  "tracing",
  "tracing-subscriber",
 ]
@@ -3642,6 +3655,7 @@ name = "rocktree-client"
 version = "0.1.0"
 dependencies = [
  "bevy",
+ "bevy-tokio-tasks",
  "glam",
  "rocktree",
  "rocktree-decode",
@@ -4188,7 +4202,19 @@ dependencies = [
  "mio",
  "pin-project-lite",
  "socket2",
+ "tokio-macros",
  "windows-sys 0.61.2",
+]
+
+[[package]]
+name = "tokio-macros"
+version = "2.6.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "af407857209536a95c8e56f8231ef2c2e2aff839b22e07a1ffcbc617e9db9fa5"
+dependencies = [
+ "proc-macro2",
+ "quote",
+ "syn",
 ]
 
 [[package]]
