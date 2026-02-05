@@ -216,8 +216,8 @@ mod native {
         }
 
         // Limit concurrent loads.
-        let max_node_loads = 10;
-        let max_bulk_loads = 5;
+        let max_node_loads = 20;
+        let max_bulk_loads = 10;
 
         // Spawn node load tasks.
         for (node_meta, _bulk_path) in nodes_to_load.into_iter().take(max_node_loads) {
@@ -274,7 +274,7 @@ mod native {
 
             match result {
                 Ok(bulk) => {
-                    tracing::debug!(
+                    tracing::info!(
                         "LOD: Loaded bulk '{}': {} nodes",
                         bulk.path,
                         bulk.nodes.len()
@@ -304,10 +304,11 @@ mod native {
 
             match result {
                 Ok(node) => {
-                    tracing::debug!(
-                        "LOD: Loaded node '{}': {} meshes",
+                    tracing::info!(
+                        "LOD: Loaded node '{}': {} meshes, mpt={:.1}",
                         node.path,
-                        node.meshes.len()
+                        node.meshes.len(),
+                        node.meters_per_texel,
                     );
 
                     // Look up the real OBB from bulk metadata.
@@ -342,6 +343,8 @@ mod native {
                             MeshMaterial3d(material),
                             transform,
                             world_position,
+                            bevy::light::NotShadowCaster,
+                            bevy::light::NotShadowReceiver,
                             RocktreeMeshMarker {
                                 path: node.path.clone(),
                                 meters_per_texel: node.meters_per_texel,
@@ -482,8 +485,8 @@ mod wasm {
             }
         }
 
-        let max_node_loads = 10;
-        let max_bulk_loads = 5;
+        let max_node_loads = 20;
+        let max_bulk_loads = 10;
 
         let task_pool = AsyncComputeTaskPool::get();
 

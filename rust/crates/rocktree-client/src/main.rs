@@ -35,7 +35,7 @@ impl Plugin for AppPlugin {
     }
 }
 
-/// Set up the initial 3D scene with camera and lighting.
+/// Set up the initial 3D scene with camera.
 fn setup_scene(mut commands: Commands) {
     // Starting position: NYC at ground level (same as C++ reference client).
     // ECEF coordinates for approximately (40.7°N, 74°W).
@@ -69,22 +69,7 @@ fn setup_scene(mut commands: Commands) {
         },
     ));
 
-    // Add directional light (sun).
-    commands.spawn((
-        DirectionalLight {
-            illuminance: light_consts::lux::OVERCAST_DAY,
-            shadows_enabled: false,
-            ..Default::default()
-        },
-        Transform::from_rotation(Quat::from_euler(EulerRot::XYZ, -0.5, 0.5, 0.0)),
-    ));
-
-    // Add ambient light.
-    commands.spawn(AmbientLight {
-        color: Color::WHITE,
-        brightness: 500.0,
-        affects_lightmapped_meshes: false,
-    });
+    // No lights needed: all materials are unlit (texture-only).
 
     tracing::info!("Scene setup complete - use WASD to move, mouse to look");
 }

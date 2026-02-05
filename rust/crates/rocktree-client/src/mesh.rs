@@ -35,16 +35,12 @@ pub fn convert_mesh(rocktree_mesh: &RocktreeMesh) -> Mesh {
     // Convert triangle strip indices to triangle list.
     let triangle_indices = strip_to_triangles(&rocktree_mesh.indices);
 
-    // Compute flat normals from triangle geometry.
-    let normals = compute_flat_normals(&positions, &triangle_indices);
-
-    // Build the Bevy mesh.
+    // Build the Bevy mesh. No normals needed since all materials are unlit.
     let mut mesh = Mesh::new(
         PrimitiveTopology::TriangleList,
         RenderAssetUsages::default(),
     );
     mesh.insert_attribute(Mesh::ATTRIBUTE_POSITION, positions);
-    mesh.insert_attribute(Mesh::ATTRIBUTE_NORMAL, normals);
     mesh.insert_attribute(Mesh::ATTRIBUTE_UV_0, uvs);
     mesh.insert_indices(Indices::U32(triangle_indices));
 
@@ -80,49 +76,6 @@ fn strip_to_triangles(strip: &[u16]) -> Vec<u32> {
     }
 
     triangles
-}
-
-/// Compute flat normals for a mesh.
-///
-/// Each vertex gets the normal of the first triangle it appears in.
-fn compute_flat_normals(positions: &[[f32; 3]], indices: &[u32]) -> Vec<[f32; 3]> {
-    // Use Option to track which vertices have normals assigned.
-    let mut normals: Vec<Option<[f32; 3]>> = vec![None; positions.len()];
-
-    for chunk in indices.chunks(3) {
-        if chunk.len() < 3 {
-            continue;
-        }
-
-        let i0 = chunk[0] as usize;
-        let i1 = chunk[1] as usize;
-        let i2 = chunk[2] as usize;
-
-        let p0 = Vec3::from_array(positions[i0]);
-        let p1 = Vec3::from_array(positions[i1]);
-        let p2 = Vec3::from_array(positions[i2]);
-
-        let edge1 = p1 - p0;
-        let edge2 = p2 - p0;
-        let normal = edge1.cross(edge2).normalize_or_zero();
-
-        // Assign to vertices that don't have a normal yet.
-        if normals[i0].is_none() {
-            normals[i0] = Some(normal.to_array());
-        }
-        if normals[i1].is_none() {
-            normals[i1] = Some(normal.to_array());
-        }
-        if normals[i2].is_none() {
-            normals[i2] = Some(normal.to_array());
-        }
-    }
-
-    // Default unassigned normals to pointing up.
-    normals
-        .into_iter()
-        .map(|n| n.unwrap_or([0.0, 0.0, 1.0]))
-        .collect()
 }
 
 /// Create a Bevy image from rocktree texture data.
