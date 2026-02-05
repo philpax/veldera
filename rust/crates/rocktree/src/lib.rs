@@ -26,10 +26,12 @@
 //! ```
 
 pub mod cache;
+mod client;
 mod error;
 pub mod types;
 
 pub use cache::{Cache, MemoryCache, NoCache};
+pub use client::Client;
 pub use error::{Error, Result};
 pub use types::{
     BulkMetadata, BulkRequest, Frustum, LodMetrics, Mesh, Node, NodeMetadata, NodeRequest,
