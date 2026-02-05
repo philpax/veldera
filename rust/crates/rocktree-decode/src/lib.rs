@@ -18,6 +18,7 @@
 //! - [`unpack_indices`]: Decode varint-encoded triangle strip indices
 //! - [`unpack_obb`]: Decode oriented bounding box from 15 bytes
 //! - [`unpack_path_and_flags`]: Extract octant path and flags from metadata
+//! - [`texture::decode_texture`]: Decode JPEG or CRN textures to RGBA
 
 mod error;
 mod varint;
@@ -28,6 +29,7 @@ pub mod obb;
 pub mod octants;
 pub mod path;
 pub mod texcoords;
+pub mod texture;
 pub mod vertices;
 
 pub use error::{DecodeError, DecodeResult};

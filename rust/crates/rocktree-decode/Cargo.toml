@@ -9,6 +9,8 @@ description = "Decode packed mesh data from Google Earth protobuf messages"
 [dependencies]
 rocktree-proto = { path = "../rocktree-proto" }
 glam = "0.30"
+image = { version = "0.25.9", default-features = false, features = ["jpeg"] }
+texture2ddecoder = "0.1.2"
 
 [dev-dependencies]
 proptest = "1"
