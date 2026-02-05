@@ -4,7 +4,7 @@
 
 use bevy::diagnostic::{DiagnosticsStore, FrameTimeDiagnosticsPlugin};
 use bevy::prelude::*;
-use bevy::ui::{Node as UiNode, PositionType, Val};
+use bevy::ui::{IsDefaultUiCamera, Node as UiNode, PositionType, Val};
 
 use crate::camera::CameraSettings;
 use crate::lod::LodState;
@@ -27,6 +27,17 @@ struct DebugText;
 
 /// Set up the debug UI text element.
 fn setup_debug_ui(mut commands: Commands) {
+    // Spawn a UI camera for the text overlay.
+    // Order 1 ensures it renders after the 3D camera (order 0).
+    commands.spawn((
+        Camera2d,
+        Camera {
+            order: 1,
+            ..default()
+        },
+        IsDefaultUiCamera,
+    ));
+
     // Create a text UI element in the top-left corner.
     commands.spawn((
         Text::new("Loading..."),
