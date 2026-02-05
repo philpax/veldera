@@ -3,6 +3,8 @@
 //! This application provides a free-flight camera to explore Google Earth's
 //! 3D terrain data, with LOD-based loading and frustum culling.
 
+mod mesh;
+
 use bevy::prelude::*;
 
 /// Plugin for the main application.
