@@ -1,0 +1,111 @@
+name: Rust CI
+
+on:
+  push:
+    branches: [master]
+    paths:
+      - 'rust/**'
+      - '.github/workflows/rust.yml'
+  pull_request:
+    branches: [master]
+    paths:
+      - 'rust/**'
+      - '.github/workflows/rust.yml'
+
+env:
+  CARGO_TERM_COLOR: always
+
+defaults:
+  run:
+    working-directory: rust
+
+jobs:
+  check:
+    name: Check and lint
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+
+      - name: Cache cargo registry
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            rust/target
+          key: ${{ runner.os }}-cargo-${{ hashFiles('rust/**/Cargo.lock') }}
+
+      - name: Check formatting
+        run: cargo fmt --all -- --check
+
+      - name: Clippy (all features)
+        run: cargo clippy --all-targets --all-features -- -D warnings
+
+      - name: Clippy (no default features)
+        run: cargo clippy --all-targets --no-default-features -- -D warnings
+
+  test-desktop:
+    name: Test (desktop)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Install system dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libudev-dev libasound2-dev
+
+      - name: Cache cargo registry
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            rust/target
+          key: ${{ runner.os }}-cargo-test-${{ hashFiles('rust/**/Cargo.lock') }}
+
+      - name: Run tests
+        run: cargo test --workspace
+
+      - name: Run tests (no default features)
+        run: cargo test --workspace --no-default-features
+
+  test-wasm:
+    name: Check (WASM)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-unknown-unknown
+
+      - name: Cache cargo registry
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            rust/target
+          key: ${{ runner.os }}-cargo-wasm-${{ hashFiles('rust/**/Cargo.lock') }}
+
+      - name: Check rocktree-proto (WASM)
+        run: cargo check --target wasm32-unknown-unknown -p rocktree-proto
+
+      - name: Check rocktree-decode (WASM)
+        run: cargo check --target wasm32-unknown-unknown -p rocktree-decode
+
+      - name: Check rocktree (WASM)
+        run: cargo check --target wasm32-unknown-unknown -p rocktree
+
+      - name: Check rocktree-client (WASM)
+        run: cargo check --target wasm32-unknown-unknown -p rocktree-client

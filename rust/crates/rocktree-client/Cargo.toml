@@ -1,0 +1,19 @@
+[package]
+name = "rocktree-client"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "3D viewer for Google Earth mesh data using Bevy"
+
+[dependencies]
+rocktree = { path = "../rocktree" }
+rocktree-decode = { path = "../rocktree-decode" }
+glam = "0.30"
+tracing = "0.1"
+
+[target.'cfg(not(target_family = "wasm"))'.dependencies]
+tracing-subscriber = "0.3"
+
+[lints]
+workspace = true
