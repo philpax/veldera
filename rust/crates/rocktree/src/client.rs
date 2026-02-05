@@ -92,12 +92,11 @@ impl<C: Cache> Client<C> {
         let url = format!("{}PlanetoidMetadata", self.base_url);
         let data = self.fetch_bytes(&url).await?;
 
-        let proto = proto::PlanetoidMetadata::decode(data.as_slice()).map_err(|e| {
-            Error::Protobuf {
+        let proto =
+            proto::PlanetoidMetadata::decode(data.as_slice()).map_err(|e| Error::Protobuf {
                 context: "planetoid metadata",
                 message: e.to_string(),
-            }
-        })?;
+            })?;
 
         let root_epoch = proto
             .root_node_metadata
@@ -125,11 +124,10 @@ impl<C: Cache> Client<C> {
         );
         let data = self.fetch_bytes(&url).await?;
 
-        let proto =
-            proto::BulkMetadata::decode(data.as_slice()).map_err(|e| Error::Protobuf {
-                context: "bulk metadata",
-                message: e.to_string(),
-            })?;
+        let proto = proto::BulkMetadata::decode(data.as_slice()).map_err(|e| Error::Protobuf {
+            context: "bulk metadata",
+            message: e.to_string(),
+        })?;
 
         Self::decode_bulk_metadata(&request.path, &proto)
     }
@@ -145,11 +143,7 @@ impl<C: Cache> Client<C> {
         let url = if let Some(imagery_epoch) = request.imagery_epoch {
             format!(
                 "{}NodeData/pb=!1m2!1s{}!2u{}!2e{}!3u{}!4b0",
-                self.base_url,
-                request.path,
-                request.epoch,
-                request.texture_format,
-                imagery_epoch
+                self.base_url, request.path, request.epoch, request.texture_format, imagery_epoch
             )
         } else {
             format!(
@@ -178,15 +172,10 @@ impl<C: Cache> Client<C> {
         tracing::debug!(url, "fetching");
 
         // Fetch from network.
-        let response = self
-            .http
-            .get(url)
-            .send()
-            .await
-            .map_err(|e| Error::Http {
-                url: url.to_string(),
-                message: e.to_string(),
-            })?;
+        let response = self.http.get(url).send().await.map_err(|e| Error::Http {
+            url: url.to_string(),
+            message: e.to_string(),
+        })?;
 
         let status = response.status();
         if !status.is_success() {
@@ -369,14 +358,8 @@ impl<C: Cache> Client<C> {
         // Apply explicit UV offset/scale if provided.
         let uv_transform = if proto.uv_offset_and_scale.len() == 4 {
             rocktree_decode::UvTransform {
-                offset: glam::Vec2::new(
-                    proto.uv_offset_and_scale[0],
-                    proto.uv_offset_and_scale[1],
-                ),
-                scale: glam::Vec2::new(
-                    proto.uv_offset_and_scale[2],
-                    proto.uv_offset_and_scale[3],
-                ),
+                offset: glam::Vec2::new(proto.uv_offset_and_scale[0], proto.uv_offset_and_scale[1]),
+                scale: glam::Vec2::new(proto.uv_offset_and_scale[2], proto.uv_offset_and_scale[3]),
             }
         } else {
             // Flip V coordinate.
