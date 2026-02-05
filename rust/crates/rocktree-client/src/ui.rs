@@ -2,6 +2,7 @@
 //!
 //! Shows FPS, camera position, altitude, and loaded node count.
 
+use bevy::camera::ClearColorConfig;
 use bevy::diagnostic::{DiagnosticsStore, FrameTimeDiagnosticsPlugin};
 use bevy::prelude::*;
 use bevy::ui::{IsDefaultUiCamera, Node as UiNode, PositionType, Val};
@@ -34,6 +35,7 @@ fn setup_debug_ui(mut commands: Commands) {
         Camera2d,
         Camera {
             order: 1,
+            clear_color: ClearColorConfig::None,
             ..default()
         },
         IsDefaultUiCamera,

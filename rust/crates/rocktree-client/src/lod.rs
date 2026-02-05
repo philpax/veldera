@@ -586,10 +586,20 @@ fn update_frustum(
     // Get the camera's high-precision world position.
     let camera_pos_d = floating_camera.position;
 
-    // Build the view matrix using rotation from transform.
-    // The translation is at origin in render space, but we use world position for LOD.
-    let view = transform.to_matrix().inverse();
-    let view_d = DMat4::from_cols_array(&view.to_cols_array().map(f64::from));
+    // Build the view matrix in world space.
+    // The Transform only has rotation (translation is zero in render space).
+    // We need to build a view matrix at the camera's actual world position.
+    let rotation = transform.rotation;
+    let rotation_d = glam::DQuat::from_xyzw(
+        f64::from(rotation.x),
+        f64::from(rotation.y),
+        f64::from(rotation.z),
+        f64::from(rotation.w),
+    );
+
+    // Build world-space view matrix: inverse of (translation * rotation).
+    let camera_transform_d = DMat4::from_rotation_translation(rotation_d, camera_pos_d);
+    let view_d = camera_transform_d.inverse();
 
     // Build the projection matrix.
     let Projection::Perspective(perspective) = projection else {
@@ -604,7 +614,7 @@ fn update_frustum(
     );
     let proj_d = DMat4::from_cols_array(&proj.to_cols_array().map(f64::from));
 
-    // Compute view-projection matrix.
+    // Compute view-projection matrix in world space.
     let vp = proj_d * view_d;
     lod_state.frustum = Some(Frustum::from_matrix(vp));
 
