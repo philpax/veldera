@@ -7,19 +7,26 @@ mod camera;
 mod loader;
 mod lod;
 mod mesh;
+mod ui;
 
 use bevy::prelude::*;
 use camera::{CameraControllerPlugin, FlightCamera};
 use loader::DataLoaderPlugin;
 use lod::LodPlugin;
+use ui::DebugUiPlugin;
 
 /// Plugin for the main application.
 pub struct AppPlugin;
 
 impl Plugin for AppPlugin {
     fn build(&self, app: &mut App) {
-        app.add_plugins((CameraControllerPlugin, DataLoaderPlugin, LodPlugin))
-            .add_systems(Startup, setup_scene);
+        app.add_plugins((
+            CameraControllerPlugin,
+            DataLoaderPlugin,
+            LodPlugin,
+            DebugUiPlugin,
+        ))
+        .add_systems(Startup, setup_scene);
     }
 }
 

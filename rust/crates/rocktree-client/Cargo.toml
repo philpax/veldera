@@ -12,7 +12,7 @@ rocktree-decode = { path = "../rocktree-decode" }
 glam = "0.30"
 tracing = "0.1"
 tokio = { version = "1.49.0", features = ["rt-multi-thread"] }
-bevy = { version = "0.18.0", default-features = false, features = ["bevy_render", "bevy_pbr", "bevy_winit", "bevy_window", "bevy_asset", "bevy_mesh", "multi_threaded", "x11"] }
+bevy = { version = "0.18.0", default-features = false, features = ["bevy_render", "bevy_pbr", "bevy_winit", "bevy_window", "bevy_asset", "bevy_mesh", "bevy_ui", "bevy_text", "multi_threaded", "x11", "default_font"] }
 
 [target.'cfg(not(target_family = "wasm"))'.dependencies]
 tracing-subscriber = "0.3"

@@ -50,6 +50,20 @@ pub struct LodState {
     lod_metrics: Option<LodMetrics>,
 }
 
+impl LodState {
+    /// Get the number of loaded nodes.
+    #[must_use]
+    pub fn loaded_node_count(&self) -> usize {
+        self.loaded_nodes.len()
+    }
+
+    /// Get the number of nodes currently being loaded.
+    #[must_use]
+    pub fn loading_node_count(&self) -> usize {
+        self.loading_nodes.len()
+    }
+}
+
 /// Component for tracking async bulk load tasks for LOD.
 #[derive(Component)]
 struct LodBulkTask {
