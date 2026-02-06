@@ -11,7 +11,8 @@ rocktree = { path = "../rocktree" }
 rocktree-decode = { path = "../rocktree-decode" }
 glam = "0.30"
 tracing = "0.1"
-bevy = { version = "0.18.0", default-features = false, features = ["bevy_render", "bevy_pbr", "bevy_winit", "bevy_window", "bevy_asset", "bevy_mesh", "bevy_ui", "bevy_text", "multi_threaded", "x11", "default_font"] }
+bevy = { version = "0.18.0", default-features = false, features = ["bevy_render", "bevy_core_pipeline", "bevy_pbr", "bevy_winit", "bevy_window", "bevy_asset", "bevy_mesh", "multi_threaded", "x11"] }
+bevy_egui = "0.39"
 
 # Native: Use bevy-tokio-tasks for Tokio runtime (reqwest requires it).
 [target.'cfg(not(target_family = "wasm"))'.dependencies]

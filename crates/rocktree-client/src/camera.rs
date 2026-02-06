@@ -6,6 +6,7 @@
 use bevy::ecs::message::MessageReader;
 use bevy::input::mouse::MouseMotion;
 use bevy::prelude::*;
+use bevy_egui::input::{egui_wants_any_keyboard_input, egui_wants_any_pointer_input};
 use glam::DVec3;
 
 use crate::floating_origin::{FloatingOrigin, FloatingOriginCamera};
@@ -17,7 +18,12 @@ impl Plugin for CameraControllerPlugin {
     fn build(&self, app: &mut App) {
         app.init_resource::<CameraSettings>().add_systems(
             Update,
-            (camera_look, camera_movement, sync_floating_origin).chain(),
+            (
+                camera_look.run_if(not(egui_wants_any_pointer_input)),
+                camera_movement.run_if(not(egui_wants_any_keyboard_input)),
+                sync_floating_origin,
+            )
+                .chain(),
         );
     }
 }

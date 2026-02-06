@@ -2,10 +2,9 @@
 //!
 //! Shows FPS, camera position, altitude, and loaded node count.
 
-use bevy::camera::ClearColorConfig;
 use bevy::diagnostic::{DiagnosticsStore, FrameTimeDiagnosticsPlugin};
 use bevy::prelude::*;
-use bevy::ui::{IsDefaultUiCamera, Node as UiNode, PositionType, Val};
+use bevy_egui::{EguiContexts, EguiPlugin, EguiPrimaryContextPass, egui};
 
 use crate::camera::CameraSettings;
 use crate::floating_origin::FloatingOriginCamera;
@@ -17,61 +16,23 @@ pub struct DebugUiPlugin;
 
 impl Plugin for DebugUiPlugin {
     fn build(&self, app: &mut App) {
-        app.add_plugins(FrameTimeDiagnosticsPlugin::default())
-            .add_systems(Startup, setup_debug_ui)
-            .add_systems(Update, update_debug_ui);
+        app.add_plugins(EguiPlugin::default())
+            .add_plugins(FrameTimeDiagnosticsPlugin::default())
+            .add_systems(EguiPrimaryContextPass, debug_ui_system);
     }
 }
 
-/// Marker component for the debug text.
-#[derive(Component)]
-struct DebugText;
-
-/// Set up the debug UI text element.
-fn setup_debug_ui(mut commands: Commands) {
-    // Spawn a UI camera for the text overlay.
-    // Order 1 ensures it renders after the 3D camera (order 0).
-    commands.spawn((
-        Camera2d,
-        Camera {
-            order: 1,
-            clear_color: ClearColorConfig::None,
-            ..default()
-        },
-        IsDefaultUiCamera,
-    ));
-
-    // Create a text UI element in the top-left corner.
-    commands.spawn((
-        Text::new("Loading..."),
-        TextFont {
-            font_size: 16.0,
-            ..default()
-        },
-        TextColor(Color::WHITE),
-        UiNode {
-            position_type: PositionType::Absolute,
-            top: Val::Px(10.0),
-            left: Val::Px(10.0),
-            ..default()
-        },
-        DebugText,
-    ));
-}
-
-/// Update the debug UI with current metrics.
+/// Render the debug UI overlay.
 #[allow(clippy::needless_pass_by_value)]
-fn update_debug_ui(
+fn debug_ui_system(
+    mut contexts: EguiContexts,
     diagnostics: Res<DiagnosticsStore>,
     settings: Res<CameraSettings>,
     lod_state: Res<LodState>,
     camera_query: Query<&FloatingOriginCamera>,
     mesh_query: Query<&RocktreeMeshMarker>,
-    mut text_query: Query<&mut Text, With<DebugText>>,
-) {
-    let Ok(mut text) = text_query.single_mut() else {
-        return;
-    };
+) -> Result {
+    let ctx = contexts.ctx_mut()?;
 
     // Get FPS.
     let fps = diagnostics
@@ -104,18 +65,26 @@ fn update_debug_ui(
     let loaded_nodes = lod_state.loaded_node_count();
     let loading_nodes = lod_state.loading_node_count();
 
-    // Update text.
-    **text = format!(
-        "FPS: {fps:.0}\n\
-         Position: ({:.0}, {:.0}, {:.0})\n\
-         Altitude: {altitude_str}\n\
-         Nodes: {loaded_nodes} loaded, {loading_nodes} loading\n\
-         Meshes: {mesh_count}\n\
-         \n\
-         Controls:\n\
-         WASD - Move\n\
-         Mouse - Look\n\
-         Shift - Speed boost",
-        position.x, position.y, position.z
-    );
+    // Render the debug panel.
+    egui::Window::new("Debug")
+        .default_pos([10.0, 10.0])
+        .show(ctx, |ui| {
+            ui.label(format!("FPS: {fps:.0}"));
+            ui.label(format!(
+                "Position: ({:.0}, {:.0}, {:.0})",
+                position.x, position.y, position.z
+            ));
+            ui.label(format!("Altitude: {altitude_str}"));
+            ui.label(format!(
+                "Nodes: {loaded_nodes} loaded, {loading_nodes} loading"
+            ));
+            ui.label(format!("Meshes: {mesh_count}"));
+            ui.separator();
+            ui.label("Controls:");
+            ui.label("  WASD - Move");
+            ui.label("  Mouse - Look");
+            ui.label("  Shift - Speed boost");
+        });
+
+    Ok(())
 }
