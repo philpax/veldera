@@ -6,7 +6,7 @@ default-members = ["crates/rocktree-client"]
 [workspace.package]
 edition = "2024"
 license = "MIT"
-repository = "https://github.com/nickkuk/earth-reverse-engineering"
+repository = "https://github.com/philpax/earth-reverse-engineering"
 
 [workspace.lints.rust]
 unsafe_code = "warn"

@@ -23,6 +23,22 @@ bevy = { version = "0.18.0", default-features = false, features = [
 bevy_egui = "0.39"
 # Platform-agnostic async channel (replaces tokio::sync::mpsc).
 async-channel = "2"
+# For geocoding API responses.
+serde = { version = "1", features = ["derive"] }
+# For URL encoding geocoding queries.
+urlencoding = "2"
+
+# Geocoding HTTP requests (native).
+[target.'cfg(not(target_family = "wasm"))'.dependencies.reqwest]
+version = "0.12"
+default-features = false
+features = ["rustls-tls", "json"]
+
+# Geocoding HTTP requests (WASM).
+[target.'cfg(target_family = "wasm")'.dependencies.reqwest]
+version = "0.12"
+default-features = false
+features = ["json"]
 
 # Native: Additional Bevy features and Tokio runtime.
 [target.'cfg(not(target_family = "wasm"))'.dependencies]
