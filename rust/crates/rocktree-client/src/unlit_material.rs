@@ -43,9 +43,19 @@ pub struct UnlitMaterial {
     #[texture(0)]
     #[sampler(1)]
     pub base_color_texture: Handle<Image>,
+    /// Bitmask of octants to hide (bit `i` set = octant `i` has a loaded child).
+    #[uniform(2)]
+    pub octant_mask: u32,
 }
 
 impl Material for UnlitMaterial {
+    fn vertex_shader() -> ShaderRef {
+        ShaderRef::Handle(Handle::Uuid(
+            UNLIT_SHADER_UUID,
+            PhantomData::<fn() -> Shader>,
+        ))
+    }
+
     fn fragment_shader() -> ShaderRef {
         ShaderRef::Handle(Handle::Uuid(
             UNLIT_SHADER_UUID,

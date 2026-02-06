@@ -35,6 +35,20 @@ pub fn convert_mesh(rocktree_mesh: &RocktreeMesh) -> Mesh {
     // Convert triangle strip indices to triangle list.
     let triangle_indices = strip_to_triangles(&rocktree_mesh.indices);
 
+    // Per-vertex octant index (0-7) stored in the red channel of vertex color.
+    // Used by the shader to mask vertices whose octant has a loaded child.
+    // When octant data is missing, use 255 as a sentinel so the shader never
+    // masks these vertices (bit 255 % 32 = bit 31 is never set in octant_mask).
+    let octant_sentinel = if rocktree_mesh.has_octant_data {
+        None
+    } else {
+        Some(255.0)
+    };
+    let colors: Vec<[f32; 4]> = vertices
+        .iter()
+        .map(|v| [octant_sentinel.unwrap_or(f32::from(v.w)), 0.0, 0.0, 1.0])
+        .collect();
+
     // Build the Bevy mesh. No normals needed since all materials are unlit.
     let mut mesh = Mesh::new(
         PrimitiveTopology::TriangleList,
@@ -42,6 +56,7 @@ pub fn convert_mesh(rocktree_mesh: &RocktreeMesh) -> Mesh {
     );
     mesh.insert_attribute(Mesh::ATTRIBUTE_POSITION, positions);
     mesh.insert_attribute(Mesh::ATTRIBUTE_UV_0, uvs);
+    mesh.insert_attribute(Mesh::ATTRIBUTE_COLOR, colors);
     mesh.insert_indices(Indices::U32(triangle_indices));
 
     mesh
