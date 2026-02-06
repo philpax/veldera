@@ -4,7 +4,7 @@
 //! Works with the floating origin system for high-precision positioning.
 
 use bevy::ecs::message::MessageReader;
-use bevy::input::mouse::{MouseMotion, MouseWheel};
+use bevy::input::mouse::{MouseMotion, MouseScrollUnit, MouseWheel};
 use bevy::prelude::*;
 use bevy::window::{CursorGrabMode, CursorOptions, PrimaryWindow};
 use bevy_egui::EguiContexts;
@@ -158,9 +158,13 @@ fn adjust_speed_with_scroll(
     mut settings: ResMut<CameraSettings>,
 ) {
     for event in scroll_events.read() {
-        // Adjust speed logarithmically for smooth scaling.
-        let scroll = event.y;
+        // Normalize scroll value: web reports pixels, native reports lines.
+        let scroll = match event.unit {
+            MouseScrollUnit::Line => event.y,
+            MouseScrollUnit::Pixel => event.y / 120.0,
+        };
         if scroll != 0.0 {
+            // Adjust speed logarithmically for smooth scaling.
             let factor = 1.1_f32.powf(scroll);
             settings.base_speed = (settings.base_speed * factor).clamp(MIN_SPEED, MAX_SPEED);
         }
