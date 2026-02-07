@@ -270,12 +270,13 @@ fn camera_movement(
             movement += right;
         }
 
-        // Ascend/descend.
+        // Ascend/descend relative to camera's local up (not world altitude).
+        let camera_up = right.cross(forward).normalize();
         if keyboard.pressed(KeyCode::Space) {
-            movement += old_up;
+            movement += camera_up;
         }
         if keyboard.pressed(KeyCode::ControlLeft) || keyboard.pressed(KeyCode::ControlRight) {
-            movement -= old_up;
+            movement -= camera_up;
         }
 
         if movement != Vec3::ZERO {
