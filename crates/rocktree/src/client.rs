@@ -245,7 +245,6 @@ impl<C: Cache> Client<C> {
 
         // head_node_center is Vec<f64>, convert to Vec3.
         let head_node_center = if proto.head_node_center.len() >= 3 {
-            #[allow(clippy::cast_possible_truncation)]
             Vec3::new(
                 proto.head_node_center[0] as f32,
                 proto.head_node_center[1] as f32,
@@ -262,7 +261,6 @@ impl<C: Cache> Client<C> {
             .unwrap_or(0);
 
         let meters_per_texel: Vec<f32> = proto.meters_per_texel.clone();
-        #[allow(clippy::cast_possible_wrap)]
         let default_texture_format = proto.default_available_texture_formats.unwrap_or(0) as i32;
         let default_imagery_epoch = proto.default_imagery_epoch;
 
@@ -309,7 +307,6 @@ impl<C: Cache> Client<C> {
 
                 let epoch = node_meta.epoch.unwrap_or(head_epoch);
 
-                #[allow(clippy::cast_possible_wrap)]
                 let texture_format = node_meta
                     .available_texture_formats
                     .map_or(default_texture_format, |f| f as i32);

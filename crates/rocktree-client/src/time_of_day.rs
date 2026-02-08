@@ -145,7 +145,6 @@ fn get_current_utc_seconds() -> f64 {
 }
 
 /// System that updates the sky color based on local time.
-#[allow(clippy::needless_pass_by_value)]
 fn update_sky_color(
     time_state: Res<TimeOfDayState>,
     camera_query: Query<&FloatingOriginCamera>,
@@ -209,7 +208,6 @@ fn calculate_sky_color(local_hours: f64) -> Color {
 
 /// Linearly interpolates between two colors.
 fn lerp_color(a: LinearRgba, b: LinearRgba, t: f64) -> LinearRgba {
-    #[allow(clippy::cast_possible_truncation)]
     let t = t as f32;
     LinearRgba::new(
         a.red + (b.red - a.red) * t,

@@ -71,7 +71,6 @@ pub fn unpack_octant_mask_and_layer_bounds(
             }
 
             // Octant mask is the lower 3 bits of i.
-            #[allow(clippy::cast_possible_truncation)]
             {
                 vertices[vtx_idx].w = (i & 7) as u8;
             }

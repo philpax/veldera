@@ -72,7 +72,6 @@ pub fn unpack_tex_coords(packed: &[u8], vertices: &mut [Vertex]) -> DecodeResult
         v = (v + v_low + (v_high << 8)) % v_mod;
 
         // u and v are always < u_mod/v_mod which are at most 65536, so they fit in u16.
-        #[allow(clippy::cast_possible_truncation)]
         {
             vertices[i].u = u as u16;
             vertices[i].v = v as u16;
@@ -81,7 +80,6 @@ pub fn unpack_tex_coords(packed: &[u8], vertices: &mut [Vertex]) -> DecodeResult
 
     // Compute UV transform for shader.
     // Precision loss is acceptable for these texture scale factors.
-    #[allow(clippy::cast_precision_loss)]
     Ok(UvTransform {
         offset: glam::Vec2::new(0.5, 0.5),
         scale: glam::Vec2::new(1.0 / u_mod as f32, 1.0 / v_mod as f32),

@@ -84,7 +84,6 @@ fn expand_component(v: u8, s: i32) -> i32 {
 /// Decode a normal vector from the octahedron mapping.
 ///
 /// This uses single-char variable names to match the original C++ algorithm.
-#[allow(clippy::many_single_char_names)]
 fn decode_normal(input_a: f64, input_f: f64) -> (f64, f64, f64) {
     let mut b = input_a;
     let mut c = input_f;
@@ -129,7 +128,6 @@ fn decode_normal(input_a: f64, input_f: f64) -> (f64, f64, f64) {
 /// Clamp a float to u8 range.
 fn clamp_to_u8(value: f64) -> u8 {
     // Truncation and sign loss are intentional: we clamp to [0, 255].
-    #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
     {
         let rounded = value.round() as i32;
         rounded.clamp(0, 255) as u8

@@ -110,7 +110,6 @@ fn set_cursor_grab(cursor: &mut CursorOptions, window: &mut Window, grabbed: boo
 }
 
 /// Check if cursor is currently grabbed (Locked on native, Confined on WASM).
-#[allow(clippy::needless_pass_by_value)]
 fn cursor_is_grabbed(cursor: Single<&CursorOptions>) -> bool {
     matches!(
         cursor.grab_mode,
@@ -119,7 +118,6 @@ fn cursor_is_grabbed(cursor: Single<&CursorOptions>) -> bool {
 }
 
 /// Handle cursor grab/ungrab with ESC and left-click.
-#[allow(clippy::needless_pass_by_value)]
 fn cursor_grab_system(
     keyboard: Res<ButtonInput<KeyCode>>,
     mouse: Res<ButtonInput<MouseButton>>,
@@ -152,7 +150,6 @@ fn cursor_grab_system(
 }
 
 /// Adjust speed with mouse scroll wheel.
-#[allow(clippy::needless_pass_by_value)]
 fn adjust_speed_with_scroll(
     mut scroll_events: MessageReader<MouseWheel>,
     mut settings: ResMut<CameraSettings>,
@@ -172,7 +169,6 @@ fn adjust_speed_with_scroll(
 }
 
 /// Handle mouse look rotation.
-#[allow(clippy::needless_pass_by_value)]
 fn camera_look(
     mut mouse_motion: MessageReader<MouseMotion>,
     settings: Res<CameraSettings>,
@@ -225,7 +221,6 @@ fn camera_look(
 }
 
 /// Handle WASD + Space/Ctrl movement with shift boost.
-#[allow(clippy::needless_pass_by_value, clippy::cast_possible_truncation)]
 fn camera_movement(
     time: Res<Time>,
     keyboard: Res<ButtonInput<KeyCode>>,

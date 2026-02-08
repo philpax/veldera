@@ -38,14 +38,6 @@ pub struct WorldPosition {
 }
 
 impl WorldPosition {
-    /// Create a new world position.
-    #[allow(dead_code)]
-    pub fn new(x: f64, y: f64, z: f64) -> Self {
-        Self {
-            position: DVec3::new(x, y, z),
-        }
-    }
-
     /// Create from a `DVec3`.
     pub fn from_dvec3(position: DVec3) -> Self {
         Self { position }
@@ -55,11 +47,7 @@ impl WorldPosition {
 /// Update all entity transforms to be relative to the floating origin.
 ///
 /// This system runs in `PostUpdate` to ensure camera movement is processed first.
-#[allow(
-    clippy::type_complexity,
-    clippy::cast_possible_truncation,
-    clippy::needless_pass_by_value
-)]
+#[allow(clippy::type_complexity)]
 fn update_transforms_relative_to_origin(
     origin: Res<FloatingOrigin>,
     mut query: Query<(&WorldPosition, &mut Transform), Without<FloatingOriginCamera>>,
@@ -86,30 +74,5 @@ impl FloatingOriginCamera {
     /// Create a new floating origin camera at the given position.
     pub fn new(position: DVec3) -> Self {
         Self { position }
-    }
-}
-
-/// System to update the floating origin to match the camera position.
-///
-/// This should be called after camera movement is processed.
-#[allow(dead_code)]
-pub fn update_floating_origin(
-    mut origin: ResMut<FloatingOrigin>,
-    query: Query<&FloatingOriginCamera>,
-) {
-    if let Ok(camera) = query.single() {
-        origin.position = camera.position;
-    }
-}
-
-/// System to sync camera Transform from `FloatingOriginCamera`.
-///
-/// The camera's Transform is always at the origin (0,0,0) since everything
-/// else is rendered relative to it.
-#[allow(dead_code)]
-pub fn sync_camera_transform(mut query: Query<(&FloatingOriginCamera, &mut Transform)>) {
-    for (_camera, mut transform) in &mut query {
-        // Camera is always at the origin in render space.
-        transform.translation = Vec3::ZERO;
     }
 }

@@ -147,7 +147,6 @@ use crate::floating_origin::WorldPosition;
 /// - `WorldPosition`: High-precision world position (ECEF coordinates)
 /// - `Transform`: Local transform with scale and rotation (translation is zeroed,
 ///   will be computed relative to floating origin at render time)
-#[allow(clippy::cast_possible_truncation)]
 pub fn matrix_to_world_position_and_transform(matrix: &glam::DMat4) -> (WorldPosition, Transform) {
     // Extract translation, rotation, and scale from the matrix.
     let (scale, rotation, translation) = matrix.to_scale_rotation_translation();
@@ -174,11 +173,7 @@ pub fn matrix_to_world_position_and_transform(matrix: &glam::DMat4) -> (WorldPos
 #[derive(Component)]
 pub struct RocktreeMeshMarker {
     /// The octant path for this node.
-    #[allow(dead_code)]
     pub path: String,
-    /// Meters per texel (LOD metric).
-    #[allow(dead_code)]
-    pub meters_per_texel: f32,
     /// Oriented bounding box from the node's bulk metadata.
     pub obb: rocktree_decode::OrientedBoundingBox,
 }

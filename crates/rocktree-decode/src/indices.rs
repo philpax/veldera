@@ -34,7 +34,6 @@ pub fn unpack_indices(packed: &[u8]) -> DecodeResult<Vec<u16>> {
     for _ in 0..strip_len {
         let val = read_varint(packed, &mut offset)?;
         // Index is zeros - val. Both are u32, result fits in u16.
-        #[allow(clippy::cast_possible_truncation)]
         let index = zeros.wrapping_sub(val) as u16;
         triangle_strip.push(index);
 

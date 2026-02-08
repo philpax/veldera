@@ -238,6 +238,7 @@ mod tests {
             RawWaker::new(std::ptr::null(), &VTABLE)
         }
 
+        #[allow(unsafe_code)]
         let waker = unsafe { Waker::from_raw(dummy_raw_waker()) };
         let mut cx = Context::from_waker(&waker);
         let mut f = std::pin::pin!(f);

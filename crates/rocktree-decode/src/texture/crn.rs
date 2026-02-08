@@ -29,7 +29,6 @@ pub fn decode_crn_to_rgba(data: &[u8]) -> DecodeResult<DecodedTexture> {
     let mut info = CrnTextureInfo::default();
 
     // Data length cast: texture files are always < 4GB.
-    #[allow(clippy::cast_possible_truncation)]
     let data_len = data.len() as u32;
     let success = info.crnd_get_texture_info(data, data_len);
 

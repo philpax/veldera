@@ -147,7 +147,6 @@ impl TeleportState {
 }
 
 /// Poll for geocoding results from background task.
-#[allow(clippy::needless_pass_by_value)]
 fn poll_geocoding_results(mut geocoding_state: ResMut<GeocodingState>) {
     while let Ok(result) = geocoding_state.result_rx.try_recv() {
         geocoding_state.is_loading = false;
@@ -165,7 +164,6 @@ fn poll_geocoding_results(mut geocoding_state: ResMut<GeocodingState>) {
 }
 
 /// Poll for elevation results and execute pending teleport.
-#[allow(clippy::needless_pass_by_value)]
 fn poll_teleport(
     mut teleport_state: ResMut<TeleportState>,
     settings: Res<CameraSettings>,

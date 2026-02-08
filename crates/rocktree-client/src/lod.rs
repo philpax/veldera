@@ -275,7 +275,6 @@ fn unload_obsolete(
 }
 
 /// Update the frustum from the camera.
-#[allow(clippy::needless_pass_by_value)]
 fn update_frustum(
     mut lod_state: ResMut<LodState>,
     camera_query: Query<
@@ -340,7 +339,6 @@ fn update_frustum(
 }
 
 /// Update LOD requests using BFS traversal from root.
-#[allow(clippy::needless_pass_by_value, clippy::too_many_lines)]
 fn update_lod_requests(
     mut commands: Commands,
     loader_state: Res<LoaderState>,
@@ -434,7 +432,6 @@ fn update_lod_requests(
 }
 
 /// Poll bulk loading results from channel.
-#[allow(clippy::needless_pass_by_value)]
 fn poll_lod_bulk_tasks(mut lod_state: ResMut<LodState>, channels: Res<LodChannels>) {
     while let Ok((path, result)) = channels.bulk_rx.try_recv() {
         lod_state.loading_bulks.remove(&path);
@@ -457,7 +454,6 @@ fn poll_lod_bulk_tasks(mut lod_state: ResMut<LodState>, channels: Res<LodChannel
 }
 
 /// Poll node loading results from channel and spawn meshes.
-#[allow(clippy::needless_pass_by_value)]
 fn poll_lod_node_tasks(
     mut commands: Commands,
     mut lod_state: ResMut<LodState>,
@@ -511,7 +507,6 @@ fn poll_lod_node_tasks(
                             world_position,
                             RocktreeMeshMarker {
                                 path: node.path.clone(),
-                                meters_per_texel: node.meters_per_texel,
                                 obb,
                             },
                         ))
@@ -532,7 +527,6 @@ fn poll_lod_node_tasks(
 /// frustum culling. Updates each material's `octant_mask` uniform so the vertex
 /// shader can collapse vertices in octants that have loaded children. Fully
 /// masked parents (all 8 octants) are hidden entirely as an optimization.
-#[allow(clippy::needless_pass_by_value)]
 fn cull_meshes(
     lod_state: Res<LodState>,
     mut materials: ResMut<Assets<UnlitMaterial>>,

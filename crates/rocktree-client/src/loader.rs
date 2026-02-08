@@ -70,7 +70,6 @@ impl Default for LoaderChannels {
 }
 
 /// Start loading the initial planetoid data.
-#[allow(clippy::needless_pass_by_value)]
 fn start_initial_load(
     state: Res<LoaderState>,
     channels: Res<LoaderChannels>,
@@ -88,7 +87,6 @@ fn start_initial_load(
 }
 
 /// Poll the planetoid loading task.
-#[allow(clippy::needless_pass_by_value)]
 fn poll_planetoid_task(
     mut state: ResMut<LoaderState>,
     channels: Res<LoaderChannels>,
@@ -130,7 +128,6 @@ fn poll_planetoid_task(
 }
 
 /// Poll bulk loading tasks.
-#[allow(clippy::needless_pass_by_value)]
 fn poll_bulk_task(mut state: ResMut<LoaderState>, channels: Res<LoaderChannels>) {
     // Only poll if we haven't loaded the root bulk yet.
     if state.root_bulk.is_some() {

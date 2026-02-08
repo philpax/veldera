@@ -38,11 +38,7 @@ struct CoordinateInputState {
 }
 
 /// Render the debug UI overlay.
-#[allow(
-    clippy::needless_pass_by_value,
-    clippy::too_many_arguments,
-    clippy::too_many_lines
-)]
+#[allow(clippy::too_many_arguments)]
 fn debug_ui_system(
     mut contexts: EguiContexts,
     diagnostics: Res<DiagnosticsStore>,
@@ -269,22 +265,16 @@ fn debug_ui_system(
 
             // Display current UTC time.
             let utc_seconds = time_of_day.current_utc_seconds();
-            #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
             let utc_h = (utc_seconds / 3600.0) as u32;
-            #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
             let utc_m = ((utc_seconds % 3600.0) / 60.0) as u32;
-            #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
             let utc_s = (utc_seconds % 60.0) as u32;
             ui.label(format!("UTC: {utc_h:02}:{utc_m:02}:{utc_s:02}"));
 
             // Display current local time with timezone offset.
             let local_hours = time_of_day.local_hours_at_longitude(lon_deg);
             let offset_hours = lon_deg / 15.0;
-            #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
             let hours = local_hours as u32;
-            #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
             let minutes = ((local_hours - f64::from(hours)) * 60.0) as u32;
-            #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
             let seconds = ((local_hours * 3600.0) % 60.0) as u32;
             let offset_sign = if offset_hours >= 0.0 { "+" } else { "" };
             ui.label(format!(
@@ -317,11 +307,9 @@ fn debug_ui_system(
                     ("1000x", 1000.0),
                 ];
                 for (label, speed) in speeds {
-                    #[allow(clippy::float_cmp)]
                     let is_selected = time_of_day.speed_multiplier == speed;
                     if ui.selectable_label(is_selected, label).clicked() {
                         time_of_day.set_speed(speed);
-                        #[allow(clippy::float_cmp)]
                         if time_of_day.mode == TimeMode::Realtime && speed != 1.0 {
                             // Switching to a non-1x speed in realtime mode should switch to override.
                             time_of_day.mode = TimeMode::Override;
