@@ -50,6 +50,4 @@ rocktree-proto (protobuf types)
 rocktree-decode (this crate)
     ↓
 rocktree (HTTP client, caching)
-    ↓
-rocktree-client (Bevy viewer)
 ```

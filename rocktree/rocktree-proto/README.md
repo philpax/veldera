@@ -55,6 +55,4 @@ rocktree-proto (this crate)
 rocktree-decode (decodes packed binary data)
     ↓
 rocktree (HTTP client, caching, orchestration)
-    ↓
-rocktree-client (Bevy 3D viewer)
 ```

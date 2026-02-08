@@ -1,12 +1,12 @@
 [workspace]
 resolver = "2"
-members = ["crates/*"]
-default-members = ["crates/rocktree-client"]
+members = ["client/*", "rocktree/*"]
+default-members = ["client/veldera-viewer"]
 
 [workspace.package]
 edition = "2024"
 license = "MIT"
-repository = "https://github.com/philpax/earth-reverse-engineering"
+repository = "https://github.com/philpax/veldera"
 
 [workspace.lints.rust]
 unsafe_code = "warn"

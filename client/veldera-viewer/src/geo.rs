@@ -23,8 +23,7 @@ impl Plugin for GeoPlugin {
 }
 
 /// User agent for API requests.
-const USER_AGENT: &str =
-    "rocktree-client/0.1 (https://github.com/philpax/earth-reverse-engineering)";
+const USER_AGENT: &str = "veldera-viewer/0.1 (https://github.com/philpax/veldera)";
 
 /// Throttle duration between geocoding requests (per Nominatim usage policy).
 pub const GEOCODING_THROTTLE_SECS: f64 = 5.0;

@@ -97,7 +97,7 @@ Within each module, organize code as follows:
 ### Native build
 
 ```sh
-cargo run -p rocktree-client
+cargo run -p veldera-viewer
 ```
 
 ### Web/WASM build

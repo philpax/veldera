@@ -109,7 +109,7 @@ fn main() {
 
     #[allow(unused_mut)]
     let mut window = Window {
-        title: "rocktree-client".to_string(),
+        title: "veldera-viewer".to_string(),
         resolution: (1280, 720).into(),
         ..Default::default()
     };

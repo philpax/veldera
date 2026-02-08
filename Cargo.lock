@@ -4175,30 +4175,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "rocktree-client"
-version = "0.1.0"
-dependencies = [
- "async-channel",
- "bevy",
- "bevy-tokio-tasks",
- "bevy_egui",
- "console_error_panic_hook",
- "glam",
- "js-sys",
- "reqwest",
- "rocktree",
- "rocktree-decode",
- "serde",
- "tokio",
- "tracing",
- "tracing-subscriber",
- "tracing-wasm",
- "urlencoding",
- "wasm-bindgen",
- "web-time",
-]
-
-[[package]]
 name = "rocktree-decode"
 version = "0.1.0"
 dependencies = [
@@ -5087,6 +5063,30 @@ dependencies = [
  "proc-macro2",
  "quote",
  "syn",
+]
+
+[[package]]
+name = "veldera-viewer"
+version = "0.1.0"
+dependencies = [
+ "async-channel",
+ "bevy",
+ "bevy-tokio-tasks",
+ "bevy_egui",
+ "console_error_panic_hook",
+ "glam",
+ "js-sys",
+ "reqwest",
+ "rocktree",
+ "rocktree-decode",
+ "serde",
+ "tokio",
+ "tracing",
+ "tracing-subscriber",
+ "tracing-wasm",
+ "urlencoding",
+ "wasm-bindgen",
+ "web-time",
 ]
 
 [[package]]

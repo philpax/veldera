@@ -1,5 +1,5 @@
 [package]
-name = "rocktree-client"
+name = "veldera-viewer"
 version = "0.1.0"
 edition.workspace = true
 license.workspace = true
@@ -11,8 +11,8 @@ default = ["webgpu"]
 webgpu = ["bevy/webgpu"]
 
 [dependencies]
-rocktree = { path = "../rocktree" }
-rocktree-decode = { path = "../rocktree-decode" }
+rocktree = { path = "../../rocktree/rocktree" }
+rocktree-decode = { path = "../../rocktree/rocktree-decode" }
 glam = "0.30"
 tracing = "0.1"
 # Base Bevy features that work on both native and WASM.

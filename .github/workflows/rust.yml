@@ -4,13 +4,13 @@ on:
   push:
     branches: [master]
     paths:
-      - '**'
-      - '.github/workflows/rust.yml'
+      - "**"
+      - ".github/workflows/rust.yml"
   pull_request:
     branches: [master]
     paths:
-      - '**'
-      - '.github/workflows/rust.yml'
+      - "**"
+      - ".github/workflows/rust.yml"
 
 env:
   CARGO_TERM_COLOR: always
@@ -103,8 +103,8 @@ jobs:
       - name: Check rocktree (WASM)
         run: cargo check --target wasm32-unknown-unknown -p rocktree
 
-      - name: Check rocktree-client (WASM)
-        run: cargo check --target wasm32-unknown-unknown -p rocktree-client
+      - name: Check veldera-viewer (WASM)
+        run: cargo check --target wasm32-unknown-unknown -p veldera-viewer
 
-      - name: Check rocktree-client with webgpu (WASM)
-        run: cargo check --target wasm32-unknown-unknown -p rocktree-client --no-default-features --features webgpu
+      - name: Check veldera-viewer with webgpu (WASM)
+        run: cargo check --target wasm32-unknown-unknown -p veldera-viewer --no-default-features --features webgpu

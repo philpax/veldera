@@ -1,2 +1,2 @@
 #!/bin/sh
-cargo run -p rocktree-client --target wasm32-unknown-unknown --no-default-features
+cargo run -p veldera-viewer --target wasm32-unknown-unknown --no-default-features
