@@ -4,19 +4,15 @@
 //! is handled by the LOD system in `lod.rs`.
 //!
 //! Uses platform-agnostic `async_channel` for communication between async tasks
-//! and the main thread. The spawn mechanism differs by platform:
-//! - Native: `bevy-tokio-tasks` for Tokio runtime (reqwest requires it)
-//! - WASM: Bevy's built-in `AsyncComputeTaskPool` (reqwest uses browser fetch)
+//! and the main thread. Task spawning is handled by `TaskSpawner` from the
+//! `async_runtime` module.
 
 use std::sync::Arc;
 
 use bevy::prelude::*;
-#[cfg(target_family = "wasm")]
-use bevy::tasks::AsyncComputeTaskPool;
-#[cfg(not(target_family = "wasm"))]
-use bevy_tokio_tasks::TokioTasksRuntime;
-
 use rocktree::{BulkMetadata, BulkRequest, Client, MemoryCache, Planetoid};
+
+use crate::async_runtime::TaskSpawner;
 
 /// Plugin for loading Google Earth data.
 pub struct DataLoaderPlugin;
@@ -78,28 +74,15 @@ impl Default for LoaderChannels {
 fn start_initial_load(
     state: Res<LoaderState>,
     channels: Res<LoaderChannels>,
-    #[cfg(not(target_family = "wasm"))] runtime: ResMut<TokioTasksRuntime>,
+    spawner: TaskSpawner,
 ) {
     let client = Arc::clone(&state.client);
     let tx = channels.planetoid_tx.clone();
 
-    #[cfg(not(target_family = "wasm"))]
-    {
-        runtime.spawn_background_task(move |_ctx| async move {
-            let result = client.fetch_planetoid().await;
-            let _ = tx.send(result).await;
-        });
-    }
-
-    #[cfg(target_family = "wasm")]
-    {
-        AsyncComputeTaskPool::get()
-            .spawn(async move {
-                let result = client.fetch_planetoid().await;
-                let _ = tx.send(result).await;
-            })
-            .detach();
-    }
+    spawner.spawn(async move {
+        let result = client.fetch_planetoid().await;
+        let _ = tx.send(result).await;
+    });
 
     tracing::info!("Started loading planetoid metadata");
 }
@@ -109,7 +92,7 @@ fn start_initial_load(
 fn poll_planetoid_task(
     mut state: ResMut<LoaderState>,
     channels: Res<LoaderChannels>,
-    #[cfg(not(target_family = "wasm"))] runtime: ResMut<TokioTasksRuntime>,
+    spawner: TaskSpawner,
 ) {
     // Only poll if we haven't loaded the planetoid yet.
     if state.planetoid.is_some() {
@@ -133,23 +116,10 @@ fn poll_planetoid_task(
             let request = BulkRequest::root(planetoid.root_epoch);
             let tx = channels.bulk_tx.clone();
 
-            #[cfg(not(target_family = "wasm"))]
-            {
-                runtime.spawn_background_task(move |_ctx| async move {
-                    let result = client.fetch_bulk(&request).await;
-                    let _ = tx.send(result).await;
-                });
-            }
-
-            #[cfg(target_family = "wasm")]
-            {
-                AsyncComputeTaskPool::get()
-                    .spawn(async move {
-                        let result = client.fetch_bulk(&request).await;
-                        let _ = tx.send(result).await;
-                    })
-                    .detach();
-            }
+            spawner.spawn(async move {
+                let result = client.fetch_bulk(&request).await;
+                let _ = tx.send(result).await;
+            });
 
             state.planetoid = Some(planetoid);
         }

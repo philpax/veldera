@@ -5,14 +5,13 @@
 use bevy::diagnostic::{DiagnosticsStore, FrameTimeDiagnosticsPlugin};
 use bevy::prelude::*;
 use bevy_egui::{EguiContexts, EguiPlugin, EguiPrimaryContextPass, egui};
-#[cfg(not(target_family = "wasm"))]
-use bevy_tokio_tasks::TokioTasksRuntime;
 use glam::DVec3;
 
+use crate::async_runtime::TaskSpawner;
 use crate::camera::{CameraSettings, FlightCamera, MAX_SPEED, MIN_SPEED};
 use crate::coords::ecef_to_lat_lon;
 use crate::floating_origin::FloatingOriginCamera;
-use crate::geo::{GeocodingState, TeleportState, GEOCODING_THROTTLE_SECS};
+use crate::geo::{GEOCODING_THROTTLE_SECS, GeocodingState, TeleportState};
 use crate::lod::LodState;
 use crate::mesh::RocktreeMeshMarker;
 
@@ -54,7 +53,7 @@ fn debug_ui_system(
     lod_state: Res<LodState>,
     camera_query: Query<(&FloatingOriginCamera, &Transform, &FlightCamera)>,
     mesh_query: Query<&RocktreeMeshMarker>,
-    #[cfg(not(target_family = "wasm"))] runtime: ResMut<TokioTasksRuntime>,
+    spawner: TaskSpawner,
 ) -> Result {
     let ctx = contexts.ctx_mut()?;
 
@@ -256,10 +255,7 @@ fn debug_ui_system(
     // Start geocoding request if requested.
     if start_geocoding {
         let current_time = time.elapsed_secs_f64();
-        #[cfg(not(target_family = "wasm"))]
-        geocoding_state.start_request(current_time, &runtime);
-        #[cfg(target_family = "wasm")]
-        geocoding_state.start_request(current_time);
+        geocoding_state.start_request(current_time, &spawner);
     }
 
     // Request teleport if coordinates were set.
@@ -267,10 +263,7 @@ fn debug_ui_system(
         // Clear search results after selecting one.
         geocoding_state.results.clear();
 
-        #[cfg(not(target_family = "wasm"))]
-        teleport_state.request(lat, lon, &runtime);
-        #[cfg(target_family = "wasm")]
-        teleport_state.request(lat, lon);
+        teleport_state.request(lat, lon, &spawner);
     }
 
     Ok(())

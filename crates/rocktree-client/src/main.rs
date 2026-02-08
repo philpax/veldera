@@ -3,6 +3,7 @@
 //! This application provides a free-flight camera to explore Google Earth's
 //! 3D terrain data, with LOD-based loading and frustum culling.
 
+mod async_runtime;
 mod camera;
 mod coords;
 mod floating_origin;
@@ -13,6 +14,7 @@ mod mesh;
 mod ui;
 mod unlit_material;
 
+use async_runtime::AsyncRuntimePlugin;
 use bevy::core_pipeline::tonemapping::Tonemapping;
 use bevy::prelude::*;
 use camera::{CameraControllerPlugin, FlightCamera};
@@ -123,9 +125,8 @@ fn main() {
         ..Default::default()
     }));
 
-    // Native: Add Tokio runtime plugin (reqwest requires it).
-    #[cfg(not(target_family = "wasm"))]
-    app.add_plugins(bevy_tokio_tasks::TokioTasksPlugin::default());
+    // Add async runtime (Tokio on native, no-op on WASM).
+    app.add_plugins(AsyncRuntimePlugin);
 
     app.add_plugins(AppPlugin).run();
 }

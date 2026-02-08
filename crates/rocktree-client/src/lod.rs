@@ -8,21 +8,18 @@
 //! need more detail are expanded, avoiding wasted bandwidth on coarse nodes.
 //!
 //! Uses platform-agnostic `async_channel` for communication between async tasks
-//! and the main thread. The spawn mechanism differs by platform:
-//! - Native: `bevy-tokio-tasks` for Tokio runtime (reqwest requires it)
-//! - WASM: Bevy's built-in `AsyncComputeTaskPool` (reqwest uses browser fetch)
+//! and the main thread. Task spawning is handled by `TaskSpawner` from the
+//! `async_runtime` module.
 
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
 use bevy::prelude::*;
-#[cfg(target_family = "wasm")]
-use bevy::tasks::AsyncComputeTaskPool;
-#[cfg(not(target_family = "wasm"))]
-use bevy_tokio_tasks::TokioTasksRuntime;
 use glam::DMat4;
 use rocktree::{BulkMetadata, BulkRequest, Frustum, LodMetrics, Node, NodeMetadata, NodeRequest};
 use rocktree_decode::OrientedBoundingBox;
+
+use crate::async_runtime::TaskSpawner;
 
 use crate::loader::LoaderState;
 use crate::mesh::{
@@ -349,7 +346,7 @@ fn update_lod_requests(
     loader_state: Res<LoaderState>,
     mut lod_state: ResMut<LodState>,
     channels: Res<LodChannels>,
-    #[cfg(not(target_family = "wasm"))] runtime: ResMut<TokioTasksRuntime>,
+    spawner: TaskSpawner,
 ) {
     if loader_state.planetoid.is_none() {
         return;
@@ -409,23 +406,10 @@ fn update_lod_requests(
         let tx = channels.node_tx.clone();
         let path_clone = path.clone();
 
-        #[cfg(not(target_family = "wasm"))]
-        {
-            runtime.spawn_background_task(move |_ctx| async move {
-                let result = client.fetch_node(&request).await;
-                let _ = tx.send((path_clone, result)).await;
-            });
-        }
-
-        #[cfg(target_family = "wasm")]
-        {
-            AsyncComputeTaskPool::get()
-                .spawn(async move {
-                    let result = client.fetch_node(&request).await;
-                    let _ = tx.send((path_clone, result)).await;
-                })
-                .detach();
-        }
+        spawner.spawn(async move {
+            let result = client.fetch_node(&request).await;
+            let _ = tx.send((path_clone, result)).await;
+        });
     }
 
     // Spawn bulk load tasks.
@@ -442,23 +426,10 @@ fn update_lod_requests(
         let tx = channels.bulk_tx.clone();
         let path_clone = path.clone();
 
-        #[cfg(not(target_family = "wasm"))]
-        {
-            runtime.spawn_background_task(move |_ctx| async move {
-                let result = client.fetch_bulk(&request).await;
-                let _ = tx.send((path_clone, result)).await;
-            });
-        }
-
-        #[cfg(target_family = "wasm")]
-        {
-            AsyncComputeTaskPool::get()
-                .spawn(async move {
-                    let result = client.fetch_bulk(&request).await;
-                    let _ = tx.send((path_clone, result)).await;
-                })
-                .detach();
-        }
+        spawner.spawn(async move {
+            let result = client.fetch_bulk(&request).await;
+            let _ = tx.send((path_clone, result)).await;
+        });
     }
 }
 

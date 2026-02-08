@@ -4,12 +4,9 @@
 //! elevation lookup via Open Elevation API.
 
 use bevy::prelude::*;
-#[cfg(target_family = "wasm")]
-use bevy::tasks::AsyncComputeTaskPool;
-#[cfg(not(target_family = "wasm"))]
-use bevy_tokio_tasks::TokioTasksRuntime;
 use serde::Deserialize;
 
+use crate::async_runtime::TaskSpawner;
 use crate::camera::{CameraSettings, FlightCamera};
 use crate::coords::lat_lon_to_ecef;
 use crate::floating_origin::FloatingOriginCamera;
@@ -70,12 +67,7 @@ impl Default for GeocodingState {
 
 impl GeocodingState {
     /// Start an async geocoding request.
-    #[allow(clippy::needless_pass_by_value)]
-    pub fn start_request(
-        &mut self,
-        current_time: f64,
-        #[cfg(not(target_family = "wasm"))] runtime: &TokioTasksRuntime,
-    ) {
+    pub fn start_request(&mut self, current_time: f64, spawner: &TaskSpawner<'_, '_>) {
         let can_request = self
             .last_request_time
             .is_none_or(|t| current_time - t >= GEOCODING_THROTTLE_SECS);
@@ -91,23 +83,10 @@ impl GeocodingState {
         let query = self.search_text.clone();
         let tx = self.result_tx.clone();
 
-        #[cfg(not(target_family = "wasm"))]
-        {
-            runtime.spawn_background_task(move |_ctx| async move {
-                let result = fetch_geocoding_results(&query).await;
-                let _ = tx.send(result).await;
-            });
-        }
-
-        #[cfg(target_family = "wasm")]
-        {
-            AsyncComputeTaskPool::get()
-                .spawn(async move {
-                    let result = fetch_geocoding_results(&query).await;
-                    let _ = tx.send(result).await;
-                })
-                .detach();
-        }
+        spawner.spawn(async move {
+            let result = fetch_geocoding_results(&query).await;
+            let _ = tx.send(result).await;
+        });
     }
 }
 
@@ -153,35 +132,17 @@ impl TeleportState {
     ///
     /// This starts an elevation fetch; the actual teleport happens when
     /// the elevation result arrives.
-    pub fn request(
-        &mut self,
-        lat: f64,
-        lon: f64,
-        #[cfg(not(target_family = "wasm"))] runtime: &TokioTasksRuntime,
-    ) {
+    pub fn request(&mut self, lat: f64, lon: f64, spawner: &TaskSpawner<'_, '_>) {
         // Cancel any existing pending teleport.
         self.pending = Some(PendingTeleport { lat, lon });
         self.error = None;
 
         let tx = self.elevation_tx.clone();
 
-        #[cfg(not(target_family = "wasm"))]
-        {
-            runtime.spawn_background_task(move |_ctx| async move {
-                let result = fetch_elevation(lat, lon).await;
-                let _ = tx.send(result).await;
-            });
-        }
-
-        #[cfg(target_family = "wasm")]
-        {
-            AsyncComputeTaskPool::get()
-                .spawn(async move {
-                    let result = fetch_elevation(lat, lon).await;
-                    let _ = tx.send(result).await;
-                })
-                .detach();
-        }
+        spawner.spawn(async move {
+            let result = fetch_elevation(lat, lon).await;
+            let _ = tx.send(result).await;
+        });
     }
 }
 
