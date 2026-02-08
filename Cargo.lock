@@ -4184,6 +4184,7 @@ dependencies = [
  "bevy_egui",
  "console_error_panic_hook",
  "glam",
+ "js-sys",
  "reqwest",
  "rocktree",
  "rocktree-decode",
@@ -4194,6 +4195,7 @@ dependencies = [
  "tracing-wasm",
  "urlencoding",
  "wasm-bindgen",
+ "web-time",
 ]
 
 [[package]]

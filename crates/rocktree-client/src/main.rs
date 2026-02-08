@@ -11,6 +11,7 @@ mod geo;
 mod loader;
 mod lod;
 mod mesh;
+mod time_of_day;
 mod ui;
 mod unlit_material;
 
@@ -23,6 +24,7 @@ use geo::GeoPlugin;
 use glam::DVec3;
 use loader::DataLoaderPlugin;
 use lod::LodPlugin;
+use time_of_day::TimeOfDayPlugin;
 use ui::DebugUiPlugin;
 use unlit_material::UnlitMaterialPlugin;
 
@@ -37,6 +39,7 @@ impl Plugin for AppPlugin {
             DataLoaderPlugin,
             GeoPlugin,
             LodPlugin,
+            TimeOfDayPlugin,
             DebugUiPlugin,
             UnlitMaterialPlugin,
         ))
@@ -56,12 +59,10 @@ fn setup_scene(mut commands: Commands) {
 
     // Spawn a 3D camera at the origin (floating origin system handles positioning).
     // The camera's Transform is always at origin; everything else is rendered relative to it.
+    // Note: clear_color is set dynamically by the time-of-day system.
     commands.spawn((
         Camera3d::default(),
-        Camera {
-            clear_color: bevy::camera::ClearColorConfig::Custom(Color::BLACK),
-            ..default()
-        },
+        Camera::default(),
         Transform::from_translation(Vec3::ZERO).looking_to(start_direction, up),
         Projection::Perspective(PerspectiveProjection {
             fov: std::f32::consts::FRAC_PI_4,

@@ -14,6 +14,7 @@ use crate::floating_origin::FloatingOriginCamera;
 use crate::geo::{GEOCODING_THROTTLE_SECS, GeocodingState, TeleportState};
 use crate::lod::LodState;
 use crate::mesh::RocktreeMeshMarker;
+use crate::time_of_day::{TimeMode, TimeOfDayState};
 
 /// Plugin for debug UI overlay.
 pub struct DebugUiPlugin;
@@ -50,6 +51,7 @@ fn debug_ui_system(
     mut coord_state: ResMut<CoordinateInputState>,
     mut geocoding_state: ResMut<GeocodingState>,
     mut teleport_state: ResMut<TeleportState>,
+    mut time_of_day: ResMut<TimeOfDayState>,
     lod_state: Res<LodState>,
     camera_query: Query<(&FloatingOriginCamera, &Transform, &FlightCamera)>,
     mesh_query: Query<&RocktreeMeshMarker>,
@@ -238,6 +240,94 @@ fn debug_ui_system(
                         .logarithmic(true)
                         .suffix(" m/s"),
                 );
+            });
+
+            ui.separator();
+
+            // Time of day controls.
+            ui.label("Time of day:");
+
+            // Mode toggle.
+            ui.horizontal(|ui| {
+                if ui
+                    .selectable_label(time_of_day.mode == TimeMode::Realtime, "Realtime")
+                    .clicked()
+                {
+                    time_of_day.sync_to_realtime();
+                }
+                if ui
+                    .selectable_label(time_of_day.mode == TimeMode::Override, "Manual")
+                    .clicked()
+                    && time_of_day.mode != TimeMode::Override
+                {
+                    // Switch to override mode, keeping current time.
+                    let current_speed = time_of_day.speed_multiplier;
+                    time_of_day.mode = TimeMode::Override;
+                    time_of_day.set_speed(current_speed);
+                }
+            });
+
+            // Display current UTC time.
+            let utc_seconds = time_of_day.current_utc_seconds();
+            #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+            let utc_h = (utc_seconds / 3600.0) as u32;
+            #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+            let utc_m = ((utc_seconds % 3600.0) / 60.0) as u32;
+            #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+            let utc_s = (utc_seconds % 60.0) as u32;
+            ui.label(format!("UTC: {utc_h:02}:{utc_m:02}:{utc_s:02}"));
+
+            // Display current local time with timezone offset.
+            let local_hours = time_of_day.local_hours_at_longitude(lon_deg);
+            let offset_hours = lon_deg / 15.0;
+            #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+            let hours = local_hours as u32;
+            #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+            let minutes = ((local_hours - f64::from(hours)) * 60.0) as u32;
+            #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+            let seconds = ((local_hours * 3600.0) % 60.0) as u32;
+            let offset_sign = if offset_hours >= 0.0 { "+" } else { "" };
+            ui.label(format!(
+                "Local: {hours:02}:{minutes:02}:{seconds:02} (UTC{offset_sign}{offset_hours:.1})"
+            ));
+
+            // Time slider (only in override mode).
+            let is_override = time_of_day.mode == TimeMode::Override;
+            if is_override {
+                let mut slider_hours = local_hours;
+                let response = ui.add(
+                    egui::Slider::new(&mut slider_hours, 0.0..=24.0)
+                        .text("Hour")
+                        .fixed_decimals(1),
+                );
+                // Only update time when user finishes dragging, not on every frame.
+                if response.drag_stopped() {
+                    time_of_day.set_override_time(slider_hours, lon_deg);
+                }
+            }
+
+            // Speed buttons.
+            ui.horizontal(|ui| {
+                ui.label("Time speed:");
+                let speeds = [
+                    ("Pause", 0.0),
+                    ("1x", 1.0),
+                    ("10x", 10.0),
+                    ("100x", 100.0),
+                    ("1000x", 1000.0),
+                ];
+                for (label, speed) in speeds {
+                    #[allow(clippy::float_cmp)]
+                    let is_selected = time_of_day.speed_multiplier == speed;
+                    if ui.selectable_label(is_selected, label).clicked() {
+                        time_of_day.set_speed(speed);
+                        #[allow(clippy::float_cmp)]
+                        if time_of_day.mode == TimeMode::Realtime && speed != 1.0 {
+                            // Switching to a non-1x speed in realtime mode should switch to override.
+                            time_of_day.mode = TimeMode::Override;
+                        }
+                    }
+                }
             });
 
             ui.separator();
