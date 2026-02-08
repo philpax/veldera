@@ -6,6 +6,7 @@
 mod camera;
 mod coords;
 mod floating_origin;
+mod geo;
 mod loader;
 mod lod;
 mod mesh;
@@ -16,6 +17,7 @@ use bevy::core_pipeline::tonemapping::Tonemapping;
 use bevy::prelude::*;
 use camera::{CameraControllerPlugin, FlightCamera};
 use floating_origin::{FloatingOriginCamera, FloatingOriginPlugin};
+use geo::GeoPlugin;
 use glam::DVec3;
 use loader::DataLoaderPlugin;
 use lod::LodPlugin;
@@ -31,6 +33,7 @@ impl Plugin for AppPlugin {
             FloatingOriginPlugin,
             CameraControllerPlugin,
             DataLoaderPlugin,
+            GeoPlugin,
             LodPlugin,
             DebugUiPlugin,
             UnlitMaterialPlugin,

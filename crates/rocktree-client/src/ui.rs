@@ -1,21 +1,18 @@
 //! Debug UI for displaying performance metrics and camera info.
 //!
 //! Shows FPS, camera position, altitude, and loaded node count.
-//! Includes geocoding search powered by OpenStreetMap Nominatim.
 
 use bevy::diagnostic::{DiagnosticsStore, FrameTimeDiagnosticsPlugin};
 use bevy::prelude::*;
-#[cfg(target_family = "wasm")]
-use bevy::tasks::AsyncComputeTaskPool;
 use bevy_egui::{EguiContexts, EguiPlugin, EguiPrimaryContextPass, egui};
 #[cfg(not(target_family = "wasm"))]
 use bevy_tokio_tasks::TokioTasksRuntime;
 use glam::DVec3;
-use serde::Deserialize;
 
 use crate::camera::{CameraSettings, FlightCamera, MAX_SPEED, MIN_SPEED};
-use crate::coords::{ecef_to_lat_lon, lat_lon_to_ecef};
+use crate::coords::ecef_to_lat_lon;
 use crate::floating_origin::FloatingOriginCamera;
+use crate::geo::{GeocodingState, TeleportState, GEOCODING_THROTTLE_SECS};
 use crate::lod::LodState;
 use crate::mesh::RocktreeMeshMarker;
 
@@ -27,9 +24,7 @@ impl Plugin for DebugUiPlugin {
         app.add_plugins(EguiPlugin::default())
             .add_plugins(FrameTimeDiagnosticsPlugin::default())
             .init_resource::<CoordinateInputState>()
-            .init_resource::<GeocodingState>()
-            .add_systems(EguiPrimaryContextPass, debug_ui_system)
-            .add_systems(Update, poll_geocoding_results);
+            .add_systems(EguiPrimaryContextPass, debug_ui_system);
     }
 }
 
@@ -41,45 +36,6 @@ struct CoordinateInputState {
     /// Track whether text fields are focused to avoid overwriting user input.
     is_editing: bool,
 }
-
-/// A geocoding search result.
-#[derive(Debug, Clone)]
-struct GeocodingResult {
-    display_name: String,
-    lat: f64,
-    lon: f64,
-}
-
-/// State for geocoding search.
-#[derive(Resource)]
-struct GeocodingState {
-    search_text: String,
-    results: Vec<GeocodingResult>,
-    is_loading: bool,
-    /// Elapsed time (in seconds) since start when last request was made.
-    last_request_time: Option<f64>,
-    error: Option<String>,
-    result_rx: async_channel::Receiver<Result<Vec<GeocodingResult>, String>>,
-    result_tx: async_channel::Sender<Result<Vec<GeocodingResult>, String>>,
-}
-
-impl Default for GeocodingState {
-    fn default() -> Self {
-        let (result_tx, result_rx) = async_channel::bounded(1);
-        Self {
-            search_text: String::new(),
-            results: Vec::new(),
-            is_loading: false,
-            last_request_time: None,
-            error: None,
-            result_rx,
-            result_tx,
-        }
-    }
-}
-
-/// Throttle duration between geocoding requests (per Nominatim usage policy).
-const GEOCODING_THROTTLE_SECS: f64 = 5.0;
 
 /// Render the debug UI overlay.
 #[allow(
@@ -94,8 +50,9 @@ fn debug_ui_system(
     mut settings: ResMut<CameraSettings>,
     mut coord_state: ResMut<CoordinateInputState>,
     mut geocoding_state: ResMut<GeocodingState>,
+    mut teleport_state: ResMut<TeleportState>,
     lod_state: Res<LodState>,
-    mut camera_query: Query<(&mut FloatingOriginCamera, &mut Transform, &mut FlightCamera)>,
+    camera_query: Query<(&FloatingOriginCamera, &Transform, &FlightCamera)>,
     mesh_query: Query<&RocktreeMeshMarker>,
     #[cfg(not(target_family = "wasm"))] runtime: ResMut<TokioTasksRuntime>,
 ) -> Result {
@@ -119,8 +76,8 @@ fn debug_ui_system(
     // Convert ECEF to lat/long (spherical Earth approximation).
     let (lat_deg, lon_deg) = ecef_to_lat_lon(position);
 
-    // Update text fields when not editing.
-    if !coord_state.is_editing {
+    // Update text fields when not editing and not teleporting.
+    if !coord_state.is_editing && !teleport_state.is_pending() {
         coord_state.lat_text = format!("{lat_deg:.6}");
         coord_state.lon_text = format!("{lon_deg:.6}");
     }
@@ -141,7 +98,7 @@ fn debug_ui_system(
     let loaded_nodes = lod_state.loaded_node_count();
     let loading_nodes = lod_state.loading_node_count();
 
-    // Track if we need to move the camera.
+    // Track if we need to teleport.
     let mut new_coords: Option<(f64, f64)> = None;
 
     // Track if we need to start a geocoding request.
@@ -193,7 +150,7 @@ fn debug_ui_system(
                 }
             }
 
-            // Show error if any.
+            // Show geocoding error if any.
             if let Some(ref error) = geocoding_state.error {
                 ui.colored_label(egui::Color32::RED, error);
             }
@@ -222,6 +179,16 @@ fn debug_ui_system(
             });
 
             ui.separator();
+
+            // Show teleport status.
+            if teleport_state.is_pending() {
+                ui.horizontal(|ui| {
+                    ui.spinner();
+                    ui.label("Teleporting...");
+                });
+            } else if let Some(ref error) = teleport_state.error {
+                ui.colored_label(egui::Color32::RED, format!("Teleport failed: {error}"));
+            }
 
             // Lat/long input fields.
             ui.horizontal(|ui| {
@@ -286,129 +253,25 @@ fn debug_ui_system(
             ui.label("  Click - Grab cursor");
         });
 
-    // Start geocoding request if requested and not throttled.
-    if start_geocoding && !geocoding_state.is_loading {
+    // Start geocoding request if requested.
+    if start_geocoding {
         let current_time = time.elapsed_secs_f64();
-        let can_request = geocoding_state
-            .last_request_time
-            .is_none_or(|t| current_time - t >= GEOCODING_THROTTLE_SECS);
-
-        if can_request && !geocoding_state.search_text.trim().is_empty() {
-            geocoding_state.is_loading = true;
-            geocoding_state.error = None;
-            geocoding_state.last_request_time = Some(current_time);
-
-            let query = geocoding_state.search_text.clone();
-            let tx = geocoding_state.result_tx.clone();
-
-            #[cfg(not(target_family = "wasm"))]
-            {
-                runtime.spawn_background_task(move |_ctx| async move {
-                    let result = fetch_geocoding_results(&query).await;
-                    let _ = tx.send(result).await;
-                });
-            }
-
-            #[cfg(target_family = "wasm")]
-            {
-                AsyncComputeTaskPool::get()
-                    .spawn(async move {
-                        let result = fetch_geocoding_results(&query).await;
-                        let _ = tx.send(result).await;
-                    })
-                    .detach();
-            }
-        }
+        #[cfg(not(target_family = "wasm"))]
+        geocoding_state.start_request(current_time, &runtime);
+        #[cfg(target_family = "wasm")]
+        geocoding_state.start_request(current_time);
     }
 
-    // Move camera if coordinates were changed.
-    if let Some((new_lat, new_lon)) = new_coords
-        && let Ok((mut origin_camera, mut transform, mut flight_camera)) = camera_query.single_mut()
-    {
-        let old_up = origin_camera.position.normalize().as_vec3();
-        let radius = origin_camera.position.length();
-
-        // Convert new lat/long to ECEF.
-        let new_position = lat_lon_to_ecef(new_lat, new_lon, radius);
-        origin_camera.position = new_position;
-
-        // Parallel transport: rotate direction to preserve orientation relative to surface.
-        let new_up = new_position.normalize().as_vec3();
-        let rotation = Quat::from_rotation_arc(old_up, new_up);
-        flight_camera.direction = (rotation * flight_camera.direction).normalize();
-
-        transform.look_to(flight_camera.direction, new_up);
-
+    // Request teleport if coordinates were set.
+    if let Some((lat, lon)) = new_coords {
         // Clear search results after selecting one.
         geocoding_state.results.clear();
+
+        #[cfg(not(target_family = "wasm"))]
+        teleport_state.request(lat, lon, &runtime);
+        #[cfg(target_family = "wasm")]
+        teleport_state.request(lat, lon);
     }
 
     Ok(())
-}
-
-/// Poll for geocoding results from background task.
-#[allow(clippy::needless_pass_by_value)]
-fn poll_geocoding_results(mut geocoding_state: ResMut<GeocodingState>) {
-    while let Ok(result) = geocoding_state.result_rx.try_recv() {
-        geocoding_state.is_loading = false;
-        match result {
-            Ok(results) => {
-                geocoding_state.results = results;
-                geocoding_state.error = None;
-            }
-            Err(e) => {
-                geocoding_state.results.clear();
-                geocoding_state.error = Some(e);
-            }
-        }
-    }
-}
-
-/// Nominatim API response item.
-#[derive(Debug, Deserialize)]
-struct NominatimPlace {
-    display_name: String,
-    lat: String,
-    lon: String,
-}
-
-/// Fetch geocoding results from Nominatim API.
-async fn fetch_geocoding_results(query: &str) -> Result<Vec<GeocodingResult>, String> {
-    let url = format!(
-        "https://nominatim.openstreetmap.org/search?q={}&format=json&limit=5",
-        urlencoding::encode(query)
-    );
-
-    let client = reqwest::Client::builder()
-        .user_agent("rocktree-client/0.1 (https://github.com/philpax/earth-reverse-engineering)")
-        .build()
-        .map_err(|e| format!("Failed to create client: {e}"))?;
-
-    let response = client
-        .get(&url)
-        .send()
-        .await
-        .map_err(|e| format!("Request failed: {e}"))?;
-
-    if !response.status().is_success() {
-        return Err(format!("HTTP {}", response.status()));
-    }
-
-    let places: Vec<NominatimPlace> = response
-        .json()
-        .await
-        .map_err(|e| format!("Failed to parse response: {e}"))?;
-
-    let results = places
-        .into_iter()
-        .filter_map(|place| {
-            Some(GeocodingResult {
-                display_name: place.display_name,
-                lat: place.lat.parse().ok()?,
-                lon: place.lon.parse().ok()?,
-            })
-        })
-        .collect();
-
-    Ok(results)
 }
