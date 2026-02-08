@@ -176,6 +176,9 @@ pub struct RocktreeMeshMarker {
     pub path: String,
     /// Oriented bounding box from the node's bulk metadata.
     pub obb: rocktree_decode::OrientedBoundingBox,
+    /// Meters per texel (LOD metric) for this mesh. Stored for debugging/future use.
+    #[allow(dead_code)]
+    pub meters_per_texel: f32,
 }
 
 #[cfg(test)]

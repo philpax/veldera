@@ -10,22 +10,35 @@
 //! Uses platform-agnostic `async_channel` for communication between async tasks
 //! and the main thread. Task spawning is handled by `TaskSpawner` from the
 //! `async_runtime` module.
+//!
+//! ## Physics integration
+//!
+//! For areas rendered at LOD level N or N-1, the N-2 mesh is retained as a
+//! physics collider. Physics colliders are active within 1km of the camera.
 
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
 use bevy::prelude::*;
-use glam::DMat4;
-use rocktree::{BulkMetadata, BulkRequest, Frustum, LodMetrics, Node, NodeMetadata, NodeRequest};
+use glam::{DMat4, DVec3};
+use rocktree::{
+    BulkMetadata, BulkRequest, Frustum, LodMetrics, Mesh as RocktreeMesh, Node, NodeMetadata,
+    NodeRequest,
+};
 use rocktree_decode::OrientedBoundingBox;
 
 use crate::async_runtime::TaskSpawner;
-
+use crate::floating_origin::FloatingOriginCamera;
 use crate::loader::LoaderState;
 use crate::mesh::{
     RocktreeMeshMarker, convert_mesh, convert_texture, matrix_to_world_position_and_transform,
 };
 use crate::unlit_material::UnlitMaterial;
+
+use crate::floating_origin::WorldPosition;
+use crate::physics::{PHYSICS_RANGE, terrain::TerrainCollider};
+
+use avian3d::prelude::*;
 
 /// Plugin for LOD management and frustum culling.
 pub struct LodPlugin;
@@ -44,8 +57,23 @@ impl Plugin for LodPlugin {
                     cull_meshes,
                 )
                     .chain(),
-            );
+            )
+            .add_systems(Update, update_physics_colliders.after(poll_lod_node_tasks));
     }
+}
+
+/// Cached data for a loaded node, used for physics collider creation.
+#[derive(Clone)]
+pub struct LoadedNodeData {
+    /// The rocktree meshes for this node.
+    pub meshes: Vec<RocktreeMesh>,
+    /// Transform from mesh-local to globe coordinates.
+    pub transform: Transform,
+    /// World position of the node.
+    pub world_position: DVec3,
+    /// Meters per texel (LOD metric). Stored for debugging/future use.
+    #[allow(dead_code)]
+    pub meters_per_texel: f32,
 }
 
 /// State for LOD management.
@@ -69,6 +97,10 @@ pub struct LodState {
     frustum: Option<Frustum>,
     /// Current LOD metrics (updated each frame).
     lod_metrics: Option<LodMetrics>,
+    /// Cached node data for physics collider creation.
+    node_data: HashMap<String, LoadedNodeData>,
+    /// Physics collider entities, keyed by node path.
+    physics_colliders: HashMap<String, Entity>,
 }
 
 impl LodState {
@@ -82,6 +114,18 @@ impl LodState {
     #[must_use]
     pub fn loading_node_count(&self) -> usize {
         self.loading_nodes.len()
+    }
+
+    /// Check if a node is currently loaded.
+    #[must_use]
+    pub fn is_node_loaded(&self, path: &str) -> bool {
+        self.loaded_nodes.contains(path)
+    }
+
+    /// Get the number of active physics colliders.
+    #[must_use]
+    pub fn physics_collider_count(&self) -> usize {
+        self.physics_colliders.len()
     }
 }
 
@@ -119,6 +163,8 @@ struct BfsResult {
     potential_bulks: HashSet<String>,
     /// OBBs discovered during traversal, to be merged into `LodState`.
     discovered_obbs: Vec<(String, OrientedBoundingBox)>,
+    /// Nodes that should be loaded for physics colliders (N-2 ancestors within range).
+    physics_nodes_to_load: Vec<NodeMetadata>,
 }
 
 /// Perform a BFS traversal from the root to determine which nodes and bulks
@@ -133,6 +179,8 @@ fn bfs_traversal(lod_state: &LodState, frustum: Frustum, lod_metrics: LodMetrics
     let mut potential_bulks: HashSet<String> = HashSet::new();
     // OBBs discovered during traversal, to be merged into lod_state after.
     let mut discovered_obbs: Vec<(String, OrientedBoundingBox)> = Vec::new();
+    // All visited nodes with their metadata, for physics eligibility check.
+    let mut visited_nodes: HashMap<String, NodeMetadata> = HashMap::new();
 
     // BFS frontier: (node_path, bulk_key) pairs.
     // Start from root node with the root bulk.
@@ -201,6 +249,11 @@ fn bfs_traversal(lod_state: &LodState, frustum: Frustum, lod_metrics: LodMetrics
                 // Cache the OBB for later use when spawning mesh entities.
                 discovered_obbs.push((node.path.clone(), node.obb));
 
+                // Track all visited nodes for physics eligibility check.
+                if node.has_data {
+                    visited_nodes.insert(node.path.clone(), (*node).clone());
+                }
+
                 // Level of detail check: only expand if the node needs more detail.
                 if !lod_metrics.should_refine(node.obb.center, node.meters_per_texel) {
                     continue;
@@ -226,23 +279,86 @@ fn bfs_traversal(lod_state: &LodState, frustum: Frustum, lod_metrics: LodMetrics
         valid = next_valid;
     }
 
+    // Identify physics-eligible nodes: N-2 ancestors of potential_nodes within range.
+    // These need to be loaded even if not needed for rendering.
+    let mut physics_nodes_to_load: Vec<NodeMetadata> = Vec::new();
+    let mut physics_paths_queued: HashSet<String> = HashSet::new();
+
+    for path in &potential_nodes {
+        if path.len() < 2 {
+            continue;
+        }
+        let ancestor_path = &path[..path.len() - 2];
+
+        // Skip if already queued or loaded.
+        if physics_paths_queued.contains(ancestor_path) {
+            continue;
+        }
+        if lod_state.loaded_nodes.contains(ancestor_path)
+            || lod_state.loading_nodes.contains(ancestor_path)
+            || lod_state.node_data.contains_key(ancestor_path)
+        {
+            continue;
+        }
+
+        // Check if ancestor was visited and has data.
+        let Some(ancestor_meta) = visited_nodes.get(ancestor_path) else {
+            continue;
+        };
+
+        // Check if within physics range.
+        let distance = lod_metrics
+            .camera_position
+            .distance(ancestor_meta.obb.center);
+        if distance > PHYSICS_RANGE {
+            continue;
+        }
+
+        physics_paths_queued.insert(ancestor_path.to_string());
+        physics_nodes_to_load.push(ancestor_meta.clone());
+    }
+
     BfsResult {
         nodes_to_load,
         bulks_to_load,
         potential_nodes,
         potential_bulks,
         discovered_obbs,
+        physics_nodes_to_load,
     }
 }
 
 /// Despawn entities for nodes no longer in the potential set, and remove
 /// obsolete bulks from the cache.
+///
+/// Note: node_data is retained for physics-eligible nodes (N-2 ancestors of
+/// potential nodes within physics range). This data is cleaned up separately
+/// by `cleanup_physics_node_data`.
 fn unload_obsolete(
     lod_state: &mut LodState,
     commands: &mut Commands,
     potential_nodes: &HashSet<String>,
     potential_bulks: &HashSet<String>,
+    camera_pos: DVec3,
 ) {
+    // Compute which nodes should be retained for physics: N-2 ancestors of
+    // potential nodes that are within physics range.
+    let physics_retained: HashSet<String> = potential_nodes
+        .iter()
+        .filter_map(|path| {
+            if path.len() < 2 {
+                return None;
+            }
+            let ancestor_path = &path[..path.len() - 2];
+            // Check if ancestor has node_data and is within physics range.
+            let node_data = lod_state.node_data.get(ancestor_path)?;
+            if camera_pos.distance(node_data.world_position) > PHYSICS_RANGE {
+                return None;
+            }
+            Some(ancestor_path.to_string())
+        })
+        .collect();
+
     // Despawn nodes no longer in the potential set.
     let obsolete_nodes: Vec<String> = lod_state
         .loaded_nodes
@@ -252,10 +368,41 @@ fn unload_obsolete(
         .collect();
     for path in &obsolete_nodes {
         lod_state.loaded_nodes.remove(path);
+        // Only remove node_data if not retained for physics.
+        if !physics_retained.contains(path) {
+            lod_state.node_data.remove(path);
+        }
         if let Some(entities) = lod_state.node_entities.remove(path) {
             for entity in entities {
                 commands.entity(entity).despawn();
             }
+        }
+    }
+
+    // Also clean up node_data that's no longer needed for physics.
+    // This handles the case where camera moved away from previously retained nodes.
+    let stale_node_data: Vec<String> = lod_state
+        .node_data
+        .keys()
+        .filter(|path| {
+            // Keep if it's a currently loaded node.
+            if lod_state.loaded_nodes.contains(*path) {
+                return false;
+            }
+            // Keep if it's retained for physics.
+            if physics_retained.contains(*path) {
+                return false;
+            }
+            // Otherwise it's stale.
+            true
+        })
+        .cloned()
+        .collect();
+    for path in stale_node_data {
+        lod_state.node_data.remove(&path);
+        // Also remove any physics collider for this node.
+        if let Some(entity) = lod_state.physics_colliders.remove(&path) {
+            commands.entity(entity).despawn();
         }
     }
 
@@ -378,14 +525,20 @@ fn update_lod_requests(
         &mut commands,
         &bfs.potential_nodes,
         &bfs.potential_bulks,
+        lod_metrics.camera_position,
     );
 
     // Limit concurrent loads.
     let max_node_loads = 20;
     let max_bulk_loads = 10;
 
-    // Spawn node load tasks.
-    for node_meta in bfs.nodes_to_load {
+    // Spawn node load tasks (rendering nodes first, then physics-only nodes).
+    let all_nodes_to_load = bfs
+        .nodes_to_load
+        .into_iter()
+        .chain(bfs.physics_nodes_to_load);
+
+    for node_meta in all_nodes_to_load {
         if lod_state.loading_nodes.len() >= max_node_loads {
             break;
         }
@@ -482,6 +635,20 @@ fn poll_lod_node_tasks(
 
                 lod_state.loaded_nodes.insert(path.clone());
 
+                let (world_position, transform) =
+                    matrix_to_world_position_and_transform(&node.matrix_globe_from_mesh);
+
+                // Cache node data for physics collider creation.
+                lod_state.node_data.insert(
+                    path.clone(),
+                    LoadedNodeData {
+                        meshes: node.meshes.clone(),
+                        transform,
+                        world_position: world_position.position,
+                        meters_per_texel: node.meters_per_texel,
+                    },
+                );
+
                 // Spawn mesh entities and track them for later despawning.
                 let entities = lod_state.node_entities.entry(path).or_default();
                 for rocktree_mesh in &node.meshes {
@@ -496,18 +663,16 @@ fn poll_lod_node_tasks(
                         octant_mask: UVec4::ZERO,
                     });
 
-                    let (world_position, transform) =
-                        matrix_to_world_position_and_transform(&node.matrix_globe_from_mesh);
-
                     let entity = commands
                         .spawn((
                             Mesh3d(mesh_handle),
                             MeshMaterial3d(material),
                             transform,
-                            world_position,
+                            world_position.clone(),
                             RocktreeMeshMarker {
                                 path: node.path.clone(),
                                 obb,
+                                meters_per_texel: node.meters_per_texel,
                             },
                         ))
                         .id();
@@ -584,6 +749,114 @@ fn cull_meshes(
             .is_some_and(|m| m.octant_mask.x != u32::from(mask));
         if needs_update && let Some(material) = materials.get_mut(&material_handle.0) {
             material.octant_mask.x = u32::from(mask);
+        }
+    }
+}
+
+/// Update physics colliders based on LOD state.
+///
+/// For tiles at depth N or N-1, retain depth N-2 as physics collider.
+/// Colliders are only active within `PHYSICS_RANGE` of the camera.
+fn update_physics_colliders(
+    mut commands: Commands,
+    mut lod_state: ResMut<LodState>,
+    camera_query: Query<&FloatingOriginCamera>,
+) {
+    use crate::physics::terrain::create_terrain_collider;
+    use crate::physics::DebugRender;
+
+    let Ok(camera) = camera_query.single() else {
+        return;
+    };
+
+    let camera_pos = camera.position;
+
+    // Determine which nodes are physics-eligible (N-2 relative to loaded N/N-1).
+    let physics_eligible: HashSet<String> = lod_state
+        .loaded_nodes
+        .iter()
+        .filter_map(|path| {
+            // A tile is physics-eligible if it has loaded descendants at depth+2.
+            // In other words, if there's a loaded node that starts with this path
+            // and is at least 2 levels deeper.
+            if path.len() < 2 {
+                return None;
+            }
+
+            // Get the N-2 ancestor path.
+            let ancestor_path = &path[..path.len() - 2];
+
+            // Check if this ancestor has node data and is within physics range.
+            let node_data = lod_state.node_data.get(ancestor_path)?;
+
+            // Check distance from camera to node center.
+            let distance = camera_pos.distance(node_data.world_position);
+            if distance > PHYSICS_RANGE {
+                return None;
+            }
+
+            Some(ancestor_path.to_string())
+        })
+        .collect();
+
+    // Create colliders for newly eligible nodes.
+    for path in &physics_eligible {
+        if lod_state.physics_colliders.contains_key(path) {
+            continue;
+        }
+
+        let Some(node_data) = lod_state.node_data.get(path) else {
+            continue;
+        };
+
+        // Create a collider for each mesh in the node.
+        // For simplicity, we'll just use the first mesh if there are multiple.
+        let Some(first_mesh) = node_data.meshes.first() else {
+            continue;
+        };
+
+        let collider = create_terrain_collider(first_mesh, &node_data.transform);
+
+        // Physics position is camera-relative.
+        let relative_pos = node_data.world_position - camera_pos;
+        let physics_pos = Vec3::new(
+            relative_pos.x as f32,
+            relative_pos.y as f32,
+            relative_pos.z as f32,
+        );
+
+        let entity = commands
+            .spawn((
+                RigidBody::Static,
+                collider,
+                Position(physics_pos),
+                // Rotation is identity since we baked rotation into collider vertices.
+                Rotation::default(),
+                // Transform is needed for Avian's debug rendering (it reads GlobalTransform).
+                Transform::from_translation(physics_pos),
+                WorldPosition::from_dvec3(node_data.world_position),
+                TerrainCollider { path: path.clone() },
+                // Enable debug rendering for this collider.
+                DebugRender::default(),
+            ))
+            .id();
+
+        lod_state.physics_colliders.insert(path.clone(), entity);
+        tracing::debug!("Created physics collider for node '{}'", path);
+    }
+
+    // Remove colliders for nodes that are no longer eligible.
+    let obsolete_colliders: Vec<String> = lod_state
+        .physics_colliders
+        .keys()
+        .filter(|path| !physics_eligible.contains(*path))
+        .cloned()
+        .collect();
+
+    for path in obsolete_colliders {
+        if let Some(entity) = lod_state.physics_colliders.remove(&path) {
+            commands.entity(entity).despawn();
+            tracing::debug!("Removed physics collider for node '{}'", path);
         }
     }
 }

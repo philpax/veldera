@@ -11,6 +11,7 @@ mod geo;
 mod loader;
 mod lod;
 mod mesh;
+mod physics;
 mod time_of_day;
 mod ui;
 mod unlit_material;
@@ -43,7 +44,8 @@ impl Plugin for AppPlugin {
             DebugUiPlugin,
             UnlitMaterialPlugin,
         ))
-        .add_systems(Startup, setup_scene);
+        .add_systems(Startup, setup_scene)
+        .add_plugins(physics::PhysicsIntegrationPlugin);
     }
 }
 

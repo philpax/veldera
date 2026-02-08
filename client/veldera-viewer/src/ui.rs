@@ -3,6 +3,7 @@
 //! Shows FPS, camera position, altitude, and loaded node count.
 
 use bevy::diagnostic::{DiagnosticsStore, FrameTimeDiagnosticsPlugin};
+use bevy::gizmos::config::GizmoConfigStore;
 use bevy::prelude::*;
 use bevy_egui::{EguiContexts, EguiPlugin, EguiPrimaryContextPass, egui};
 use glam::DVec3;
@@ -16,6 +17,8 @@ use crate::lod::LodState;
 use crate::mesh::RocktreeMeshMarker;
 use crate::time_of_day::{TimeMode, TimeOfDayState};
 
+use crate::physics::{is_physics_debug_enabled, spawn_projectile, toggle_physics_debug};
+
 /// Plugin for debug UI overlay.
 pub struct DebugUiPlugin;
 
@@ -24,7 +27,11 @@ impl Plugin for DebugUiPlugin {
         app.add_plugins(EguiPlugin::default())
             .add_plugins(FrameTimeDiagnosticsPlugin::default())
             .init_resource::<CoordinateInputState>()
-            .add_systems(EguiPrimaryContextPass, debug_ui_system);
+            .add_systems(EguiPrimaryContextPass, debug_ui_system)
+            .add_systems(
+                EguiPrimaryContextPass,
+                physics_ui_system.after(debug_ui_system),
+            );
     }
 }
 
@@ -343,6 +350,64 @@ fn debug_ui_system(
 
         teleport_state.request(lat, lon, &spawner);
     }
+
+    Ok(())
+}
+
+/// Physics UI for shooting projectiles and toggling debug visualization.
+fn physics_ui_system(
+    mut commands: Commands,
+    mut contexts: EguiContexts,
+    mut config_store: ResMut<GizmoConfigStore>,
+    mut meshes: ResMut<Assets<Mesh>>,
+    mut materials: ResMut<Assets<StandardMaterial>>,
+    lod_state: Res<LodState>,
+    camera_query: Query<(&FloatingOriginCamera, &Transform)>,
+) -> Result {
+    let ctx = contexts.ctx_mut()?;
+
+    egui::Window::new("Physics")
+        .anchor(egui::Align2::RIGHT_TOP, [-10.0, 10.0])
+        .show(ctx, |ui| {
+            // Physics stats.
+            let collider_count = lod_state.physics_collider_count();
+            ui.label(format!("Colliders: {collider_count}"));
+
+            ui.separator();
+
+            // Shoot sphere button.
+            if ui.button("Shoot sphere").clicked()
+                && let Ok((camera, transform)) = camera_query.single()
+            {
+                let camera_pos = camera.position;
+                let camera_dir = transform.forward().as_vec3();
+                spawn_projectile(
+                    &mut commands,
+                    &mut meshes,
+                    &mut materials,
+                    camera_pos,
+                    camera_dir,
+                );
+                tracing::info!("Shot projectile from camera");
+            }
+
+            ui.separator();
+
+            // Debug visualization toggle.
+            let mut debug_enabled = is_physics_debug_enabled(&config_store);
+            if ui
+                .checkbox(&mut debug_enabled, "Debug visualization")
+                .changed()
+            {
+                toggle_physics_debug(&mut config_store);
+            }
+
+            ui.separator();
+
+            ui.label("Physics controls:");
+            ui.label("  Spheres fall toward Earth center");
+            ui.label("  Colliders active within 1km");
+        });
 
     Ok(())
 }
