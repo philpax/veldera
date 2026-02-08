@@ -3,12 +3,13 @@
 //! Run with: `cargo run -p rocktree-proto --bin generate`
 
 use std::path::PathBuf;
+use std::process::Command;
 use std::{env, fs, io};
 
 fn main() -> io::Result<()> {
     let manifest_dir = PathBuf::from(env::var("CARGO_MANIFEST_DIR").unwrap());
-    let workspace_root = manifest_dir.parent().unwrap().parent().unwrap();
-    let proto_path = workspace_root.join("proto/rocktree.proto");
+    let proto_dir_path = manifest_dir.join("proto");
+    let proto_path = proto_dir_path.join("rocktree.proto");
     let out_dir = manifest_dir.join("src/generated");
 
     println!("Generating protobuf code from: {}", proto_path.display());
@@ -20,7 +21,7 @@ fn main() -> io::Result<()> {
     // Configure prost to generate code.
     prost_build::Config::new()
         .out_dir(&out_dir)
-        .compile_protos(&[&proto_path], &[workspace_root.join("proto")])?;
+        .compile_protos(&[&proto_path], &[proto_dir_path])?;
 
     // The proto package is `geo_globetrotter_proto_rocktree`, so prost generates
     // `geo_globetrotter_proto_rocktree.rs`. We'll include it directly in mod.rs.
@@ -38,8 +39,15 @@ fn main() -> io::Result<()> {
              #![allow(clippy::must_use_candidate)]\n\n\
              {content}"
         );
-        fs::write(out_dir.join("mod.rs"), mod_content)?;
+        let mod_rs_path = out_dir.join("mod.rs");
+        fs::write(&mod_rs_path, mod_content)?;
         fs::remove_file(&generated_file)?;
+
+        // Format the generated code with rustfmt.
+        let status = Command::new("rustfmt").arg(&mod_rs_path).status()?;
+        if !status.success() {
+            eprintln!("Warning: rustfmt failed with status: {status}");
+        }
 
         println!("Successfully generated protobuf types!");
     } else {
