@@ -7,7 +7,7 @@ repository.workspace = true
 description = "3D viewer for Google Earth mesh data using Bevy"
 
 [features]
-default = []
+default = ["webgpu"]
 webgpu = ["bevy/webgpu"]
 
 [dependencies]
@@ -18,7 +18,8 @@ tracing = "0.1"
 # Base Bevy features that work on both native and WASM.
 bevy = { version = "0.18.0", default-features = false, features = [
     "bevy_render", "bevy_core_pipeline", "bevy_pbr", "bevy_winit",
-    "bevy_window", "bevy_asset", "bevy_mesh", "webgl2"
+    "bevy_window", "bevy_asset", "bevy_mesh", "bevy_post_process",
+    "webgl2", "tonemapping_luts"
 ] }
 bevy_egui = "0.39"
 # Platform-agnostic async channel (replaces tokio::sync::mpsc).
@@ -44,7 +45,8 @@ features = ["json"]
 [target.'cfg(not(target_family = "wasm"))'.dependencies]
 bevy = { version = "0.18.0", default-features = false, features = [
     "bevy_render", "bevy_core_pipeline", "bevy_pbr", "bevy_winit",
-    "bevy_window", "bevy_asset", "bevy_mesh", "multi_threaded", "x11"
+    "bevy_window", "bevy_asset", "bevy_mesh", "bevy_post_process",
+    "multi_threaded", "x11", "tonemapping_luts"
 ] }
 bevy-tokio-tasks = "0.18"
 tokio = { version = "1", features = ["sync"] }
