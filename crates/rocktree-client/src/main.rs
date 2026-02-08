@@ -4,6 +4,7 @@
 //! 3D terrain data, with LOD-based loading and frustum culling.
 
 mod camera;
+mod coords;
 mod floating_origin;
 mod loader;
 mod lod;

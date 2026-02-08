@@ -14,6 +14,7 @@ use glam::DVec3;
 use serde::Deserialize;
 
 use crate::camera::{CameraSettings, FlightCamera, MAX_SPEED, MIN_SPEED};
+use crate::coords::{ecef_to_lat_lon, lat_lon_to_ecef};
 use crate::floating_origin::FloatingOriginCamera;
 use crate::lod::LodState;
 use crate::mesh::RocktreeMeshMarker;
@@ -410,22 +411,4 @@ async fn fetch_geocoding_results(query: &str) -> Result<Vec<GeocodingResult>, St
         .collect();
 
     Ok(results)
-}
-
-/// Convert ECEF coordinates to latitude and longitude (degrees).
-fn ecef_to_lat_lon(position: DVec3) -> (f64, f64) {
-    let lat_rad = (position.z / position.length()).asin();
-    let lon_rad = position.y.atan2(position.x);
-    (lat_rad.to_degrees(), lon_rad.to_degrees())
-}
-
-/// Convert latitude, longitude (degrees), and radius to ECEF coordinates.
-fn lat_lon_to_ecef(lat_deg: f64, lon_deg: f64, radius: f64) -> DVec3 {
-    let lat_rad = lat_deg.to_radians();
-    let lon_rad = lon_deg.to_radians();
-    DVec3::new(
-        radius * lat_rad.cos() * lon_rad.cos(),
-        radius * lat_rad.cos() * lon_rad.sin(),
-        radius * lat_rad.sin(),
-    )
 }
