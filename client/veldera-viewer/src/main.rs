@@ -7,6 +7,7 @@ mod async_runtime;
 mod camera;
 mod coords;
 mod floating_origin;
+mod fps_controller;
 mod geo;
 mod loader;
 mod lod;
@@ -37,6 +38,7 @@ impl Plugin for AppPlugin {
         app.add_plugins((
             FloatingOriginPlugin,
             CameraControllerPlugin,
+            fps_controller::FpsControllerPlugin,
             DataLoaderPlugin,
             GeoPlugin,
             LodPlugin,

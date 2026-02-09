@@ -20,6 +20,7 @@ use bevy::gizmos::config::{GizmoConfig, GizmoConfigStore};
 use bevy::prelude::*;
 
 use crate::floating_origin::{FloatingOriginCamera, WorldPosition};
+use crate::fps_controller::LogicalPlayer;
 
 pub use terrain::TerrainCollider;
 
@@ -144,10 +145,13 @@ fn apply_origin_shift(
 /// Gravity must point toward Earth center, not -Y. Since Position is
 /// camera-relative, we recover ECEF first to compute gravity direction.
 /// We directly modify LinearVelocity to apply gravitational acceleration.
+///
+/// Note: LogicalPlayer (FPS controller) handles its own radial gravity internally.
+#[allow(clippy::type_complexity)]
 fn apply_radial_gravity(
     camera_query: Query<&FloatingOriginCamera>,
     time: Res<Time>,
-    mut query: Query<(&Position, &mut LinearVelocity), With<RigidBody>>,
+    mut query: Query<(&Position, &mut LinearVelocity), (With<RigidBody>, Without<LogicalPlayer>)>,
 ) {
     let Ok(camera) = camera_query.single() else {
         return;

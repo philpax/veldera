@@ -9,7 +9,7 @@ use bevy_egui::{EguiContexts, EguiPlugin, EguiPrimaryContextPass, egui};
 use glam::DVec3;
 
 use crate::async_runtime::TaskSpawner;
-use crate::camera::{CameraSettings, FlightCamera, MAX_SPEED, MIN_SPEED};
+use crate::camera::{CameraMode, CameraSettings, FlightCamera, MAX_SPEED, MIN_SPEED};
 use crate::coords::ecef_to_lat_lon;
 use crate::floating_origin::FloatingOriginCamera;
 use crate::geo::{GEOCODING_THROTTLE_SECS, GeocodingState, TeleportState};
@@ -68,6 +68,7 @@ fn debug_ui_system(
     mut teleport_state: ResMut<TeleportState>,
     mut time_of_day: ResMut<TimeOfDayState>,
     mut config_store: ResMut<GizmoConfigStore>,
+    camera_mode: Res<CameraMode>,
     lod_state: Res<LodState>,
     camera_query: Query<(&FloatingOriginCamera, &Transform, &FlightCamera)>,
     mesh_query: Query<&RocktreeMeshMarker>,
@@ -159,6 +160,7 @@ fn debug_ui_system(
                         &mut geocoding_state,
                         &mut teleport_state,
                         &mut time_of_day,
+                        &camera_mode,
                         lon_deg,
                         &mut new_coords,
                         &mut start_geocoding,
@@ -203,10 +205,20 @@ fn render_main_tab(
     geocoding_state: &mut GeocodingState,
     teleport_state: &mut TeleportState,
     time_of_day: &mut TimeOfDayState,
+    camera_mode: &CameraMode,
     lon_deg: f64,
     new_coords: &mut Option<(f64, f64)>,
     start_geocoding: &mut bool,
 ) {
+    // Camera mode indicator.
+    let mode_str = match camera_mode {
+        CameraMode::Flycam => "Flycam",
+        CameraMode::FpsController => "FPS controller",
+    };
+    ui.label(format!("Mode: {mode_str} (N to toggle)"));
+
+    ui.separator();
+
     ui.label(format!("FPS: {fps:.0}"));
     ui.label(format!(
         "Position: ({:.0}, {:.0}, {:.0})",

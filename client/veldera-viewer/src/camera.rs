@@ -3,6 +3,7 @@
 //! Provides WASD movement with mouse look and altitude-based speed scaling.
 //! Works with the floating origin system for high-precision positioning.
 
+use avian3d::prelude::*;
 use bevy::ecs::message::MessageReader;
 use bevy::input::mouse::{MouseMotion, MouseScrollUnit, MouseWheel};
 use bevy::prelude::*;
@@ -11,30 +12,55 @@ use bevy_egui::EguiContexts;
 use bevy_egui::input::egui_wants_any_keyboard_input;
 use glam::DVec3;
 
-use crate::floating_origin::{FloatingOrigin, FloatingOriginCamera};
+use crate::floating_origin::{FloatingOrigin, FloatingOriginCamera, WorldPosition};
+use crate::fps_controller::{
+    CameraConfig, FpsController, FpsControllerInput, LogicalPlayer, RenderPlayer,
+};
 
 /// Minimum base speed in meters per second.
 pub const MIN_SPEED: f32 = 10.0;
 /// Maximum base speed in meters per second.
 pub const MAX_SPEED: f32 = 25_000.0;
 
+/// Current camera mode.
+#[derive(Resource, Default, PartialEq, Eq, Clone, Copy, Debug)]
+pub enum CameraMode {
+    /// Free-flight camera (default).
+    #[default]
+    Flycam,
+    /// First-person controller with physics.
+    FpsController,
+}
+
 /// Plugin for free-flight camera controls.
 pub struct CameraControllerPlugin;
 
 impl Plugin for CameraControllerPlugin {
     fn build(&self, app: &mut App) {
-        app.init_resource::<CameraSettings>().add_systems(
-            Update,
-            (
-                cursor_grab_system,
-                adjust_speed_with_scroll.run_if(cursor_is_grabbed),
-                camera_look.run_if(cursor_is_grabbed),
-                camera_movement.run_if(cursor_is_grabbed.and(not(egui_wants_any_keyboard_input))),
-                sync_floating_origin,
-            )
-                .chain(),
-        );
+        app.init_resource::<CameraSettings>()
+            .init_resource::<CameraMode>()
+            .add_systems(
+                Update,
+                (
+                    toggle_camera_mode,
+                    cursor_grab_system,
+                    adjust_speed_with_scroll.run_if(cursor_is_grabbed.and(is_flycam_mode)),
+                    camera_look.run_if(cursor_is_grabbed.and(is_flycam_mode)),
+                    camera_movement.run_if(
+                        cursor_is_grabbed
+                            .and(not(egui_wants_any_keyboard_input))
+                            .and(is_flycam_mode),
+                    ),
+                    sync_floating_origin.run_if(is_flycam_mode),
+                )
+                    .chain(),
+            );
     }
+}
+
+/// Run condition: flycam mode is active.
+pub fn is_flycam_mode(mode: Res<CameraMode>) -> bool {
+    *mode == CameraMode::Flycam
 }
 
 /// Settings for camera movement.
@@ -137,6 +163,148 @@ fn cursor_grab_system(
             set_cursor_grab(&mut cursor, &mut window, true);
         }
     }
+}
+
+/// Toggle between flycam and FPS controller modes with the N key.
+fn toggle_camera_mode(
+    keyboard: Res<ButtonInput<KeyCode>>,
+    mut mode: ResMut<CameraMode>,
+    mut commands: Commands,
+    camera_query: Query<(Entity, &FloatingOriginCamera, &FlightCamera)>,
+    logical_player_query: Query<
+        (Entity, &Position, &WorldPosition, &FpsController),
+        With<LogicalPlayer>,
+    >,
+) {
+    if !keyboard.just_pressed(KeyCode::KeyN) {
+        return;
+    }
+
+    match *mode {
+        CameraMode::Flycam => {
+            // Switch to FPS controller.
+            if let Ok((camera_entity, camera, flight_camera)) = camera_query.single() {
+                let camera_ecef = camera.position;
+                let (yaw, pitch) = direction_to_yaw_pitch(flight_camera.direction, camera_ecef);
+
+                // Spawn the logical player entity.
+                let logical_entity = spawn_fps_player(&mut commands, camera_ecef, yaw, pitch);
+
+                // Add RenderPlayer to the camera.
+                commands
+                    .entity(camera_entity)
+                    .insert(RenderPlayer { logical_entity });
+
+                *mode = CameraMode::FpsController;
+                tracing::info!("Switched to FPS controller mode");
+            }
+        }
+        CameraMode::FpsController => {
+            // Switch back to flycam.
+            if let Ok((logical_entity, _position, world_pos, controller)) =
+                logical_player_query.single()
+            {
+                // Get the final world position from the logical player.
+                let final_ecef = world_pos.position;
+
+                // Convert yaw/pitch back to direction.
+                let direction =
+                    yaw_pitch_to_direction(controller.yaw, controller.pitch, final_ecef);
+
+                // Update the FlightCamera.
+                if let Ok((camera_entity, _, _)) = camera_query.single() {
+                    // Remove RenderPlayer from camera.
+                    commands.entity(camera_entity).remove::<RenderPlayer>();
+
+                    // Update FlightCamera direction and FloatingOriginCamera position.
+                    commands.entity(camera_entity).insert((
+                        FlightCamera { direction },
+                        FloatingOriginCamera::new(final_ecef),
+                    ));
+                }
+
+                // Despawn the logical player.
+                commands.entity(logical_entity).despawn();
+
+                *mode = CameraMode::Flycam;
+                tracing::info!("Switched to flycam mode");
+            }
+        }
+    }
+}
+
+/// Spawn the FPS player entity at the given ECEF position.
+fn spawn_fps_player(commands: &mut Commands, ecef_pos: DVec3, yaw: f32, pitch: f32) -> Entity {
+    // The player spawns at Position::ZERO since physics is camera-relative.
+    // WorldPosition tracks the absolute ECEF position.
+    // Capsule: radius 0.5, segment length 1.0, total height 2.0m.
+    commands
+        .spawn((
+            LogicalPlayer,
+            Transform::default(),
+            WorldPosition::from_dvec3(ecef_pos),
+            RigidBody::Dynamic,
+            Collider::capsule(0.5, 1.0),
+            Position(Vec3::ZERO),
+            LinearVelocity::default(),
+            LockedAxes::ROTATION_LOCKED,
+            FpsController {
+                yaw,
+                pitch,
+                ..Default::default()
+            },
+            FpsControllerInput {
+                yaw,
+                pitch,
+                ..Default::default()
+            },
+            CameraConfig { height_offset: 0.5 },
+        ))
+        .id()
+}
+
+/// Convert a direction vector to yaw/pitch angles in the radial frame.
+fn direction_to_yaw_pitch(direction: Vec3, ecef_pos: DVec3) -> (f32, f32) {
+    use crate::fps_controller::RadialFrame;
+
+    let frame = RadialFrame::from_ecef_position(ecef_pos);
+
+    // Project direction onto the tangent plane to get the horizontal component.
+    let vertical_component = direction.dot(frame.up);
+    let horizontal = direction - frame.up * vertical_component;
+    let horizontal_len = horizontal.length();
+
+    // Pitch is the angle from the horizontal plane. Positive pitch = looking up.
+    let pitch = vertical_component.atan2(horizontal_len);
+
+    // Yaw is the angle from north in the tangent plane.
+    // Negative yaw = turned right (clockwise when viewed from above).
+    let yaw = if horizontal_len > 1e-6 {
+        let horizontal_normalized = horizontal / horizontal_len;
+        let north_component = horizontal_normalized.dot(frame.north);
+        let east_component = horizontal_normalized.dot(frame.east);
+        (-east_component).atan2(north_component)
+    } else {
+        0.0
+    };
+
+    (yaw, pitch)
+}
+
+/// Convert yaw/pitch angles to a direction vector in the radial frame.
+fn yaw_pitch_to_direction(yaw: f32, pitch: f32, ecef_pos: DVec3) -> Vec3 {
+    use crate::fps_controller::RadialFrame;
+
+    let frame = RadialFrame::from_ecef_position(ecef_pos);
+
+    // Horizontal direction from yaw.
+    // Negative yaw = turned right (clockwise) = facing east.
+    let forward = frame.north * yaw.cos() - frame.east * yaw.sin();
+
+    // Add pitch component. Positive pitch = looking up (toward local_up).
+    let direction = forward * pitch.cos() + frame.up * pitch.sin();
+
+    direction.normalize()
 }
 
 /// Adjust speed with mouse scroll wheel.
