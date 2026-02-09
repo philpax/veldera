@@ -189,14 +189,16 @@ struct TeleportPhase {
     start_position: DVec3,
     /// Target camera position in ECEF.
     target_position: DVec3,
-    /// Camera orientation at start (t=0).
+    /// Camera orientation at animation start (t=0).
     orient_start: Quat,
-    /// Camera orientation at cruise start (t=0.2), looking down toward target.
-    orient_cruise_start: Quat,
-    /// Camera orientation at cruise end (t=0.8), looking down from target direction.
-    orient_cruise_end: Quat,
-    /// Camera orientation at end (t=1.0), looking at horizon.
+    /// Camera orientation at animation end (t=1.0), looking at horizon.
     orient_end: Quat,
+    /// "Up" vector (in camera space) when looking down at end of ascent.
+    /// This is the start direction projected onto the tangent plane.
+    ascent_up: Vec3,
+    /// "Up" vector (in camera space) when looking down at start of descent.
+    /// This is the target horizon direction (north at destination).
+    descent_up: Vec3,
     /// Total duration of the animation in seconds.
     duration: f32,
     /// Elapsed time since animation started.
@@ -307,10 +309,10 @@ impl ArcTrajectory {
         const LONG: f64 = 20_000_000.0;
 
         // Duration values (seconds).
-        const MIN_DURATION: f32 = 1.0;
-        const SHORT_DURATION: f32 = 3.0;
-        const MEDIUM_DURATION: f32 = 6.0;
-        const MAX_DURATION: f32 = 10.0;
+        const MIN_DURATION: f32 = 2.0;
+        const SHORT_DURATION: f32 = 5.0;
+        const MEDIUM_DURATION: f32 = 10.0;
+        const MAX_DURATION: f32 = 15.0;
 
         if surface_distance < VERY_SHORT {
             MIN_DURATION
@@ -362,26 +364,48 @@ impl ArcTrajectory {
     }
 }
 
+// Animation phase boundaries.
+const ASCENT_END: f64 = 0.05;
+const DESCENT_START: f64 = 0.95;
+
 /// Compute the camera orientation quaternion at a given t in the animation.
 ///
-/// Uses precomputed keyframe orientations and quaternion slerp for smooth interpolation.
-fn compute_orientation_at_t(phase: &TeleportPhase, t: f64) -> Quat {
-    if t < 0.2 {
-        // Departure: orient_start -> orient_cruise_start.
-        let phase_t = (t / 0.2) as f32;
+/// - Ascent: Slerp from initial orientation to looking down
+/// - Cruise: Always look at Earth center, smoothly rotate up vector
+/// - Descent: Slerp from looking down to looking at horizon
+fn compute_orientation_at_t(phase: &TeleportPhase, position: DVec3, t: f64) -> Quat {
+    // Direction toward Earth center (looking down).
+    let down = -position.normalize().as_vec3();
+
+    if t < ASCENT_END {
+        // Ascent: slerp from initial orientation to looking down with ascent_up.
+        let phase_t = (t / ASCENT_END) as f32;
         let eased_t = smootherstep(f64::from(phase_t)) as f32;
-        phase.orient_start.slerp(phase.orient_cruise_start, eased_t)
-    } else if t < 0.8 {
-        // Cruise: orient_cruise_start -> orient_cruise_end.
-        let cruise_t = ((t - 0.2) / 0.6) as f32;
-        phase
-            .orient_cruise_start
-            .slerp(phase.orient_cruise_end, cruise_t)
+
+        let orient_ascent_end = Transform::IDENTITY
+            .looking_to(down, phase.ascent_up)
+            .rotation;
+        phase.orient_start.slerp(orient_ascent_end, eased_t)
+    } else if t < DESCENT_START {
+        // Cruise: always look at Earth center, interpolate the up vector.
+        let cruise_t = ((t - ASCENT_END) / (DESCENT_START - ASCENT_END)) as f32;
+
+        // Slerp the up vector from ascent_up to descent_up.
+        let up = phase
+            .ascent_up
+            .slerp(phase.descent_up, cruise_t)
+            .normalize();
+
+        Transform::IDENTITY.looking_to(down, up).rotation
     } else {
-        // Arrival: orient_cruise_end -> orient_end.
-        let phase_t = ((t - 0.8) / 0.2) as f32;
+        // Descent: slerp from looking down to final orientation.
+        let phase_t = ((t - DESCENT_START) / (1.0 - DESCENT_START)) as f32;
         let eased_t = smootherstep(f64::from(phase_t)) as f32;
-        phase.orient_cruise_end.slerp(phase.orient_end, eased_t)
+
+        let orient_descent_start = Transform::IDENTITY
+            .looking_to(down, phase.descent_up)
+            .rotation;
+        orient_descent_start.slerp(phase.orient_end, eased_t)
     }
 }
 
@@ -457,11 +481,9 @@ fn poll_teleport(
                     let duration = ArcTrajectory::compute_duration(surface_distance);
                     let apex_altitude = trajectory.apex_altitude;
 
-                    // Compute keyframe orientations as quaternions for smooth interpolation.
+                    // Compute orientation keyframes and up vectors.
                     let start_up = start_norm.as_vec3();
                     let target_up = target_norm.as_vec3();
-                    let start_down = -start_up;
-                    let target_down = -target_up;
 
                     // Direction of travel (tangent to great circle at start).
                     let travel_dir = (target_norm - start_norm * start_norm.dot(target_norm))
@@ -482,30 +504,27 @@ fn poll_teleport(
                         .looking_to(start_direction, start_up)
                         .rotation;
 
-                    // orient_cruise_start: Looking down, with travel direction as "up" in view.
-                    // When looking down, camera "up" becomes "forward" on screen.
-                    let orient_cruise_start = Transform::IDENTITY
-                        .looking_to(start_down, travel_dir)
-                        .rotation;
-
-                    // orient_cruise_end: Looking down at target, with target north as "up" in view.
-                    let orient_cruise_end = Transform::IDENTITY
-                        .looking_to(target_down, target_frame.north)
-                        .rotation;
-
-                    // orient_end: Looking at horizon (north), with radial up.
+                    // orient_end: Final orientation, looking at horizon (north) with radial up.
                     let orient_end = Transform::IDENTITY
                         .looking_to(target_frame.north, target_up)
                         .rotation;
+
+                    // ascent_up: When looking down at end of ascent, this is "up" in camera view.
+                    // Use travel direction so ascent rotates toward the destination.
+                    let ascent_up = travel_dir;
+
+                    // descent_up: When looking down at start of descent, this is "up" in camera view.
+                    // Use target's north so descent rotates smoothly to final orientation.
+                    let descent_up = target_frame.north;
 
                     // Start the animation.
                     animation.phase = Some(TeleportPhase {
                         start_position,
                         target_position,
                         orient_start,
-                        orient_cruise_start,
-                        orient_cruise_end,
                         orient_end,
+                        ascent_up,
+                        descent_up,
                         duration,
                         elapsed: 0.0,
                         trajectory,
@@ -557,8 +576,8 @@ fn update_teleport_animation(
                 .position_at_t(t, phase.start_position, phase.target_position);
         origin_camera.position = position;
 
-        // Compute camera orientation using quaternion slerp.
-        let orientation = compute_orientation_at_t(phase, t);
+        // Compute camera orientation.
+        let orientation = compute_orientation_at_t(phase, position, t);
         transform.rotation = orientation;
 
         // Extract the forward direction from the orientation for FlightCamera.
