@@ -15,6 +15,7 @@ use glam::DVec3;
 
 use crate::camera::CameraMode;
 use crate::floating_origin::{FloatingOrigin, FloatingOriginCamera, WorldPosition};
+use crate::geo::TeleportAnimation;
 
 pub struct FpsControllerPlugin;
 
@@ -24,19 +25,22 @@ impl Plugin for FpsControllerPlugin {
             .add_systems(PreUpdate, clear_fixed_timestep_flag)
             .add_systems(
                 FixedPreUpdate,
-                (set_fixed_time_step_flag, fps_controller_move)
-                    .run_if(is_fps_mode.and(cursor_is_grabbed)),
+                (set_fixed_time_step_flag, fps_controller_move).run_if(
+                    is_fps_mode
+                        .and(cursor_is_grabbed)
+                        .and(teleport_animation_not_active),
+                ),
             )
             .add_systems(
                 RunFixedMainLoop,
                 (
                     (fps_controller_input, fps_controller_look)
                         .chain()
-                        .run_if(cursor_is_grabbed)
+                        .run_if(cursor_is_grabbed.and(teleport_animation_not_active))
                         .in_set(RunFixedMainLoopSystems::BeforeFixedMainLoop),
                     (
                         clear_input.run_if(did_fixed_timestep_run_this_frame),
-                        fps_controller_render,
+                        fps_controller_render.run_if(teleport_animation_not_active),
                         sync_floating_origin_fps,
                     )
                         .chain()
@@ -45,6 +49,11 @@ impl Plugin for FpsControllerPlugin {
                     .run_if(is_fps_mode),
             );
     }
+}
+
+/// Run condition: teleport animation is not active.
+fn teleport_animation_not_active(anim: Res<TeleportAnimation>) -> bool {
+    !anim.is_active()
 }
 
 /// Run condition: FPS controller mode is active.

@@ -12,7 +12,7 @@ use crate::async_runtime::TaskSpawner;
 use crate::camera::{CameraMode, CameraSettings, FlightCamera, MAX_SPEED, MIN_SPEED};
 use crate::coords::ecef_to_lat_lon;
 use crate::floating_origin::FloatingOriginCamera;
-use crate::geo::{GEOCODING_THROTTLE_SECS, GeocodingState, TeleportState};
+use crate::geo::{GEOCODING_THROTTLE_SECS, GeocodingState, TeleportAnimation, TeleportState};
 use crate::lod::LodState;
 use crate::mesh::RocktreeMeshMarker;
 use crate::physics::{is_physics_debug_enabled, toggle_physics_debug};
@@ -66,6 +66,7 @@ fn debug_ui_system(
     mut ui_state: ResMut<DebugUiState>,
     mut geocoding_state: ResMut<GeocodingState>,
     mut teleport_state: ResMut<TeleportState>,
+    teleport_animation: Res<TeleportAnimation>,
     mut time_of_day: ResMut<TimeOfDayState>,
     mut config_store: ResMut<GizmoConfigStore>,
     camera_mode: Res<CameraMode>,
@@ -159,6 +160,7 @@ fn debug_ui_system(
                         &mut coord_state,
                         &mut geocoding_state,
                         &mut teleport_state,
+                        &teleport_animation,
                         &mut time_of_day,
                         &camera_mode,
                         lon_deg,
@@ -204,6 +206,7 @@ fn render_main_tab(
     coord_state: &mut CoordinateInputState,
     geocoding_state: &mut GeocodingState,
     teleport_state: &mut TeleportState,
+    teleport_animation: &TeleportAnimation,
     time_of_day: &mut TimeOfDayState,
     camera_mode: &CameraMode,
     lon_deg: f64,
@@ -292,10 +295,18 @@ fn render_main_tab(
     ui.separator();
 
     // Show teleport status.
-    if teleport_state.is_pending() {
+    if let Some(progress) = teleport_animation.progress() {
         ui.horizontal(|ui| {
             ui.spinner();
-            ui.label("Teleporting...");
+            #[allow(clippy::cast_possible_truncation)]
+            let percentage = (progress * 100.0) as u32;
+            ui.label(format!("Flying... {percentage}%"));
+        });
+        ui.add(egui::ProgressBar::new(progress).show_percentage());
+    } else if teleport_state.is_pending() {
+        ui.horizontal(|ui| {
+            ui.spinner();
+            ui.label("Fetching elevation...");
         });
     } else if let Some(ref error) = teleport_state.error {
         ui.colored_label(egui::Color32::RED, format!("Teleport failed: {error}"));

@@ -16,6 +16,7 @@ use crate::floating_origin::{FloatingOrigin, FloatingOriginCamera, WorldPosition
 use crate::fps_controller::{
     CameraConfig, FpsController, FpsControllerInput, LogicalPlayer, RenderPlayer,
 };
+use crate::geo::TeleportAnimation;
 
 /// Minimum base speed in meters per second.
 pub const MIN_SPEED: f32 = 10.0;
@@ -42,20 +43,32 @@ impl Plugin for CameraControllerPlugin {
             .add_systems(
                 Update,
                 (
-                    toggle_camera_mode,
+                    toggle_camera_mode.run_if(
+                        not(egui_wants_any_keyboard_input).and(teleport_animation_not_active),
+                    ),
                     cursor_grab_system,
                     adjust_speed_with_scroll.run_if(cursor_is_grabbed.and(is_flycam_mode)),
-                    camera_look.run_if(cursor_is_grabbed.and(is_flycam_mode)),
+                    camera_look.run_if(
+                        cursor_is_grabbed
+                            .and(is_flycam_mode)
+                            .and(teleport_animation_not_active),
+                    ),
                     camera_movement.run_if(
                         cursor_is_grabbed
                             .and(not(egui_wants_any_keyboard_input))
-                            .and(is_flycam_mode),
+                            .and(is_flycam_mode)
+                            .and(teleport_animation_not_active),
                     ),
                     sync_floating_origin.run_if(is_flycam_mode),
                 )
                     .chain(),
             );
     }
+}
+
+/// Run condition: teleport animation is not active.
+fn teleport_animation_not_active(anim: Res<TeleportAnimation>) -> bool {
+    !anim.is_active()
 }
 
 /// Run condition: flycam mode is active.
@@ -234,7 +247,12 @@ fn toggle_camera_mode(
 }
 
 /// Spawn the FPS player entity at the given ECEF position.
-fn spawn_fps_player(commands: &mut Commands, ecef_pos: DVec3, yaw: f32, pitch: f32) -> Entity {
+pub(crate) fn spawn_fps_player(
+    commands: &mut Commands,
+    ecef_pos: DVec3,
+    yaw: f32,
+    pitch: f32,
+) -> Entity {
     // The player spawns at Position::ZERO since physics is camera-relative.
     // WorldPosition tracks the absolute ECEF position.
     // Capsule: radius 0.5, segment length 1.0, total height 2.0m.
@@ -264,7 +282,7 @@ fn spawn_fps_player(commands: &mut Commands, ecef_pos: DVec3, yaw: f32, pitch: f
 }
 
 /// Convert a direction vector to yaw/pitch angles in the radial frame.
-fn direction_to_yaw_pitch(direction: Vec3, ecef_pos: DVec3) -> (f32, f32) {
+pub(crate) fn direction_to_yaw_pitch(direction: Vec3, ecef_pos: DVec3) -> (f32, f32) {
     use crate::fps_controller::RadialFrame;
 
     let frame = RadialFrame::from_ecef_position(ecef_pos);
