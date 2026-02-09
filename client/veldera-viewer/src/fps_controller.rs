@@ -99,12 +99,6 @@ impl RadialFrame {
 #[derive(Resource, Default)]
 pub struct DidFixedTimestepRunThisFrame(bool);
 
-#[derive(PartialEq)]
-pub enum MoveMode {
-    Noclip,
-    Ground,
-}
-
 /// Marker component for the logical player entity (physics body).
 #[derive(Component)]
 pub struct LogicalPlayer;
@@ -123,7 +117,6 @@ pub struct CameraConfig {
 
 #[derive(Component, Default)]
 pub struct FpsControllerInput {
-    pub fly: bool,
     pub sprint: bool,
     pub jump: bool,
     pub crouch: bool,
@@ -138,7 +131,6 @@ pub struct FpsControllerInput {
 #[derive(Component)]
 #[allow(dead_code)]
 pub struct FpsController {
-    pub move_mode: MoveMode,
     pub radius: f32,
     /// If the distance to the ground is less than this value, the player is considered grounded.
     pub grounded_distance: f32,
@@ -156,15 +148,12 @@ pub struct FpsController {
     pub traction_normal_cutoff: f32,
     pub friction_speed_cutoff: f32,
     pub jump_speed: f32,
-    pub fly_speed: f32,
     pub crouched_speed: f32,
     pub crouch_speed: f32,
     pub uncrouch_speed: f32,
     pub height: f32,
     pub upright_height: f32,
     pub crouch_height: f32,
-    pub fast_fly_speed: f32,
-    pub fly_friction: f32,
     pub pitch: f32,
     pub yaw: f32,
     pub ground_tick: u8,
@@ -180,7 +169,6 @@ pub struct FpsController {
     pub key_down: KeyCode,
     pub key_sprint: KeyCode,
     pub key_jump: KeyCode,
-    pub key_fly: KeyCode,
     pub key_crouch: KeyCode,
     pub experimental_enable_ledge_cling: bool,
 
@@ -190,11 +178,8 @@ pub struct FpsController {
 impl Default for FpsController {
     fn default() -> Self {
         Self {
-            move_mode: MoveMode::Ground,
             grounded_distance: 0.5,
             radius: 0.5,
-            fly_speed: 10.0,
-            fast_fly_speed: 30.0,
             walk_speed: 9.0,
             run_speed: 14.0,
             forward_speed: 30.0,
@@ -212,7 +197,6 @@ impl Default for FpsController {
             friction: 10.0,
             traction_normal_cutoff: 0.7,
             friction_speed_cutoff: 0.1,
-            fly_friction: 0.5,
             pitch: 0.0,
             yaw: 0.0,
             ground_tick: 0,
@@ -228,7 +212,6 @@ impl Default for FpsController {
             key_down: KeyCode::KeyE,
             key_sprint: KeyCode::ShiftLeft,
             key_jump: KeyCode::Space,
-            key_fly: KeyCode::KeyF,
             key_crouch: KeyCode::ControlLeft,
             sensitivity: 0.001,
             experimental_enable_ledge_cling: false, // Does not work well on Avian yet.
@@ -276,7 +259,6 @@ fn clear_input(mut query: Query<&mut FpsControllerInput>) {
         input.movement = Vec3::ZERO;
         input.sprint = false;
         input.jump = false;
-        input.fly = false;
         input.crouch = false;
     }
 }
@@ -310,7 +292,6 @@ pub fn fps_controller_input(
         );
         input.sprint |= key_input.pressed(controller.key_sprint);
         input.jump |= key_input.pressed(controller.key_jump);
-        input.fly |= key_input.just_pressed(controller.key_fly);
         input.crouch |= key_input.pressed(controller.key_crouch);
     }
 }
@@ -360,245 +341,208 @@ pub fn fps_controller_move(
         let frame = RadialFrame::from_ecef_position(ecef_pos);
         let local_up = frame.up;
 
-        if input.fly {
-            controller.move_mode = match controller.move_mode {
-                MoveMode::Noclip => MoveMode::Ground,
-                MoveMode::Ground => MoveMode::Noclip,
+        let speeds = Vec3::new(controller.side_speed, 0.0, controller.forward_speed);
+
+        // Build movement directions relative to local up.
+        // Negative yaw = turned right (clockwise when viewed from above).
+        let forward = frame.north * input.yaw.cos() - frame.east * input.yaw.sin();
+        let right = frame.east * input.yaw.cos() + frame.north * input.yaw.sin();
+        let move_to_world = Mat3::from_cols(right, local_up, forward);
+
+        let mut wish_direction = move_to_world * (input.movement * speeds);
+        let mut wish_speed = wish_direction.length();
+        if wish_speed > f32::EPSILON {
+            // Avoid division by zero.
+            wish_direction /= wish_speed; // Effectively normalize, avoid length computation twice.
+        }
+        let max_speed = if input.crouch {
+            controller.crouched_speed
+        } else if input.sprint {
+            controller.run_speed
+        } else {
+            controller.walk_speed
+        };
+        wish_speed = f32::min(wish_speed, max_speed);
+
+        // Compute downward direction for shape cast.
+        let down_dir = Dir3::new(-local_up).unwrap_or(Dir3::NEG_Y);
+
+        // Shape cast downwards to find ground.
+        // Better than a ray cast as it handles when you are near the edge of a surface.
+        let filter = SpatialQueryFilter::default().with_excluded_entities([entity]);
+        if let Some(hit) = spatial_query_pipeline.cast_shape(
+            // Consider when the controller is right up against a wall.
+            // We do not want the shape cast to detect it,
+            // so provide a slightly smaller collider in the XZ plane.
+            &scaled_collider_laterally(&collider, SLIGHT_SCALE_DOWN),
+            transform.translation,
+            transform.rotation,
+            down_dir,
+            &ShapeCastConfig::from_max_distance(controller.grounded_distance),
+            &filter,
+        ) {
+            let has_traction = Vec3::dot(hit.normal1, local_up) > controller.traction_normal_cutoff;
+
+            // Only apply friction after at least one tick, allows b-hopping without losing speed.
+            if controller.ground_tick >= 1 && has_traction {
+                // Compute lateral speed (perpendicular to local up).
+                let vertical_component = velocity.0.dot(local_up) * local_up;
+                let lateral_velocity = velocity.0 - vertical_component;
+                let lateral_speed = lateral_velocity.length();
+
+                if lateral_speed > controller.friction_speed_cutoff {
+                    let control = f32::max(lateral_speed, controller.stop_speed);
+                    let drop = control * controller.friction * dt;
+                    let new_speed = f32::max((lateral_speed - drop) / lateral_speed, 0.0);
+                    velocity.0 = vertical_component
+                        + lateral_velocity.normalize() * lateral_speed * new_speed;
+                } else {
+                    velocity.0 = Vec3::ZERO;
+                }
+                if controller.ground_tick == 1 {
+                    // Snap to ground.
+                    velocity.0 -= local_up * hit.distance;
+                }
+            }
+
+            let mut add = acceleration(
+                wish_direction,
+                wish_speed,
+                controller.acceleration,
+                velocity.0,
+                dt,
+            );
+            if !has_traction {
+                add -= local_up * GRAVITY * dt;
+            }
+            velocity.0 += add;
+
+            if has_traction {
+                let linear_velocity = velocity.0;
+                velocity.0 -= Vec3::dot(linear_velocity, hit.normal1) * hit.normal1;
+
+                if input.jump {
+                    velocity.0 += local_up * controller.jump_speed;
+                }
+            }
+
+            // Increment ground tick but cap at max value.
+            controller.ground_tick = controller.ground_tick.saturating_add(1);
+        } else {
+            controller.ground_tick = 0;
+            wish_speed = f32::min(wish_speed, controller.air_speed_cap);
+
+            let mut add = acceleration(
+                wish_direction,
+                wish_speed,
+                controller.air_acceleration,
+                velocity.0,
+                dt,
+            );
+            // Apply radial gravity.
+            add -= local_up * GRAVITY * dt;
+            velocity.0 += add;
+
+            // Clamp lateral air speed.
+            let vertical_component = velocity.0.dot(local_up) * local_up;
+            let lateral_velocity = velocity.0 - vertical_component;
+            let air_speed = lateral_velocity.length();
+            if air_speed > controller.max_air_speed {
+                let ratio = controller.max_air_speed / air_speed;
+                velocity.0 = vertical_component + lateral_velocity * ratio;
+            }
+        };
+
+        /* Crouching */
+
+        let crouch_height = controller.crouch_height;
+        let upright_height = controller.upright_height;
+
+        let crouch_speed = if input.crouch {
+            -controller.crouch_speed
+        } else {
+            controller.uncrouch_speed
+        };
+        controller.height += dt * crouch_speed;
+        controller.height = controller.height.clamp(crouch_height, upright_height);
+
+        if let Some(capsule) = collider.shape().as_capsule() {
+            let radius = capsule.radius;
+            // For radial coordinates, the capsule axis should align with local up.
+            // We store the half-height along local up.
+            let half = Point::from(local_up * (controller.height * 0.5 - radius));
+            collider.set_shape(SharedShape::capsule(-half, half, radius));
+        } else if let Some(cylinder) = collider.shape().as_cylinder() {
+            let radius = cylinder.radius;
+            collider.set_shape(SharedShape::cylinder(controller.height * 0.5, radius));
+        } else {
+            panic!("Controller must use a cylinder or capsule collider")
+        }
+
+        // Step offset really only works best for cylinders.
+        // For capsules the player has to practically teleported to fully step up.
+        if collider.shape().as_cylinder().is_some()
+            && controller.experimental_step_offset > f32::EPSILON
+            && controller.ground_tick >= 1
+        {
+            // Try putting the player forward, but instead lifted upward by the step offset.
+            // If we can find a surface below us, we can adjust our position to be on top of it.
+            let future_position = transform.translation + velocity.0 * dt;
+            let future_position_lifted =
+                future_position + local_up * controller.experimental_step_offset;
+            if let Some(hit) = spatial_query_pipeline.cast_shape(
+                &collider,
+                future_position_lifted,
+                transform.rotation,
+                down_dir,
+                &ShapeCastConfig::from_max_distance(
+                    controller.experimental_step_offset * SLIGHT_SCALE_DOWN,
+                ),
+                &filter,
+            ) {
+                let has_traction_on_ledge =
+                    Vec3::dot(hit.normal1, local_up) > controller.traction_normal_cutoff;
+                if has_traction_on_ledge {
+                    transform.translation +=
+                        local_up * (controller.experimental_step_offset - hit.distance);
+                }
             }
         }
 
-        match controller.move_mode {
-            MoveMode::Noclip => {
-                if input.movement == Vec3::ZERO {
-                    let friction = controller.fly_friction.clamp(0.0, 1.0);
-                    velocity.0 *= 1.0 - friction;
-                    if velocity.length_squared() < f32::EPSILON {
-                        velocity.0 = Vec3::ZERO;
-                    }
-                } else {
-                    let fly_speed = if input.sprint {
-                        controller.fast_fly_speed
-                    } else {
-                        controller.fly_speed
-                    };
-                    // Build movement matrix relative to local up.
-                    // Negative yaw = turned right (clockwise when viewed from above).
-                    // Positive pitch = looking up, so forward tilts upward.
-                    let forward = (frame.north * input.yaw.cos() - frame.east * input.yaw.sin())
-                        * input.pitch.cos()
-                        + local_up * input.pitch.sin();
-                    let right = frame.east * input.yaw.cos() + frame.north * input.yaw.sin();
-
-                    let move_to_world = Mat3::from_cols(right, local_up, forward);
-                    velocity.0 = move_to_world * input.movement * fly_speed;
+        // Prevent falling off ledges.
+        if controller.experimental_enable_ledge_cling
+            && controller.ground_tick >= 1
+            && input.crouch
+            && !input.jump
+        {
+            for _ in 0..2 {
+                // Find the component of our velocity that is overhanging and subtract it off.
+                let overhang = overhang_component(
+                    entity,
+                    &collider,
+                    transform.as_ref(),
+                    &spatial_query_pipeline,
+                    velocity.0,
+                    dt,
+                    local_up,
+                );
+                if let Some(overhang) = overhang {
+                    velocity.0 -= overhang;
                 }
             }
-            MoveMode::Ground => {
-                let speeds = Vec3::new(controller.side_speed, 0.0, controller.forward_speed);
-
-                // Build movement directions relative to local up.
-                // Negative yaw = turned right (clockwise when viewed from above).
-                let forward = frame.north * input.yaw.cos() - frame.east * input.yaw.sin();
-                let right = frame.east * input.yaw.cos() + frame.north * input.yaw.sin();
-                let move_to_world = Mat3::from_cols(right, local_up, forward);
-
-                let mut wish_direction = move_to_world * (input.movement * speeds);
-                let mut wish_speed = wish_direction.length();
-                if wish_speed > f32::EPSILON {
-                    // Avoid division by zero.
-                    wish_direction /= wish_speed; // Effectively normalize, avoid length computation twice.
-                }
-                let max_speed = if input.crouch {
-                    controller.crouched_speed
-                } else if input.sprint {
-                    controller.run_speed
-                } else {
-                    controller.walk_speed
-                };
-                wish_speed = f32::min(wish_speed, max_speed);
-
-                // Compute downward direction for shape cast.
-                let down_dir = Dir3::new(-local_up).unwrap_or(Dir3::NEG_Y);
-
-                // Shape cast downwards to find ground.
-                // Better than a ray cast as it handles when you are near the edge of a surface.
-                let filter = SpatialQueryFilter::default().with_excluded_entities([entity]);
-                if let Some(hit) = spatial_query_pipeline.cast_shape(
-                    // Consider when the controller is right up against a wall.
-                    // We do not want the shape cast to detect it,
-                    // so provide a slightly smaller collider in the XZ plane.
-                    &scaled_collider_laterally(&collider, SLIGHT_SCALE_DOWN),
-                    transform.translation,
-                    transform.rotation,
-                    down_dir,
-                    &ShapeCastConfig::from_max_distance(controller.grounded_distance),
-                    &filter,
-                ) {
-                    let has_traction =
-                        Vec3::dot(hit.normal1, local_up) > controller.traction_normal_cutoff;
-
-                    // Only apply friction after at least one tick, allows b-hopping without losing speed.
-                    if controller.ground_tick >= 1 && has_traction {
-                        // Compute lateral speed (perpendicular to local up).
-                        let vertical_component = velocity.0.dot(local_up) * local_up;
-                        let lateral_velocity = velocity.0 - vertical_component;
-                        let lateral_speed = lateral_velocity.length();
-
-                        if lateral_speed > controller.friction_speed_cutoff {
-                            let control = f32::max(lateral_speed, controller.stop_speed);
-                            let drop = control * controller.friction * dt;
-                            let new_speed = f32::max((lateral_speed - drop) / lateral_speed, 0.0);
-                            velocity.0 = vertical_component
-                                + lateral_velocity.normalize() * lateral_speed * new_speed;
-                        } else {
-                            velocity.0 = Vec3::ZERO;
-                        }
-                        if controller.ground_tick == 1 {
-                            // Snap to ground.
-                            velocity.0 -= local_up * hit.distance;
-                        }
-                    }
-
-                    let mut add = acceleration(
-                        wish_direction,
-                        wish_speed,
-                        controller.acceleration,
-                        velocity.0,
-                        dt,
-                    );
-                    if !has_traction {
-                        add -= local_up * GRAVITY * dt;
-                    }
-                    velocity.0 += add;
-
-                    if has_traction {
-                        let linear_velocity = velocity.0;
-                        velocity.0 -= Vec3::dot(linear_velocity, hit.normal1) * hit.normal1;
-
-                        if input.jump {
-                            velocity.0 += local_up * controller.jump_speed;
-                        }
-                    }
-
-                    // Increment ground tick but cap at max value.
-                    controller.ground_tick = controller.ground_tick.saturating_add(1);
-                } else {
-                    controller.ground_tick = 0;
-                    wish_speed = f32::min(wish_speed, controller.air_speed_cap);
-
-                    let mut add = acceleration(
-                        wish_direction,
-                        wish_speed,
-                        controller.air_acceleration,
-                        velocity.0,
-                        dt,
-                    );
-                    // Apply radial gravity.
-                    add -= local_up * GRAVITY * dt;
-                    velocity.0 += add;
-
-                    // Clamp lateral air speed.
-                    let vertical_component = velocity.0.dot(local_up) * local_up;
-                    let lateral_velocity = velocity.0 - vertical_component;
-                    let air_speed = lateral_velocity.length();
-                    if air_speed > controller.max_air_speed {
-                        let ratio = controller.max_air_speed / air_speed;
-                        velocity.0 = vertical_component + lateral_velocity * ratio;
-                    }
-                };
-
-                /* Crouching */
-
-                let crouch_height = controller.crouch_height;
-                let upright_height = controller.upright_height;
-
-                let crouch_speed = if input.crouch {
-                    -controller.crouch_speed
-                } else {
-                    controller.uncrouch_speed
-                };
-                controller.height += dt * crouch_speed;
-                controller.height = controller.height.clamp(crouch_height, upright_height);
-
-                if let Some(capsule) = collider.shape().as_capsule() {
-                    let radius = capsule.radius;
-                    // For radial coordinates, the capsule axis should align with local up.
-                    // We store the half-height along local up.
-                    let half = Point::from(local_up * (controller.height * 0.5 - radius));
-                    collider.set_shape(SharedShape::capsule(-half, half, radius));
-                } else if let Some(cylinder) = collider.shape().as_cylinder() {
-                    let radius = cylinder.radius;
-                    collider.set_shape(SharedShape::cylinder(controller.height * 0.5, radius));
-                } else {
-                    panic!("Controller must use a cylinder or capsule collider")
-                }
-
-                // Step offset really only works best for cylinders.
-                // For capsules the player has to practically teleported to fully step up.
-                if collider.shape().as_cylinder().is_some()
-                    && controller.experimental_step_offset > f32::EPSILON
-                    && controller.ground_tick >= 1
-                {
-                    // Try putting the player forward, but instead lifted upward by the step offset.
-                    // If we can find a surface below us, we can adjust our position to be on top of it.
-                    let future_position = transform.translation + velocity.0 * dt;
-                    let future_position_lifted =
-                        future_position + local_up * controller.experimental_step_offset;
-                    if let Some(hit) = spatial_query_pipeline.cast_shape(
-                        &collider,
-                        future_position_lifted,
-                        transform.rotation,
-                        down_dir,
-                        &ShapeCastConfig::from_max_distance(
-                            controller.experimental_step_offset * SLIGHT_SCALE_DOWN,
-                        ),
-                        &filter,
-                    ) {
-                        let has_traction_on_ledge =
-                            Vec3::dot(hit.normal1, local_up) > controller.traction_normal_cutoff;
-                        if has_traction_on_ledge {
-                            transform.translation +=
-                                local_up * (controller.experimental_step_offset - hit.distance);
-                        }
-                    }
-                }
-
-                // Prevent falling off ledges.
-                if controller.experimental_enable_ledge_cling
-                    && controller.ground_tick >= 1
-                    && input.crouch
-                    && !input.jump
-                {
-                    for _ in 0..2 {
-                        // Find the component of our velocity that is overhanging and subtract it off.
-                        let overhang = overhang_component(
-                            entity,
-                            &collider,
-                            transform.as_ref(),
-                            &spatial_query_pipeline,
-                            velocity.0,
-                            dt,
-                            local_up,
-                        );
-                        if let Some(overhang) = overhang {
-                            velocity.0 -= overhang;
-                        }
-                    }
-                    // If we are still overhanging consider unsolvable and freeze.
-                    if overhang_component(
-                        entity,
-                        &collider,
-                        transform.as_ref(),
-                        &spatial_query_pipeline,
-                        velocity.0,
-                        dt,
-                        local_up,
-                    )
-                    .is_some()
-                    {
-                        velocity.0 = Vec3::ZERO;
-                    }
-                }
+            // If we are still overhanging consider unsolvable and freeze.
+            if overhang_component(
+                entity,
+                &collider,
+                transform.as_ref(),
+                &spatial_query_pipeline,
+                velocity.0,
+                dt,
+                local_up,
+            )
+            .is_some()
+            {
+                velocity.0 = Vec3::ZERO;
             }
         }
     }
