@@ -1,8 +1,9 @@
 //! Physics integration using Avian 3D.
 //!
-//! Integrates Avian physics with the rocktree LOD system. For areas rendered
-//! at LOD level N or N-1, the N-2 mesh is retained as a physics collider.
-//! Physics is active within 1km of the camera.
+//! Integrates Avian physics with the rocktree LOD system. Physics colliders use
+//! a fixed absolute LOD level ([`PHYSICS_LOD_DEPTH`]). All physics colliders are
+//! at this single depth to avoid overlapping geometry. Physics is active within
+//! [`PHYSICS_RANGE`] of the camera.
 //!
 //! All physics runs in camera-relative space to handle floating origin.
 //! When the camera moves, all physics positions shift by -delta to maintain
@@ -25,6 +26,17 @@ pub use terrain::TerrainCollider;
 
 /// Physics range from camera in meters.
 pub const PHYSICS_RANGE: f64 = 1000.0;
+
+/// Offset from max LOD level for physics colliders.
+const PHYSICS_LOD_OFFSET: usize = 2;
+
+/// Fixed LOD depth for physics colliders.
+///
+/// Physics colliders always use this exact depth level, which is
+/// `PHYSICS_LOD_OFFSET` levels coarser than the finest possible (MAX_LEVEL).
+/// All physics colliders are at this single depth, ensuring no overlapping
+/// geometry.
+pub const PHYSICS_LOD_DEPTH: usize = rocktree_decode::MAX_LEVEL - PHYSICS_LOD_OFFSET;
 
 /// Plugin for physics integration with the rocktree LOD system.
 pub struct PhysicsIntegrationPlugin;

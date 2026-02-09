@@ -13,8 +13,10 @@
 //!
 //! ## Physics integration
 //!
-//! For areas rendered at LOD level N or N-1, the N-2 mesh is retained as a
-//! physics collider. Physics colliders are active within 1km of the camera.
+//! Physics colliders use a fixed LOD depth (`PHYSICS_LOD_DEPTH`), which is
+//! `MAX_LEVEL - PHYSICS_LOD_OFFSET`. All colliders are at this single depth
+//! to avoid overlapping geometry. Colliders are active within `PHYSICS_RANGE`
+//! of the camera.
 
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
@@ -36,7 +38,7 @@ use crate::mesh::{
 use crate::unlit_material::UnlitMaterial;
 
 use crate::floating_origin::WorldPosition;
-use crate::physics::{PHYSICS_RANGE, terrain::TerrainCollider};
+use crate::physics::{PHYSICS_LOD_DEPTH, PHYSICS_RANGE, terrain::TerrainCollider};
 
 use avian3d::prelude::*;
 
@@ -163,7 +165,7 @@ struct BfsResult {
     potential_bulks: HashSet<String>,
     /// OBBs discovered during traversal, to be merged into `LodState`.
     discovered_obbs: Vec<(String, OrientedBoundingBox)>,
-    /// Nodes that should be loaded for physics colliders (N-2 ancestors within range).
+    /// Nodes that should be loaded for physics colliders (at `PHYSICS_LOD_DEPTH` within range).
     physics_nodes_to_load: Vec<NodeMetadata>,
 }
 
@@ -279,43 +281,31 @@ fn bfs_traversal(lod_state: &LodState, frustum: Frustum, lod_metrics: LodMetrics
         valid = next_valid;
     }
 
-    // Identify physics-eligible nodes: N-2 ancestors of potential_nodes within range.
+    // Identify physics-eligible nodes: nodes at exactly PHYSICS_LOD_DEPTH within range.
     // These need to be loaded even if not needed for rendering.
     let mut physics_nodes_to_load: Vec<NodeMetadata> = Vec::new();
-    let mut physics_paths_queued: HashSet<String> = HashSet::new();
 
-    for path in &potential_nodes {
-        if path.len() < 2 {
+    for (path, node_meta) in &visited_nodes {
+        // Must be at exactly the physics depth.
+        if path.len() != PHYSICS_LOD_DEPTH {
             continue;
         }
-        let ancestor_path = &path[..path.len() - 2];
 
-        // Skip if already queued or loaded.
-        if physics_paths_queued.contains(ancestor_path) {
-            continue;
-        }
-        if lod_state.loaded_nodes.contains(ancestor_path)
-            || lod_state.loading_nodes.contains(ancestor_path)
-            || lod_state.node_data.contains_key(ancestor_path)
+        // Skip if already loaded or loading.
+        if lod_state.loaded_nodes.contains(path)
+            || lod_state.loading_nodes.contains(path)
+            || lod_state.node_data.contains_key(path)
         {
             continue;
         }
 
-        // Check if ancestor was visited and has data.
-        let Some(ancestor_meta) = visited_nodes.get(ancestor_path) else {
-            continue;
-        };
-
         // Check if within physics range.
-        let distance = lod_metrics
-            .camera_position
-            .distance(ancestor_meta.obb.center);
+        let distance = lod_metrics.camera_position.distance(node_meta.obb.center);
         if distance > PHYSICS_RANGE {
             continue;
         }
 
-        physics_paths_queued.insert(ancestor_path.to_string());
-        physics_nodes_to_load.push(ancestor_meta.clone());
+        physics_nodes_to_load.push(node_meta.clone());
     }
 
     BfsResult {
@@ -331,9 +321,9 @@ fn bfs_traversal(lod_state: &LodState, frustum: Frustum, lod_metrics: LodMetrics
 /// Despawn entities for nodes no longer in the potential set, and remove
 /// obsolete bulks from the cache.
 ///
-/// Note: node_data is retained for physics-eligible nodes (N-2 ancestors of
-/// potential nodes within physics range). This data is cleaned up separately
-/// by `cleanup_physics_node_data`.
+/// Note: node_data is retained for physics-eligible nodes (nodes at
+/// `PHYSICS_LOD_DEPTH` within physics range). This data is cleaned up
+/// separately by `cleanup_physics_node_data`.
 fn unload_obsolete(
     lod_state: &mut LodState,
     commands: &mut Commands,
@@ -341,21 +331,21 @@ fn unload_obsolete(
     potential_bulks: &HashSet<String>,
     camera_pos: DVec3,
 ) {
-    // Compute which nodes should be retained for physics: N-2 ancestors of
-    // potential nodes that are within physics range.
-    let physics_retained: HashSet<String> = potential_nodes
+    // Compute which nodes should be retained for physics: nodes at exactly
+    // PHYSICS_LOD_DEPTH that are within physics range.
+    let physics_retained: HashSet<String> = lod_state
+        .node_data
         .iter()
-        .filter_map(|path| {
-            if path.len() < 2 {
+        .filter_map(|(path, node_data)| {
+            // Must be at exactly the physics depth.
+            if path.len() != PHYSICS_LOD_DEPTH {
                 return None;
             }
-            let ancestor_path = &path[..path.len() - 2];
-            // Check if ancestor has node_data and is within physics range.
-            let node_data = lod_state.node_data.get(ancestor_path)?;
+            // Check if within physics range.
             if camera_pos.distance(node_data.world_position) > PHYSICS_RANGE {
                 return None;
             }
-            Some(ancestor_path.to_string())
+            Some(path.clone())
         })
         .collect();
 
@@ -755,7 +745,8 @@ fn cull_meshes(
 
 /// Update physics colliders based on LOD state.
 ///
-/// For tiles at depth N or N-1, retain depth N-2 as physics collider.
+/// Physics colliders use a fixed LOD level (`PHYSICS_LOD_DEPTH`).
+/// All physics colliders are at the same depth to avoid overlapping geometry.
 /// Colliders are only active within `PHYSICS_RANGE` of the camera.
 fn update_physics_colliders(
     mut commands: Commands,
@@ -771,23 +762,15 @@ fn update_physics_colliders(
 
     let camera_pos = camera.position;
 
-    // Determine which nodes are physics-eligible (N-2 relative to loaded N/N-1).
+    // Find all nodes at exactly the physics depth that are within range.
     let physics_eligible: HashSet<String> = lod_state
-        .loaded_nodes
+        .node_data
         .iter()
-        .filter_map(|path| {
-            // A tile is physics-eligible if it has loaded descendants at depth+2.
-            // In other words, if there's a loaded node that starts with this path
-            // and is at least 2 levels deeper.
-            if path.len() < 2 {
+        .filter_map(|(path, node_data)| {
+            // Must be at exactly the physics depth.
+            if path.len() != PHYSICS_LOD_DEPTH {
                 return None;
             }
-
-            // Get the N-2 ancestor path.
-            let ancestor_path = &path[..path.len() - 2];
-
-            // Check if this ancestor has node data and is within physics range.
-            let node_data = lod_state.node_data.get(ancestor_path)?;
 
             // Check distance from camera to node center.
             let distance = camera_pos.distance(node_data.world_position);
@@ -795,7 +778,7 @@ fn update_physics_colliders(
                 return None;
             }
 
-            Some(ancestor_path.to_string())
+            Some(path.clone())
         })
         .collect();
 
@@ -842,7 +825,11 @@ fn update_physics_colliders(
             .id();
 
         lod_state.physics_colliders.insert(path.clone(), entity);
-        tracing::debug!("Created physics collider for node '{}'", path);
+        tracing::debug!(
+            "Created physics collider for node '{}' (depth {})",
+            path,
+            PHYSICS_LOD_DEPTH
+        );
     }
 
     // Remove colliders for nodes that are no longer eligible.

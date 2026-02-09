@@ -1,7 +1,7 @@
 //! Terrain collider creation and management.
 //!
 //! Creates trimesh colliders from rocktree mesh data for physics simulation.
-//! Colliders are created for tiles at depth N-2 relative to rendered N/N-1 tiles.
+//! Colliders are created for tiles at a fixed LOD depth (`PHYSICS_LOD_DEPTH`).
 
 use avian3d::prelude::*;
 use bevy::prelude::*;
