@@ -23,19 +23,17 @@ pub struct CameraControllerPlugin;
 
 impl Plugin for CameraControllerPlugin {
     fn build(&self, app: &mut App) {
-        app.init_resource::<CameraSettings>()
-            .add_systems(Startup, grab_cursor)
-            .add_systems(
-                Update,
-                (
-                    cursor_grab_system,
-                    adjust_speed_with_scroll.run_if(cursor_is_grabbed),
-                    camera_look.run_if(cursor_is_grabbed),
-                    camera_movement.run_if(not(egui_wants_any_keyboard_input)),
-                    sync_floating_origin,
-                )
-                    .chain(),
-            );
+        app.init_resource::<CameraSettings>().add_systems(
+            Update,
+            (
+                cursor_grab_system,
+                adjust_speed_with_scroll.run_if(cursor_is_grabbed),
+                camera_look.run_if(cursor_is_grabbed),
+                camera_movement.run_if(cursor_is_grabbed.and(not(egui_wants_any_keyboard_input))),
+                sync_floating_origin,
+            )
+                .chain(),
+        );
     }
 }
 
@@ -76,14 +74,6 @@ impl Default for FlightCamera {
             direction: Vec3::new(0.219_862, 0.419_329, 0.312_226).normalize(),
         }
     }
-}
-
-/// Grab the cursor on startup.
-fn grab_cursor(
-    mut cursor: Single<&mut CursorOptions>,
-    mut window: Single<&mut Window, With<PrimaryWindow>>,
-) {
-    set_cursor_grab(&mut cursor, &mut window, true);
 }
 
 /// Set cursor grab state, centering the cursor when grabbing.

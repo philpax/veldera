@@ -753,8 +753,8 @@ fn update_physics_colliders(
     mut lod_state: ResMut<LodState>,
     camera_query: Query<&FloatingOriginCamera>,
 ) {
-    use crate::physics::terrain::create_terrain_collider;
     use crate::physics::DebugRender;
+    use crate::physics::terrain::create_terrain_collider;
 
     let Ok(camera) = camera_query.single() else {
         return;
