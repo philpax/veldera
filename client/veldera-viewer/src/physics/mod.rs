@@ -21,7 +21,6 @@ use bevy::prelude::*;
 
 use crate::floating_origin::{FloatingOriginCamera, WorldPosition};
 
-pub use projectile::spawn_projectile;
 pub use terrain::TerrainCollider;
 
 /// Physics range from camera in meters.
@@ -49,6 +48,7 @@ impl Plugin for PhysicsIntegrationPlugin {
             .add_plugins(PhysicsDebugPlugin)
             .insert_resource(Gravity(Vec3::ZERO))
             .init_resource::<PhysicsState>()
+            .init_resource::<projectile::ProjectileFireState>()
             .add_systems(Startup, configure_physics_debug_on_startup)
             .add_systems(
                 FixedPreUpdate,
@@ -60,7 +60,13 @@ impl Plugin for PhysicsIntegrationPlugin {
                     .chain()
                     .after(PhysicsSystems::Last),
             )
-            .add_systems(Update, projectile::despawn_projectiles);
+            .add_systems(
+                Update,
+                (
+                    projectile::click_to_fire_system,
+                    projectile::despawn_projectiles,
+                ),
+            );
     }
 }
 

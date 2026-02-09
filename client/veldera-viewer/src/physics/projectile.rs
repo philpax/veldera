@@ -1,14 +1,16 @@
 //! Projectile spawning and lifecycle management.
 //!
 //! Spawns physics-enabled spheres that can be shot from the camera.
-//! Projectiles despawn when >500m from spawn position or when their
-//! contact tile unloads.
+//! Left-click while cursor is grabbed to fire. Projectiles despawn when
+//! >500m from spawn position or when their contact tile unloads.
 
 use avian3d::prelude::*;
 use bevy::prelude::*;
+use bevy::window::{CursorGrabMode, CursorOptions};
+use bevy_egui::EguiContexts;
 use glam::DVec3;
 
-use crate::floating_origin::WorldPosition;
+use crate::floating_origin::{FloatingOriginCamera, WorldPosition};
 use crate::lod::LodState;
 
 /// Maximum distance from spawn position before despawning.
@@ -20,6 +22,33 @@ const PROJECTILE_RADIUS: f32 = 1.0;
 /// Initial projectile speed in m/s.
 const PROJECTILE_SPEED: f32 = 50.0;
 
+/// Minimum time between projectile spawns in seconds.
+const FIRE_DEBOUNCE_SECS: f32 = 0.5;
+
+/// Tracks time since last projectile spawn for debouncing.
+#[derive(Resource, Default)]
+pub struct ProjectileFireState {
+    /// Time in seconds since the last projectile was fired.
+    time_since_last_fire: f32,
+}
+
+impl ProjectileFireState {
+    /// Check if enough time has passed to fire again.
+    fn can_fire(&self) -> bool {
+        self.time_since_last_fire >= FIRE_DEBOUNCE_SECS
+    }
+
+    /// Record that a projectile was just fired.
+    fn record_fire(&mut self) {
+        self.time_since_last_fire = 0.0;
+    }
+
+    /// Advance the timer.
+    fn tick(&mut self, delta: f32) {
+        self.time_since_last_fire += delta;
+    }
+}
+
 /// Component marking an entity as a physics projectile.
 #[derive(Component)]
 pub struct Projectile {
@@ -29,18 +58,74 @@ pub struct Projectile {
     pub contact_tile: Option<String>,
 }
 
+/// System that fires projectiles on left-click when cursor is grabbed.
+///
+/// Includes debouncing to prevent rapid-fire spam.
+#[allow(clippy::too_many_arguments)]
+pub fn click_to_fire_system(
+    mut commands: Commands,
+    time: Res<Time>,
+    mouse: Res<ButtonInput<MouseButton>>,
+    cursor: Single<&CursorOptions>,
+    mut fire_state: ResMut<ProjectileFireState>,
+    mut meshes: ResMut<Assets<Mesh>>,
+    mut materials: ResMut<Assets<StandardMaterial>>,
+    mut contexts: EguiContexts,
+    camera_query: Query<(&FloatingOriginCamera, &Transform)>,
+) {
+    // Advance the debounce timer.
+    fire_state.tick(time.delta_secs());
+
+    // Only fire when cursor is grabbed.
+    let is_grabbed = matches!(
+        cursor.grab_mode,
+        CursorGrabMode::Locked | CursorGrabMode::Confined
+    );
+    if !is_grabbed {
+        return;
+    }
+
+    // Check if left mouse button was just pressed.
+    if !mouse.just_pressed(MouseButton::Left) {
+        return;
+    }
+
+    // Don't fire if clicking on UI.
+    if contexts
+        .ctx_mut()
+        .ok()
+        .is_some_and(|ctx| ctx.is_pointer_over_area())
+    {
+        return;
+    }
+
+    // Debounce check.
+    if !fire_state.can_fire() {
+        return;
+    }
+
+    // Get camera position and direction.
+    let Ok((camera, transform)) = camera_query.single() else {
+        return;
+    };
+
+    let camera_pos = camera.position;
+    let camera_dir = transform.forward().as_vec3();
+
+    spawn_projectile(
+        &mut commands,
+        &mut meshes,
+        &mut materials,
+        camera_pos,
+        camera_dir,
+    );
+
+    fire_state.record_fire();
+    tracing::debug!("Fired projectile from camera");
+}
+
 /// Spawn a projectile sphere from the camera position in the camera direction.
-///
-/// # Arguments
-/// * `commands` - Bevy commands for entity spawning.
-/// * `meshes` - Mesh assets.
-/// * `materials` - Material assets.
-/// * `camera_world_pos` - Camera world position in ECEF.
-/// * `camera_dir` - Camera forward direction.
-///
-/// # Returns
-/// The spawned entity ID.
-pub fn spawn_projectile(
+fn spawn_projectile(
     commands: &mut Commands,
     meshes: &mut Assets<Mesh>,
     materials: &mut Assets<StandardMaterial>,
