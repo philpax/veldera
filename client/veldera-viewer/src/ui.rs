@@ -2,6 +2,8 @@
 //!
 //! Shows FPS, camera position, altitude, and loaded node count.
 
+use std::sync::Arc;
+
 use bevy::diagnostic::{DiagnosticsStore, FrameTimeDiagnosticsPlugin};
 use bevy::gizmos::config::GizmoConfigStore;
 use bevy::prelude::*;
@@ -21,13 +23,22 @@ use crate::time_of_day::{TimeMode, TimeOfDayState};
 /// Plugin for debug UI overlay.
 pub struct DebugUiPlugin;
 
+#[derive(Resource)]
+pub struct HasInitialisedFonts;
+
 impl Plugin for DebugUiPlugin {
     fn build(&self, app: &mut App) {
         app.add_plugins(EguiPlugin::default())
             .add_plugins(FrameTimeDiagnosticsPlugin::default())
             .init_resource::<CoordinateInputState>()
             .init_resource::<DebugUiState>()
-            .add_systems(EguiPrimaryContextPass, debug_ui_system);
+            .add_systems(
+                EguiPrimaryContextPass,
+                (
+                    setup_fonts.run_if(not(resource_exists::<HasInitialisedFonts>)),
+                    debug_ui_system,
+                ),
+            );
     }
 }
 
@@ -53,6 +64,29 @@ struct CoordinateInputState {
     lon_text: String,
     /// Track whether text fields are focused to avoid overwriting user input.
     is_editing: bool,
+}
+
+fn setup_fonts(mut contexts: EguiContexts, mut commands: Commands) {
+    let Ok(ctx) = contexts.ctx_mut() else {
+        return;
+    };
+
+    let mut fonts = egui::FontDefinitions::default();
+    // Replace the default font with GoNoto
+    fonts.font_data.insert(
+        "GoNoto".into(),
+        Arc::new(egui::FontData::from_static(include_bytes!(
+            "../assets/GoNotoKurrent-Regular.ttf"
+        ))),
+    );
+    fonts
+        .families
+        .entry(egui::FontFamily::Proportional)
+        .or_default()
+        .push("GoNoto".into());
+
+    ctx.set_fonts(fonts);
+    commands.insert_resource(HasInitialisedFonts);
 }
 
 /// Render the debug UI overlay.
@@ -298,9 +332,7 @@ fn render_main_tab(
     if let Some(progress) = teleport_animation.progress() {
         ui.horizontal(|ui| {
             ui.spinner();
-            #[allow(clippy::cast_possible_truncation)]
-            let percentage = (progress * 100.0) as u32;
-            ui.label(format!("Flying... {percentage}%"));
+            ui.label("Flying...");
         });
         ui.add(egui::ProgressBar::new(progress).show_percentage());
     } else if teleport_state.is_pending() {
