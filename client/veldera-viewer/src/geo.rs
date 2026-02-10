@@ -4,6 +4,7 @@
 //! elevation lookup via Open Elevation API.
 
 use avian3d::prelude::*;
+use bevy::audio::Volume;
 use bevy::prelude::*;
 use glam::DVec3;
 use serde::Deserialize;
@@ -16,6 +17,18 @@ use crate::coords::{lat_lon_to_ecef, slerp_dvec3, smootherstep};
 use crate::floating_origin::FloatingOriginCamera;
 use crate::fps_controller::{LogicalPlayer, RadialFrame, RenderPlayer};
 
+/// Handle to the woosh sound asset.
+#[derive(Resource)]
+struct WooshSoundHandle(Handle<AudioSource>);
+
+/// Handle to the wind loop sound asset.
+#[derive(Resource)]
+struct WindLoopSoundHandle(Handle<AudioSource>);
+
+/// Marker component for the teleport wind loop audio entity.
+#[derive(Component)]
+struct TeleportWindLoop;
+
 /// Plugin for geocoding and elevation services.
 pub struct GeoPlugin;
 
@@ -24,15 +37,44 @@ impl Plugin for GeoPlugin {
         app.init_resource::<GeocodingState>()
             .init_resource::<TeleportState>()
             .init_resource::<TeleportAnimation>()
+            .add_systems(Startup, load_teleport_sounds)
             .add_systems(
                 Update,
                 (
                     poll_geocoding_results,
+                    play_departure_woosh,
                     poll_teleport,
                     update_teleport_animation,
                 ),
             );
     }
+}
+
+/// Play departure woosh immediately when teleport is requested.
+fn play_departure_woosh(
+    mut commands: Commands,
+    mut teleport_state: ResMut<TeleportState>,
+    woosh_sound: Option<Res<WooshSoundHandle>>,
+) {
+    if teleport_state.play_departure_woosh {
+        teleport_state.play_departure_woosh = false;
+        if let Some(ref woosh) = woosh_sound {
+            commands.spawn((
+                AudioPlayer::new(woosh.0.clone()),
+                PlaybackSettings::DESPAWN.with_volume(Volume::Linear(1.25)),
+            ));
+        }
+    }
+}
+
+/// Load teleport sound assets on startup.
+fn load_teleport_sounds(mut commands: Commands, asset_server: Res<AssetServer>) {
+    commands.insert_resource(WooshSoundHandle(
+        asset_server.load("683096__florianreichelt__woosh.mp3"),
+    ));
+    commands.insert_resource(WindLoopSoundHandle(
+        asset_server.load("135034__mrlindstrom__windloop6sec.wav"),
+    ));
 }
 
 /// User agent for API requests.
@@ -112,6 +154,8 @@ pub struct TeleportState {
     pending: Option<PendingTeleport>,
     /// Error from the last elevation fetch, if any.
     pub error: Option<String>,
+    /// Whether a departure woosh should be played (set on request, cleared after playing).
+    play_departure_woosh: bool,
     elevation_rx: async_channel::Receiver<Result<f64, String>>,
     elevation_tx: async_channel::Sender<Result<f64, String>>,
 }
@@ -128,6 +172,7 @@ impl Default for TeleportState {
         Self {
             pending: None,
             error: None,
+            play_departure_woosh: false,
             elevation_rx,
             elevation_tx,
         }
@@ -148,6 +193,7 @@ impl TeleportState {
         // Cancel any existing pending teleport.
         self.pending = Some(PendingTeleport { lat, lon });
         self.error = None;
+        self.play_departure_woosh = true;
 
         let tx = self.elevation_tx.clone();
 
@@ -243,6 +289,8 @@ struct TeleportPhase {
     camera_mode: CameraMode,
     /// Current state of the animation.
     state: AnimationState,
+    /// Whether the arrival woosh has been played (at descent start).
+    arrival_woosh_played: bool,
 }
 
 impl TeleportPhase {
@@ -471,6 +519,7 @@ fn poll_geocoding_results(mut geocoding_state: ResMut<GeocodingState>) {
 }
 
 /// Poll for elevation results and start teleport animation.
+#[allow(clippy::too_many_arguments)]
 fn poll_teleport(
     mut commands: Commands,
     mut teleport_state: ResMut<TeleportState>,
@@ -479,6 +528,8 @@ fn poll_teleport(
     camera_mode: Res<CameraMode>,
     camera_query: Query<(Entity, &FloatingOriginCamera, &FlightCamera)>,
     logical_player_query: Query<Entity, With<LogicalPlayer>>,
+    wind_loop_query: Query<Entity, With<TeleportWindLoop>>,
+    wind_loop_sound: Option<Res<WindLoopSoundHandle>>,
 ) {
     while let Ok(result) = teleport_state.elevation_rx.try_recv() {
         let Some(pending) = teleport_state.pending.take() else {
@@ -491,6 +542,10 @@ fn poll_teleport(
 
                 if let Ok((camera_entity, origin_camera, flight_camera)) = camera_query.single() {
                     // Get the current position (either from current animation or from camera).
+                    // Also stop any existing wind loop if we're canceling an animation.
+                    for entity in &wind_loop_query {
+                        commands.entity(entity).despawn();
+                    }
                     let start_position = animation.cancel().unwrap_or(origin_camera.position);
                     let start_direction = flight_camera.direction;
 
@@ -574,6 +629,7 @@ fn poll_teleport(
                         trajectory,
                         camera_mode: *camera_mode,
                         state: AnimationState::Flying,
+                        arrival_woosh_played: false,
                     });
 
                     tracing::info!(
@@ -582,6 +638,15 @@ fn poll_teleport(
                         duration,
                         apex_altitude / 1000.0
                     );
+
+                    // Start wind loop.
+                    if let Some(ref wind) = wind_loop_sound {
+                        commands.spawn((
+                            AudioPlayer::new(wind.0.clone()),
+                            PlaybackSettings::LOOP,
+                            TeleportWindLoop,
+                        ));
+                    }
                 }
             }
             Err(e) => {
@@ -592,6 +657,7 @@ fn poll_teleport(
 }
 
 /// Update the teleport animation each frame.
+#[allow(clippy::too_many_arguments)]
 fn update_teleport_animation(
     mut commands: Commands,
     time: Res<Time>,
@@ -603,6 +669,9 @@ fn update_teleport_animation(
         &mut Transform,
         &mut FlightCamera,
     )>,
+    wind_loop_query: Query<Entity, With<TeleportWindLoop>>,
+    mut wind_sink_query: Query<&mut AudioSink, With<TeleportWindLoop>>,
+    woosh_sound: Option<Res<WooshSoundHandle>>,
 ) {
     let Some(ref mut phase) = animation.phase else {
         return;
@@ -637,9 +706,33 @@ fn update_teleport_animation(
                 flight_camera.direction = orientation * Vec3::NEG_Z;
             }
 
+            // Update wind loop volume based on truncated sine wave.
+            // Volume ranges from 25% at start/end to 100% at middle.
+            if let Ok(mut sink) = wind_sink_query.single_mut() {
+                let sine_value = (t * std::f64::consts::PI).sin();
+                let volume = 0.25 + 0.75 * sine_value;
+                sink.set_volume(Volume::Linear(volume as f32));
+            }
+
+            // Play arrival woosh at DESCENT_START (when camera starts aligning to horizon).
+            if t >= DESCENT_START && !phase.arrival_woosh_played {
+                phase.arrival_woosh_played = true;
+                if let Some(ref woosh) = woosh_sound {
+                    commands.spawn((
+                        AudioPlayer::new(woosh.0.clone()),
+                        PlaybackSettings::DESPAWN.with_volume(Volume::Linear(1.25)),
+                    ));
+                }
+            }
+
             // Transition when arc animation is complete.
             if phase.elapsed >= phase.duration {
                 tracing::info!("Arc animation complete, waiting for physics...");
+
+                // Stop wind loop.
+                for entity in &wind_loop_query {
+                    commands.entity(entity).despawn();
+                }
 
                 // Check if physics is already loaded.
                 if let Some(ground_hit) =
