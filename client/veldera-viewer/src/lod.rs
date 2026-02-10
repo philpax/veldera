@@ -829,7 +829,11 @@ fn update_physics_colliders(
             continue;
         };
 
-        let collider = create_terrain_collider(first_mesh, &node_data.transform);
+        // Skip if mesh data is invalid for physics.
+        let Some(collider) = create_terrain_collider(first_mesh, &node_data.transform) else {
+            tracing::debug!("Skipping invalid mesh for physics collider: '{}'", path);
+            continue;
+        };
 
         // Physics position is camera-relative.
         let relative_pos = node_data.world_position - camera_pos;

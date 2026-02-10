@@ -28,8 +28,12 @@ pub struct TerrainCollider {
 /// * `transform` - The mesh's Transform (has scale and rotation, translation is zero).
 ///
 /// # Returns
-/// A trimesh collider with vertices transformed to match the GPU rendering.
-pub fn create_terrain_collider(rocktree_mesh: &RocktreeMesh, transform: &Transform) -> Collider {
+/// A trimesh collider with vertices transformed to match the GPU rendering,
+/// or `None` if the mesh data is invalid for physics.
+pub fn create_terrain_collider(
+    rocktree_mesh: &RocktreeMesh,
+    transform: &Transform,
+) -> Option<Collider> {
     // Transform local vertices to match what GPU sees (minus translation).
     // Mesh vertices are in 0-255 range.
     let vertices: Vec<Vec3> = rocktree_mesh
@@ -44,8 +48,8 @@ pub fn create_terrain_collider(rocktree_mesh: &RocktreeMesh, transform: &Transfo
     // Convert triangle strip to triangle list.
     let triangles = strip_to_triangles(&rocktree_mesh.indices);
 
-    // trimesh panics on invalid input; try_trimesh would return Result.
-    Collider::trimesh(vertices, triangles)
+    // Use try_trimesh to avoid panicking on invalid input.
+    Collider::try_trimesh(vertices, triangles).ok()
 }
 
 /// Convert a triangle strip to a list of triangle index tuples.
