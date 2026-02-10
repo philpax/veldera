@@ -50,7 +50,13 @@ impl Plugin for PhysicsIntegrationPlugin {
             .insert_resource(Gravity(Vec3::ZERO))
             .init_resource::<PhysicsState>()
             .init_resource::<projectile::ProjectileFireState>()
-            .add_systems(Startup, configure_physics_debug_on_startup)
+            .add_systems(
+                Startup,
+                (
+                    configure_physics_debug_on_startup,
+                    projectile::load_bounce_sound,
+                ),
+            )
             .add_systems(
                 FixedPreUpdate,
                 apply_origin_shift.before(PhysicsSystems::Prepare),
@@ -66,6 +72,7 @@ impl Plugin for PhysicsIntegrationPlugin {
                 (
                     projectile::click_to_fire_system,
                     projectile::despawn_projectiles,
+                    projectile::projectile_collision_sound,
                 ),
             );
     }

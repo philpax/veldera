@@ -5,6 +5,7 @@
 //! >500m from spawn position or when their contact tile unloads.
 
 use avian3d::prelude::*;
+use bevy::audio::Volume;
 use bevy::prelude::*;
 use bevy::window::{CursorGrabMode, CursorOptions};
 use bevy_egui::EguiContexts;
@@ -12,6 +13,10 @@ use glam::DVec3;
 
 use crate::floating_origin::{FloatingOriginCamera, WorldPosition};
 use crate::lod::LodState;
+
+/// Handle to the bounce sound asset.
+#[derive(Resource)]
+pub struct BounceSoundHandle(Handle<AudioSource>);
 
 /// Maximum distance from spawn position before despawning.
 const DESPAWN_DISTANCE: f64 = 500.0;
@@ -23,7 +28,7 @@ const PROJECTILE_RADIUS: f32 = 1.0;
 const PROJECTILE_SPEED: f32 = 50.0;
 
 /// Minimum time between projectile spawns in seconds.
-const FIRE_DEBOUNCE_SECS: f32 = 0.5;
+const FIRE_DEBOUNCE_SECS: f32 = 0.2;
 
 /// Tracks time since last projectile spawn for debouncing.
 #[derive(Resource, Default)]
@@ -158,6 +163,7 @@ fn spawn_projectile(
             WorldPosition::from_dvec3(spawn_world_pos),
             RigidBody::Dynamic,
             Collider::sphere(PROJECTILE_RADIUS),
+            CollisionEventsEnabled,
             Position(physics_pos),
             LinearVelocity(initial_velocity),
             Mass(10.0),
@@ -192,5 +198,41 @@ pub fn despawn_projectiles(
             tracing::debug!("Despawning projectile: contact tile '{tile_path}' unloaded");
             commands.entity(entity).despawn();
         }
+    }
+}
+
+/// Load the bounce sound asset on startup.
+pub fn load_bounce_sound(mut commands: Commands, asset_server: Res<AssetServer>) {
+    commands.insert_resource(BounceSoundHandle(
+        asset_server.load("519649__boaay__basket-ball-bounce.wav"),
+    ));
+}
+
+/// Play a bounce sound when a projectile collides with something.
+pub fn projectile_collision_sound(
+    mut commands: Commands,
+    mut collision_events: MessageReader<CollisionStart>,
+    bounce_sound: Option<Res<BounceSoundHandle>>,
+    projectile_query: Query<&Position, With<Projectile>>,
+) {
+    let Some(bounce_sound) = bounce_sound else {
+        return;
+    };
+
+    for event in collision_events.read() {
+        // Check if either entity is a projectile.
+        let projectile_pos = projectile_query
+            .get(event.collider1)
+            .or_else(|_| projectile_query.get(event.collider2));
+
+        let Ok(pos) = projectile_pos else { continue };
+        // Spawn a spatial audio entity at the collision position.
+        commands.spawn((
+            Transform::from_translation(pos.0),
+            AudioPlayer::new(bounce_sound.0.clone()),
+            PlaybackSettings::DESPAWN
+                .with_spatial(true)
+                .with_volume(Volume::Decibels(40.0)),
+        ));
     }
 }

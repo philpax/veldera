@@ -18,6 +18,7 @@ mod ui;
 mod unlit_material;
 
 use async_runtime::AsyncRuntimePlugin;
+use bevy::audio::SpatialListener;
 use bevy::core_pipeline::tonemapping::Tonemapping;
 use bevy::prelude::*;
 use camera::{CameraControllerPlugin, FlightCamera};
@@ -81,6 +82,8 @@ fn setup_scene(mut commands: Commands) {
         FlightCamera {
             direction: start_direction,
         },
+        // Spatial audio listener for 3D sound.
+        SpatialListener::default(),
     ));
 
     // No lights needed: all materials are unlit (texture-only).
