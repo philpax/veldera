@@ -18,6 +18,10 @@ use crate::lod::LodState;
 #[derive(Resource)]
 pub struct BounceSoundHandle(Handle<AudioSource>);
 
+/// Handle to the fire sound asset.
+#[derive(Resource)]
+pub struct FireSoundHandle(Handle<AudioSource>);
+
 /// Maximum distance from spawn position before despawning.
 const DESPAWN_DISTANCE: f64 = 500.0;
 
@@ -76,6 +80,7 @@ pub fn click_to_fire_system(
     mut meshes: ResMut<Assets<Mesh>>,
     mut materials: ResMut<Assets<StandardMaterial>>,
     mut contexts: EguiContexts,
+    fire_sound: Option<Res<FireSoundHandle>>,
     camera_query: Query<(&FloatingOriginCamera, &Transform)>,
 ) {
     // Advance the debounce timer.
@@ -124,6 +129,18 @@ pub fn click_to_fire_system(
         camera_pos,
         camera_dir,
     );
+
+    // Play fire sound 0.2m in front of player.
+    if let Some(fire_sound) = fire_sound {
+        let sound_pos = camera_dir * 0.2;
+        commands.spawn((
+            Transform::from_translation(sound_pos),
+            AudioPlayer::new(fire_sound.0.clone()),
+            PlaybackSettings::DESPAWN
+                .with_spatial(true)
+                .with_volume(Volume::Decibels(20.0)),
+        ));
+    }
 
     fire_state.record_fire();
     tracing::debug!("Fired projectile from camera");
@@ -201,10 +218,13 @@ pub fn despawn_projectiles(
     }
 }
 
-/// Load the bounce sound asset on startup.
-pub fn load_bounce_sound(mut commands: Commands, asset_server: Res<AssetServer>) {
+/// Load sound assets on startup.
+pub fn load_sounds(mut commands: Commands, asset_server: Res<AssetServer>) {
     commands.insert_resource(BounceSoundHandle(
         asset_server.load("519649__boaay__basket-ball-bounce.wav"),
+    ));
+    commands.insert_resource(FireSoundHandle(
+        asset_server.load("151713__bowlingballout__pvc-rocket-cannon.wav"),
     ));
 }
 

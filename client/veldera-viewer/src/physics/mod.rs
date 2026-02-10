@@ -52,10 +52,7 @@ impl Plugin for PhysicsIntegrationPlugin {
             .init_resource::<projectile::ProjectileFireState>()
             .add_systems(
                 Startup,
-                (
-                    configure_physics_debug_on_startup,
-                    projectile::load_bounce_sound,
-                ),
+                (configure_physics_debug_on_startup, projectile::load_sounds),
             )
             .add_systems(
                 FixedPreUpdate,
