@@ -3,6 +3,7 @@
 //! Provides location search via OpenStreetMap Nominatim and
 //! elevation lookup via Open Elevation API.
 
+use avian3d::prelude::*;
 use bevy::prelude::*;
 use glam::DVec3;
 use serde::Deserialize;
@@ -170,17 +171,52 @@ impl TeleportAnimation {
         self.phase.is_some()
     }
 
+    /// Returns true if the animation is complete but waiting for physics to load.
+    pub fn is_waiting_for_physics(&self) -> bool {
+        self.phase.as_ref().is_some_and(|p| {
+            matches!(
+                p.state,
+                AnimationState::WaitingForPhysics { .. } | AnimationState::Settling { .. }
+            )
+        })
+    }
+
     /// Returns the animation progress as a value from 0.0 to 1.0, or None if not active.
     pub fn progress(&self) -> Option<f32> {
-        self.phase
-            .as_ref()
-            .map(|p| (p.elapsed / p.duration).clamp(0.0, 1.0))
+        self.phase.as_ref().map(|p| match p.state {
+            AnimationState::Flying => (p.elapsed / p.duration).clamp(0.0, 1.0),
+            AnimationState::WaitingForPhysics { .. } | AnimationState::Settling { .. } => 1.0,
+        })
     }
 
     /// Cancel the current animation and return the current position if any.
     pub fn cancel(&mut self) -> Option<DVec3> {
         self.phase.take().map(|p| p.current_position())
     }
+}
+
+/// Extra delay after physics is detected before returning control.
+const PHYSICS_SETTLE_DELAY: f32 = 0.2;
+
+/// Maximum time to wait for physics to load before giving up.
+const PHYSICS_WAIT_TIMEOUT: f32 = 5.0;
+
+/// State machine for the teleportation animation.
+enum AnimationState {
+    /// Arc animation is playing.
+    Flying,
+    /// Animation complete, waiting for terrain collider to load.
+    WaitingForPhysics {
+        /// When we started waiting (for timeout).
+        started_at: f32,
+    },
+    /// Physics detected, waiting for settle delay.
+    Settling {
+        /// When physics was first detected.
+        detected_at: f32,
+        /// The ground hit info for spawning.
+        ground_hit: GroundHit,
+    },
 }
 
 /// A phase of the teleportation animation.
@@ -194,12 +230,10 @@ struct TeleportPhase {
     /// Camera orientation at animation end (t=1.0), looking at horizon.
     orient_end: Quat,
     /// "Up" vector (in camera space) when looking down at end of ascent.
-    /// This is the start direction projected onto the tangent plane.
     ascent_up: Vec3,
     /// "Up" vector (in camera space) when looking down at start of descent.
-    /// This is the target horizon direction (north at destination).
     descent_up: Vec3,
-    /// Total duration of the animation in seconds.
+    /// Total duration of the arc animation in seconds.
     duration: f32,
     /// Elapsed time since animation started.
     elapsed: f32,
@@ -207,6 +241,8 @@ struct TeleportPhase {
     trajectory: ArcTrajectory,
     /// The camera mode when the animation started.
     camera_mode: CameraMode,
+    /// Current state of the animation.
+    state: AnimationState,
 }
 
 impl TeleportPhase {
@@ -215,6 +251,14 @@ impl TeleportPhase {
         let t = (self.elapsed / self.duration).clamp(0.0, 1.0) as f64;
         self.trajectory
             .position_at_t(t, self.start_position, self.target_position)
+    }
+
+    /// Get the ground hit if we're in a state that has one.
+    fn ground_hit(&self) -> Option<&GroundHit> {
+        match &self.state {
+            AnimationState::Settling { ground_hit, .. } => Some(ground_hit),
+            _ => None,
+        }
     }
 }
 
@@ -529,6 +573,7 @@ fn poll_teleport(
                         elapsed: 0.0,
                         trajectory,
                         camera_mode: *camera_mode,
+                        state: AnimationState::Flying,
                     });
 
                     tracing::info!(
@@ -551,6 +596,7 @@ fn update_teleport_animation(
     mut commands: Commands,
     time: Res<Time>,
     mut animation: ResMut<TeleportAnimation>,
+    spatial_query: SpatialQuery,
     mut camera_query: Query<(
         Entity,
         &mut FloatingOriginCamera,
@@ -562,58 +608,209 @@ fn update_teleport_animation(
         return;
     };
 
-    // Advance time.
+    // Advance elapsed time.
     phase.elapsed += time.delta_secs();
-    let t = (phase.elapsed / phase.duration).clamp(0.0, 1.0) as f64;
 
-    let camera_entity = if let Ok((entity, mut origin_camera, mut transform, mut flight_camera)) =
-        camera_query.single_mut()
-    {
-        // Compute new position along the arc.
-        let position =
-            phase
-                .trajectory
-                .position_at_t(t, phase.start_position, phase.target_position);
-        origin_camera.position = position;
+    // Get the current camera position for physics-relative coordinates.
+    let camera_ecef = camera_query
+        .single()
+        .map(|(_, cam, _, _)| cam.position)
+        .unwrap_or(phase.target_position);
 
-        // Compute camera orientation.
-        let orientation = compute_orientation_at_t(phase, position, t);
-        transform.rotation = orientation;
+    // State machine transitions.
+    match &phase.state {
+        AnimationState::Flying => {
+            // Update camera position and orientation along the arc.
+            let t = (phase.elapsed / phase.duration).clamp(0.0, 1.0) as f64;
 
-        // Extract the forward direction from the orientation for FlightCamera.
-        // In Bevy, the camera looks along -Z in local space.
-        flight_camera.direction = orientation * Vec3::NEG_Z;
+            if let Ok((_, mut origin_camera, mut transform, mut flight_camera)) =
+                camera_query.single_mut()
+            {
+                let position =
+                    phase
+                        .trajectory
+                        .position_at_t(t, phase.start_position, phase.target_position);
+                origin_camera.position = position;
 
-        Some(entity)
-    } else {
-        None
-    };
+                let orientation = compute_orientation_at_t(phase, position, t);
+                transform.rotation = orientation;
+                flight_camera.direction = orientation * Vec3::NEG_Z;
+            }
 
-    // Check if animation is complete.
-    if phase.elapsed >= phase.duration {
-        tracing::info!("Teleport animation complete");
+            // Transition when arc animation is complete.
+            if phase.elapsed >= phase.duration {
+                tracing::info!("Arc animation complete, waiting for physics...");
 
-        // If we were in FPS mode, respawn the player.
-        if phase.camera_mode == CameraMode::FpsController
-            && let Some(camera_entity) = camera_entity
-            && let Ok((_, origin_camera, _, flight_camera)) = camera_query.single()
-        {
-            let final_position = origin_camera.position;
-            let (yaw, pitch) = direction_to_yaw_pitch(flight_camera.direction, final_position);
-
-            // Spawn new logical player at target position.
-            let logical_entity = spawn_fps_player(&mut commands, final_position, yaw, pitch);
-
-            // Add RenderPlayer to camera.
-            commands
-                .entity(camera_entity)
-                .insert(RenderPlayer { logical_entity });
-
-            tracing::info!("Respawned FPS player after teleport");
+                // Check if physics is already loaded.
+                if let Some(ground_hit) =
+                    find_ground_underneath(phase.target_position, camera_ecef, &spatial_query)
+                {
+                    phase.state = AnimationState::Settling {
+                        detected_at: phase.elapsed,
+                        ground_hit,
+                    };
+                } else {
+                    phase.state = AnimationState::WaitingForPhysics {
+                        started_at: phase.elapsed,
+                    };
+                }
+            }
         }
 
-        animation.phase = None;
+        AnimationState::WaitingForPhysics { started_at } => {
+            // Check for timeout.
+            if phase.elapsed - started_at >= PHYSICS_WAIT_TIMEOUT {
+                tracing::warn!("Physics wait timeout ({PHYSICS_WAIT_TIMEOUT}s), spawning anyway");
+                complete_teleport_animation(&mut commands, &mut animation, &camera_query);
+                return;
+            }
+
+            // Check for ground.
+            if let Some(ground_hit) =
+                find_ground_underneath(phase.target_position, camera_ecef, &spatial_query)
+            {
+                tracing::info!("Physics detected, waiting for settle delay...");
+                phase.state = AnimationState::Settling {
+                    detected_at: phase.elapsed,
+                    ground_hit,
+                };
+            }
+        }
+
+        AnimationState::Settling {
+            detected_at,
+            ground_hit: _,
+        } => {
+            // Check if physics disappeared.
+            if find_ground_underneath(phase.target_position, camera_ecef, &spatial_query).is_none()
+            {
+                tracing::warn!("Physics disappeared, returning to waiting state");
+                phase.state = AnimationState::WaitingForPhysics {
+                    started_at: *detected_at,
+                };
+                return;
+            }
+
+            // Check if settle delay has passed.
+            if phase.elapsed - detected_at >= PHYSICS_SETTLE_DELAY {
+                tracing::info!("Physics settled, completing teleport");
+                // Update ground hit with latest position before completing.
+                if let Some(latest_hit) =
+                    find_ground_underneath(phase.target_position, camera_ecef, &spatial_query)
+                {
+                    phase.state = AnimationState::Settling {
+                        detected_at: *detected_at,
+                        ground_hit: latest_hit,
+                    };
+                }
+                complete_teleport_animation(&mut commands, &mut animation, &camera_query);
+            }
+        }
     }
+}
+
+/// Result of ground detection raycast.
+struct GroundHit {
+    /// The physics-relative position where ground was hit.
+    hit_position: Vec3,
+    /// The local up direction (away from Earth center).
+    up_direction: Vec3,
+}
+
+/// Check if there's ground underneath the given position using a raycast.
+///
+/// Casts a ray from 1km above the target position, 2km downward toward Earth's center.
+fn find_ground_underneath(
+    target_ecef: DVec3,
+    camera_ecef: DVec3,
+    spatial_query: &SpatialQuery,
+) -> Option<GroundHit> {
+    // Start 1km above the target position.
+    const RAY_START_HEIGHT: f64 = 1000.0;
+    // Cast 2km downward (enough to reach ground from 1km above).
+    const RAY_MAX_DISTANCE: f32 = 2000.0;
+
+    // Direction toward Earth's center (downward in ECEF).
+    let down_direction = -target_ecef.normalize().as_vec3();
+    let up_direction = -down_direction;
+
+    // Start the ray 1km above the target position (camera-relative).
+    let ray_start_ecef = target_ecef + target_ecef.normalize() * RAY_START_HEIGHT;
+    let ray_start = (ray_start_ecef - camera_ecef).as_vec3();
+
+    // Cast a ray downward.
+    let dir = Dir3::new(down_direction).unwrap_or(Dir3::NEG_Y);
+    spatial_query
+        .cast_ray(
+            ray_start,
+            dir,
+            RAY_MAX_DISTANCE,
+            true,
+            &SpatialQueryFilter::default(),
+        )
+        .map(|hit| {
+            let hit_position = ray_start + *dir * hit.distance;
+            GroundHit {
+                hit_position,
+                up_direction,
+            }
+        })
+}
+
+/// Complete the teleport animation and return control to the player.
+fn complete_teleport_animation(
+    commands: &mut Commands,
+    animation: &mut ResMut<TeleportAnimation>,
+    camera_query: &Query<(
+        Entity,
+        &mut FloatingOriginCamera,
+        &mut Transform,
+        &mut FlightCamera,
+    )>,
+) {
+    let Some(ref phase) = animation.phase else {
+        return;
+    };
+
+    // If we were in FPS mode, respawn the player.
+    if phase.camera_mode == CameraMode::FpsController
+        && let Ok((camera_entity, origin_camera, _, flight_camera)) = camera_query.single()
+    {
+        // Height above ground to spawn the player (capsule half-height + buffer).
+        const SPAWN_HEIGHT_ABOVE_GROUND: f32 = 2.0;
+
+        // Compute physics position (camera-relative) and ECEF position.
+        let (physics_pos, spawn_ecef) = if let Some(ground_hit) = phase.ground_hit() {
+            // Physics position: ground hit + height offset in up direction.
+            let physics_pos =
+                ground_hit.hit_position + ground_hit.up_direction * SPAWN_HEIGHT_ABOVE_GROUND;
+            // ECEF position: camera + physics offset.
+            let spawn_ecef = origin_camera.position + physics_pos.as_dvec3();
+            (physics_pos, spawn_ecef)
+        } else {
+            // Fallback: spawn at camera position (physics origin).
+            let up_direction = origin_camera.position.normalize();
+            let spawn_ecef =
+                origin_camera.position + up_direction * f64::from(SPAWN_HEIGHT_ABOVE_GROUND);
+            (Vec3::ZERO, spawn_ecef)
+        };
+
+        let (yaw, pitch) = direction_to_yaw_pitch(flight_camera.direction, spawn_ecef);
+
+        // Spawn new logical player at position above ground.
+        let logical_entity = spawn_fps_player(commands, spawn_ecef, physics_pos, yaw, pitch);
+
+        // Add RenderPlayer to camera.
+        commands
+            .entity(camera_entity)
+            .insert(RenderPlayer { logical_entity });
+
+        tracing::info!(
+            "Respawned FPS player after teleport at ground + {SPAWN_HEIGHT_ABOVE_GROUND}m"
+        );
+    }
+
+    animation.phase = None;
 }
 
 /// Fetch geocoding results from Nominatim API.

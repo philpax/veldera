@@ -42,6 +42,17 @@ use crate::physics::{PHYSICS_LOD_DEPTH, PHYSICS_RANGE, terrain::TerrainCollider}
 
 use avian3d::prelude::*;
 
+/// Earth radius in meters (for altitude calculation).
+const EARTH_RADIUS: f64 = 6_371_000.0;
+
+/// Maximum altitude (above terrain) at which forced proximity loading applies.
+/// Above this height, normal frustum culling is used for all nodes.
+const PROXIMITY_LOADING_MAX_ALTITUDE: f64 = 1000.0;
+
+/// Radius around camera where nodes are kept loaded regardless of frustum.
+/// Only applies when camera is within `PROXIMITY_LOADING_MAX_ALTITUDE`.
+const PROXIMITY_LOADING_RADIUS: f64 = 50.0;
+
 /// Plugin for LOD management and frustum culling.
 pub struct LodPlugin;
 
@@ -243,8 +254,18 @@ fn bfs_traversal(lod_state: &LodState, frustum: Frustum, lod_metrics: LodMetrics
                     continue;
                 };
 
-                // Frustum culling using the OBB.
-                if !frustum.intersects_obb(&node.obb) {
+                // Frustum culling using the OBB, with proximity exception.
+                // When the camera is at low altitude, keep nodes within a small radius
+                // loaded regardless of frustum to ensure ground is always available.
+                let camera_altitude = lod_metrics.camera_position.length() - EARTH_RADIUS;
+                let is_low_altitude = camera_altitude <= PROXIMITY_LOADING_MAX_ALTITUDE;
+                let distance_to_node = lod_metrics.camera_position.distance(node.obb.center);
+                let is_nearby = distance_to_node <= PROXIMITY_LOADING_RADIUS;
+
+                let in_frustum = frustum.intersects_obb(&node.obb);
+                let force_load = is_low_altitude && is_nearby;
+
+                if !in_frustum && !force_load {
                     continue;
                 }
 
@@ -709,9 +730,19 @@ fn cull_meshes(
         }
     }
 
+    // Get camera position for proximity check.
+    let camera_pos = lod_state.lod_metrics.map(|m| m.camera_position);
+
     for (marker, material_handle, mut visibility) in &mut query {
-        // Check frustum visibility.
-        if !frustum.intersects_obb(&marker.obb) {
+        // Check frustum visibility, with proximity exception.
+        let in_frustum = frustum.intersects_obb(&marker.obb);
+        let force_visible = camera_pos.is_some_and(|cam_pos| {
+            let altitude = cam_pos.length() - EARTH_RADIUS;
+            let distance = cam_pos.distance(marker.obb.center);
+            altitude <= PROXIMITY_LOADING_MAX_ALTITUDE && distance <= PROXIMITY_LOADING_RADIUS
+        });
+
+        if !in_frustum && !force_visible {
             if *visibility != Visibility::Hidden {
                 *visibility = Visibility::Hidden;
             }

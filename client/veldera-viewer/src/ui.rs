@@ -329,7 +329,13 @@ fn render_main_tab(
     ui.separator();
 
     // Show teleport status.
-    if let Some(progress) = teleport_animation.progress() {
+    if teleport_animation.is_waiting_for_physics() {
+        ui.horizontal(|ui| {
+            ui.spinner();
+            ui.label("Waiting for terrain to load...");
+        });
+        ui.add(egui::ProgressBar::new(1.0).show_percentage());
+    } else if let Some(progress) = teleport_animation.progress() {
         ui.horizontal(|ui| {
             ui.spinner();
             ui.label("Flying...");

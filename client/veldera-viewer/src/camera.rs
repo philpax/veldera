@@ -200,8 +200,9 @@ fn toggle_camera_mode(
                 let camera_ecef = camera.position;
                 let (yaw, pitch) = direction_to_yaw_pitch(flight_camera.direction, camera_ecef);
 
-                // Spawn the logical player entity.
-                let logical_entity = spawn_fps_player(&mut commands, camera_ecef, yaw, pitch);
+                // Spawn the logical player entity at the camera position.
+                let logical_entity =
+                    spawn_fps_player(&mut commands, camera_ecef, Vec3::ZERO, yaw, pitch);
 
                 // Add RenderPlayer to the camera.
                 commands
@@ -247,23 +248,27 @@ fn toggle_camera_mode(
 }
 
 /// Spawn the FPS player entity at the given ECEF position.
+///
+/// `physics_pos` is the camera-relative physics position. Use `Vec3::ZERO` to spawn
+/// at the camera origin, or provide an offset to spawn elsewhere in physics space.
 pub(crate) fn spawn_fps_player(
     commands: &mut Commands,
     ecef_pos: DVec3,
+    physics_pos: Vec3,
     yaw: f32,
     pitch: f32,
 ) -> Entity {
-    // The player spawns at Position::ZERO since physics is camera-relative.
     // WorldPosition tracks the absolute ECEF position.
+    // Position is camera-relative for physics simulation.
     // Capsule: radius 0.5, segment length 1.0, total height 2.0m.
     commands
         .spawn((
             LogicalPlayer,
-            Transform::default(),
+            Transform::from_translation(physics_pos),
             WorldPosition::from_dvec3(ecef_pos),
             RigidBody::Dynamic,
             Collider::capsule(0.5, 1.0),
-            Position(Vec3::ZERO),
+            Position(physics_pos),
             LinearVelocity::default(),
             LockedAxes::ROTATION_LOCKED,
             FpsController {
