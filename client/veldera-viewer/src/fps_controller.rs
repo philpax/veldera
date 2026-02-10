@@ -25,11 +25,8 @@ impl Plugin for FpsControllerPlugin {
             .add_systems(PreUpdate, clear_fixed_timestep_flag)
             .add_systems(
                 FixedPreUpdate,
-                (set_fixed_time_step_flag, fps_controller_move).run_if(
-                    is_fps_mode
-                        .and(cursor_is_grabbed)
-                        .and(teleport_animation_not_active),
-                ),
+                (set_fixed_time_step_flag, fps_controller_move)
+                    .run_if(is_fps_mode.and(teleport_animation_not_active)),
             )
             .add_systems(
                 RunFixedMainLoop,
