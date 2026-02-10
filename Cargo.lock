@@ -5863,6 +5863,7 @@ dependencies = [
  "console_error_panic_hook",
  "glam 0.30.10",
  "js-sys",
+ "rand",
  "reqwest",
  "rocktree",
  "rocktree-decode",

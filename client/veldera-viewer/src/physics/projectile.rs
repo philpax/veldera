@@ -10,6 +10,7 @@ use bevy::prelude::*;
 use bevy::window::{CursorGrabMode, CursorOptions};
 use bevy_egui::EguiContexts;
 use glam::DVec3;
+use rand::Rng;
 
 use crate::floating_origin::{FloatingOriginCamera, WorldPosition};
 use crate::lod::LodState;
@@ -25,8 +26,14 @@ pub struct FireSoundHandle(Handle<AudioSource>);
 /// Maximum distance from spawn position before despawning.
 const DESPAWN_DISTANCE: f64 = 500.0;
 
-/// Projectile radius in meters.
-const PROJECTILE_RADIUS: f32 = 1.0;
+/// Base projectile radius in meters.
+const PROJECTILE_RADIUS_BASE: f32 = 1.0;
+
+/// Minimum radius scale factor.
+const PROJECTILE_RADIUS_MIN_SCALE: f32 = 0.5;
+
+/// Maximum radius scale factor.
+const PROJECTILE_RADIUS_MAX_SCALE: f32 = 1.5;
 
 /// Initial projectile speed in m/s.
 const PROJECTILE_SPEED: f32 = 50.0;
@@ -154,8 +161,18 @@ fn spawn_projectile(
     camera_world_pos: DVec3,
     camera_dir: Vec3,
 ) -> Entity {
+    let mut rng = rand::rng();
+
+    // Randomize radius.
+    let radius_scale = rng.random_range(PROJECTILE_RADIUS_MIN_SCALE..=PROJECTILE_RADIUS_MAX_SCALE);
+    let radius = PROJECTILE_RADIUS_BASE * radius_scale;
+
+    // Generate pastel color using HSL.
+    let hue = rng.random_range(0.0..360.0);
+    let color = Color::hsl(hue, 0.7, 0.85);
+
     // Spawn position is slightly in front of camera to avoid self-collision.
-    let offset = camera_dir * (PROJECTILE_RADIUS * 3.0);
+    let offset = camera_dir * (radius * 3.0);
     let spawn_world_pos = camera_world_pos + offset.as_dvec3();
 
     // Physics position is camera-relative (spawn is at offset from camera).
@@ -164,13 +181,16 @@ fn spawn_projectile(
     // Initial velocity in camera direction.
     let initial_velocity = camera_dir * PROJECTILE_SPEED;
 
-    // Create sphere mesh.
-    let mesh = meshes.add(Sphere::new(PROJECTILE_RADIUS));
+    // Create sphere mesh with randomized size.
+    let mesh = meshes.add(Sphere::new(radius));
     let material = materials.add(StandardMaterial {
-        base_color: Color::srgb(1.0, 0.3, 0.1),
-        emissive: LinearRgba::new(1.0, 0.3, 0.1, 1.0),
+        base_color: color,
+        emissive: color.to_linear() * 0.5,
         ..default()
     });
+
+    // Scale mass with volume (radius^3).
+    let mass = 10.0 * radius_scale.powi(3);
 
     commands
         .spawn((
@@ -179,11 +199,11 @@ fn spawn_projectile(
             Transform::from_translation(physics_pos),
             WorldPosition::from_dvec3(spawn_world_pos),
             RigidBody::Dynamic,
-            Collider::sphere(PROJECTILE_RADIUS),
+            Collider::sphere(radius),
             CollisionEventsEnabled,
             Position(physics_pos),
             LinearVelocity(initial_velocity),
-            Mass(10.0),
+            Mass(mass),
             Projectile {
                 spawn_position: spawn_world_pos,
                 contact_tile: None,
