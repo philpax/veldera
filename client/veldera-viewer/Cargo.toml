@@ -13,6 +13,7 @@ webgpu = ["bevy/webgpu"]
 [dependencies]
 rocktree = { path = "../../rocktree/rocktree" }
 rocktree-decode = { path = "../../rocktree/rocktree-decode" }
+bevy_pbr_atmosphere_planet = { path = "../../crates/bevy_pbr_atmosphere_planet" }
 glam = "0.30"
 tracing = "0.1"
 # Base Bevy features that work on both native and WASM.

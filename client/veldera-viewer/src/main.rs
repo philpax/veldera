@@ -4,6 +4,7 @@
 //! 3D terrain data, with LOD-based loading and frustum culling.
 
 mod async_runtime;
+mod atmosphere;
 mod camera;
 mod coords;
 mod floating_origin;
@@ -18,16 +19,22 @@ mod ui;
 mod unlit_material;
 
 use async_runtime::AsyncRuntimePlugin;
+use atmosphere::{AtmosphereBundle, AtmosphereIntegrationPlugin};
 use bevy::audio::SpatialListener;
+use bevy::camera::Exposure;
 use bevy::core_pipeline::tonemapping::Tonemapping;
+use bevy::light::light_consts::lux;
+use bevy::pbr::ScatteringMedium;
+use bevy::post_process::bloom::Bloom;
 use bevy::prelude::*;
+use bevy::render::view::Hdr;
 use camera::{CameraControllerPlugin, FlightCamera};
 use floating_origin::{FloatingOriginCamera, FloatingOriginPlugin};
 use geo::GeoPlugin;
 use glam::DVec3;
 use loader::DataLoaderPlugin;
 use lod::LodPlugin;
-use time_of_day::TimeOfDayPlugin;
+use time_of_day::{Sun, TimeOfDayPlugin};
 use ui::DebugUiPlugin;
 use unlit_material::UnlitMaterialPlugin;
 
@@ -46,6 +53,7 @@ impl Plugin for AppPlugin {
             TimeOfDayPlugin,
             DebugUiPlugin,
             UnlitMaterialPlugin,
+            AtmosphereIntegrationPlugin,
         ))
         .add_systems(Startup, setup_scene)
         .add_plugins(physics::PhysicsIntegrationPlugin);
@@ -53,7 +61,7 @@ impl Plugin for AppPlugin {
 }
 
 /// Set up the initial 3D scene with camera.
-fn setup_scene(mut commands: Commands) {
+fn setup_scene(mut commands: Commands, mut media: ResMut<Assets<ScatteringMedium>>) {
     // Starting position: NYC at ground level (same as C++ reference client).
     // ECEF coordinates for approximately (40.7°N, 74°W).
     let start_position = DVec3::new(1_329_866.230_289, -4_643_494.267_515, 4_154_677.131_562);
@@ -61,6 +69,10 @@ fn setup_scene(mut commands: Commands) {
 
     // Calculate up vector (from Earth center towards camera).
     let up = start_position.normalize().as_vec3();
+
+    // Create Earth's scattering medium for atmosphere.
+    // Use default which provides proper Earth-like Rayleigh and Mie scattering.
+    let earth_medium = media.add(ScatteringMedium::default());
 
     // Spawn a 3D camera at the origin (floating origin system handles positioning).
     // The camera's Transform is always at origin; everything else is rendered relative to it.
@@ -75,8 +87,14 @@ fn setup_scene(mut commands: Commands) {
             far: 100_000_000.0, // 100,000 km to see the whole Earth.
             ..Default::default()
         }),
-        // Disable tonemapping since we use unlit materials.
-        Tonemapping::None,
+        // Use ACES filmic tonemapping for HDR atmosphere.
+        Tonemapping::AcesFitted,
+        // HDR is required for atmosphere rendering.
+        Hdr,
+        // Exposure compensation for the bright atmospheric illuminance.
+        Exposure { ev100: 13.0 },
+        // Bloom gives the sun a natural glow.
+        Bloom::NATURAL,
         // High-precision camera position for floating origin system.
         FloatingOriginCamera::new(start_position),
         FlightCamera {
@@ -84,9 +102,25 @@ fn setup_scene(mut commands: Commands) {
         },
         // Spatial audio listener for 3D sound.
         SpatialListener::default(),
+        // Spherical atmosphere for Earth.
+        AtmosphereBundle::earth(earth_medium, start_position),
     ));
 
-    // No lights needed: all materials are unlit (texture-only).
+    // Directional light representing the sun (required for atmosphere).
+    // Uses RAW_SUNLIGHT illuminance which is the pre-scattering sunlight value,
+    // allowing the atmosphere to properly filter it.
+    //
+    // The sun direction is updated each frame by the time_of_day system based on UTC time.
+    // This creates realistic day/night cycles as you fly around the globe.
+    commands.spawn((
+        Sun,
+        DirectionalLight {
+            color: Color::WHITE,
+            illuminance: lux::RAW_SUNLIGHT,
+            ..default()
+        },
+        Transform::default(),
+    ));
 
     tracing::info!("Scene setup complete - use WASD to move, mouse to look");
 }

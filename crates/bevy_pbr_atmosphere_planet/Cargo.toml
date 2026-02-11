@@ -1,0 +1,20 @@
+[package]
+name = "bevy_pbr_atmosphere_planet"
+version = "0.1.0"
+edition.workspace = true
+license = "MIT OR Apache-2.0"
+repository.workspace = true
+description = "Bevy atmospheric scattering adapted for spherical planets with floating origin cameras"
+
+[dependencies]
+bevy = { version = "0.18.0", default-features = false, features = [
+    "bevy_render",
+    "bevy_core_pipeline",
+    "bevy_pbr",
+    "bevy_asset",
+] }
+glam = "0.30"
+tracing = "0.1"
+
+[lints]
+workspace = true

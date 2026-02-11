@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["client/*", "rocktree/*"]
+members = ["client/*", "rocktree/*", "crates/*"]
 default-members = ["client/veldera-viewer"]
 
 [workspace.package]

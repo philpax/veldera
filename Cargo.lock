@@ -1083,6 +1083,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "bevy_pbr_atmosphere_planet"
+version = "0.1.0"
+dependencies = [
+ "bevy",
+ "glam 0.30.10",
+ "tracing",
+]
+
+[[package]]
 name = "bevy_picking"
 version = "0.18.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -5860,6 +5869,7 @@ dependencies = [
  "bevy",
  "bevy-tokio-tasks",
  "bevy_egui",
+ "bevy_pbr_atmosphere_planet",
  "console_error_panic_hook",
  "glam 0.30.10",
  "js-sys",

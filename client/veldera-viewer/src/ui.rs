@@ -424,11 +424,16 @@ fn render_main_tab(
         }
     });
 
-    // Display current UTC time.
+    // Display current UTC date and time.
+    let current_date = time_of_day.current_date();
     let utc_seconds = time_of_day.current_utc_seconds();
     let utc_h = (utc_seconds / 3600.0) as u32;
     let utc_m = ((utc_seconds % 3600.0) / 60.0) as u32;
     let utc_s = (utc_seconds % 60.0) as u32;
+    ui.label(format!(
+        "Date: {}-{:02}-{:02}",
+        current_date.year, current_date.month, current_date.day
+    ));
     ui.label(format!("UTC: {utc_h:02}:{utc_m:02}:{utc_s:02}"));
 
     // Display current local time with timezone offset.
@@ -442,7 +447,7 @@ fn render_main_tab(
         "Local: {hours:02}:{minutes:02}:{seconds:02} (UTC{offset_sign}{offset_hours:.1})"
     ));
 
-    // Time slider (only in override mode).
+    // Time and date controls (only in override mode).
     let is_override = time_of_day.mode == TimeMode::Override;
     if is_override {
         let mut slider_hours = local_hours;
@@ -455,6 +460,29 @@ fn render_main_tab(
         if response.drag_stopped() {
             time_of_day.set_override_time(slider_hours, lon_deg);
         }
+
+        // Date controls.
+        ui.horizontal(|ui| {
+            ui.label("Date:");
+            if ui.button("◀").clicked() {
+                let mut new_date = current_date;
+                new_date.retreat_day();
+                time_of_day.set_override_date(new_date);
+            }
+            ui.label(format!(
+                "{}-{:02}-{:02}",
+                current_date.year, current_date.month, current_date.day
+            ));
+            if ui.button("▶").clicked() {
+                let mut new_date = current_date;
+                new_date.advance_day();
+                time_of_day.set_override_date(new_date);
+            }
+        });
+
+        // Show sun declination for reference.
+        let declination = time_of_day.sun_declination_deg();
+        ui.label(format!("Sun declination: {declination:.1}°"));
     }
 
     // Speed buttons.
