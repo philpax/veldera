@@ -337,10 +337,8 @@ fn render_location_tab(
     ui.separator();
 
     // Time of day controls.
-    ui.label("Time of day:");
-
-    // Mode toggle.
     ui.horizontal(|ui| {
+        ui.label("Time of day:");
         if ui
             .selectable_label(location.time_of_day.mode == TimeMode::Realtime, "Realtime")
             .clicked()
@@ -378,26 +376,30 @@ fn render_location_tab(
     let minutes = ((local_hours - f64::from(hours)) * 60.0) as u32;
     let seconds = ((local_hours * 3600.0) % 60.0) as u32;
     let offset_sign = if offset_hours >= 0.0 { "+" } else { "" };
-    ui.label(format!(
-        "Local: {hours:02}:{minutes:02}:{seconds:02} (UTC{offset_sign}{offset_hours:.1})"
-    ));
+
+    let is_override = location.time_of_day.mode == TimeMode::Override;
+    ui.horizontal(|ui| {
+        ui.label(format!(
+            "Local: {hours:02}:{minutes:02}:{seconds:02} (UTC{offset_sign}{offset_hours:.1})"
+        ));
+        if is_override {
+            let mut slider_hours = local_hours;
+            ui.add(
+                egui::Slider::new(&mut slider_hours, 0.0..=24.0)
+                    .text("hours")
+                    .fixed_decimals(2),
+            );
+            // Only update time if there was a significant change.
+            if (slider_hours - local_hours).abs() > 0.01 {
+                location
+                    .time_of_day
+                    .set_override_time(slider_hours, lon_deg);
+            }
+        }
+    });
 
     // Time and date controls (only in override mode).
-    let is_override = location.time_of_day.mode == TimeMode::Override;
     if is_override {
-        let mut slider_hours = local_hours;
-        let response = ui.add(
-            egui::Slider::new(&mut slider_hours, 0.0..=24.0)
-                .text("Hour")
-                .fixed_decimals(1),
-        );
-        // Only update time when user finishes dragging, not on every frame.
-        if response.drag_stopped() {
-            location
-                .time_of_day
-                .set_override_time(slider_hours, lon_deg);
-        }
-
         // Date controls.
         ui.horizontal(|ui| {
             ui.label("Date:");
