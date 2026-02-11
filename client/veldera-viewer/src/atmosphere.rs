@@ -24,7 +24,9 @@ pub struct AtmosphereIntegrationPlugin;
 impl Plugin for AtmosphereIntegrationPlugin {
     fn build(&self, app: &mut App) {
         app.add_plugins(bevy_pbr_atmosphere_planet::SphericalAtmospherePlugin)
-            .add_systems(Update, sync_atmosphere_camera);
+            // Run in PostUpdate to ensure camera position is fully updated.
+            // This prevents frame-lag artifacts during camera movement.
+            .add_systems(PostUpdate, sync_atmosphere_camera);
     }
 }
 
