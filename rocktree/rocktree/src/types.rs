@@ -28,6 +28,10 @@ pub struct Mesh {
     pub indices: Vec<u16>,
     /// UV coordinate transform (offset and scale).
     pub uv_transform: UvTransform,
+    /// Per-vertex normals (3 floats per vertex: x, y, z in mesh-local space).
+    /// These are the original normals from Google Earth, ensuring seamless
+    /// lighting across tile boundaries.
+    pub normals: Vec<[f32; 3]>,
     /// Texture pixel data.
     pub texture_data: Vec<u8>,
     /// Texture format.

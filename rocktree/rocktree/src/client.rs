@@ -348,10 +348,17 @@ impl<C: Cache> Client<C> {
             DMat4::IDENTITY
         };
 
+        // Unpack the normal lookup table from the node data (shared by all meshes).
+        let normal_lookup = proto
+            .for_normals
+            .as_deref()
+            .filter(|d| !d.is_empty())
+            .and_then(|data| rocktree_decode::unpack_for_normals(data).ok());
+
         let mut meshes = Vec::new();
 
         for mesh_proto in &proto.meshes {
-            let mesh = Self::decode_mesh(mesh_proto)?;
+            let mesh = Self::decode_mesh(mesh_proto, normal_lookup.as_deref())?;
             meshes.push(mesh);
         }
 
@@ -372,7 +379,7 @@ impl<C: Cache> Client<C> {
     }
 
     /// Decode a mesh from protobuf.
-    fn decode_mesh(proto: &proto::Mesh) -> Result<Mesh> {
+    fn decode_mesh(proto: &proto::Mesh, normal_lookup: Option<&[u8]>) -> Result<Mesh> {
         // Unpack vertices.
         let vertices_data = proto.vertices.as_deref().unwrap_or(&[]);
         let mut vertices = rocktree_decode::unpack_vertices(vertices_data)?;
@@ -424,6 +431,9 @@ impl<C: Cache> Client<C> {
         let visible_index_count = layer_bounds[3].min(indices.len());
         let indices: Vec<u16> = indices.into_iter().take(visible_index_count).collect();
 
+        // Decode per-vertex normals from the mesh's normal indices and the node's lookup table.
+        let normals = Self::decode_normals(proto, normal_lookup, vertices.len());
+
         // Decode texture.
         let (texture_data, texture_format, texture_width, texture_height) =
             Self::decode_texture(proto)?;
@@ -432,12 +442,47 @@ impl<C: Cache> Client<C> {
             vertices,
             indices,
             uv_transform,
+            normals,
             texture_data,
             texture_format,
             texture_width,
             texture_height,
             has_octant_data,
         })
+    }
+
+    /// Decode per-vertex normals from mesh normal indices and node lookup table.
+    ///
+    /// Returns normals as `[f32; 3]` per vertex, with components in [-1, 1].
+    /// Falls back to default up-facing normals if data is unavailable.
+    fn decode_normals(
+        mesh: &proto::Mesh,
+        normal_lookup: Option<&[u8]>,
+        vertex_count: usize,
+    ) -> Vec<[f32; 3]> {
+        // Unpack per-vertex normal indices using the lookup table.
+        let mesh_normals = mesh.normals.as_deref();
+        let unpacked = rocktree_decode::unpack_normals(mesh_normals, normal_lookup, vertex_count);
+
+        match unpacked {
+            Ok(rgba_normals) => {
+                // Convert from [0, 255] RGBA to [-1, 1] float3.
+                rgba_normals
+                    .chunks(4)
+                    .map(|chunk| {
+                        [
+                            (f32::from(chunk[0]) - 127.0) / 127.0,
+                            (f32::from(chunk[1]) - 127.0) / 127.0,
+                            (f32::from(chunk[2]) - 127.0) / 127.0,
+                        ]
+                    })
+                    .collect()
+            }
+            Err(_) => {
+                // Fallback: default normals pointing "up" (will be transformed by mesh matrix).
+                vec![[0.0, 0.0, 1.0]; vertex_count]
+            }
+        }
     }
 
     /// Decode texture data from a mesh.
