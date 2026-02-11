@@ -10,11 +10,15 @@ use bevy::prelude::*;
 use bevy_egui::{EguiContexts, EguiPlugin, EguiPrimaryContextPass, egui};
 use glam::DVec3;
 
+use bevy::ecs::system::SystemParam;
+
 use crate::async_runtime::TaskSpawner;
 use crate::camera::{CameraMode, CameraSettings, FlightCamera, MAX_SPEED, MIN_SPEED};
 use crate::coords::ecef_to_lat_lon;
 use crate::floating_origin::FloatingOriginCamera;
-use crate::geo::{GEOCODING_THROTTLE_SECS, GeocodingState, TeleportAnimation, TeleportState};
+use crate::geo::{
+    GEOCODING_THROTTLE_SECS, GeocodingState, HttpClient, TeleportAnimation, TeleportState,
+};
 use crate::lod::LodState;
 use crate::mesh::RocktreeMeshMarker;
 use crate::physics::{is_physics_debug_enabled, toggle_physics_debug};
@@ -66,6 +70,16 @@ struct CoordinateInputState {
     is_editing: bool,
 }
 
+/// Grouped geocoding, teleport, and HTTP client resources.
+#[derive(SystemParam)]
+struct GeoParams<'w, 's> {
+    geocoding_state: ResMut<'w, GeocodingState>,
+    teleport_state: ResMut<'w, TeleportState>,
+    teleport_animation: Res<'w, TeleportAnimation>,
+    http_client: Res<'w, HttpClient>,
+    spawner: TaskSpawner<'w, 's>,
+}
+
 fn setup_fonts(mut contexts: EguiContexts, mut commands: Commands) {
     let Ok(ctx) = contexts.ctx_mut() else {
         return;
@@ -98,16 +112,13 @@ fn debug_ui_system(
     mut settings: ResMut<CameraSettings>,
     mut coord_state: ResMut<CoordinateInputState>,
     mut ui_state: ResMut<DebugUiState>,
-    mut geocoding_state: ResMut<GeocodingState>,
-    mut teleport_state: ResMut<TeleportState>,
-    teleport_animation: Res<TeleportAnimation>,
+    mut geo: GeoParams,
     mut time_of_day: ResMut<TimeOfDayState>,
     mut config_store: ResMut<GizmoConfigStore>,
     camera_mode: Res<CameraMode>,
     lod_state: Res<LodState>,
     camera_query: Query<(&FloatingOriginCamera, &Transform, &FlightCamera)>,
     mesh_query: Query<&RocktreeMeshMarker>,
-    spawner: TaskSpawner,
 ) -> Result {
     let ctx = contexts.ctx_mut()?;
 
@@ -130,7 +141,7 @@ fn debug_ui_system(
     let (lat_deg, lon_deg) = ecef_to_lat_lon(position);
 
     // Update text fields when not editing and not teleporting.
-    if !coord_state.is_editing && !teleport_state.is_pending() {
+    if !coord_state.is_editing && !geo.teleport_state.is_pending() {
         coord_state.lat_text = format!("{lat_deg:.6}");
         coord_state.lon_text = format!("{lon_deg:.6}");
     }
@@ -157,6 +168,9 @@ fn debug_ui_system(
 
     // Track if we need to start a geocoding request.
     let mut start_geocoding = false;
+
+    // Track if we need to start a reverse geocoding request.
+    let mut start_reverse_geocoding = false;
 
     // Render the debug panel.
     egui::Window::new("Debug")
@@ -192,14 +206,15 @@ fn debug_ui_system(
                         &time,
                         &mut settings,
                         &mut coord_state,
-                        &mut geocoding_state,
-                        &mut teleport_state,
-                        &teleport_animation,
+                        &mut geo.geocoding_state,
+                        &mut geo.teleport_state,
+                        &geo.teleport_animation,
                         &mut time_of_day,
                         &camera_mode,
                         lon_deg,
                         &mut new_coords,
                         &mut start_geocoding,
+                        &mut start_reverse_geocoding,
                     );
                 }
                 DebugTab::Physics => {
@@ -209,17 +224,30 @@ fn debug_ui_system(
         });
 
     // Start geocoding request if requested.
+    let current_time = time.elapsed_secs_f64();
     if start_geocoding {
-        let current_time = time.elapsed_secs_f64();
-        geocoding_state.start_request(current_time, &spawner);
+        geo.geocoding_state
+            .start_request(current_time, &geo.http_client, &geo.spawner);
+    }
+
+    // Start reverse geocoding request if requested.
+    if start_reverse_geocoding {
+        geo.geocoding_state.start_reverse_request(
+            lat_deg,
+            lon_deg,
+            current_time,
+            &geo.http_client,
+            &geo.spawner,
+        );
     }
 
     // Request teleport if coordinates were set.
     if let Some((lat, lon)) = new_coords {
         // Clear search results after selecting one.
-        geocoding_state.results.clear();
+        geo.geocoding_state.results.clear();
 
-        teleport_state.request(lat, lon, &spawner);
+        geo.teleport_state
+            .request(lat, lon, &geo.http_client, &geo.spawner);
     }
 
     Ok(())
@@ -246,6 +274,7 @@ fn render_main_tab(
     lon_deg: f64,
     new_coords: &mut Option<(f64, f64)>,
     start_geocoding: &mut bool,
+    start_reverse_geocoding: &mut bool,
 ) {
     // Camera mode indicator.
     let mode_str = match camera_mode {
@@ -282,6 +311,13 @@ fn render_main_tab(
         }
         if ui.button("Go").clicked() {
             *start_geocoding = true;
+        }
+        if ui
+            .button("Here?")
+            .on_hover_text("Look up current location")
+            .clicked()
+        {
+            *start_reverse_geocoding = true;
         }
     });
 
