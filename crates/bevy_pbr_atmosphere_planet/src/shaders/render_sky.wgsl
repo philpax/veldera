@@ -8,9 +8,8 @@ enable dual_source_blending;
 #import bevy_pbr_atmosphere_planet::{
     bindings::{view, settings, atmosphere_transforms, atmosphere},
     functions::{
-        sample_transmittance_lut, sample_transmittance_lut_segment,
-        sample_sky_view_lut, direction_world_to_atmosphere,
-        uv_to_ray_direction, uv_to_ndc, sample_aerial_view_lut,
+        direction_world_to_atmosphere,
+        uv_to_ray_direction, uv_to_ndc,
         sample_sun_radiance, ndc_to_camera_dist, raymarch_atmosphere,
         get_view_position, max_atmosphere_distance
     },
@@ -46,7 +45,6 @@ fn main(in: FullscreenVertexOutput) -> RenderSkyOutput {
     let ray_dir_as = direction_world_to_atmosphere(ray_dir_ws, up);
     let mu = ray_dir_as.y;
     let max_samples = settings.sky_max_samples;
-    let should_raymarch = settings.rendering_method == 1u;
 
     var transmittance: vec3<f32>;
     var inscattering: vec3<f32>;
@@ -54,12 +52,8 @@ fn main(in: FullscreenVertexOutput) -> RenderSkyOutput {
     // Use atmosphere-space ray direction for sun radiance calculation.
     let sun_radiance = sample_sun_radiance(ray_dir_as);
 
-    // When camera is outside or at high altitude, LUTs don't work properly.
-    // Force raymarching above 10km altitude to avoid artifacts.
-    let high_altitude_threshold = atmosphere.bottom_radius + 10000.0; // 10km above surface
+    // Always use raymarching - LUTs have artifacts with our spherical planet setup.
     let is_outside_atmosphere = r > atmosphere.top_radius;
-    let is_high_altitude = r > high_altitude_threshold;
-    let use_raymarch = should_raymarch || is_high_altitude;
 
     if depth == 0.0 {
         // Looking at sky (no geometry hit).
@@ -79,38 +73,20 @@ fn main(in: FullscreenVertexOutput) -> RenderSkyOutput {
                 // Block clear color - atmosphere provides its own background (black space).
                 transmittance = vec3(0.0);
             }
-        } else if is_high_altitude {
-            // High altitude (>10km) - use raymarching and block clear color.
-            // This avoids LUT artifacts and ensures consistent space rendering.
+        } else {
+            // Inside atmosphere - raymarch and block clear color.
             let t_max = max_atmosphere_distance(r, mu);
             let result = raymarch_atmosphere(world_pos, ray_dir_as, t_max, max_samples, in.uv, true);
             inscattering = result.inscattering + sun_radiance * result.transmittance;
-            // Block clear color for consistent space rendering.
+            // Block clear color for consistent rendering.
             transmittance = vec3(0.0);
-        } else if use_raymarch {
-            let t_max = max_atmosphere_distance(r, mu);
-            // Raymarch in atmosphere space.
-            let result = raymarch_atmosphere(world_pos, ray_dir_as, t_max, max_samples, in.uv, true);
-            inscattering = result.inscattering;
-            transmittance = result.transmittance;
-            inscattering += sun_radiance * transmittance;
-        } else {
-            transmittance = sample_transmittance_lut(r, mu);
-            inscattering = sample_sky_view_lut(r, ray_dir_as);
-            inscattering += sun_radiance * transmittance;
         }
     } else {
-        // Looking at geometry.
+        // Looking at geometry - raymarch to the geometry distance.
         let t = ndc_to_camera_dist(vec3(uv_to_ndc(in.uv), depth));
-        if use_raymarch {
-            // Raymarch in atmosphere space.
-            let result = raymarch_atmosphere(world_pos, ray_dir_as, t, max_samples, in.uv, false);
-            inscattering = result.inscattering;
-            transmittance = result.transmittance;
-        } else {
-            inscattering = sample_aerial_view_lut(in.uv, t);
-            transmittance = sample_transmittance_lut_segment(r, mu, t);
-        }
+        let result = raymarch_atmosphere(world_pos, ray_dir_as, t, max_samples, in.uv, false);
+        inscattering = result.inscattering;
+        transmittance = result.transmittance;
     }
 
     // Exposure compensation.
