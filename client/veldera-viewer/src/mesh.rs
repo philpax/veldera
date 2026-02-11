@@ -49,7 +49,7 @@ pub fn convert_mesh(rocktree_mesh: &RocktreeMesh) -> Mesh {
         .map(|v| [octant_sentinel.unwrap_or(f32::from(v.w)), 0.0, 0.0, 1.0])
         .collect();
 
-    // Build the Bevy mesh. No normals needed since all materials are unlit.
+    // Build the Bevy mesh with normals for lit rendering.
     let mut mesh = Mesh::new(
         PrimitiveTopology::TriangleList,
         RenderAssetUsages::default(),
@@ -58,6 +58,11 @@ pub fn convert_mesh(rocktree_mesh: &RocktreeMesh) -> Mesh {
     mesh.insert_attribute(Mesh::ATTRIBUTE_UV_0, uvs);
     mesh.insert_attribute(Mesh::ATTRIBUTE_COLOR, colors);
     mesh.insert_indices(Indices::U32(triangle_indices));
+
+    // Use the original normals from Google Earth data to ensure seamless
+    // lighting across tile boundaries. These normals are consistent at
+    // shared edges between adjacent tiles.
+    mesh.insert_attribute(Mesh::ATTRIBUTE_NORMAL, rocktree_mesh.normals.clone());
 
     mesh
 }

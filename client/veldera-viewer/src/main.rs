@@ -14,9 +14,9 @@ mod loader;
 mod lod;
 mod mesh;
 mod physics;
+mod terrain_material;
 mod time_of_day;
 mod ui;
-mod unlit_material;
 
 use async_runtime::AsyncRuntimePlugin;
 use atmosphere::{AtmosphereBundle, AtmosphereIntegrationPlugin};
@@ -34,9 +34,9 @@ use geo::GeoPlugin;
 use glam::DVec3;
 use loader::DataLoaderPlugin;
 use lod::LodPlugin;
+use terrain_material::TerrainMaterialPlugin;
 use time_of_day::{Sun, TimeOfDayPlugin};
 use ui::DebugUiPlugin;
-use unlit_material::UnlitMaterialPlugin;
 
 /// Plugin for the main application.
 pub struct AppPlugin;
@@ -52,7 +52,7 @@ impl Plugin for AppPlugin {
             LodPlugin,
             TimeOfDayPlugin,
             DebugUiPlugin,
-            UnlitMaterialPlugin,
+            TerrainMaterialPlugin,
             AtmosphereIntegrationPlugin,
         ))
         .add_systems(Startup, setup_scene)

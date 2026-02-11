@@ -35,7 +35,7 @@ use crate::loader::LoaderState;
 use crate::mesh::{
     RocktreeMeshMarker, convert_mesh, convert_texture, matrix_to_world_position_and_transform,
 };
-use crate::unlit_material::UnlitMaterial;
+use crate::terrain_material::{TerrainMaterial, TerrainMaterialExtension};
 
 use crate::floating_origin::WorldPosition;
 use crate::physics::{PHYSICS_LOD_DEPTH, PHYSICS_RANGE, terrain::TerrainCollider};
@@ -622,7 +622,7 @@ fn poll_lod_node_tasks(
     mut commands: Commands,
     mut lod_state: ResMut<LodState>,
     mut meshes: ResMut<Assets<Mesh>>,
-    mut materials: ResMut<Assets<UnlitMaterial>>,
+    mut materials: ResMut<Assets<TerrainMaterial>>,
     mut images: ResMut<Assets<Image>>,
     channels: Res<LodChannels>,
 ) {
@@ -669,9 +669,16 @@ fn poll_lod_node_tasks(
                     let mesh_handle = meshes.add(mesh);
                     let texture_handle = images.add(texture);
 
-                    let material = materials.add(UnlitMaterial {
-                        base_color_texture: texture_handle,
-                        octant_mask: UVec4::ZERO,
+                    let material = materials.add(TerrainMaterial {
+                        base: StandardMaterial {
+                            base_color_texture: Some(texture_handle),
+                            // Disable specular reflections for terrain.
+                            reflectance: 0.0,
+                            ..default()
+                        },
+                        extension: TerrainMaterialExtension {
+                            octant_mask: UVec4::ZERO,
+                        },
                     });
 
                     let entity = commands
@@ -705,10 +712,10 @@ fn poll_lod_node_tasks(
 /// masked parents (all 8 octants) are hidden entirely as an optimization.
 fn cull_meshes(
     lod_state: Res<LodState>,
-    mut materials: ResMut<Assets<UnlitMaterial>>,
+    mut materials: ResMut<Assets<TerrainMaterial>>,
     mut query: Query<(
         &RocktreeMeshMarker,
-        &MeshMaterial3d<UnlitMaterial>,
+        &MeshMaterial3d<TerrainMaterial>,
         &mut Visibility,
     )>,
 ) {
@@ -767,9 +774,9 @@ fn cull_meshes(
         // material every frame (get_mut marks the asset as modified).
         let needs_update = materials
             .get(&material_handle.0)
-            .is_some_and(|m| m.octant_mask.x != u32::from(mask));
+            .is_some_and(|m| m.extension.octant_mask.x != u32::from(mask));
         if needs_update && let Some(material) = materials.get_mut(&material_handle.0) {
-            material.octant_mask.x = u32::from(mask);
+            material.extension.octant_mask.x = u32::from(mask);
         }
     }
 }
