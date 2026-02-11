@@ -23,6 +23,16 @@ pub const MIN_SPEED: f32 = 10.0;
 /// Maximum base speed in meters per second.
 pub const MAX_SPEED: f32 = 25_000.0;
 
+/// Which style of teleport animation to use.
+#[derive(Default, PartialEq, Eq, Clone, Copy, Debug)]
+pub enum TeleportAnimationMode {
+    /// Classic Earth-looking mode: camera looks down at Earth during cruise.
+    #[default]
+    Classic,
+    /// Horizon-chasing mode: camera faces the direction of travel with Earth below.
+    HorizonChasing,
+}
+
 /// Current camera mode.
 #[derive(Resource, Default, PartialEq, Eq, Clone, Copy, Debug)]
 pub enum CameraMode {
@@ -87,6 +97,8 @@ pub struct CameraSettings {
     pub mouse_sensitivity: f32,
     /// Earth radius in meters (for altitude calculation).
     pub earth_radius: f64,
+    /// Which teleport animation style to use.
+    pub teleport_animation_mode: TeleportAnimationMode,
 }
 
 impl Default for CameraSettings {
@@ -96,6 +108,7 @@ impl Default for CameraSettings {
             boost_multiplier: 5.0,
             mouse_sensitivity: 0.001,
             earth_radius: 6_371_000.0,
+            teleport_animation_mode: TeleportAnimationMode::default(),
         }
     }
 }

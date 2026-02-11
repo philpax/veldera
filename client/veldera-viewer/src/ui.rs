@@ -13,7 +13,9 @@ use glam::DVec3;
 use bevy::ecs::system::SystemParam;
 
 use crate::async_runtime::TaskSpawner;
-use crate::camera::{CameraMode, CameraSettings, FlightCamera, MAX_SPEED, MIN_SPEED};
+use crate::camera::{
+    CameraMode, CameraSettings, FlightCamera, MAX_SPEED, MIN_SPEED, TeleportAnimationMode,
+};
 use crate::coords::ecef_to_lat_lon;
 use crate::floating_origin::FloatingOriginCamera;
 use crate::geo::{
@@ -492,6 +494,31 @@ fn render_camera_tab(ui: &mut egui::Ui, settings: &mut CameraSettings, camera_mo
                 .logarithmic(true)
                 .suffix(" m/s"),
         );
+    });
+
+    ui.separator();
+
+    // Teleport animation mode selector.
+    ui.horizontal(|ui| {
+        ui.label("Teleport style:");
+        let current_label = match settings.teleport_animation_mode {
+            TeleportAnimationMode::Classic => "Classic",
+            TeleportAnimationMode::HorizonChasing => "Horizon",
+        };
+        egui::ComboBox::from_id_salt("teleport_style")
+            .selected_text(current_label)
+            .show_ui(ui, |ui| {
+                ui.selectable_value(
+                    &mut settings.teleport_animation_mode,
+                    TeleportAnimationMode::Classic,
+                    "Classic",
+                );
+                ui.selectable_value(
+                    &mut settings.teleport_animation_mode,
+                    TeleportAnimationMode::HorizonChasing,
+                    "Horizon",
+                );
+            });
     });
 }
 

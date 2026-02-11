@@ -11,7 +11,8 @@ use serde::Deserialize;
 
 use crate::async_runtime::TaskSpawner;
 use crate::camera::{
-    CameraMode, CameraSettings, FlightCamera, direction_to_yaw_pitch, spawn_fps_player,
+    CameraMode, CameraSettings, FlightCamera, TeleportAnimationMode, direction_to_yaw_pitch,
+    spawn_fps_player,
 };
 use crate::coords::{lat_lon_to_ecef, slerp_dvec3, smootherstep};
 use crate::floating_origin::FloatingOriginCamera;
@@ -353,6 +354,8 @@ struct TeleportPhase {
     state: AnimationState,
     /// Whether the arrival woosh has been played (at descent start).
     arrival_woosh_played: bool,
+    /// Which animation style to use for orientation.
+    animation_mode: TeleportAnimationMode,
 }
 
 impl TeleportPhase {
@@ -386,7 +389,12 @@ struct ArcTrajectory {
 
 impl ArcTrajectory {
     /// Create a new arc trajectory based on start and target positions.
-    fn new(start: DVec3, target: DVec3, earth_radius: f64) -> Self {
+    fn new(
+        start: DVec3,
+        target: DVec3,
+        earth_radius: f64,
+        animation_mode: TeleportAnimationMode,
+    ) -> Self {
         let start_altitude = start.length() - earth_radius;
         let target_altitude = target.length() - earth_radius;
 
@@ -396,8 +404,15 @@ impl ArcTrajectory {
         let arc_angle = start_norm.dot(target_norm).clamp(-1.0, 1.0).acos();
         let surface_distance = arc_angle * earth_radius;
 
-        // Scale apex altitude based on distance.
-        let apex_altitude = Self::compute_apex_altitude(surface_distance, start_altitude);
+        // Scale apex altitude based on distance and animation mode.
+        let apex_altitude = match animation_mode {
+            TeleportAnimationMode::Classic => {
+                Self::compute_apex_altitude_classic(surface_distance, start_altitude)
+            }
+            TeleportAnimationMode::HorizonChasing => {
+                Self::compute_apex_altitude_horizon(surface_distance, start_altitude)
+            }
+        };
 
         Self {
             earth_radius,
@@ -407,13 +422,13 @@ impl ArcTrajectory {
         }
     }
 
-    /// Compute the apex altitude based on surface distance.
+    /// Compute the apex altitude for classic mode.
     ///
     /// Scaling is designed to give a cinematic "zoom out" effect:
     /// - Short hops stay relatively low
     /// - Long distances go high enough to see Earth's curvature
     /// - Antipodal journeys reach near-orbital altitudes
-    fn compute_apex_altitude(surface_distance: f64, start_altitude: f64) -> f64 {
+    fn compute_apex_altitude_classic(surface_distance: f64, start_altitude: f64) -> f64 {
         // Distance thresholds (meters).
         const SHORT: f64 = 10_000.0;
         const CITY: f64 = 100_000.0;
@@ -451,6 +466,46 @@ impl ArcTrajectory {
         };
 
         // Ensure apex is at least above the starting altitude.
+        apex.max(start_altitude + MIN_APEX)
+    }
+
+    /// Compute the apex altitude for horizon-chasing mode.
+    ///
+    /// Stays much lower than classic mode to keep the horizon visible
+    /// and Earth filling the lower half of the view. Tops out at low
+    /// orbital altitude for antipodal journeys.
+    fn compute_apex_altitude_horizon(surface_distance: f64, start_altitude: f64) -> f64 {
+        // Distance thresholds (meters).
+        const SHORT: f64 = 10_000.0;
+        const CITY: f64 = 100_000.0;
+        const REGIONAL: f64 = 1_000_000.0;
+        const CONTINENTAL: f64 = 10_000_000.0;
+
+        // Apex altitude values (meters) — much lower than classic.
+        const MIN_APEX: f64 = 120.0;
+        const SHORT_APEX: f64 = 600.0;
+        const CITY_APEX: f64 = 6_000.0;
+        const REGIONAL_APEX: f64 = 30_000.0;
+        const CONTINENTAL_APEX: f64 = 90_000.0;
+        const MAX_APEX: f64 = 180_000.0;
+
+        let apex = if surface_distance < SHORT {
+            let t = surface_distance / SHORT;
+            MIN_APEX + t * (SHORT_APEX - MIN_APEX)
+        } else if surface_distance < CITY {
+            let t = (surface_distance - SHORT) / (CITY - SHORT);
+            SHORT_APEX + t * (CITY_APEX - SHORT_APEX)
+        } else if surface_distance < REGIONAL {
+            let t = (surface_distance - CITY) / (REGIONAL - CITY);
+            CITY_APEX + t * (REGIONAL_APEX - CITY_APEX)
+        } else if surface_distance < CONTINENTAL {
+            let t = (surface_distance - REGIONAL) / (CONTINENTAL - REGIONAL);
+            REGIONAL_APEX + t * (CONTINENTAL_APEX - REGIONAL_APEX)
+        } else {
+            let t = ((surface_distance - CONTINENTAL) / CONTINENTAL).min(1.0);
+            CONTINENTAL_APEX + t * (MAX_APEX - CONTINENTAL_APEX)
+        };
+
         apex.max(start_altitude + MIN_APEX)
     }
 
@@ -522,12 +577,41 @@ impl ArcTrajectory {
 const ASCENT_END: f64 = 0.05;
 const DESCENT_START: f64 = 0.95;
 
+/// Compute the great-circle tangent direction at `position` toward `target`.
+///
+/// Returns the unit tangent vector in the plane of the great circle,
+/// pointing from `position` toward `target`. Falls back to `fallback`
+/// when `position` and `target` are nearly antipodal or coincident.
+fn great_circle_tangent(position: DVec3, target: DVec3, fallback: Vec3) -> Vec3 {
+    let p = position.normalize();
+    let t = target.normalize();
+    let tangent = t - p * p.dot(t);
+    let len_sq = tangent.length_squared();
+    if len_sq < 1e-10 {
+        return fallback;
+    }
+    (tangent / len_sq.sqrt()).as_vec3()
+}
+
 /// Compute the camera orientation quaternion at a given t in the animation.
 ///
-/// - Ascent: Slerp from initial orientation to looking down
-/// - Cruise: Always look at Earth center, smoothly rotate up vector
-/// - Descent: Slerp from looking down to looking at horizon
+/// Delegates to either the classic or horizon-chasing logic based on
+/// the animation mode stored in the phase.
 fn compute_orientation_at_t(phase: &TeleportPhase, position: DVec3, t: f64) -> Quat {
+    match phase.animation_mode {
+        TeleportAnimationMode::Classic => compute_orientation_classic(phase, position, t),
+        TeleportAnimationMode::HorizonChasing => {
+            compute_orientation_horizon_chasing(phase, position, t)
+        }
+    }
+}
+
+/// Classic orientation: look down at Earth during cruise.
+///
+/// - Ascent: Slerp from initial orientation to looking down.
+/// - Cruise: Always look at Earth center, smoothly rotate up vector.
+/// - Descent: Slerp from looking down to looking at horizon.
+fn compute_orientation_classic(phase: &TeleportPhase, position: DVec3, t: f64) -> Quat {
     // Direction toward Earth center (looking down).
     let down = -position.normalize().as_vec3();
 
@@ -561,6 +645,82 @@ fn compute_orientation_at_t(phase: &TeleportPhase, position: DVec3, t: f64) -> Q
             .rotation;
         orient_descent_start.slerp(phase.orient_end, eased_t)
     }
+}
+
+/// Horizon-chasing orientation: face the direction of travel with Earth below.
+///
+/// Uses the trajectory velocity to derive a natural pitch — the camera
+/// pitches up during the climb and down during descent, following the arc.
+///
+/// - Ascent: Slerp from initial orientation to velocity-derived cruise orientation.
+/// - Cruise: Look along the (pitch-amplified) trajectory velocity, radial up.
+/// - Descent: Slerp from cruise orientation to final horizon orientation.
+fn compute_orientation_horizon_chasing(phase: &TeleportPhase, _position: DVec3, t: f64) -> Quat {
+    if t < ASCENT_END {
+        let phase_t = (t / ASCENT_END) as f32;
+        let eased_t = smootherstep(f64::from(phase_t)) as f32;
+
+        let orient_cruise_start = horizon_cruise_orientation(phase, ASCENT_END);
+        phase.orient_start.slerp(orient_cruise_start, eased_t)
+    } else if t < DESCENT_START {
+        horizon_cruise_orientation(phase, t)
+    } else {
+        let phase_t = ((t - DESCENT_START) / (1.0 - DESCENT_START)) as f32;
+        let eased_t = smootherstep(f64::from(phase_t)) as f32;
+
+        let orient_cruise_end = horizon_cruise_orientation(phase, DESCENT_START);
+        orient_cruise_end.slerp(phase.orient_end, eased_t)
+    }
+}
+
+/// Compute the cruise orientation from the trajectory velocity.
+///
+/// The radial (vertical) component of the velocity is amplified so that
+/// the pitch is visually noticeable even at the low cruise altitudes
+/// used by horizon-chasing mode. The amplification scales with the arc
+/// distance: 1x for short hops (natural pitch is already sufficient),
+/// up to 3x for antipodal journeys (where the altitude-to-distance
+/// ratio is tiny).
+fn horizon_cruise_orientation(phase: &TeleportPhase, t: f64) -> Quat {
+    const DT: f64 = 0.002;
+
+    // Scale pitch amplification based on arc angle (0 = same point, pi = antipodal).
+    let arc_angle = phase
+        .start_position
+        .normalize()
+        .dot(phase.target_position.normalize())
+        .clamp(-1.0, 1.0)
+        .acos();
+    let pitch_amplification = 1.0 + 2.0 * (arc_angle / std::f64::consts::PI);
+
+    let pos = phase
+        .trajectory
+        .position_at_t(t, phase.start_position, phase.target_position);
+    let pos_before = phase.trajectory.position_at_t(
+        (t - DT).max(0.0),
+        phase.start_position,
+        phase.target_position,
+    );
+    let pos_after = phase.trajectory.position_at_t(
+        (t + DT).min(1.0),
+        phase.start_position,
+        phase.target_position,
+    );
+
+    let velocity = pos_after - pos_before;
+    let radial_up = pos.normalize();
+
+    // Decompose velocity into radial (vertical) and tangential (horizontal).
+    let radial_component = radial_up * velocity.dot(radial_up);
+    let tangential_component = velocity - radial_component;
+
+    // Amplify radial component for more pronounced pitch effect.
+    let amplified = tangential_component + radial_component * pitch_amplification;
+    let look_dir = amplified.normalize().as_vec3();
+
+    Transform::IDENTITY
+        .looking_to(look_dir, radial_up.as_vec3())
+        .rotation
 }
 
 /// Poll for geocoding results from background task.
@@ -643,8 +803,12 @@ fn poll_teleport(
                     let surface_distance = arc_angle * settings.earth_radius;
 
                     // Create the trajectory.
-                    let trajectory =
-                        ArcTrajectory::new(start_position, target_position, settings.earth_radius);
+                    let trajectory = ArcTrajectory::new(
+                        start_position,
+                        target_position,
+                        settings.earth_radius,
+                        settings.teleport_animation_mode,
+                    );
                     let duration = ArcTrajectory::compute_duration(surface_distance);
                     let apex_altitude = trajectory.apex_altitude;
 
@@ -671,9 +835,26 @@ fn poll_teleport(
                         .looking_to(start_direction, start_up)
                         .rotation;
 
-                    // orient_end: Final orientation, looking at horizon (north) with radial up.
+                    // orient_end: Final orientation at the destination.
+                    // Classic mode looks north; horizon-chasing looks along the
+                    // arrival travel direction so the descent doesn't require a yaw turn.
+                    let end_direction = match settings.teleport_animation_mode {
+                        TeleportAnimationMode::Classic => target_frame.north,
+                        TeleportAnimationMode::HorizonChasing => {
+                            // Travel tangent at the target, continuing in the same
+                            // direction we were flying (start -> target).
+                            let arrival_tangent = great_circle_tangent(
+                                target_position,
+                                start_position,
+                                target_frame.north,
+                            );
+                            // Negate because great_circle_tangent points toward start,
+                            // but we want to continue in the direction of travel.
+                            -arrival_tangent
+                        }
+                    };
                     let orient_end = Transform::IDENTITY
-                        .looking_to(target_frame.north, target_up)
+                        .looking_to(end_direction, target_up)
                         .rotation;
 
                     // ascent_up: When looking down at end of ascent, this is "up" in camera view.
@@ -698,6 +879,7 @@ fn poll_teleport(
                         camera_mode: *camera_mode,
                         state: AnimationState::Flying,
                         arrival_woosh_played: false,
+                        animation_mode: settings.teleport_animation_mode,
                     });
 
                     tracing::info!(
