@@ -9,7 +9,7 @@
 //! When the camera moves, all physics positions shift by -delta to maintain
 //! correct relative positions.
 
-mod projectile;
+pub mod grapple;
 pub mod terrain;
 
 pub use avian3d::debug_render::DebugRender;
@@ -49,10 +49,9 @@ impl Plugin for PhysicsIntegrationPlugin {
             .add_plugins(PhysicsDebugPlugin)
             .insert_resource(Gravity(Vec3::ZERO))
             .init_resource::<PhysicsState>()
-            .init_resource::<projectile::ProjectileFireState>()
             .add_systems(
                 Startup,
-                (configure_physics_debug_on_startup, projectile::load_sounds),
+                (configure_physics_debug_on_startup, grapple::load_sounds),
             )
             .add_systems(
                 FixedPreUpdate,
@@ -67,9 +66,10 @@ impl Plugin for PhysicsIntegrationPlugin {
             .add_systems(
                 Update,
                 (
-                    projectile::click_to_fire_system,
-                    projectile::despawn_projectiles,
-                    projectile::projectile_collision_sound,
+                    grapple::grapple_shoot_system,
+                    grapple::grapple_release_system,
+                    grapple::draw_grapple_ropes,
+                    grapple::cleanup_orphaned_anchors,
                 ),
             );
     }

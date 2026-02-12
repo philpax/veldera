@@ -23,6 +23,7 @@ use crate::geo::{
 };
 use crate::lod::LodState;
 use crate::mesh::RocktreeMeshMarker;
+use crate::physics::grapple::GrappleSettings;
 use crate::physics::{PHYSICS_RANGE, is_physics_debug_enabled, toggle_physics_debug};
 use crate::time_of_day::{TimeMode, TimeOfDayState};
 
@@ -54,6 +55,7 @@ enum DebugTab {
     #[default]
     LocationAndTime,
     Camera,
+    Gameplay,
     Diagnostics,
 }
 
@@ -101,6 +103,12 @@ struct CameraParams<'w, 's> {
     >,
 }
 
+/// Resources for the gameplay tab.
+#[derive(SystemParam)]
+struct GameplayParams<'w> {
+    grapple_settings: ResMut<'w, GrappleSettings>,
+}
+
 /// Resources for the diagnostics tab.
 #[derive(SystemParam)]
 struct DiagnosticsParams<'w, 's> {
@@ -140,6 +148,7 @@ fn debug_ui_system(
     mut ui_state: ResMut<DebugUiState>,
     mut location: LocationParams,
     mut camera: CameraParams,
+    mut gameplay: GameplayParams,
     mut diag: DiagnosticsParams,
 ) -> Result {
     let ctx = contexts.ctx_mut()?;
@@ -162,6 +171,7 @@ fn debug_ui_system(
                 for (tab, label) in [
                     (DebugTab::LocationAndTime, "Location & time"),
                     (DebugTab::Camera, "Camera"),
+                    (DebugTab::Gameplay, "Gameplay"),
                     (DebugTab::Diagnostics, "Diagnostics"),
                 ] {
                     if ui
@@ -180,6 +190,9 @@ fn debug_ui_system(
                 }
                 DebugTab::Camera => {
                     render_camera_tab(ui, &mut camera.settings, &camera.camera_mode);
+                }
+                DebugTab::Gameplay => {
+                    render_gameplay_tab(ui, &mut gameplay);
                 }
                 DebugTab::Diagnostics => {
                     render_diagnostics_tab(ui, &mut diag, position, altitude);
@@ -520,6 +533,50 @@ fn render_camera_tab(ui: &mut egui::Ui, settings: &mut CameraSettings, camera_mo
                 );
             });
     });
+}
+
+/// Render the gameplay tab content.
+fn render_gameplay_tab(ui: &mut egui::Ui, gameplay: &mut GameplayParams) {
+    ui.heading("Grapple settings");
+
+    ui.horizontal(|ui| {
+        ui.label("Range:");
+        ui.add(
+            egui::Slider::new(&mut gameplay.grapple_settings.range, 10.0..=500.0)
+                .suffix(" m")
+                .logarithmic(true),
+        );
+    });
+
+    ui.horizontal(|ui| {
+        ui.label("Stiffness:");
+        ui.add(
+            egui::Slider::new(&mut gameplay.grapple_settings.stiffness, 1.0..=10_000_000.0)
+                .logarithmic(true),
+        );
+    });
+
+    ui.horizontal(|ui| {
+        ui.label("Damping:");
+        ui.add(egui::Slider::new(
+            &mut gameplay.grapple_settings.damping,
+            0.0..=10.0,
+        ));
+    });
+
+    ui.horizontal(|ui| {
+        ui.label("Initial impulse:");
+        ui.add(
+            egui::Slider::new(&mut gameplay.grapple_settings.initial_impulse, 0.0..=50.0)
+                .suffix(" m/s"),
+        );
+    });
+
+    ui.separator();
+
+    if ui.button("Reset to defaults").clicked() {
+        *gameplay.grapple_settings = GrappleSettings::default();
+    }
 }
 
 /// Render the diagnostics tab content.
