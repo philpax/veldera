@@ -15,6 +15,7 @@ use glam::DVec3;
 use rand::Rng;
 
 use crate::{
+    camera::CameraModeState,
     floating_origin::{FloatingOriginCamera, WorldPosition},
     lod::LodState,
 };
@@ -80,13 +81,14 @@ pub struct Projectile {
 
 /// System that fires projectiles on left-click when cursor is grabbed.
 ///
-/// Includes debouncing to prevent rapid-fire spam.
+/// Includes debouncing to prevent rapid-fire spam. Only fires in FPS mode.
 #[allow(clippy::too_many_arguments)]
 pub fn click_to_fire_system(
     mut commands: Commands,
     time: Res<Time>,
     mouse: Res<ButtonInput<MouseButton>>,
     cursor: Single<&CursorOptions>,
+    mode_state: Res<CameraModeState>,
     mut fire_state: ResMut<ProjectileFireState>,
     mut meshes: ResMut<Assets<Mesh>>,
     mut materials: ResMut<Assets<StandardMaterial>>,
@@ -96,6 +98,11 @@ pub fn click_to_fire_system(
 ) {
     // Advance the debounce timer.
     fire_state.tick(time.delta_secs());
+
+    // Only fire in FPS mode.
+    if !mode_state.is_fps_controller() {
+        return;
+    }
 
     // Only fire when cursor is grabbed.
     let is_grabbed = matches!(
