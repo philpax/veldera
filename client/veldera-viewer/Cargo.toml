@@ -2,63 +2,78 @@
 name = "veldera-viewer"
 version = "0.1.0"
 edition.workspace = true
-license.workspace = true
-repository.workspace = true
 description = "3D viewer for Google Earth mesh data using Bevy"
-
-[features]
-default = ["webgpu"]
-webgpu = ["bevy/webgpu"]
+repository.workspace = true
+license.workspace = true
 
 [dependencies]
-rocktree = { path = "../../rocktree/rocktree" }
-rocktree-decode = { path = "../../rocktree/rocktree-decode" }
-bevy_pbr_atmosphere_planet = { path = "../../crates/bevy_pbr_atmosphere_planet" }
-glam = "0.30"
-tracing = "0.1"
-# Base Bevy features that work on both native and WASM.
-bevy = { version = "0.18.0", default-features = false, features = [
-    "bevy_render", "bevy_core_pipeline", "bevy_pbr", "bevy_winit",
-    "bevy_window", "bevy_asset", "bevy_mesh", "bevy_post_process",
-    "bevy_gizmos", "bevy_gizmos_render", "webgl2", "tonemapping_luts",
-    "mp3", "wav"
-] }
-bevy_egui = "0.39"
 # Platform-agnostic async channel (replaces tokio::sync::mpsc).
 async-channel = "2"
+# Physics engine.
+avian3d = "0.5"
+# Base Bevy features that work on both native and WASM.
+bevy = { version = "0.18.0", default-features = false, features = [
+  "bevy_asset",
+  "bevy_core_pipeline",
+  "bevy_gizmos",
+  "bevy_gizmos_render",
+  "bevy_gltf",
+  "bevy_mesh",
+  "bevy_pbr",
+  "bevy_post_process",
+  "bevy_render",
+  "bevy_window",
+  "bevy_winit",
+  "mp3",
+  "reflect_auto_register",
+  "tonemapping_luts",
+  "wav",
+  "webgl2"
+] }
+bevy_egui = "0.39"
+bevy_pbr_atmosphere_planet = { path = "../../crates/bevy_pbr_atmosphere_planet" }
+egui_extras = "0.33.3"
+egui_plot = "0.34.0"
+glam = "0.30"
+# Random number generation.
+rand = "0.9"
+rocktree = { path = "../../rocktree/rocktree" }
+rocktree-decode = { path = "../../rocktree/rocktree-decode" }
 # For geocoding API responses.
 serde = { version = "1", features = ["derive"] }
+tracing = "0.1"
 # For URL encoding geocoding queries.
 urlencoding = "2"
 # Cross-platform time support.
 web-time = "1"
-# Physics engine.
-avian3d = "0.5"
-# Random number generation.
-rand = "0.9"
+
+# Native: Additional Bevy features and Tokio runtime.
+[target.'cfg(not(target_family = "wasm"))'.dependencies]
+bevy = { version = "0.18.0", default-features = false, features = [
+  "bevy_asset",
+  "bevy_core_pipeline",
+  "bevy_gizmos",
+  "bevy_gizmos_render",
+  "bevy_mesh",
+  "bevy_pbr",
+  "bevy_post_process",
+  "bevy_render",
+  "bevy_window",
+  "bevy_winit",
+  "multi_threaded",
+  "tonemapping_luts",
+  "x11"
+] }
+bevy-tokio-tasks = "0.18"
+clap = { version = "4", features = ["derive"] }
+tokio = { version = "1", features = ["sync"] }
+tracing-subscriber = "0.3"
 
 # Geocoding HTTP requests (native).
 [target.'cfg(not(target_family = "wasm"))'.dependencies.reqwest]
 version = "0.12"
 default-features = false
-features = ["rustls-tls", "json"]
-
-# Geocoding HTTP requests (WASM).
-[target.'cfg(target_family = "wasm")'.dependencies.reqwest]
-version = "0.12"
-default-features = false
-features = ["json"]
-
-# Native: Additional Bevy features and Tokio runtime.
-[target.'cfg(not(target_family = "wasm"))'.dependencies]
-bevy = { version = "0.18.0", default-features = false, features = [
-    "bevy_render", "bevy_core_pipeline", "bevy_pbr", "bevy_winit",
-    "bevy_window", "bevy_asset", "bevy_mesh", "bevy_post_process",
-    "bevy_gizmos", "bevy_gizmos_render", "multi_threaded", "x11", "tonemapping_luts"
-] }
-bevy-tokio-tasks = "0.18"
-tokio = { version = "1", features = ["sync"] }
-tracing-subscriber = "0.3"
+features = ["json", "rustls-tls"]
 
 # WASM: Panic hook and tracing for browser console.
 [target.'cfg(target_family = "wasm")'.dependencies]
@@ -66,6 +81,16 @@ console_error_panic_hook = "0.1"
 js-sys = "0.3"
 tracing-wasm = "0.2"
 wasm-bindgen = "0.2"
+
+# Geocoding HTTP requests (WASM).
+[target.'cfg(target_family = "wasm")'.dependencies.reqwest]
+version = "0.12"
+default-features = false
+features = ["json"]
+
+[features]
+default = ["webgpu"]
+webgpu = ["bevy/webgpu"]
 
 [lints]
 workspace = true

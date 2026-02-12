@@ -1,0 +1,42 @@
+(
+  resources: {},
+  entities: {
+    1: (
+      components: {
+        "veldera_viewer::vehicle::components::Vehicle": (
+          name: "Swiftshadow",
+          description: "Fast and agile",
+          scale: 2,
+        ),
+        "veldera_viewer::vehicle::components::VehicleThrusterConfig": (
+          offsets: [(-0.3, -1.2), (0.3, -1.2), (0.3, 1.2), (-0.3, 1.2)],
+          k_p: 10000.0,
+          k_d: -5000.0,
+          target_altitude: 1.75,
+          max_strength: 50000.0,
+        ),
+        "veldera_viewer::vehicle::components::VehicleMovementConfig": (
+          forward_force: 1250.0,
+          backward_force: -200.0,
+          forward_offset: (0.0, 1.2),
+          jump_force: 1250.0,
+          pitch_strength: 600.0,
+          turning_strength: 400.0,
+        ),
+        "veldera_viewer::vehicle::components::VehicleDragConfig": (
+          linear_drag: 20.0,
+          angular_drag: 0.35,
+          angular_delay_secs: 0.25,
+        ),
+        "veldera_viewer::vehicle::components::VehiclePhysicsConfig": (
+          density: 10.0,
+          collider_half_extents: (0.9, 1.5, 0.3),
+        ),
+        "veldera_viewer::vehicle::components::VehicleModel": (
+          path: "vehicles/craft_racer.glb#Scene0",
+          scale: 1.5,
+        ),
+      },
+    ),
+  },
+)

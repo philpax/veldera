@@ -19,6 +19,7 @@ mod physics;
 mod terrain_material;
 mod time_of_day;
 mod ui;
+mod vehicle;
 
 use async_runtime::AsyncRuntimePlugin;
 use atmosphere::{AtmosphereBundle, AtmosphereIntegrationPlugin};
@@ -58,6 +59,7 @@ impl Plugin for AppPlugin {
             DebugUiPlugin,
             TerrainMaterialPlugin,
             AtmosphereIntegrationPlugin,
+            vehicle::VehiclePlugin,
         ))
         .add_systems(Startup, (setup_scene, apply_datetime_override))
         .add_plugins(physics::PhysicsIntegrationPlugin);

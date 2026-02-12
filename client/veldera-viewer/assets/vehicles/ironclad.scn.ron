@@ -1,0 +1,42 @@
+(
+  resources: {},
+  entities: {
+    1: (
+      components: {
+        "veldera_viewer::vehicle::components::Vehicle": (
+          name: "Ironclad",
+          description: "Heavy and stable",
+          scale: 2,
+        ),
+        "veldera_viewer::vehicle::components::VehicleThrusterConfig": (
+          offsets: [(-0.4, -1.4), (0.4, -1.4), (0.4, 1.4), (-0.4, 1.4)],
+          k_p: 8000.0,
+          k_d: -2000.0,
+          target_altitude: 2.0,
+          max_strength: 60000.0,
+        ),
+        "veldera_viewer::vehicle::components::VehicleMovementConfig": (
+          forward_force: 600.0,
+          backward_force: -200.0,
+          forward_offset: (0.0, 1.4),
+          jump_force: 1500.0,
+          pitch_strength: 180.0,
+          turning_strength: 360.0,
+        ),
+        "veldera_viewer::vehicle::components::VehicleDragConfig": (
+          linear_drag: 25.0,
+          angular_drag: 0.2,
+          angular_delay_secs: 0.25,
+        ),
+        "veldera_viewer::vehicle::components::VehiclePhysicsConfig": (
+          density: 15.0,
+          collider_half_extents: (1.0, 1.6, 0.4),
+        ),
+        "veldera_viewer::vehicle::components::VehicleModel": (
+          path: "vehicles/craft_miner.glb#Scene0",
+          scale: 1.5,
+        ),
+      },
+    ),
+  },
+)

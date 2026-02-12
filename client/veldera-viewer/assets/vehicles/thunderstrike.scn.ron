@@ -1,0 +1,42 @@
+(
+  resources: {},
+  entities: {
+    1: (
+      components: {
+        "veldera_viewer::vehicle::components::Vehicle": (
+          name: "Thunderstrike",
+          description: "Balanced handling",
+          scale: 2,
+        ),
+        "veldera_viewer::vehicle::components::VehicleThrusterConfig": (
+          offsets: [(-0.3, -1.2), (0.3, -1.2), (0.3, 1.2), (-0.3, 1.2)],
+          k_p: 12000.0,
+          k_d: -4000.0,
+          target_altitude: 1.75,
+          max_strength: 50000.0,
+        ),
+        "veldera_viewer::vehicle::components::VehicleMovementConfig": (
+          forward_force: 700.0,
+          backward_force: -250.0,
+          forward_offset: (0.0, 1.2),
+          jump_force: 1250.0,
+          pitch_strength: 500.0,
+          turning_strength: 450.0,
+        ),
+        "veldera_viewer::vehicle::components::VehicleDragConfig": (
+          linear_drag: 20.0,
+          angular_drag: 0.2,
+          angular_delay_secs: 0.25,
+        ),
+        "veldera_viewer::vehicle::components::VehiclePhysicsConfig": (
+          density: 12.0,
+          collider_half_extents: (0.9, 1.5, 0.3),
+        ),
+        "veldera_viewer::vehicle::components::VehicleModel": (
+          path: "vehicles/craft_speederA.glb#Scene0",
+          scale: 1.5,
+        ),
+      },
+    ),
+  },
+)
