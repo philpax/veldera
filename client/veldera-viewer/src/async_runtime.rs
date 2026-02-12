@@ -35,8 +35,10 @@ mod native {
     /// On native, this wraps a Tokio `JoinHandle`. Calling [`cancel`](Self::cancel)
     /// aborts the underlying task immediately, which also aborts any in-flight
     /// HTTP request.
+    #[allow(dead_code)]
     pub struct SpawnedTask(tokio::task::JoinHandle<()>);
 
+    #[allow(dead_code)]
     impl SpawnedTask {
         /// Cancel the task. This aborts the Tokio task immediately.
         pub fn cancel(self) {
@@ -74,6 +76,7 @@ mod native {
         /// Like [`spawn`](Self::spawn), but returns a [`SpawnedTask`] handle.
         /// Cancelling the handle aborts the underlying Tokio task, which also
         /// aborts any in-flight HTTP request driven by the future.
+        #[allow(dead_code)]
         pub fn spawn_cancellable<F>(&self, future: F) -> SpawnedTask
         where
             F: Future<Output = ()> + Send + 'static,
@@ -97,8 +100,10 @@ mod wasm {
     ///
     /// On WASM, this wraps a Bevy `Task`. Dropping the handle (via
     /// [`cancel`](Self::cancel)) stops the future from being polled.
+    #[allow(dead_code)]
     pub struct SpawnedTask(bevy::tasks::Task<()>);
 
+    #[allow(dead_code)]
     impl SpawnedTask {
         /// Cancel the task by dropping the inner handle, which stops it
         /// from being polled.
@@ -140,6 +145,7 @@ mod wasm {
         /// Like [`spawn`](Self::spawn), but returns a [`SpawnedTask`] handle.
         /// Cancelling the handle drops the task, preventing it from being polled
         /// further.
+        #[allow(dead_code)]
         pub fn spawn_cancellable<F>(&self, future: F) -> SpawnedTask
         where
             F: Future<Output = ()> + 'static,
@@ -151,6 +157,8 @@ mod wasm {
 }
 
 #[cfg(not(target_family = "wasm"))]
+#[allow(unused_imports)]
 pub use native::{SpawnedTask, TaskSpawner};
 #[cfg(target_family = "wasm")]
+#[allow(unused_imports)]
 pub use wasm::{SpawnedTask, TaskSpawner};
