@@ -3,6 +3,7 @@
 //! This application provides a free-flight camera to explore Google Earth's
 //! 3D terrain data, with LOD-based loading and frustum culling.
 
+mod assets;
 mod async_runtime;
 mod atmosphere;
 mod camera;
@@ -46,6 +47,7 @@ pub struct AppPlugin;
 impl Plugin for AppPlugin {
     fn build(&self, app: &mut App) {
         app.add_plugins((
+            assets::AssetsPlugin,
             FloatingOriginPlugin,
             CameraControllerPlugin,
             fps_controller::FpsControllerPlugin,
