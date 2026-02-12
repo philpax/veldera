@@ -324,6 +324,7 @@ fn get_current_utc_date() -> SimpleDate {
 }
 
 /// Converts days since Unix epoch (1970-01-01) to a date.
+#[cfg(not(target_family = "wasm"))]
 fn days_since_epoch_to_date(days: i32) -> SimpleDate {
     // Algorithm based on Howard Hinnant's date algorithms.
     let z = days + 719468;

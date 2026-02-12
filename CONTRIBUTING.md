@@ -48,6 +48,8 @@
   - `cargo clippy --all-targets --no-default-features -- -D warnings`
   - `cargo test --workspace`
   - `cargo test --workspace --no-default-features`
+  - Run `scripts/web_check.sh`, using WSL if necessary.
+- _Never_ run `cargo build`.
 
 ### Type system patterns
 
