@@ -29,7 +29,7 @@ use rocktree::{
 };
 use rocktree_decode::OrientedBoundingBox;
 
-use crate::async_runtime::TaskSpawner;
+use crate::async_runtime::{SpawnedTask, TaskSpawner};
 use crate::floating_origin::FloatingOriginCamera;
 use crate::loader::LoaderState;
 use crate::mesh::{
@@ -45,13 +45,39 @@ use avian3d::prelude::*;
 /// Earth radius in meters (for altitude calculation).
 const EARTH_RADIUS: f64 = 6_371_000.0;
 
-/// Maximum altitude (above terrain) at which forced proximity loading applies.
-/// Above this height, normal frustum culling is used for all nodes.
-const PROXIMITY_LOADING_MAX_ALTITUDE: f64 = 1000.0;
+/// Altitude below which the ground LOD profile fully applies (meters).
+const GROUND_ALTITUDE: f64 = 200.0;
 
-/// Radius around camera where nodes are kept loaded regardless of frustum.
-/// Only applies when camera is within `PROXIMITY_LOADING_MAX_ALTITUDE`.
-const PROXIMITY_LOADING_RADIUS: f64 = 50.0;
+/// Altitude above which the orbital LOD profile fully applies (meters).
+const ORBITAL_ALTITUDE: f64 = 5_000.0;
+
+/// Adaptive LOD profile that parameterizes all LOD behavior.
+///
+/// Values are interpolated between ground and orbital profiles based on
+/// camera altitude, so LOD behavior adapts continuously as the camera
+/// ascends or descends without any explicit mode switching.
+#[derive(Resource, Clone, Debug)]
+pub struct LodProfile {
+    /// Radius for proximity force-loading (meters).
+    pub proximity_radius: f64,
+    /// Maximum altitude for proximity loading (meters).
+    pub proximity_max_altitude: f64,
+    /// Grace period before unloading nodes no longer in the BFS set (seconds).
+    pub grace_period_secs: f64,
+    /// FOV multiplier for the BFS frustum (1.0 = no expansion).
+    pub bfs_fov_multiplier: f64,
+}
+
+impl Default for LodProfile {
+    fn default() -> Self {
+        Self {
+            proximity_radius: 200.0,
+            proximity_max_altitude: 5000.0,
+            grace_period_secs: 15.0,
+            bfs_fov_multiplier: 2.0,
+        }
+    }
+}
 
 /// Plugin for LOD management and frustum culling.
 pub struct LodPlugin;
@@ -60,9 +86,11 @@ impl Plugin for LodPlugin {
     fn build(&self, app: &mut App) {
         app.init_resource::<LodState>()
             .init_resource::<LodChannels>()
+            .init_resource::<LodProfile>()
             .add_systems(
                 Update,
                 (
+                    update_lod_profile,
                     update_frustum,
                     update_lod_requests,
                     poll_lod_bulk_tasks,
@@ -92,12 +120,12 @@ pub struct LoadedNodeData {
 /// State for LOD management.
 #[derive(Resource, Default)]
 pub struct LodState {
-    /// Paths of nodes that are currently being loaded.
-    loading_nodes: HashSet<String>,
+    /// Handles to in-flight node load tasks, keyed by node path.
+    loading_node_tasks: HashMap<String, SpawnedTask>,
     /// Paths of nodes that are currently loaded and rendered.
     loaded_nodes: HashSet<String>,
-    /// Paths of bulks that are currently being loaded.
-    loading_bulks: HashSet<String>,
+    /// Handles to in-flight bulk load tasks, keyed by bulk path.
+    loading_bulk_tasks: HashMap<String, SpawnedTask>,
     /// Paths of bulks that failed to load (to avoid retrying).
     failed_bulks: HashSet<String>,
     /// Cached bulk metadata by path.
@@ -108,12 +136,20 @@ pub struct LodState {
     node_entities: HashMap<String, Vec<Entity>>,
     /// Current view frustum (updated each frame).
     frustum: Option<Frustum>,
+    /// Expanded frustum for BFS traversal (wider FOV to keep off-screen nodes loaded).
+    bfs_frustum: Option<Frustum>,
     /// Current LOD metrics (updated each frame).
     lod_metrics: Option<LodMetrics>,
     /// Cached node data for physics collider creation.
     node_data: HashMap<String, LoadedNodeData>,
     /// Physics collider entities, keyed by node path.
     physics_colliders: HashMap<String, Entity>,
+    /// Last time each node was in the BFS potential set, for grace period unloading.
+    node_last_wanted: HashMap<String, f64>,
+    /// Previous camera position for velocity computation.
+    previous_camera_pos: Option<DVec3>,
+    /// Smoothed camera velocity in ECEF coordinates (meters per second).
+    camera_velocity: DVec3,
 }
 
 impl LodState {
@@ -126,11 +162,18 @@ impl LodState {
     /// Get the number of nodes currently being loaded.
     #[must_use]
     pub fn loading_node_count(&self) -> usize {
-        self.loading_nodes.len()
+        self.loading_node_tasks.len()
+    }
+
+    /// Get the camera speed in meters per second.
+    #[must_use]
+    pub fn camera_speed(&self) -> f64 {
+        self.camera_velocity.length()
     }
 
     /// Check if a node is currently loaded.
     #[must_use]
+    #[allow(dead_code)]
     pub fn is_node_loaded(&self, path: &str) -> bool {
         self.loaded_nodes.contains(path)
     }
@@ -185,7 +228,12 @@ struct BfsResult {
 ///
 /// All access to `lod_state` during BFS is read-only. Mutations are collected
 /// into the returned `BfsResult` and applied by the caller.
-fn bfs_traversal(lod_state: &LodState, frustum: Frustum, lod_metrics: LodMetrics) -> BfsResult {
+fn bfs_traversal(
+    lod_state: &LodState,
+    frustum: Frustum,
+    lod_metrics: LodMetrics,
+    profile: &LodProfile,
+) -> BfsResult {
     let mut nodes_to_load: Vec<NodeMetadata> = Vec::new();
     let mut bulks_to_load: Vec<(String, u32)> = Vec::new();
     let mut potential_nodes: HashSet<String> = HashSet::new();
@@ -220,7 +268,7 @@ fn bfs_traversal(lod_state: &LodState, frustum: Frustum, lod_metrics: LodMetrics
 
                 if !lod_state.bulks.contains_key(path) {
                     // Trigger download if not already loading or failed.
-                    if !lod_state.loading_bulks.contains(path)
+                    if !lod_state.loading_bulk_tasks.contains_key(path)
                         && !lod_state.failed_bulks.contains(path)
                     {
                         bulks_to_load.push((path.clone(), child_epoch));
@@ -258,9 +306,9 @@ fn bfs_traversal(lod_state: &LodState, frustum: Frustum, lod_metrics: LodMetrics
                 // When the camera is at low altitude, keep nodes within a small radius
                 // loaded regardless of frustum to ensure ground is always available.
                 let camera_altitude = lod_metrics.camera_position.length() - EARTH_RADIUS;
-                let is_low_altitude = camera_altitude <= PROXIMITY_LOADING_MAX_ALTITUDE;
+                let is_low_altitude = camera_altitude <= profile.proximity_max_altitude;
                 let distance_to_node = lod_metrics.camera_position.distance(node.obb.center);
-                let is_nearby = distance_to_node <= PROXIMITY_LOADING_RADIUS;
+                let is_nearby = distance_to_node <= profile.proximity_radius;
 
                 let in_frustum = frustum.intersects_obb(&node.obb);
                 let force_load = is_low_altitude && is_nearby;
@@ -288,7 +336,7 @@ fn bfs_traversal(lod_state: &LodState, frustum: Frustum, lod_metrics: LodMetrics
                 if node.has_data {
                     potential_nodes.insert(node.path.clone());
                     if !lod_state.loaded_nodes.contains(&node.path)
-                        && !lod_state.loading_nodes.contains(&node.path)
+                        && !lod_state.loading_node_tasks.contains_key(&node.path)
                     {
                         nodes_to_load.push((*node).clone());
                     }
@@ -314,7 +362,7 @@ fn bfs_traversal(lod_state: &LodState, frustum: Frustum, lod_metrics: LodMetrics
 
         // Skip if already loaded or loading.
         if lod_state.loaded_nodes.contains(path)
-            || lod_state.loading_nodes.contains(path)
+            || lod_state.loading_node_tasks.contains_key(path)
             || lod_state.node_data.contains_key(path)
         {
             continue;
@@ -342,6 +390,9 @@ fn bfs_traversal(lod_state: &LodState, frustum: Frustum, lod_metrics: LodMetrics
 /// Despawn entities for nodes no longer in the potential set, and remove
 /// obsolete bulks from the cache.
 ///
+/// Nodes that are no longer in the BFS potential set are given a grace period
+/// before being unloaded, so turning away and back does not require re-fetching.
+///
 /// Note: node_data is retained for physics-eligible nodes (nodes at
 /// `PHYSICS_LOD_DEPTH` within physics range). This data is cleaned up
 /// separately by `cleanup_physics_node_data`.
@@ -351,6 +402,8 @@ fn unload_obsolete(
     potential_nodes: &HashSet<String>,
     potential_bulks: &HashSet<String>,
     camera_pos: DVec3,
+    now: f64,
+    grace_period: f64,
 ) {
     // Compute which nodes should be retained for physics: nodes at exactly
     // PHYSICS_LOD_DEPTH that are within physics range.
@@ -370,15 +423,26 @@ fn unload_obsolete(
         })
         .collect();
 
-    // Despawn nodes no longer in the potential set.
+    // Despawn nodes no longer in the potential set whose grace period has expired.
     let obsolete_nodes: Vec<String> = lod_state
         .loaded_nodes
         .iter()
-        .filter(|p| !potential_nodes.contains(p.as_str()))
+        .filter(|p| {
+            if potential_nodes.contains(p.as_str()) {
+                return false;
+            }
+            let last_wanted = lod_state
+                .node_last_wanted
+                .get(p.as_str())
+                .copied()
+                .unwrap_or(0.0);
+            (now - last_wanted) > grace_period
+        })
         .cloned()
         .collect();
     for path in &obsolete_nodes {
         lod_state.loaded_nodes.remove(path);
+        lod_state.node_last_wanted.remove(path);
         // Only remove node_data if not retained for physics.
         if !physics_retained.contains(path) {
             lod_state.node_data.remove(path);
@@ -418,10 +482,21 @@ fn unload_obsolete(
     }
 
     // Remove bulks no longer in the potential set (never remove the root bulk).
+    // Only remove a bulk if all of its contained nodes have been unloaded
+    // (i.e. none are in the potential set or within their grace period).
     let obsolete_bulks: Vec<String> = lod_state
         .bulks
         .keys()
-        .filter(|p: &&String| !p.is_empty() && !potential_bulks.contains(p.as_str()))
+        .filter(|p: &&String| {
+            if p.is_empty() || potential_bulks.contains(p.as_str()) {
+                return false;
+            }
+            // Check that no loaded node belongs to this bulk (grace period protection).
+            !lod_state
+                .loaded_nodes
+                .iter()
+                .any(|node_path| node_path.starts_with(p.as_str()))
+        })
         .cloned()
         .collect();
     for path in obsolete_bulks {
@@ -432,9 +507,38 @@ fn unload_obsolete(
     }
 }
 
-/// Update the frustum from the camera.
+/// Linearly interpolate between two values.
+fn lerp(a: f64, b: f64, t: f64) -> f64 {
+    a + (b - a) * t
+}
+
+/// Update the LOD profile based on camera altitude.
+///
+/// Smoothly interpolates between ground-level and orbital profiles so that
+/// LOD behavior adapts continuously as the camera ascends or descends.
+fn update_lod_profile(
+    mut profile: ResMut<LodProfile>,
+    camera_query: Query<&FloatingOriginCamera, With<Camera3d>>,
+) {
+    let Ok(floating_camera) = camera_query.single() else {
+        return;
+    };
+
+    let altitude = floating_camera.position.length() - EARTH_RADIUS;
+    let t = ((altitude - GROUND_ALTITUDE) / (ORBITAL_ALTITUDE - GROUND_ALTITUDE)).clamp(0.0, 1.0);
+
+    // Ground profile (t=0) -> Orbital profile (t=1).
+    profile.proximity_radius = lerp(200.0, 0.0, t);
+    profile.proximity_max_altitude = 5000.0;
+    profile.grace_period_secs = lerp(15.0, 2.0, t);
+    profile.bfs_fov_multiplier = lerp(2.0, 1.0, t);
+}
+
+/// Update the frustum from the camera and track camera velocity.
 fn update_frustum(
     mut lod_state: ResMut<LodState>,
+    time: Res<Time>,
+    profile: Res<LodProfile>,
     camera_query: Query<
         (
             &Transform,
@@ -451,6 +555,18 @@ fn update_frustum(
 
     // Get the camera's high-precision world position.
     let camera_pos_d = floating_camera.position;
+
+    // Compute smoothed velocity via frame-rate-independent EMA (~5 Hz cutoff).
+    let dt = time.delta_secs_f64();
+    if dt > 0.0 {
+        if let Some(prev_pos) = lod_state.previous_camera_pos {
+            let raw_velocity = (camera_pos_d - prev_pos) / dt;
+            let tau = 1.0 / (2.0 * std::f64::consts::PI * 5.0);
+            let alpha = (1.0 - (-dt / tau).exp()).clamp(0.0, 1.0);
+            lod_state.camera_velocity = lod_state.camera_velocity.lerp(raw_velocity, alpha);
+        }
+        lod_state.previous_camera_pos = Some(camera_pos_d);
+    }
 
     // Build the view matrix in world space.
     // The Transform only has rotation (translation is zero in render space).
@@ -480,9 +596,21 @@ fn update_frustum(
     );
     let proj_d = DMat4::from_cols_array(&proj.to_cols_array().map(f64::from));
 
-    // Compute view-projection matrix in world space.
+    // Compute view-projection matrix in world space (for render-time culling).
     let vp = proj_d * view_d;
     lod_state.frustum = Some(Frustum::from_matrix(vp));
+
+    // Compute expanded BFS frustum with wider FOV for off-screen node persistence.
+    let bfs_fov = perspective.fov * profile.bfs_fov_multiplier as f32;
+    let bfs_proj = Mat4::perspective_rh(
+        bfs_fov,
+        perspective.aspect_ratio,
+        perspective.near,
+        perspective.far,
+    );
+    let bfs_proj_d = DMat4::from_cols_array(&bfs_proj.to_cols_array().map(f64::from));
+    let bfs_vp = bfs_proj_d * view_d;
+    lod_state.bfs_frustum = Some(Frustum::from_matrix(bfs_vp));
 
     // Update LOD metrics using high-precision camera position.
     let screen_height = windows
@@ -499,8 +627,10 @@ fn update_frustum(
 /// Update LOD requests using BFS traversal from root.
 fn update_lod_requests(
     mut commands: Commands,
+    time: Res<Time>,
     loader_state: Res<LoaderState>,
     mut lod_state: ResMut<LodState>,
+    profile: Res<LodProfile>,
     channels: Res<LodChannels>,
     spawner: TaskSpawner,
 ) {
@@ -513,7 +643,7 @@ fn update_lod_requests(
     let Some(lod_metrics) = lod_state.lod_metrics else {
         return;
     };
-    let Some(frustum) = lod_state.frustum else {
+    let Some(bfs_frustum) = lod_state.bfs_frustum else {
         return;
     };
 
@@ -522,40 +652,105 @@ fn update_lod_requests(
         lod_state.bulks.insert(String::new(), root_bulk.clone());
     }
 
-    // BFS traversal (read-only access to lod_state).
-    let bfs = bfs_traversal(&lod_state, frustum, lod_metrics);
+    // BFS traversal uses the expanded frustum so off-screen nodes stay in the potential set.
+    let bfs = bfs_traversal(&lod_state, bfs_frustum, lod_metrics, &profile);
 
     // Merge discovered OBBs into lod_state.
     for (path, obb) in &bfs.discovered_obbs {
         lod_state.node_obbs.entry(path.clone()).or_insert(*obb);
     }
 
-    // Unload obsolete nodes and bulks.
+    // Stamp every node in the BFS potential set with the current time.
+    let now = time.elapsed_secs_f64();
+    for path in &bfs.potential_nodes {
+        lod_state.node_last_wanted.insert(path.clone(), now);
+    }
+
+    // Unload obsolete nodes and bulks (with grace period).
     unload_obsolete(
         &mut lod_state,
         &mut commands,
         &bfs.potential_nodes,
         &bfs.potential_bulks,
         lod_metrics.camera_position,
+        now,
+        profile.grace_period_secs,
     );
 
     // Limit concurrent loads.
     let max_node_loads = 20;
     let max_bulk_loads = 10;
 
-    // Spawn node load tasks (rendering nodes first, then physics-only nodes).
-    let all_nodes_to_load = bfs
-        .nodes_to_load
-        .into_iter()
-        .chain(bfs.physics_nodes_to_load);
+    // Compute velocity context for direction-biased loading and cancellation.
+    let camera_pos = lod_metrics.camera_position;
+    let velocity = lod_state.camera_velocity;
+    let speed = velocity.length();
+    let velocity_dir = if speed > 1e-6 {
+        velocity / speed
+    } else {
+        DVec3::ZERO
+    };
+
+    // Bias strength: strongest at ground level when moving fast, zero at orbital altitude
+    // or when stationary.
+    let camera_altitude = camera_pos.length() - EARTH_RADIUS;
+    let altitude_t = ((camera_altitude - GROUND_ALTITUDE) / (ORBITAL_ALTITUDE - GROUND_ALTITUDE))
+        .clamp(0.0, 1.0);
+    let speed_factor = (speed / 10.0).min(1.0);
+    let effective_bias = 0.5 * (1.0 - altitude_t) * speed_factor;
+
+    // Cancel in-flight node loads the camera is clearly moving away from.
+    // Only cancel nodes that left the BFS potential set AND are behind the camera.
+    if speed > 1e-6 {
+        let cancelled: Vec<String> = lod_state
+            .loading_node_tasks
+            .keys()
+            .filter(|path| {
+                // Keep nodes that are still in the BFS potential set.
+                if bfs.potential_nodes.contains(*path) {
+                    return false;
+                }
+                let Some(obb) = lod_state.node_obbs.get(*path) else {
+                    return false;
+                };
+                let to_node = (obb.center - camera_pos).normalize_or_zero();
+                to_node.dot(velocity_dir) < -0.2
+            })
+            .cloned()
+            .collect();
+        for path in &cancelled {
+            if let Some(handle) = lod_state.loading_node_tasks.remove(path) {
+                handle.cancel();
+                tracing::debug!("LOD: Cancelled in-flight load for '{}'", path);
+            }
+        }
+    }
+
+    // Merge rendering and physics nodes, then sort by velocity-biased distance.
+    let mut all_nodes_to_load: Vec<NodeMetadata> = bfs.nodes_to_load;
+    all_nodes_to_load.extend(bfs.physics_nodes_to_load);
+    all_nodes_to_load.sort_by(|a, b| {
+        let score = |node: &NodeMetadata| -> f64 {
+            let dist_sq = camera_pos.distance_squared(node.obb.center);
+            if effective_bias < 1e-6 {
+                return dist_sq;
+            }
+            // Nodes ahead of movement get a lower (better) score.
+            let node_dir = (node.obb.center - camera_pos).normalize_or_zero();
+            let alignment = node_dir.dot(velocity_dir); // -1..+1
+            dist_sq * (1.0 - alignment * effective_bias)
+        };
+        score(a)
+            .partial_cmp(&score(b))
+            .unwrap_or(std::cmp::Ordering::Equal)
+    });
 
     for node_meta in all_nodes_to_load {
-        if lod_state.loading_nodes.len() >= max_node_loads {
+        if lod_state.loading_node_tasks.len() >= max_node_loads {
             break;
         }
 
         let path = node_meta.path.clone();
-        lod_state.loading_nodes.insert(path.clone());
 
         let client = Arc::clone(&loader_state.client);
         let request = NodeRequest::new(
@@ -568,19 +763,18 @@ fn update_lod_requests(
         let tx = channels.node_tx.clone();
         let path_clone = path.clone();
 
-        spawner.spawn(async move {
+        let handle = spawner.spawn_cancellable(async move {
             let result = client.fetch_node(&request).await;
             let _ = tx.send((path_clone, result)).await;
         });
+        lod_state.loading_node_tasks.insert(path, handle);
     }
 
     // Spawn bulk load tasks.
     for (path, epoch) in bfs.bulks_to_load {
-        if lod_state.loading_bulks.len() >= max_bulk_loads {
+        if lod_state.loading_bulk_tasks.len() >= max_bulk_loads {
             break;
         }
-
-        lod_state.loading_bulks.insert(path.clone());
 
         let client = Arc::clone(&loader_state.client);
         let request = BulkRequest::new(path.clone(), epoch);
@@ -588,17 +782,19 @@ fn update_lod_requests(
         let tx = channels.bulk_tx.clone();
         let path_clone = path.clone();
 
-        spawner.spawn(async move {
+        let handle = spawner.spawn_cancellable(async move {
             let result = client.fetch_bulk(&request).await;
             let _ = tx.send((path_clone, result)).await;
         });
+        lod_state.loading_bulk_tasks.insert(path, handle);
     }
 }
 
 /// Poll bulk loading results from channel.
 fn poll_lod_bulk_tasks(mut lod_state: ResMut<LodState>, channels: Res<LodChannels>) {
     while let Ok((path, result)) = channels.bulk_rx.try_recv() {
-        lod_state.loading_bulks.remove(&path);
+        // Remove the task handle (it completed naturally).
+        lod_state.loading_bulk_tasks.remove(&path);
 
         match result {
             Ok(bulk) => {
@@ -627,7 +823,13 @@ fn poll_lod_node_tasks(
     channels: Res<LodChannels>,
 ) {
     while let Ok((path, result)) = channels.node_rx.try_recv() {
-        lod_state.loading_nodes.remove(&path);
+        // Remove the task handle (it completed naturally). If the handle is
+        // already gone, the task was cancelled — discard the result.
+        let was_wanted = lod_state.loading_node_tasks.remove(&path).is_some();
+        if !was_wanted {
+            tracing::debug!("LOD: Discarded cancelled node '{}'", path);
+            continue;
+        }
 
         match result {
             Ok(node) => {
@@ -712,6 +914,7 @@ fn poll_lod_node_tasks(
 /// masked parents (all 8 octants) are hidden entirely as an optimization.
 fn cull_meshes(
     lod_state: Res<LodState>,
+    profile: Res<LodProfile>,
     mut materials: ResMut<Assets<TerrainMaterial>>,
     mut query: Query<(
         &RocktreeMeshMarker,
@@ -746,7 +949,7 @@ fn cull_meshes(
         let force_visible = camera_pos.is_some_and(|cam_pos| {
             let altitude = cam_pos.length() - EARTH_RADIUS;
             let distance = cam_pos.distance(marker.obb.center);
-            altitude <= PROXIMITY_LOADING_MAX_ALTITUDE && distance <= PROXIMITY_LOADING_RADIUS
+            altitude <= profile.proximity_max_altitude && distance <= profile.proximity_radius
         });
 
         if !in_frustum && !force_visible {
