@@ -30,6 +30,20 @@ mod native {
     use bevy::ecs::system::SystemParam;
     use bevy::prelude::*;
 
+    /// Opaque handle to a spawned async task that can be cancelled.
+    ///
+    /// On native, this wraps a Tokio `JoinHandle`. Calling [`cancel`](Self::cancel)
+    /// aborts the underlying task immediately, which also aborts any in-flight
+    /// HTTP request.
+    pub struct SpawnedTask(tokio::task::JoinHandle<()>);
+
+    impl SpawnedTask {
+        /// Cancel the task. This aborts the Tokio task immediately.
+        pub fn cancel(self) {
+            self.0.abort();
+        }
+    }
+
     /// A system parameter for spawning async tasks in a platform-agnostic way.
     ///
     /// Use this instead of directly accessing `TokioTasksRuntime` or
@@ -54,6 +68,19 @@ mod native {
         {
             self.runtime.spawn_background_task(move |_ctx| future);
         }
+
+        /// Spawn a background task and return a handle that can cancel it.
+        ///
+        /// Like [`spawn`](Self::spawn), but returns a [`SpawnedTask`] handle.
+        /// Cancelling the handle aborts the underlying Tokio task, which also
+        /// aborts any in-flight HTTP request driven by the future.
+        pub fn spawn_cancellable<F>(&self, future: F) -> SpawnedTask
+        where
+            F: Future<Output = ()> + Send + 'static,
+        {
+            let handle = self.runtime.spawn_background_task(move |_ctx| future);
+            SpawnedTask(handle)
+        }
     }
 }
 
@@ -65,6 +92,20 @@ mod wasm {
     use bevy::ecs::system::SystemParam;
     use bevy::prelude::*;
     use bevy::tasks::AsyncComputeTaskPool;
+
+    /// Opaque handle to a spawned async task that can be cancelled.
+    ///
+    /// On WASM, this wraps a Bevy `Task`. Dropping the handle (via
+    /// [`cancel`](Self::cancel)) stops the future from being polled.
+    pub struct SpawnedTask(bevy::tasks::Task<()>);
+
+    impl SpawnedTask {
+        /// Cancel the task by dropping the inner handle, which stops it
+        /// from being polled.
+        pub fn cancel(self) {
+            drop(self.0);
+        }
+    }
 
     /// A system parameter for spawning async tasks in a platform-agnostic way.
     ///
@@ -93,10 +134,23 @@ mod wasm {
         {
             AsyncComputeTaskPool::get().spawn_local(future).detach();
         }
+
+        /// Spawn a background task and return a handle that can cancel it.
+        ///
+        /// Like [`spawn`](Self::spawn), but returns a [`SpawnedTask`] handle.
+        /// Cancelling the handle drops the task, preventing it from being polled
+        /// further.
+        pub fn spawn_cancellable<F>(&self, future: F) -> SpawnedTask
+        where
+            F: Future<Output = ()> + 'static,
+        {
+            let task = AsyncComputeTaskPool::get().spawn_local(future);
+            SpawnedTask(task)
+        }
     }
 }
 
 #[cfg(not(target_family = "wasm"))]
-pub use native::TaskSpawner;
+pub use native::{SpawnedTask, TaskSpawner};
 #[cfg(target_family = "wasm")]
-pub use wasm::TaskSpawner;
+pub use wasm::{SpawnedTask, TaskSpawner};
