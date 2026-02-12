@@ -250,6 +250,19 @@ impl TimeOfDayState {
         self.day_offset = 0;
     }
 
+    /// Sets an absolute UTC date and time in override mode.
+    ///
+    /// `utc_seconds` is seconds since midnight UTC (0..86400).
+    /// Time continues to advance at the current speed multiplier.
+    #[allow(dead_code)]
+    pub fn set_override_utc(&mut self, date: SimpleDate, utc_seconds: f64) {
+        self.mode = TimeMode::Override;
+        self.reference_instant = Instant::now();
+        self.reference_sim_time = utc_seconds;
+        self.reference_date = date;
+        self.day_offset = 0;
+    }
+
     /// Switches back to realtime mode.
     pub fn sync_to_realtime(&mut self) {
         self.mode = TimeMode::Realtime;

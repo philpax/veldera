@@ -14,7 +14,8 @@ use bevy::ecs::system::SystemParam;
 
 use crate::async_runtime::TaskSpawner;
 use crate::camera::{
-    CameraMode, CameraSettings, FlightCamera, MAX_SPEED, MIN_SPEED, TeleportAnimationMode,
+    AltitudeRequest, CameraMode, CameraModeState, CameraSettings, FlightCamera, MAX_SPEED,
+    MIN_SPEED, TeleportAnimationMode,
 };
 use crate::coords::ecef_to_lat_lon;
 use crate::floating_origin::FloatingOriginCamera;
@@ -89,7 +90,7 @@ struct LocationParams<'w, 's> {
 #[derive(SystemParam)]
 struct CameraParams<'w, 's> {
     settings: ResMut<'w, CameraSettings>,
-    camera_mode: Res<'w, CameraMode>,
+    camera_mode: Res<'w, CameraModeState>,
     camera_query: Query<
         'w,
         's,

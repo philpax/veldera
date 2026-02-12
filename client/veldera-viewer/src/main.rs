@@ -10,6 +10,7 @@ mod coords;
 mod floating_origin;
 mod fps_controller;
 mod geo;
+mod launch_params;
 mod loader;
 mod lod;
 mod mesh;
@@ -28,14 +29,15 @@ use bevy::pbr::ScatteringMedium;
 use bevy::post_process::bloom::Bloom;
 use bevy::prelude::*;
 use bevy::render::view::Hdr;
-use camera::{CameraControllerPlugin, FlightCamera};
+use camera::{CameraControllerPlugin, CameraSettings, FlightCamera};
+use coords::lat_lon_to_ecef;
 use floating_origin::{FloatingOriginCamera, FloatingOriginPlugin};
 use geo::GeoPlugin;
-use glam::DVec3;
+use launch_params::LaunchParams;
 use loader::DataLoaderPlugin;
 use lod::LodPlugin;
 use terrain_material::TerrainMaterialPlugin;
-use time_of_day::{Sun, TimeOfDayPlugin};
+use time_of_day::{SimpleDate, Sun, TimeOfDayPlugin, TimeOfDayState};
 use ui::DebugUiPlugin;
 
 /// Plugin for the main application.
@@ -55,20 +57,34 @@ impl Plugin for AppPlugin {
             TerrainMaterialPlugin,
             AtmosphereIntegrationPlugin,
         ))
-        .add_systems(Startup, setup_scene)
+        .add_systems(Startup, (setup_scene, apply_datetime_override))
         .add_plugins(physics::PhysicsIntegrationPlugin);
     }
 }
 
 /// Set up the initial 3D scene with camera.
-fn setup_scene(mut commands: Commands, mut media: ResMut<Assets<ScatteringMedium>>) {
-    // Starting position: NYC at ground level (same as C++ reference client).
-    // ECEF coordinates for approximately (40.7°N, 74°W).
-    let start_position = DVec3::new(1_329_866.230_289, -4_643_494.267_515, 4_154_677.131_562);
-    let start_direction = Vec3::new(0.219_862, 0.419_329, 0.312_226).normalize();
+fn setup_scene(
+    mut commands: Commands,
+    mut media: ResMut<Assets<ScatteringMedium>>,
+    params: Res<LaunchParams>,
+    settings: Res<CameraSettings>,
+) {
+    // Convert launch parameters to ECEF position.
+    let radius = settings.earth_radius + params.altitude;
+    let start_position = lat_lon_to_ecef(params.lat, params.lon, radius);
 
-    // Calculate up vector (from Earth center towards camera).
+    // Compute initial viewing direction: look north along the surface.
     let up = start_position.normalize().as_vec3();
+    let start_direction = {
+        let world_north = Vec3::Z;
+        let north = (world_north - up * world_north.dot(up)).normalize_or_zero();
+        // At the poles, north is degenerate; fall back to an arbitrary tangent.
+        if north.length_squared() < 0.001 {
+            Vec3::X
+        } else {
+            north
+        }
+    };
 
     // Create Earth's scattering medium for atmosphere.
     // Use default which provides proper Earth-like Rayleigh and Mie scattering.
@@ -122,30 +138,28 @@ fn setup_scene(mut commands: Commands, mut media: ResMut<Assets<ScatteringMedium
         Transform::default(),
     ));
 
-    tracing::info!("Scene setup complete - use WASD to move, mouse to look");
+    tracing::info!(
+        "Scene setup complete at ({:.2}\u{00b0}, {:.2}\u{00b0}, {:.0}m)",
+        params.lat,
+        params.lon,
+        params.altitude,
+    );
+}
+
+/// Apply the date-time override from launch parameters, if provided.
+fn apply_datetime_override(params: Res<LaunchParams>, mut time_state: ResMut<TimeOfDayState>) {
+    if let Some(ref dt) = params.datetime {
+        let date = SimpleDate {
+            year: dt.year,
+            month: dt.month,
+            day: dt.day,
+        };
+        time_state.set_override_utc(date, dt.utc_seconds());
+        tracing::info!("Time override set to {dt} UTC");
+    }
 }
 
 fn main() {
-    // Initialize tracing for native platforms.
-    #[cfg(not(target_family = "wasm"))]
-    {
-        use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
-        tracing_subscriber::registry()
-            .with(tracing_subscriber::fmt::layer())
-            .with(
-                tracing_subscriber::EnvFilter::try_from_default_env()
-                    .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info")),
-            )
-            .init();
-    }
-
-    // Initialize tracing for WASM (logs to browser console).
-    #[cfg(target_family = "wasm")]
-    {
-        console_error_panic_hook::set_once();
-        tracing_wasm::set_as_global_default();
-    }
-
     let mut app = App::new();
 
     #[allow(unused_mut)]
@@ -167,6 +181,10 @@ fn main() {
         primary_window: Some(window),
         ..Default::default()
     }));
+
+    // Parse launch parameters (CLI args on native, URL query params on WASM).
+    let params = launch_params::parse();
+    app.insert_resource(params);
 
     // Add async runtime (Tokio on native, no-op on WASM).
     app.add_plugins(AsyncRuntimePlugin);

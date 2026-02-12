@@ -13,7 +13,7 @@ use bevy::prelude::*;
 use bevy::window::{CursorGrabMode, CursorOptions};
 use glam::DVec3;
 
-use crate::camera::CameraMode;
+use crate::camera::CameraModeState;
 use crate::floating_origin::{FloatingOrigin, FloatingOriginCamera, WorldPosition};
 use crate::geo::TeleportAnimation;
 
@@ -54,8 +54,8 @@ fn teleport_animation_not_active(anim: Res<TeleportAnimation>) -> bool {
 }
 
 /// Run condition: FPS controller mode is active.
-fn is_fps_mode(mode: Res<CameraMode>) -> bool {
-    *mode == CameraMode::FpsController
+fn is_fps_mode(state: Res<CameraModeState>) -> bool {
+    state.is_fps_controller()
 }
 
 /// Run condition: cursor is grabbed.

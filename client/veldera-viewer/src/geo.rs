@@ -11,8 +11,8 @@ use serde::Deserialize;
 
 use crate::async_runtime::TaskSpawner;
 use crate::camera::{
-    CameraMode, CameraSettings, FlightCamera, TeleportAnimationMode, direction_to_yaw_pitch,
-    spawn_fps_player,
+    CameraMode, CameraModeState, CameraSettings, FlightCamera, TeleportAnimationMode,
+    direction_to_yaw_pitch, spawn_fps_player,
 };
 use crate::coords::{lat_lon_to_ecef, slerp_dvec3, smootherstep};
 use crate::floating_origin::FloatingOriginCamera;
@@ -753,7 +753,7 @@ fn poll_teleport(
     mut teleport_state: ResMut<TeleportState>,
     mut animation: ResMut<TeleportAnimation>,
     settings: Res<CameraSettings>,
-    camera_mode: Res<CameraMode>,
+    camera_mode: Res<CameraModeState>,
     camera_query: Query<(Entity, &FloatingOriginCamera, &FlightCamera)>,
     logical_player_query: Query<Entity, With<LogicalPlayer>>,
     wind_loop_query: Query<Entity, With<TeleportWindLoop>>,
@@ -789,7 +789,7 @@ fn poll_teleport(
                     }
 
                     // If in FPS mode, despawn the logical player and remove RenderPlayer from camera.
-                    if *camera_mode == CameraMode::FpsController {
+                    if camera_mode.is_fps_controller() {
                         if let Ok(player_entity) = logical_player_query.single() {
                             commands.entity(player_entity).despawn();
                         }
@@ -876,7 +876,7 @@ fn poll_teleport(
                         duration,
                         elapsed: 0.0,
                         trajectory,
-                        camera_mode: *camera_mode,
+                        camera_mode: camera_mode.current(),
                         state: AnimationState::Flying,
                         arrival_woosh_played: false,
                         animation_mode: settings.teleport_animation_mode,
