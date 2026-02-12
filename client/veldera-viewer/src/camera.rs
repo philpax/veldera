@@ -17,6 +17,7 @@ use crate::fps_controller::{
     CameraConfig, FpsController, FpsControllerInput, LogicalPlayer, RenderPlayer,
 };
 use crate::geo::TeleportAnimation;
+use crate::physics::grapple::GrappleState;
 
 /// Minimum base speed in meters per second.
 pub const MIN_SPEED: f32 = 10.0;
@@ -295,6 +296,7 @@ pub(crate) fn spawn_fps_player(
                 ..Default::default()
             },
             CameraConfig { height_offset: 0.5 },
+            GrappleState::default(),
         ))
         .id()
 }

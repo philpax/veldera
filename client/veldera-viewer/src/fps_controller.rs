@@ -109,6 +109,15 @@ pub struct DidFixedTimestepRunThisFrame(bool);
 #[derive(Component)]
 pub struct LogicalPlayer;
 
+/// Marker component that suspends normal character controller behavior.
+///
+/// When present, the FPS controller skips ground detection, friction, velocity
+/// clamping, and other character-controller logic. Only radial gravity is applied.
+/// Use this when external physics constraints (like grapple joints) should control
+/// the player's movement.
+#[derive(Component)]
+pub struct ExternalForceOverride;
+
 /// Marker component for the render player (camera follows this entity).
 #[derive(Component)]
 pub struct RenderPlayer {
@@ -317,6 +326,7 @@ pub fn fps_controller_move(
     time: Res<Time<Fixed>>,
     spatial_query_pipeline: Res<SpatialQueryPipeline>,
     camera_query: Query<&FloatingOriginCamera>,
+    override_query: Query<(), With<ExternalForceOverride>>,
     mut query: Query<
         (
             Entity,
@@ -346,6 +356,13 @@ pub fn fps_controller_move(
         let ecef_pos = camera_pos + position.0.as_dvec3();
         let frame = RadialFrame::from_ecef_position(ecef_pos);
         let local_up = frame.up;
+
+        // When external forces are controlling the player (e.g., grappling),
+        // skip character controller logic and only apply gravity.
+        if override_query.get(entity).is_ok() {
+            velocity.0 -= local_up * GRAVITY * dt;
+            continue;
+        }
 
         let speeds = Vec3::new(controller.side_speed, 0.0, controller.forward_speed);
 
