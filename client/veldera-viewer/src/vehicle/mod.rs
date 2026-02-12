@@ -19,9 +19,10 @@ pub use components::{
     VehiclePhysicsConfig, VehicleState, VehicleThrusterConfig,
 };
 
-use crate::camera::{CameraModeState, CameraModeTransitions, FlightCamera, FollowedEntity};
+use crate::camera::{
+    CameraModeState, CameraModeTransitions, FlightCamera, FollowedEntity, RadialFrame,
+};
 use crate::floating_origin::{FloatingOriginCamera, WorldPosition};
-use crate::fps_controller::RadialFrame;
 
 /// Plugin for vehicle functionality.
 pub struct VehiclePlugin;

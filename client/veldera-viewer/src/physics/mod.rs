@@ -19,8 +19,8 @@ use bevy::color::palettes::css::LIME;
 use bevy::gizmos::config::{GizmoConfig, GizmoConfigStore};
 use bevy::prelude::*;
 
+use crate::camera::LogicalPlayer;
 use crate::floating_origin::{FloatingOriginCamera, WorldPosition};
-use crate::fps_controller::LogicalPlayer;
 
 pub use terrain::TerrainCollider;
 

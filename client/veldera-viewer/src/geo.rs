@@ -11,12 +11,11 @@ use serde::Deserialize;
 
 use crate::async_runtime::TaskSpawner;
 use crate::camera::{
-    CameraMode, CameraModeState, CameraSettings, FlightCamera, TeleportAnimationMode,
-    direction_to_yaw_pitch, spawn_fps_player,
+    CameraMode, CameraModeState, CameraSettings, FlightCamera, LogicalPlayer, RadialFrame,
+    RenderPlayer, TeleportAnimationMode, direction_to_yaw_pitch, spawn_fps_player,
 };
 use crate::coords::{lat_lon_to_ecef, slerp_dvec3, smootherstep};
 use crate::floating_origin::FloatingOriginCamera;
-use crate::fps_controller::{LogicalPlayer, RadialFrame, RenderPlayer};
 
 /// Handle to the woosh sound asset.
 #[derive(Resource)]

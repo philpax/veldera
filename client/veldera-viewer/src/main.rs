@@ -9,7 +9,6 @@ mod atmosphere;
 mod camera;
 mod coords;
 mod floating_origin;
-mod fps_controller;
 mod geo;
 mod launch_params;
 mod loader;
@@ -51,7 +50,6 @@ impl Plugin for AppPlugin {
             assets::AssetsPlugin,
             FloatingOriginPlugin,
             CameraControllerPlugin,
-            fps_controller::FpsControllerPlugin,
             DataLoaderPlugin,
             GeoPlugin,
             LodPlugin,

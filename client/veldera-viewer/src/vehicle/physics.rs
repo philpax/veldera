@@ -10,9 +10,8 @@ use super::components::{
     ThrusterDiagnostic, Vehicle, VehicleDragConfig, VehicleInput, VehicleMovementConfig,
     VehiclePhysicsConfig, VehicleState, VehicleThrusterConfig,
 };
-use crate::camera::CameraModeState;
+use crate::camera::{CameraModeState, RadialFrame};
 use crate::floating_origin::{FloatingOriginCamera, WorldPosition};
-use crate::fps_controller::RadialFrame;
 use crate::ui::VehicleRightRequest;
 
 /// Jump cooldown in seconds.

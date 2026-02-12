@@ -1,70 +1,27 @@
-// Adapted version of https://github.com/qhdwight/bevy_fps_controller to our weird set of circumstances.
-// Full credit to qhdwight; I would have used their crate directly, but we have a floating origin
-// and radial gravity, so things get a bit more complicated.
+//! First-person controller camera mode.
+//!
+//! Adapted from https://github.com/qhdwight/bevy_fps_controller for floating origin
+//! and radial gravity. Provides walking, jumping, and crouching on terrain.
 
 use std::f32::consts::*;
 
-use avian3d::{
-    parry::{math::Point, shape::SharedShape},
-    prelude::*,
-};
+use avian3d::parry::math::Point;
+use avian3d::parry::shape::SharedShape;
+use avian3d::prelude::*;
+use bevy::ecs::message::MessageReader;
 use bevy::input::mouse::MouseMotion;
 use bevy::prelude::*;
 use bevy::window::{CursorGrabMode, CursorOptions};
 use glam::DVec3;
 
-use crate::camera::CameraModeState;
 use crate::floating_origin::{FloatingOrigin, FloatingOriginCamera, WorldPosition};
 use crate::geo::TeleportAnimation;
 
-pub struct FpsControllerPlugin;
+use super::{CameraModeState, FlightCamera};
 
-impl Plugin for FpsControllerPlugin {
-    fn build(&self, app: &mut App) {
-        app.init_resource::<DidFixedTimestepRunThisFrame>()
-            .add_systems(PreUpdate, clear_fixed_timestep_flag)
-            .add_systems(
-                FixedPreUpdate,
-                (set_fixed_time_step_flag, fps_controller_move)
-                    .run_if(is_fps_mode.and(teleport_animation_not_active)),
-            )
-            .add_systems(
-                RunFixedMainLoop,
-                (
-                    (fps_controller_input, fps_controller_look)
-                        .chain()
-                        .run_if(cursor_is_grabbed.and(teleport_animation_not_active))
-                        .in_set(RunFixedMainLoopSystems::BeforeFixedMainLoop),
-                    (
-                        clear_input.run_if(did_fixed_timestep_run_this_frame),
-                        fps_controller_render.run_if(teleport_animation_not_active),
-                        sync_floating_origin_fps,
-                    )
-                        .chain()
-                        .in_set(RunFixedMainLoopSystems::AfterFixedMainLoop),
-                )
-                    .run_if(is_fps_mode),
-            );
-    }
-}
-
-/// Run condition: teleport animation is not active.
-fn teleport_animation_not_active(anim: Res<TeleportAnimation>) -> bool {
-    !anim.is_active()
-}
-
-/// Run condition: FPS controller mode is active.
-fn is_fps_mode(state: Res<CameraModeState>) -> bool {
-    state.is_fps_controller()
-}
-
-/// Run condition: cursor is grabbed.
-fn cursor_is_grabbed(cursor: Single<&CursorOptions>) -> bool {
-    matches!(
-        cursor.grab_mode,
-        CursorGrabMode::Locked | CursorGrabMode::Confined
-    )
-}
+// ============================================================================
+// Radial frame
+// ============================================================================
 
 /// Radial coordinate frame based on ECEF position.
 ///
@@ -102,8 +59,71 @@ impl RadialFrame {
     }
 }
 
+// ============================================================================
+// Plugin
+// ============================================================================
+
+/// Plugin for first-person controller camera mode.
+pub(super) struct FpsControllerPlugin;
+
+impl Plugin for FpsControllerPlugin {
+    fn build(&self, app: &mut App) {
+        app.init_resource::<DidFixedTimestepRunThisFrame>()
+            .init_resource::<PreservedFpsState>()
+            .add_systems(PreUpdate, clear_fixed_timestep_flag)
+            .add_systems(
+                FixedPreUpdate,
+                (set_fixed_time_step_flag, fps_controller_move)
+                    .run_if(is_fps_mode.and(teleport_animation_not_active)),
+            )
+            .add_systems(
+                RunFixedMainLoop,
+                (
+                    (fps_controller_input, fps_controller_look)
+                        .chain()
+                        .run_if(cursor_is_grabbed.and(teleport_animation_not_active))
+                        .in_set(RunFixedMainLoopSystems::BeforeFixedMainLoop),
+                    (
+                        clear_input.run_if(did_fixed_timestep_run_this_frame),
+                        fps_controller_render.run_if(teleport_animation_not_active),
+                        sync_floating_origin_fps,
+                    )
+                        .chain()
+                        .in_set(RunFixedMainLoopSystems::AfterFixedMainLoop),
+                )
+                    .run_if(is_fps_mode),
+            );
+    }
+}
+
+// ============================================================================
+// Run conditions
+// ============================================================================
+
+/// Run condition: teleport animation is not active.
+fn teleport_animation_not_active(anim: Res<TeleportAnimation>) -> bool {
+    !anim.is_active()
+}
+
+/// Run condition: FPS controller mode is active.
+fn is_fps_mode(state: Res<CameraModeState>) -> bool {
+    state.is_fps_controller()
+}
+
+/// Run condition: cursor is grabbed.
+fn cursor_is_grabbed(cursor: Single<&CursorOptions>) -> bool {
+    matches!(
+        cursor.grab_mode,
+        CursorGrabMode::Locked | CursorGrabMode::Confined
+    )
+}
+
+// ============================================================================
+// Components
+// ============================================================================
+
 #[derive(Resource, Default)]
-pub struct DidFixedTimestepRunThisFrame(bool);
+struct DidFixedTimestepRunThisFrame(bool);
 
 /// Marker component for the logical player entity (physics body).
 #[derive(Component)]
@@ -208,7 +228,7 @@ impl Default for FpsController {
             ground_tick: 0,
             stop_speed: 1.0,
             jump_speed: 4.0,
-            experimental_step_offset: 0.0, // Does not work well on Avian yet.
+            experimental_step_offset: 0.0,
             enable_input: true,
             key_forward: KeyCode::KeyW,
             key_back: KeyCode::KeyS,
@@ -220,26 +240,185 @@ impl Default for FpsController {
             key_jump: KeyCode::Space,
             key_crouch: KeyCode::ControlLeft,
             sensitivity: 0.001,
-            experimental_enable_ledge_cling: false, // Does not work well on Avian yet.
+            experimental_enable_ledge_cling: false,
 
             previous_translation: None,
         }
     }
 }
 
-//     __                _
-//    / /   ____  ____ _(_)____
-//   / /   / __ \/ __ `/ / ___/
-//  / /___/ /_/ / /_/ / / /__
-// /_____/\____/\__, /_/\___/
-//             /____/
+// ============================================================================
+// Mode transition helpers
+// ============================================================================
 
-// Used as padding by camera pitching (up/down) to avoid spooky math problems.
+/// Preserved FPS controller state for restoration after FollowEntity mode.
+#[derive(Resource, Default)]
+pub(super) struct PreservedFpsState {
+    /// The yaw angle when entering FollowEntity.
+    pub yaw: f32,
+    /// The pitch angle when entering FollowEntity.
+    pub pitch: f32,
+}
+
+/// Spawn the FPS player entity at the given ECEF position.
+pub fn spawn_fps_player(
+    commands: &mut Commands,
+    ecef_pos: DVec3,
+    physics_pos: Vec3,
+    yaw: f32,
+    pitch: f32,
+) -> Entity {
+    commands
+        .spawn((
+            LogicalPlayer,
+            Transform::from_translation(physics_pos),
+            WorldPosition::from_dvec3(ecef_pos),
+            RigidBody::Dynamic,
+            Collider::capsule(0.5, 1.0),
+            Position(physics_pos),
+            LinearVelocity::default(),
+            LockedAxes::ROTATION_LOCKED,
+            FpsController {
+                yaw,
+                pitch,
+                ..Default::default()
+            },
+            FpsControllerInput {
+                yaw,
+                pitch,
+                ..Default::default()
+            },
+            CameraConfig { height_offset: 0.5 },
+        ))
+        .id()
+}
+
+/// Convert a direction vector to yaw/pitch angles in the radial frame.
+pub fn direction_to_yaw_pitch(direction: Vec3, ecef_pos: DVec3) -> (f32, f32) {
+    let frame = RadialFrame::from_ecef_position(ecef_pos);
+
+    let vertical_component = direction.dot(frame.up);
+    let horizontal = direction - frame.up * vertical_component;
+    let horizontal_len = horizontal.length();
+
+    let pitch = vertical_component.atan2(horizontal_len);
+
+    let yaw = if horizontal_len > 1e-6 {
+        let horizontal_normalized = horizontal / horizontal_len;
+        let north_component = horizontal_normalized.dot(frame.north);
+        let east_component = horizontal_normalized.dot(frame.east);
+        (-east_component).atan2(north_component)
+    } else {
+        0.0
+    };
+
+    (yaw, pitch)
+}
+
+/// Convert yaw/pitch angles to a direction vector in the radial frame.
+pub(super) fn yaw_pitch_to_direction(yaw: f32, pitch: f32, ecef_pos: DVec3) -> Vec3 {
+    let frame = RadialFrame::from_ecef_position(ecef_pos);
+    let forward = frame.north * yaw.cos() - frame.east * yaw.sin();
+    let direction = forward * pitch.cos() + frame.up * pitch.sin();
+    direction.normalize()
+}
+
+/// Set up FPS mode from Flycam: spawn logical player at camera position.
+pub(super) fn setup_from_flycam(
+    commands: &mut Commands,
+    camera_entity: Entity,
+    camera: &FloatingOriginCamera,
+    flight_camera: Option<&FlightCamera>,
+) {
+    let camera_ecef = camera.position;
+    let (yaw, pitch) = if let Some(fc) = flight_camera {
+        direction_to_yaw_pitch(fc.direction, camera_ecef)
+    } else {
+        (0.0, 0.0)
+    };
+
+    let logical_entity = spawn_fps_player(commands, camera_ecef, Vec3::ZERO, yaw, pitch);
+
+    commands
+        .entity(camera_entity)
+        .insert(RenderPlayer { logical_entity });
+}
+
+/// Set up FPS mode from FollowEntity: spawn logical player at camera position with preserved angles.
+pub(super) fn setup_from_follow_entity(
+    commands: &mut Commands,
+    preserved_fps: &mut PreservedFpsState,
+    camera_entity: Entity,
+    camera: &FloatingOriginCamera,
+) {
+    let camera_ecef = camera.position;
+    let yaw = preserved_fps.yaw;
+    let pitch = preserved_fps.pitch;
+
+    let logical_entity = spawn_fps_player(commands, camera_ecef, Vec3::ZERO, yaw, pitch);
+
+    commands
+        .entity(camera_entity)
+        .insert(RenderPlayer { logical_entity });
+
+    *preserved_fps = PreservedFpsState::default();
+}
+
+/// Clean up FPS mode: despawn logical player, restore FlightCamera.
+#[allow(clippy::type_complexity)]
+pub(super) fn cleanup(
+    commands: &mut Commands,
+    camera_entity: Entity,
+    logical_player_query: &Query<
+        (Entity, &WorldPosition, &FpsController),
+        (With<LogicalPlayer>, Without<FloatingOriginCamera>),
+    >,
+) -> Option<(DVec3, Vec3)> {
+    let Ok((logical_entity, world_pos, controller)) = logical_player_query.single() else {
+        return None;
+    };
+
+    let final_ecef = world_pos.position;
+    let direction = yaw_pitch_to_direction(controller.yaw, controller.pitch, final_ecef);
+    let frame = RadialFrame::from_ecef_position(final_ecef);
+    let transform = Transform::IDENTITY.looking_to(direction, frame.up);
+
+    commands.entity(camera_entity).remove::<RenderPlayer>();
+    commands.entity(camera_entity).insert((
+        FlightCamera { direction },
+        FloatingOriginCamera::new(final_ecef),
+        transform,
+    ));
+
+    commands.entity(logical_entity).despawn();
+
+    Some((final_ecef, direction))
+}
+
+/// Preserve FPS state and despawn the logical player.
+#[allow(clippy::type_complexity)]
+pub(super) fn preserve_and_cleanup(
+    commands: &mut Commands,
+    preserved_fps: &mut PreservedFpsState,
+    logical_player_query: &Query<
+        (Entity, &WorldPosition, &FpsController),
+        (With<LogicalPlayer>, Without<FloatingOriginCamera>),
+    >,
+) {
+    if let Ok((logical_entity, _world_pos, controller)) = logical_player_query.single() {
+        preserved_fps.yaw = controller.yaw;
+        preserved_fps.pitch = controller.pitch;
+
+        commands.entity(logical_entity).despawn();
+    }
+}
+
+// ============================================================================
+// Controller systems
+// ============================================================================
+
 const ANGLE_EPSILON: f32 = 0.001953125;
-
 const SLIGHT_SCALE_DOWN: f32 = 0.9375;
-
-/// Radial gravity constant (m/s²).
 const GRAVITY: f32 = 9.81;
 
 fn clear_fixed_timestep_flag(
@@ -269,7 +448,7 @@ fn clear_input(mut query: Query<&mut FpsControllerInput>) {
     }
 }
 
-pub fn fps_controller_input(
+fn fps_controller_input(
     key_input: Res<ButtonInput<KeyCode>>,
     mut mouse_events: MessageReader<MouseMotion>,
     mut query: Query<(&FpsController, &mut FpsControllerInput)>,
@@ -302,18 +481,15 @@ pub fn fps_controller_input(
     }
 }
 
-pub fn fps_controller_look(mut query: Query<(&mut FpsController, &FpsControllerInput)>) {
+fn fps_controller_look(mut query: Query<(&mut FpsController, &FpsControllerInput)>) {
     for (mut controller, input) in query.iter_mut() {
         controller.pitch = input.pitch;
         controller.yaw = input.yaw;
     }
 }
 
-/// Move the FPS controller using radial gravity.
-///
-/// All movement is computed relative to the local up vector (from Earth center).
 #[allow(clippy::too_many_lines, clippy::type_complexity)]
-pub fn fps_controller_move(
+fn fps_controller_move(
     time: Res<Time<Fixed>>,
     spatial_query_pipeline: Res<SpatialQueryPipeline>,
     camera_query: Query<&FloatingOriginCamera>,
@@ -342,15 +518,12 @@ pub fn fps_controller_move(
     {
         controller.previous_translation = Some(transform.translation);
 
-        // Compute ECEF position and radial frame.
         let ecef_pos = camera_pos + position.0.as_dvec3();
         let frame = RadialFrame::from_ecef_position(ecef_pos);
         let local_up = frame.up;
 
         let speeds = Vec3::new(controller.side_speed, 0.0, controller.forward_speed);
 
-        // Build movement directions relative to local up.
-        // Negative yaw = turned right (clockwise when viewed from above).
         let forward = frame.north * input.yaw.cos() - frame.east * input.yaw.sin();
         let right = frame.east * input.yaw.cos() + frame.north * input.yaw.sin();
         let move_to_world = Mat3::from_cols(right, local_up, forward);
@@ -358,8 +531,7 @@ pub fn fps_controller_move(
         let mut wish_direction = move_to_world * (input.movement * speeds);
         let mut wish_speed = wish_direction.length();
         if wish_speed > f32::EPSILON {
-            // Avoid division by zero.
-            wish_direction /= wish_speed; // Effectively normalize, avoid length computation twice.
+            wish_direction /= wish_speed;
         }
         let max_speed = if input.crouch {
             controller.crouched_speed
@@ -370,16 +542,10 @@ pub fn fps_controller_move(
         };
         wish_speed = f32::min(wish_speed, max_speed);
 
-        // Compute downward direction for shape cast.
         let down_dir = Dir3::new(-local_up).unwrap_or(Dir3::NEG_Y);
 
-        // Shape cast downwards to find ground.
-        // Better than a ray cast as it handles when you are near the edge of a surface.
         let filter = SpatialQueryFilter::default().with_excluded_entities([entity]);
         if let Some(hit) = spatial_query_pipeline.cast_shape(
-            // Consider when the controller is right up against a wall.
-            // We do not want the shape cast to detect it,
-            // so provide a slightly smaller collider in the XZ plane.
             &scaled_collider_laterally(&collider, SLIGHT_SCALE_DOWN),
             transform.translation,
             transform.rotation,
@@ -389,9 +555,7 @@ pub fn fps_controller_move(
         ) {
             let has_traction = Vec3::dot(hit.normal1, local_up) > controller.traction_normal_cutoff;
 
-            // Only apply friction after at least one tick, allows b-hopping without losing speed.
             if controller.ground_tick >= 1 && has_traction {
-                // Compute lateral speed (perpendicular to local up).
                 let vertical_component = velocity.0.dot(local_up) * local_up;
                 let lateral_velocity = velocity.0 - vertical_component;
                 let lateral_speed = lateral_velocity.length();
@@ -406,7 +570,6 @@ pub fn fps_controller_move(
                     velocity.0 = Vec3::ZERO;
                 }
                 if controller.ground_tick == 1 {
-                    // Snap to ground.
                     velocity.0 -= local_up * hit.distance;
                 }
             }
@@ -432,7 +595,6 @@ pub fn fps_controller_move(
                 }
             }
 
-            // Increment ground tick but cap at max value.
             controller.ground_tick = controller.ground_tick.saturating_add(1);
         } else {
             controller.ground_tick = 0;
@@ -445,11 +607,9 @@ pub fn fps_controller_move(
                 velocity.0,
                 dt,
             );
-            // Apply radial gravity.
             add -= local_up * GRAVITY * dt;
             velocity.0 += add;
 
-            // Clamp lateral air speed.
             let vertical_component = velocity.0.dot(local_up) * local_up;
             let lateral_velocity = velocity.0 - vertical_component;
             let air_speed = lateral_velocity.length();
@@ -458,8 +618,6 @@ pub fn fps_controller_move(
                 velocity.0 = vertical_component + lateral_velocity * ratio;
             }
         };
-
-        /* Crouching */
 
         let crouch_height = controller.crouch_height;
         let upright_height = controller.upright_height;
@@ -474,8 +632,6 @@ pub fn fps_controller_move(
 
         if let Some(capsule) = collider.shape().as_capsule() {
             let radius = capsule.radius;
-            // For radial coordinates, the capsule axis should align with local up.
-            // We store the half-height along local up.
             let half = Point::from(local_up * (controller.height * 0.5 - radius));
             collider.set_shape(SharedShape::capsule(-half, half, radius));
         } else if let Some(cylinder) = collider.shape().as_cylinder() {
@@ -485,14 +641,10 @@ pub fn fps_controller_move(
             panic!("Controller must use a cylinder or capsule collider")
         }
 
-        // Step offset really only works best for cylinders.
-        // For capsules the player has to practically teleported to fully step up.
         if collider.shape().as_cylinder().is_some()
             && controller.experimental_step_offset > f32::EPSILON
             && controller.ground_tick >= 1
         {
-            // Try putting the player forward, but instead lifted upward by the step offset.
-            // If we can find a surface below us, we can adjust our position to be on top of it.
             let future_position = transform.translation + velocity.0 * dt;
             let future_position_lifted =
                 future_position + local_up * controller.experimental_step_offset;
@@ -515,14 +667,12 @@ pub fn fps_controller_move(
             }
         }
 
-        // Prevent falling off ledges.
         if controller.experimental_enable_ledge_cling
             && controller.ground_tick >= 1
             && input.crouch
             && !input.jump
         {
             for _ in 0..2 {
-                // Find the component of our velocity that is overhanging and subtract it off.
                 let overhang = overhang_component(
                     entity,
                     &collider,
@@ -536,7 +686,6 @@ pub fn fps_controller_move(
                     velocity.0 -= overhang;
                 }
             }
-            // If we are still overhanging consider unsolvable and freeze.
             if overhang_component(
                 entity,
                 &collider,
@@ -554,8 +703,6 @@ pub fn fps_controller_move(
     }
 }
 
-/// Returns the offset that puts a point at the center of the player transform to the bottom of the collider.
-/// Needed for when we want to originate something at the foot of the player.
 fn collider_y_offset(collider: &Collider, local_up: Vec3) -> Vec3 {
     local_up
         * if let Some(cylinder) = collider.shape().as_cylinder() {
@@ -567,7 +714,6 @@ fn collider_y_offset(collider: &Collider, local_up: Vec3) -> Vec3 {
         }
 }
 
-/// Return a collider that is scaled laterally (perpendicular to local up) but not vertically.
 fn scaled_collider_laterally(collider: &Collider, scale: f32) -> Collider {
     if let Some(cylinder) = collider.shape().as_cylinder() {
         Collider::cylinder(cylinder.radius * scale, cylinder.half_height * 2.0)
@@ -591,9 +737,6 @@ fn overhang_component(
         return None;
     }
 
-    // Cast a segment (zero radius capsule) from our next position back towards us (sweeping a rectangle).
-    // If there is a ledge in front of us we will hit the edge of it.
-    // We can use the normal of the hit to subtract off the component that is overhanging.
     let cast_capsule = Collider::capsule(0.01, 0.5);
     let filter = SpatialQueryFilter::default().with_excluded_entities([entity]);
     let collider_offset = collider_y_offset(collider, local_up);
@@ -615,7 +758,6 @@ fn overhang_component(
             false,
             &filter,
         );
-        // Make sure that this is actually a ledge, e.g. there is no ground in front of us.
         if cast.is_none() {
             let normal = -hit.normal1;
             let alignment = Vec3::dot(velocity, normal);
@@ -650,17 +792,12 @@ fn get_axis(key_input: &Res<ButtonInput<KeyCode>>, key_pos: KeyCode, key_neg: Ke
     get_pressed(key_input, key_pos) - get_pressed(key_input, key_neg)
 }
 
-//     ____                 __
-//    / __ \___  ____  ____/ /__  _____
-//   / /_/ / _ \/ __ \/ __  / _ \/ ___/
-//  / _, _/  __/ / / / /_/ /  __/ /
-// /_/ |_|\___/_/ /_/\__,_/\___/_/
+// ============================================================================
+// Render system
+// ============================================================================
 
-/// Render the camera by interpolating from the logical player position.
-///
-/// Updates the FloatingOriginCamera to follow the logical player.
 #[allow(clippy::type_complexity)]
-pub fn fps_controller_render(
+fn fps_controller_render(
     fixed_time: Res<Time<Fixed>>,
     mut camera_query: Query<&mut FloatingOriginCamera>,
     mut render_query: Query<(&mut Transform, &RenderPlayer), With<RenderPlayer>>,
@@ -686,7 +823,6 @@ pub fn fps_controller_render(
             let current = logical_transform.translation;
             let interpolated = previous.unwrap_or(current).lerp(current, t);
 
-            // Compute the radial frame for rotation.
             let ecef_pos = world_pos.position;
             let frame = RadialFrame::from_ecef_position(ecef_pos);
             let local_up = frame.up;
@@ -694,22 +830,15 @@ pub fn fps_controller_render(
             let collider_offset = collider_y_offset(collider, local_up);
             let camera_offset = local_up * camera_config.height_offset;
 
-            // Camera stays at origin; we update FloatingOriginCamera instead.
             render_transform.translation = Vec3::ZERO;
 
-            // Compute rotation using radial frame.
-            // Yaw rotates around local up, pitch rotates around local right.
-            // Negative yaw = turned right (clockwise when viewed from above).
-            // Positive pitch = looking up (toward local_up).
             let forward = frame.north * controller.yaw.cos() - frame.east * controller.yaw.sin();
             let look_direction =
                 forward * controller.pitch.cos() + local_up * controller.pitch.sin();
 
             render_transform.look_to(look_direction, local_up);
 
-            // Update the floating origin camera to the player's world position.
             if let Ok(mut floating_camera) = camera_query.single_mut() {
-                // The camera is at the player's physics position plus the visual offset.
                 let offset_local = collider_offset + camera_offset;
                 let offset_world = DVec3::new(
                     f64::from(offset_local.x + interpolated.x - current.x),
@@ -722,7 +851,6 @@ pub fn fps_controller_render(
     }
 }
 
-/// Sync the floating origin resource with the camera position in FPS mode.
 fn sync_floating_origin_fps(
     mut origin: ResMut<FloatingOrigin>,
     query: Query<&FloatingOriginCamera>,
