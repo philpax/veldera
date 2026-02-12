@@ -21,7 +21,7 @@ use crate::floating_origin::FloatingOriginCamera;
 use crate::geo::{
     GEOCODING_THROTTLE_SECS, GeocodingState, HttpClient, TeleportAnimation, TeleportState,
 };
-use crate::lod::LodState;
+use crate::lod::{LodProfile, LodState};
 use crate::mesh::RocktreeMeshMarker;
 use crate::physics::{PHYSICS_RANGE, is_physics_debug_enabled, toggle_physics_debug};
 use crate::time_of_day::{TimeMode, TimeOfDayState};
@@ -106,6 +106,7 @@ struct CameraParams<'w, 's> {
 struct DiagnosticsParams<'w, 's> {
     diagnostics: Res<'w, DiagnosticsStore>,
     lod_state: Res<'w, LodState>,
+    lod_profile: Res<'w, LodProfile>,
     mesh_query: Query<'w, 's, &'static RocktreeMeshMarker>,
     config_store: ResMut<'w, GizmoConfigStore>,
 }
@@ -559,6 +560,24 @@ fn render_diagnostics_tab(
         "Nodes: {loaded_nodes} loaded, {loading_nodes} loading"
     ));
     ui.label(format!("Meshes: {mesh_count}"));
+    ui.label(format!(
+        "Camera speed: {:.1} m/s",
+        diag.lod_state.camera_speed()
+    ));
+
+    ui.separator();
+
+    // LOD profile.
+    let profile = &diag.lod_profile;
+    ui.label(format!(
+        "Proximity radius: {:.0} m",
+        profile.proximity_radius
+    ));
+    ui.label(format!("Grace period: {:.1} s", profile.grace_period_secs));
+    ui.label(format!(
+        "BFS FOV multiplier: {:.2}x",
+        profile.bfs_fov_multiplier
+    ));
 
     ui.separator();
 
