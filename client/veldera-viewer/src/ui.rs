@@ -24,7 +24,7 @@ use crate::geo::{
 };
 use crate::lod::LodState;
 use crate::mesh::RocktreeMeshMarker;
-use crate::physics::{PHYSICS_RANGE, is_physics_debug_enabled, toggle_physics_debug};
+use crate::physics::{is_physics_debug_enabled, toggle_physics_debug};
 use crate::time_of_day::{TimeMode, TimeOfDayState};
 
 /// Plugin for debug UI overlay.
@@ -84,6 +84,7 @@ struct LocationParams<'w, 's> {
     time_of_day: ResMut<'w, TimeOfDayState>,
     http_client: Res<'w, HttpClient>,
     spawner: TaskSpawner<'w, 's>,
+    altitude_request: ResMut<'w, AltitudeRequest>,
 }
 
 /// Resources for camera display and control.
@@ -146,7 +147,7 @@ fn debug_ui_system(
     let ctx = contexts.ctx_mut()?;
 
     // Compute camera position and altitude (needed for lat/lon and diagnostics).
-    let (position, altitude) = if let Ok((cam, _, _)) = camera.camera_query.single() {
+    let (position, _altitude) = if let Ok((cam, _, _)) = camera.camera_query.single() {
         let pos = cam.position;
         let alt_m = pos.length() - camera.settings.earth_radius;
         (pos, alt_m)
@@ -177,13 +178,13 @@ fn debug_ui_system(
 
             match ui_state.selected_tab {
                 DebugTab::LocationAndTime => {
-                    render_location_tab(ui, &time, &mut location, position);
+                    render_location_tab(ui, &time, &mut location, &camera.settings, position);
                 }
                 DebugTab::Camera => {
-                    render_camera_tab(ui, &mut camera.settings, &camera.camera_mode);
+                    render_camera_tab(ui, &mut camera);
                 }
                 DebugTab::Diagnostics => {
-                    render_diagnostics_tab(ui, &mut diag, position, altitude);
+                    render_diagnostics_tab(ui, &mut diag, position);
                 }
             }
         });
@@ -196,9 +197,11 @@ fn render_location_tab(
     ui: &mut egui::Ui,
     time: &Time,
     location: &mut LocationParams,
+    settings: &CameraSettings,
     position: DVec3,
 ) {
     let (lat_deg, lon_deg) = ecef_to_lat_lon(position);
+    let altitude = position.length() - settings.earth_radius;
 
     // Update text fields when not editing and not teleporting.
     if !location.coord_state.is_editing && !location.teleport_state.is_pending() {
@@ -298,11 +301,11 @@ fn render_location_tab(
         ui.colored_label(egui::Color32::RED, format!("Teleport failed: {error}"));
     }
 
-    // Lat/long input fields.
+    // Lat/lon input fields on the same row.
     ui.horizontal(|ui| {
         ui.label("Lat:");
         let lat_response = ui.add(
-            egui::TextEdit::singleline(&mut location.coord_state.lat_text).desired_width(100.0),
+            egui::TextEdit::singleline(&mut location.coord_state.lat_text).desired_width(80.0),
         );
         if lat_response.has_focus() {
             location.coord_state.is_editing = true;
@@ -316,12 +319,10 @@ fn render_location_tab(
             }
             location.coord_state.is_editing = false;
         }
-    });
 
-    ui.horizontal(|ui| {
         ui.label("Lon:");
         let lon_response = ui.add(
-            egui::TextEdit::singleline(&mut location.coord_state.lon_text).desired_width(100.0),
+            egui::TextEdit::singleline(&mut location.coord_state.lon_text).desired_width(80.0),
         );
         if lon_response.has_focus() {
             location.coord_state.is_editing = true;
@@ -334,6 +335,23 @@ fn render_location_tab(
                 new_coords = Some((lat.clamp(-90.0, 90.0), lon));
             }
             location.coord_state.is_editing = false;
+        }
+    });
+
+    // Altitude slider (logarithmic scale from 1m to 10,000km).
+    let mut slider_alt = altitude.clamp(1.0, 10_000_000.0);
+    ui.horizontal(|ui| {
+        ui.label("Alt:");
+        if ui
+            .add(
+                egui::Slider::new(&mut slider_alt, 1.0..=10_000_000.0)
+                    .logarithmic(true)
+                    .update_while_editing(false)
+                    .suffix(" m"),
+            )
+            .changed()
+        {
+            location.altitude_request.request(slider_alt);
         }
     });
 
@@ -477,32 +495,35 @@ fn render_location_tab(
 }
 
 /// Render the camera tab content.
-fn render_camera_tab(ui: &mut egui::Ui, settings: &mut CameraSettings, camera_mode: &CameraMode) {
+fn render_camera_tab(ui: &mut egui::Ui, camera: &mut CameraParams) {
     // Camera mode indicator.
-    let mode_str = match camera_mode {
+    let mode_str = match camera.camera_mode.current() {
         CameraMode::Flycam => "Flycam",
         CameraMode::FpsController => "FPS controller",
+        CameraMode::FollowEntity => "Following entity",
     };
     ui.label(format!("Mode: {mode_str} (N to toggle)"));
 
     ui.separator();
 
-    // Speed slider.
-    ui.horizontal(|ui| {
-        ui.label("Speed:");
-        ui.add(
-            egui::Slider::new(&mut settings.base_speed, MIN_SPEED..=MAX_SPEED)
-                .logarithmic(true)
-                .suffix(" m/s"),
-        );
-    });
+    // Speed slider (only in flycam mode).
+    if camera.camera_mode.is_flycam() {
+        ui.horizontal(|ui| {
+            ui.label("Speed:");
+            ui.add(
+                egui::Slider::new(&mut camera.settings.base_speed, MIN_SPEED..=MAX_SPEED)
+                    .logarithmic(true)
+                    .suffix(" m/s"),
+            );
+        });
 
-    ui.separator();
+        ui.separator();
+    }
 
     // Teleport animation mode selector.
     ui.horizontal(|ui| {
         ui.label("Teleport style:");
-        let current_label = match settings.teleport_animation_mode {
+        let current_label = match camera.settings.teleport_animation_mode {
             TeleportAnimationMode::Classic => "Classic",
             TeleportAnimationMode::HorizonChasing => "Horizon",
         };
@@ -510,12 +531,12 @@ fn render_camera_tab(ui: &mut egui::Ui, settings: &mut CameraSettings, camera_mo
             .selected_text(current_label)
             .show_ui(ui, |ui| {
                 ui.selectable_value(
-                    &mut settings.teleport_animation_mode,
+                    &mut camera.settings.teleport_animation_mode,
                     TeleportAnimationMode::Classic,
                     "Classic",
                 );
                 ui.selectable_value(
-                    &mut settings.teleport_animation_mode,
+                    &mut camera.settings.teleport_animation_mode,
                     TeleportAnimationMode::HorizonChasing,
                     "Horizon",
                 );
@@ -524,12 +545,7 @@ fn render_camera_tab(ui: &mut egui::Ui, settings: &mut CameraSettings, camera_mo
 }
 
 /// Render the diagnostics tab content.
-fn render_diagnostics_tab(
-    ui: &mut egui::Ui,
-    diag: &mut DiagnosticsParams,
-    position: DVec3,
-    altitude: f64,
-) {
+fn render_diagnostics_tab(ui: &mut egui::Ui, diag: &mut DiagnosticsParams, position: DVec3) {
     let fps = diag
         .diagnostics
         .get(&FrameTimeDiagnosticsPlugin::FPS)
@@ -540,47 +556,16 @@ fn render_diagnostics_tab(
     let mesh_count = diag.mesh_query.iter().count();
     let collider_count = diag.lod_state.physics_collider_count();
 
-    let altitude_str = if altitude >= 1_000_000.0 {
-        let mm = altitude / 1_000_000.0;
-        format!("{mm:.1} Mm")
-    } else if altitude >= 1_000.0 {
-        let km = altitude / 1_000.0;
-        format!("{km:.1} km")
-    } else {
-        format!("{altitude:.0} m")
-    };
-
     ui.label(format!("FPS: {fps:.0}"));
     ui.label(format!(
         "Position: ({:.0}, {:.0}, {:.0})",
         position.x, position.y, position.z
     ));
-    ui.label(format!("Altitude: {altitude_str}"));
     ui.label(format!(
         "Nodes: {loaded_nodes} loaded, {loading_nodes} loading"
     ));
     ui.label(format!("Meshes: {mesh_count}"));
-
-    ui.separator();
-
     ui.label(format!("Colliders: {collider_count}"));
-
-    // Show whether physics is active based on altitude.
-    let physics_active = altitude <= PHYSICS_RANGE;
-    if physics_active {
-        ui.label(format!(
-            "Physics active (altitude {:.0}m <= {:.0}m range)",
-            altitude, PHYSICS_RANGE
-        ));
-    } else {
-        ui.colored_label(
-            egui::Color32::GRAY,
-            format!(
-                "Physics inactive (altitude {:.0}m > {:.0}m range)",
-                altitude, PHYSICS_RANGE
-            ),
-        );
-    }
 
     ui.separator();
 
