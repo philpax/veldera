@@ -135,6 +135,7 @@ fn setup_scene(
         DirectionalLight {
             color: Color::WHITE,
             illuminance: lux::RAW_SUNLIGHT,
+            shadows_enabled: true,
             ..default()
         },
         Transform::default(),

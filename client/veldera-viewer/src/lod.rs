@@ -21,6 +21,7 @@
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
+use bevy::light::NotShadowCaster;
 use bevy::prelude::*;
 use glam::{DMat4, DVec3};
 use rocktree::{
@@ -602,7 +603,7 @@ fn poll_lod_bulk_tasks(mut lod_state: ResMut<LodState>, channels: Res<LodChannel
 
         match result {
             Ok(bulk) => {
-                tracing::info!(
+                tracing::debug!(
                     "LOD: Loaded bulk '{}': {} nodes",
                     bulk.path,
                     bulk.nodes.len()
@@ -692,6 +693,8 @@ fn poll_lod_node_tasks(
                                 obb,
                                 meters_per_texel: node.meters_per_texel,
                             },
+                            // Terrain receives shadows but doesn't cast them.
+                            NotShadowCaster,
                         ))
                         .id();
                     entities.push(entity);
