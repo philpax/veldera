@@ -1,7 +1,9 @@
 //! Texture coordinate unpacking.
 
-use crate::error::{DecodeError, DecodeResult};
-use crate::{UvTransform, Vertex};
+use crate::{
+    UvTransform, Vertex,
+    error::{DecodeError, DecodeResult},
+};
 
 /// Unpack texture coordinates into vertex array.
 ///

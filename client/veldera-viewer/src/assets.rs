@@ -2,10 +2,11 @@
 //!
 //! Provides loaders for asset types that Bevy doesn't handle by default.
 
-use bevy::asset::io::Reader;
-use bevy::asset::{AssetLoader, LoadContext};
-use bevy::prelude::*;
-use bevy::reflect::TypePath;
+use bevy::{
+    asset::{AssetLoader, LoadContext, io::Reader},
+    prelude::*,
+    reflect::TypePath,
+};
 
 /// Plugin for custom asset loaders.
 pub struct AssetsPlugin;

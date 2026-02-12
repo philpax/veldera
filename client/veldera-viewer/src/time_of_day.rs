@@ -7,8 +7,7 @@
 use bevy::prelude::*;
 use web_time::Instant;
 
-use crate::coords::ecef_to_lat_lon;
-use crate::floating_origin::FloatingOriginCamera;
+use crate::{coords::ecef_to_lat_lon, floating_origin::FloatingOriginCamera};
 
 /// Earth's axial tilt in degrees.
 const AXIAL_TILT_DEG: f64 = 23.44;

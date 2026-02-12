@@ -3,8 +3,10 @@
 //! CRN is a compressed texture format that stores DXT1-encoded data
 //! in a highly compressed form. This module decodes CRN to RGBA pixels.
 
-use crate::error::{DecodeError, DecodeResult};
-use crate::texture::DecodedTexture;
+use crate::{
+    error::{DecodeError, DecodeResult},
+    texture::DecodedTexture,
+};
 use texture2ddecoder::CrnTextureInfo;
 
 /// Decode CRN (Crunch) data to RGBA pixels.

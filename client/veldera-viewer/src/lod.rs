@@ -18,11 +18,12 @@
 //! to avoid overlapping geometry. Colliders are active within `PHYSICS_RANGE`
 //! of the camera.
 
-use std::collections::{HashMap, HashSet};
-use std::sync::Arc;
+use std::{
+    collections::{HashMap, HashSet},
+    sync::Arc,
+};
 
-use bevy::light::NotShadowCaster;
-use bevy::prelude::*;
+use bevy::{light::NotShadowCaster, prelude::*};
 use glam::{DMat4, DVec3};
 use rocktree::{
     BulkMetadata, BulkRequest, Frustum, LodMetrics, Mesh as RocktreeMesh, Node, NodeMetadata,
@@ -30,16 +31,20 @@ use rocktree::{
 };
 use rocktree_decode::OrientedBoundingBox;
 
-use crate::async_runtime::TaskSpawner;
-use crate::floating_origin::FloatingOriginCamera;
-use crate::loader::LoaderState;
-use crate::mesh::{
-    RocktreeMeshMarker, convert_mesh, convert_texture, matrix_to_world_position_and_transform,
+use crate::{
+    async_runtime::TaskSpawner,
+    floating_origin::FloatingOriginCamera,
+    loader::LoaderState,
+    mesh::{
+        RocktreeMeshMarker, convert_mesh, convert_texture, matrix_to_world_position_and_transform,
+    },
+    terrain_material::{TerrainMaterial, TerrainMaterialExtension},
 };
-use crate::terrain_material::{TerrainMaterial, TerrainMaterialExtension};
 
-use crate::floating_origin::WorldPosition;
-use crate::physics::{PHYSICS_LOD_DEPTH, PHYSICS_RANGE, terrain::TerrainCollider};
+use crate::{
+    floating_origin::WorldPosition,
+    physics::{PHYSICS_LOD_DEPTH, PHYSICS_RANGE, terrain::TerrainCollider},
+};
 
 use avian3d::prelude::*;
 
@@ -794,8 +799,7 @@ fn update_physics_colliders(
     mut lod_state: ResMut<LodState>,
     camera_query: Query<&FloatingOriginCamera>,
 ) {
-    use crate::physics::DebugRender;
-    use crate::physics::terrain::create_terrain_collider;
+    use crate::physics::{DebugRender, terrain::create_terrain_collider};
 
     let Ok(camera) = camera_query.single() else {
         return;

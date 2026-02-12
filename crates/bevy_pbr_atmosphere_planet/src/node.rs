@@ -1,28 +1,32 @@
 //! Derived from Bevy 0.18 bevy_pbr atmosphere implementation.
 //! See NOTICE.md for attribution and licensing.
 
-use bevy::camera::Viewport;
-use bevy::ecs::query::QueryItem;
-use bevy::ecs::system::lifetimeless::Read;
-use bevy::ecs::world::World;
-use bevy::math::{UVec2, Vec3Swizzles};
-use bevy::pbr::ViewLightsUniformOffset;
-use bevy::render::camera::ExtractedCamera;
-use bevy::render::diagnostic::RecordDiagnostics;
-use bevy::render::extract_component::DynamicUniformIndex;
-use bevy::render::render_graph::{NodeRunError, RenderGraphContext, RenderLabel, ViewNode};
-use bevy::render::render_resource::{
-    ComputePass, ComputePassDescriptor, PipelineCache, RenderPassDescriptor,
+use bevy::{
+    camera::Viewport,
+    ecs::{query::QueryItem, system::lifetimeless::Read, world::World},
+    math::{UVec2, Vec3Swizzles},
+    pbr::ViewLightsUniformOffset,
+    render::{
+        camera::ExtractedCamera,
+        diagnostic::RecordDiagnostics,
+        extract_component::DynamicUniformIndex,
+        render_graph::{NodeRunError, RenderGraphContext, RenderLabel, ViewNode},
+        render_resource::{
+            ComputePass, ComputePassDescriptor, PipelineCache, RenderPassDescriptor,
+        },
+        renderer::RenderContext,
+        view::{ViewTarget, ViewUniformOffset},
+    },
 };
-use bevy::render::renderer::RenderContext;
-use bevy::render::view::{ViewTarget, ViewUniformOffset};
 
 use bevy::camera::MainPassResolutionOverride;
 
-use crate::GpuAtmosphereSettings;
-use crate::resources::{
-    AtmosphereBindGroups, AtmosphereLutPipelines, AtmosphereTransformsOffset, GpuAtmosphere,
-    RenderSkyPipelineId,
+use crate::{
+    GpuAtmosphereSettings,
+    resources::{
+        AtmosphereBindGroups, AtmosphereLutPipelines, AtmosphereTransformsOffset, GpuAtmosphere,
+        RenderSkyPipelineId,
+    },
 };
 
 #[derive(PartialEq, Eq, Debug, Copy, Clone, Hash, RenderLabel)]

@@ -8,9 +8,7 @@ mod components;
 mod physics;
 
 use avian3d::prelude::*;
-use bevy::asset::LoadedFolder;
-use bevy::prelude::*;
-use bevy::scene::SceneInstanceReady;
+use bevy::{asset::LoadedFolder, prelude::*, scene::SceneInstanceReady};
 use bevy_egui::input::egui_wants_any_keyboard_input;
 use glam::DVec3;
 
@@ -19,10 +17,10 @@ pub use components::{
     VehiclePhysicsConfig, VehicleState, VehicleThrusterConfig,
 };
 
-use crate::camera::{
-    CameraModeState, CameraModeTransitions, FlightCamera, FollowedEntity, RadialFrame,
+use crate::{
+    camera::{CameraModeState, CameraModeTransitions, FlightCamera, FollowedEntity, RadialFrame},
+    floating_origin::{FloatingOriginCamera, WorldPosition},
 };
-use crate::floating_origin::{FloatingOriginCamera, WorldPosition};
 
 /// Plugin for vehicle functionality.
 pub struct VehiclePlugin;

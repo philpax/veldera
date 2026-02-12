@@ -1,8 +1,10 @@
 //! Octant mask and layer bounds unpacking.
 
-use crate::Vertex;
-use crate::error::{DecodeError, DecodeResult};
-use crate::varint::read_varint;
+use crate::{
+    Vertex,
+    error::{DecodeError, DecodeResult},
+    varint::read_varint,
+};
 
 /// Unpack octant masks for vertices and compute layer bounds.
 ///

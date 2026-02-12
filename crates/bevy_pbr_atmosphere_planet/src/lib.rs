@@ -17,31 +17,37 @@
 mod node;
 mod resources;
 
-use bevy::app::{App, Plugin};
-use bevy::asset::{Handle, embedded_asset};
-use bevy::ecs::component::Component;
-use bevy::ecs::query::{Changed, QueryItem, With};
-use bevy::ecs::schedule::IntoScheduleConfigs;
-use bevy::ecs::system::{Query, lifetimeless::Read};
-use bevy::math::{UVec2, UVec3, Vec3};
-use bevy::pbr::ScatteringMedium;
-use bevy::reflect::{Reflect, std_traits::ReflectDefault};
-use bevy::render::extract_component::{
-    ExtractComponent, ExtractComponentPlugin, UniformComponentPlugin,
+use bevy::{
+    app::{App, Plugin},
+    asset::{Handle, embedded_asset},
+    ecs::{
+        component::Component,
+        query::{Changed, QueryItem, With},
+        schedule::IntoScheduleConfigs,
+        system::{Query, lifetimeless::Read},
+    },
+    math::{UVec2, UVec3, Vec3},
+    pbr::ScatteringMedium,
+    reflect::{Reflect, std_traits::ReflectDefault},
+    render::{
+        Render, RenderApp, RenderStartup, RenderSystems,
+        extract_component::{ExtractComponent, ExtractComponentPlugin, UniformComponentPlugin},
+        render_graph::{RenderGraphExt, ViewNodeRunner},
+        render_resource::{
+            DownlevelFlags, ShaderType, SpecializedRenderPipelines, TextureFormat, TextureUsages,
+        },
+        renderer::RenderAdapter,
+        view::Hdr,
+    },
+    shader::load_shader_library,
 };
-use bevy::render::render_graph::{RenderGraphExt, ViewNodeRunner};
-use bevy::render::render_resource::{
-    DownlevelFlags, ShaderType, SpecializedRenderPipelines, TextureFormat, TextureUsages,
-};
-use bevy::render::renderer::RenderAdapter;
-use bevy::render::view::Hdr;
-use bevy::render::{Render, RenderApp, RenderStartup, RenderSystems};
-use bevy::shader::load_shader_library;
 use tracing::warn;
 
-use bevy::asset::AssetId;
-use bevy::core_pipeline::core_3d::graph::{Core3d, Node3d};
-use bevy::prelude::Camera3d;
+use bevy::{
+    asset::AssetId,
+    core_pipeline::core_3d::graph::{Core3d, Node3d},
+    prelude::Camera3d,
+};
 
 pub use resources::{AtmosphereTransforms, GpuAtmosphere, RenderSkyBindGroupLayouts};
 

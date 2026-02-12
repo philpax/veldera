@@ -3,16 +3,16 @@
 //! Extends `StandardMaterial` with per-vertex octant masking to hide vertices
 //! in octants that have loaded children, enabling seamless LOD transitions.
 
-use bevy::asset::embedded_asset;
-use bevy::mesh::MeshVertexBufferLayoutRef;
-use bevy::pbr::{
-    ExtendedMaterial, MaterialExtension, MaterialExtensionKey, MaterialExtensionPipeline,
+use bevy::{
+    asset::embedded_asset,
+    mesh::MeshVertexBufferLayoutRef,
+    pbr::{ExtendedMaterial, MaterialExtension, MaterialExtensionKey, MaterialExtensionPipeline},
+    prelude::*,
+    render::render_resource::{
+        AsBindGroup, RenderPipelineDescriptor, SpecializedMeshPipelineError,
+    },
+    shader::ShaderRef,
 };
-use bevy::prelude::*;
-use bevy::render::render_resource::{
-    AsBindGroup, RenderPipelineDescriptor, SpecializedMeshPipelineError,
-};
-use bevy::shader::ShaderRef;
 
 /// Plugin that registers the terrain material.
 pub struct TerrainMaterialPlugin;

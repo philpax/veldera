@@ -13,14 +13,20 @@ mod projectile;
 pub mod terrain;
 
 pub use avian3d::debug_render::DebugRender;
-use avian3d::debug_render::{PhysicsDebugPlugin, PhysicsGizmos};
-use avian3d::prelude::*;
-use bevy::color::palettes::css::LIME;
-use bevy::gizmos::config::{GizmoConfig, GizmoConfigStore};
-use bevy::prelude::*;
+use avian3d::{
+    debug_render::{PhysicsDebugPlugin, PhysicsGizmos},
+    prelude::*,
+};
+use bevy::{
+    color::palettes::css::LIME,
+    gizmos::config::{GizmoConfig, GizmoConfigStore},
+    prelude::*,
+};
 
-use crate::camera::LogicalPlayer;
-use crate::floating_origin::{FloatingOriginCamera, WorldPosition};
+use crate::{
+    camera::LogicalPlayer,
+    floating_origin::{FloatingOriginCamera, WorldPosition},
+};
 
 pub use terrain::TerrainCollider;
 

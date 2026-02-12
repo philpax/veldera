@@ -2,18 +2,17 @@
 //!
 //! Provides geocoding search, coordinate input, altitude control, and time-of-day settings.
 
-use bevy::ecs::system::SystemParam;
-use bevy::prelude::*;
+use bevy::{ecs::system::SystemParam, prelude::*};
 use bevy_egui::egui;
 use glam::DVec3;
 
-use crate::async_runtime::TaskSpawner;
-use crate::camera::{AltitudeRequest, CameraSettings};
-use crate::coords::ecef_to_lat_lon;
-use crate::geo::{
-    GEOCODING_THROTTLE_SECS, GeocodingState, HttpClient, TeleportAnimation, TeleportState,
+use crate::{
+    async_runtime::TaskSpawner,
+    camera::{AltitudeRequest, CameraSettings},
+    coords::ecef_to_lat_lon,
+    geo::{GEOCODING_THROTTLE_SECS, GeocodingState, HttpClient, TeleportAnimation, TeleportState},
+    time_of_day::{TimeMode, TimeOfDayState},
 };
-use crate::time_of_day::{TimeMode, TimeOfDayState};
 
 /// State for the lat/long text input fields.
 #[derive(Resource, Default)]

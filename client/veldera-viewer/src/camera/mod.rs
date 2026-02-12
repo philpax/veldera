@@ -33,8 +33,10 @@ mod input;
 use avian3d::prelude::*;
 use bevy::prelude::*;
 
-use crate::floating_origin::{FloatingOriginCamera, WorldPosition};
-use crate::launch_params::LaunchParams;
+use crate::{
+    floating_origin::{FloatingOriginCamera, WorldPosition},
+    launch_params::LaunchParams,
+};
 
 pub use follow::{FollowEntityTarget, FollowedEntity};
 pub use fps::{LogicalPlayer, RadialFrame, RenderPlayer, direction_to_yaw_pitch, spawn_fps_player};

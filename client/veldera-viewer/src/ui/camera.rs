@@ -2,15 +2,16 @@
 //!
 //! Displays camera mode and provides settings for flycam and teleport animation.
 
-use bevy::ecs::system::SystemParam;
-use bevy::prelude::*;
+use bevy::{ecs::system::SystemParam, prelude::*};
 use bevy_egui::egui;
 
-use crate::camera::{
-    CameraMode, CameraModeState, CameraSettings, FlightCamera, MAX_SPEED, MIN_SPEED,
-    TeleportAnimationMode,
+use crate::{
+    camera::{
+        CameraMode, CameraModeState, CameraSettings, FlightCamera, MAX_SPEED, MIN_SPEED,
+        TeleportAnimationMode,
+    },
+    floating_origin::FloatingOriginCamera,
 };
-use crate::floating_origin::FloatingOriginCamera;
 
 /// Resources for camera display and control.
 #[derive(SystemParam)]

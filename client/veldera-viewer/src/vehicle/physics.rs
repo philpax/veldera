@@ -3,16 +3,20 @@
 //! Implements PID-controlled hover thrusters with radial gravity integration.
 
 use avian3d::prelude::*;
-use bevy::prelude::*;
-use bevy::window::{CursorGrabMode, CursorOptions};
+use bevy::{
+    prelude::*,
+    window::{CursorGrabMode, CursorOptions},
+};
 
 use super::components::{
     ThrusterDiagnostic, Vehicle, VehicleDragConfig, VehicleInput, VehicleMovementConfig,
     VehiclePhysicsConfig, VehicleState, VehicleThrusterConfig,
 };
-use crate::camera::{CameraModeState, RadialFrame};
-use crate::floating_origin::{FloatingOriginCamera, WorldPosition};
-use crate::ui::VehicleRightRequest;
+use crate::{
+    camera::{CameraModeState, RadialFrame},
+    floating_origin::{FloatingOriginCamera, WorldPosition},
+    ui::VehicleRightRequest,
+};
 
 /// Jump cooldown in seconds.
 const JUMP_COOLDOWN: f32 = 2.0;

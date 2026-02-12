@@ -22,14 +22,11 @@ mod vehicle;
 
 use async_runtime::AsyncRuntimePlugin;
 use atmosphere::{AtmosphereBundle, AtmosphereIntegrationPlugin};
-use bevy::audio::SpatialListener;
-use bevy::camera::Exposure;
-use bevy::core_pipeline::tonemapping::Tonemapping;
-use bevy::light::light_consts::lux;
-use bevy::pbr::ScatteringMedium;
-use bevy::post_process::bloom::Bloom;
-use bevy::prelude::*;
-use bevy::render::view::Hdr;
+use bevy::{
+    audio::SpatialListener, camera::Exposure, core_pipeline::tonemapping::Tonemapping,
+    light::light_consts::lux, pbr::ScatteringMedium, post_process::bloom::Bloom, prelude::*,
+    render::view::Hdr,
+};
 use camera::{CameraControllerPlugin, CameraSettings, FlightCamera};
 use coords::lat_lon_to_ecef;
 use floating_origin::{FloatingOriginCamera, FloatingOriginPlugin};

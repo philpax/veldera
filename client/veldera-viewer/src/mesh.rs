@@ -3,9 +3,11 @@
 //! Converts rocktree mesh data (packed vertices, triangle strips) to Bevy's
 //! mesh format (positions, normals, UVs, triangle lists).
 
-use bevy::asset::RenderAssetUsages;
-use bevy::mesh::{Indices, PrimitiveTopology};
-use bevy::prelude::*;
+use bevy::{
+    asset::RenderAssetUsages,
+    mesh::{Indices, PrimitiveTopology},
+    prelude::*,
+};
 use rocktree::{Mesh as RocktreeMesh, TextureFormat};
 
 /// Convert a rocktree mesh to a Bevy mesh.

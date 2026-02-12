@@ -4,18 +4,19 @@
 //! elevation lookup via Open Elevation API.
 
 use avian3d::prelude::*;
-use bevy::audio::Volume;
-use bevy::prelude::*;
+use bevy::{audio::Volume, prelude::*};
 use glam::DVec3;
 use serde::Deserialize;
 
-use crate::async_runtime::TaskSpawner;
-use crate::camera::{
-    CameraMode, CameraModeState, CameraSettings, FlightCamera, LogicalPlayer, RadialFrame,
-    RenderPlayer, TeleportAnimationMode, direction_to_yaw_pitch, spawn_fps_player,
+use crate::{
+    async_runtime::TaskSpawner,
+    camera::{
+        CameraMode, CameraModeState, CameraSettings, FlightCamera, LogicalPlayer, RadialFrame,
+        RenderPlayer, TeleportAnimationMode, direction_to_yaw_pitch, spawn_fps_player,
+    },
+    coords::{lat_lon_to_ecef, slerp_dvec3, smootherstep},
+    floating_origin::FloatingOriginCamera,
 };
-use crate::coords::{lat_lon_to_ecef, slerp_dvec3, smootherstep};
-use crate::floating_origin::FloatingOriginCamera;
 
 /// Handle to the woosh sound asset.
 #[derive(Resource)]

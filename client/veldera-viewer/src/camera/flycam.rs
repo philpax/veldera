@@ -2,14 +2,18 @@
 //!
 //! Handles WASD movement, mouse look, and speed adjustment for the free-flight camera.
 
-use bevy::ecs::message::MessageReader;
-use bevy::input::mouse::{MouseMotion, MouseScrollUnit, MouseWheel};
-use bevy::prelude::*;
+use bevy::{
+    ecs::message::MessageReader,
+    input::mouse::{MouseMotion, MouseScrollUnit, MouseWheel},
+    prelude::*,
+};
 use bevy_egui::input::egui_wants_any_keyboard_input;
 use glam::DVec3;
 
-use crate::floating_origin::{FloatingOrigin, FloatingOriginCamera};
-use crate::geo::TeleportAnimation;
+use crate::{
+    floating_origin::{FloatingOrigin, FloatingOriginCamera},
+    geo::TeleportAnimation,
+};
 
 use super::{
     CameraModeState, CameraSettings, FlightCamera, MAX_SPEED, MIN_SPEED, cursor_is_grabbed,

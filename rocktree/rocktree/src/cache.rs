@@ -10,10 +10,12 @@
 //! - [`NoCache`]: Passthrough implementation that caches nothing
 
 use crate::error::Result;
-use std::collections::HashMap;
-use std::future::Future;
-use std::pin::Pin;
-use std::sync::{Arc, RwLock};
+use std::{
+    collections::HashMap,
+    future::Future,
+    pin::Pin,
+    sync::{Arc, RwLock},
+};
 
 /// Future type for cache get operations.
 pub type GetFuture<'a> = Pin<Box<dyn Future<Output = Result<Option<Vec<u8>>>> + Send + 'a>>;

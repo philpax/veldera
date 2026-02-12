@@ -27,8 +27,7 @@ impl Plugin for AsyncRuntimePlugin {
 mod native {
     use std::future::Future;
 
-    use bevy::ecs::system::SystemParam;
-    use bevy::prelude::*;
+    use bevy::{ecs::system::SystemParam, prelude::*};
 
     /// Opaque handle to a spawned async task that can be cancelled.
     ///
@@ -92,9 +91,7 @@ mod native {
 mod wasm {
     use std::future::Future;
 
-    use bevy::ecs::system::SystemParam;
-    use bevy::prelude::*;
-    use bevy::tasks::AsyncComputeTaskPool;
+    use bevy::{ecs::system::SystemParam, prelude::*, tasks::AsyncComputeTaskPool};
 
     /// Opaque handle to a spawned async task that can be cancelled.
     ///

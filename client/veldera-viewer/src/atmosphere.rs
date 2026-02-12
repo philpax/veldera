@@ -4,8 +4,7 @@
 //! `FloatingOriginCamera` to provide correct atmospheric scattering on a
 //! spherical Earth.
 
-use bevy::pbr::ScatteringMedium;
-use bevy::prelude::*;
+use bevy::{pbr::ScatteringMedium, prelude::*};
 use bevy_pbr_atmosphere_planet::{
     AtmosphereSettings, SphericalAtmosphere, SphericalAtmosphereCamera,
 };

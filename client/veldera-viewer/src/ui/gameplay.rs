@@ -2,12 +2,13 @@
 //!
 //! Provides vehicle spawning and status display.
 
-use bevy::ecs::system::SystemParam;
-use bevy::prelude::*;
+use bevy::{ecs::system::SystemParam, prelude::*};
 use bevy_egui::egui;
 
-use crate::camera::CameraModeState;
-use crate::vehicle::{Vehicle, VehicleActions, VehicleDefinitions, VehicleState};
+use crate::{
+    camera::CameraModeState,
+    vehicle::{Vehicle, VehicleActions, VehicleDefinitions, VehicleState},
+};
 
 /// Resources for the gameplay tab.
 #[derive(SystemParam)]

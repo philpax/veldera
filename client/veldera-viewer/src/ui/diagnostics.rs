@@ -4,21 +4,25 @@
 
 use std::collections::VecDeque;
 
-use bevy::diagnostic::{DiagnosticsStore, FrameTimeDiagnosticsPlugin};
-use bevy::ecs::system::SystemParam;
-use bevy::gizmos::config::GizmoConfigStore;
-use bevy::prelude::*;
+use bevy::{
+    diagnostic::{DiagnosticsStore, FrameTimeDiagnosticsPlugin},
+    ecs::system::SystemParam,
+    gizmos::config::GizmoConfigStore,
+    prelude::*,
+};
 use bevy_egui::egui;
 use egui_extras::{Column, TableBuilder};
 use egui_plot::{Line, Plot, PlotPoints};
 use glam::DVec3;
 
-use crate::lod::LodState;
-use crate::mesh::RocktreeMeshMarker;
-use crate::physics::{is_physics_debug_enabled, toggle_physics_debug};
-use crate::vehicle::{
-    Vehicle, VehicleDragConfig, VehicleInput, VehicleMovementConfig, VehicleState,
-    VehicleThrusterConfig,
+use crate::{
+    lod::LodState,
+    mesh::RocktreeMeshMarker,
+    physics::{is_physics_debug_enabled, toggle_physics_debug},
+    vehicle::{
+        Vehicle, VehicleDragConfig, VehicleInput, VehicleMovementConfig, VehicleState,
+        VehicleThrusterConfig,
+    },
 };
 
 /// Number of samples to keep in vehicle history.

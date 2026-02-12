@@ -1,7 +1,9 @@
 //! Vertex unpacking.
 
-use crate::Vertex;
-use crate::error::{DecodeError, DecodeResult};
+use crate::{
+    Vertex,
+    error::{DecodeError, DecodeResult},
+};
 
 /// Unpack delta-encoded vertex positions.
 ///

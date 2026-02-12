@@ -2,10 +2,11 @@
 //!
 //! Handles cursor grab/ungrab and camera mode toggling.
 
-use bevy::prelude::*;
-use bevy::window::{CursorGrabMode, CursorOptions, PrimaryWindow};
-use bevy_egui::EguiContexts;
-use bevy_egui::input::egui_wants_any_keyboard_input;
+use bevy::{
+    prelude::*,
+    window::{CursorGrabMode, CursorOptions, PrimaryWindow},
+};
+use bevy_egui::{EguiContexts, input::egui_wants_any_keyboard_input};
 
 use crate::geo::TeleportAnimation;
 

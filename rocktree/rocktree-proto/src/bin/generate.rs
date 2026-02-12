@@ -2,9 +2,7 @@
 //!
 //! Run with: `cargo run -p rocktree-proto --bin generate`
 
-use std::path::PathBuf;
-use std::process::Command;
-use std::{env, fs, io};
+use std::{env, fs, io, path::PathBuf, process::Command};
 
 fn main() -> io::Result<()> {
     let manifest_dir = PathBuf::from(env::var("CARGO_MANIFEST_DIR").unwrap());

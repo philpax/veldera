@@ -5,17 +5,22 @@
 
 use std::f32::consts::*;
 
-use avian3d::parry::math::Point;
-use avian3d::parry::shape::SharedShape;
-use avian3d::prelude::*;
-use bevy::ecs::message::MessageReader;
-use bevy::input::mouse::MouseMotion;
-use bevy::prelude::*;
-use bevy::window::{CursorGrabMode, CursorOptions};
+use avian3d::{
+    parry::{math::Point, shape::SharedShape},
+    prelude::*,
+};
+use bevy::{
+    ecs::message::MessageReader,
+    input::mouse::MouseMotion,
+    prelude::*,
+    window::{CursorGrabMode, CursorOptions},
+};
 use glam::DVec3;
 
-use crate::floating_origin::{FloatingOrigin, FloatingOriginCamera, WorldPosition};
-use crate::geo::TeleportAnimation;
+use crate::{
+    floating_origin::{FloatingOrigin, FloatingOriginCamera, WorldPosition},
+    geo::TeleportAnimation,
+};
 
 use super::{CameraModeState, FlightCamera};
 

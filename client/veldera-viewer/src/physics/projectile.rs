@@ -5,15 +5,19 @@
 //! >500m from spawn position or when their contact tile unloads.
 
 use avian3d::prelude::*;
-use bevy::audio::Volume;
-use bevy::prelude::*;
-use bevy::window::{CursorGrabMode, CursorOptions};
+use bevy::{
+    audio::Volume,
+    prelude::*,
+    window::{CursorGrabMode, CursorOptions},
+};
 use bevy_egui::EguiContexts;
 use glam::DVec3;
 use rand::Rng;
 
-use crate::floating_origin::{FloatingOriginCamera, WorldPosition};
-use crate::lod::LodState;
+use crate::{
+    floating_origin::{FloatingOriginCamera, WorldPosition},
+    lod::LodState,
+};
 
 /// Handle to the bounce sound asset.
 #[derive(Resource)]

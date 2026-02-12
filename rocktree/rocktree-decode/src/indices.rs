@@ -1,7 +1,6 @@
 //! Index unpacking.
 
-use crate::error::DecodeResult;
-use crate::varint::read_varint;
+use crate::{error::DecodeResult, varint::read_varint};
 
 /// Unpack varint-encoded triangle strip indices.
 ///

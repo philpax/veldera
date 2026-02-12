@@ -1,29 +1,33 @@
 //! Derived from Bevy 0.18 bevy_pbr atmosphere implementation.
 //! See NOTICE.md for attribution and licensing.
 
-use bevy::asset::{AssetId, Handle, load_embedded_asset};
-use bevy::core_pipeline::FullscreenShader;
-use bevy::ecs::component::Component;
-use bevy::ecs::entity::Entity;
-use bevy::ecs::error::BevyError;
-use bevy::ecs::query::With;
-use bevy::ecs::resource::Resource;
-use bevy::ecs::system::{Commands, Query, Res, ResMut};
-use bevy::ecs::world::{FromWorld, World};
-use bevy::image::ToExtents;
-use bevy::math::{Affine3A, Mat4, Vec3, Vec3A};
-use bevy::pbr::{
-    GpuLights, GpuScatteringMedium, LightMeta, ScatteringMedium, ScatteringMediumSampler,
+use bevy::{
+    asset::{AssetId, Handle, load_embedded_asset},
+    core_pipeline::FullscreenShader,
+    ecs::{
+        component::Component,
+        entity::Entity,
+        error::BevyError,
+        query::With,
+        resource::Resource,
+        system::{Commands, Query, Res, ResMut},
+        world::{FromWorld, World},
+    },
+    image::ToExtents,
+    math::{Affine3A, Mat4, Vec3, Vec3A},
+    pbr::{GpuLights, GpuScatteringMedium, LightMeta, ScatteringMedium, ScatteringMediumSampler},
+    prelude::Camera3d,
+    render::{
+        extract_component::ComponentUniforms,
+        render_asset::RenderAssets,
+        render_resource::{binding_types::*, *},
+        renderer::{RenderDevice, RenderQueue},
+        texture::{CachedTexture, TextureCache},
+        view::{ExtractedView, Msaa, ViewDepthTexture, ViewUniform, ViewUniforms},
+    },
+    shader::Shader,
+    utils::default,
 };
-use bevy::prelude::Camera3d;
-use bevy::render::extract_component::ComponentUniforms;
-use bevy::render::render_asset::RenderAssets;
-use bevy::render::render_resource::{binding_types::*, *};
-use bevy::render::renderer::{RenderDevice, RenderQueue};
-use bevy::render::texture::{CachedTexture, TextureCache};
-use bevy::render::view::{ExtractedView, Msaa, ViewDepthTexture, ViewUniform, ViewUniforms};
-use bevy::shader::Shader;
-use bevy::utils::default;
 use std::ops::Deref;
 
 use crate::{ExtractedAtmosphere, GpuAtmosphereSettings, SphericalAtmosphereCamera};

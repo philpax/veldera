@@ -1,7 +1,9 @@
 //! Oriented bounding box unpacking.
 
-use crate::OrientedBoundingBox;
-use crate::error::{DecodeError, DecodeResult};
+use crate::{
+    OrientedBoundingBox,
+    error::{DecodeError, DecodeResult},
+};
 use glam::{DMat3, DVec3, Vec3};
 
 /// Unpack a 15-byte oriented bounding box.

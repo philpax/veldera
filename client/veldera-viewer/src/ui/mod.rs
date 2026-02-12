@@ -9,8 +9,7 @@ mod location;
 
 use std::sync::Arc;
 
-use bevy::diagnostic::FrameTimeDiagnosticsPlugin;
-use bevy::prelude::*;
+use bevy::{diagnostic::FrameTimeDiagnosticsPlugin, prelude::*};
 use bevy_egui::{EguiContexts, EguiPlugin, EguiPrimaryContextPass, egui};
 use glam::DVec3;
 

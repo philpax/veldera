@@ -1,7 +1,9 @@
 //! JPEG texture decoding.
 
-use crate::error::{DecodeError, DecodeResult};
-use crate::texture::DecodedTexture;
+use crate::{
+    error::{DecodeError, DecodeResult},
+    texture::DecodedTexture,
+};
 use image::ImageReader;
 use std::io::Cursor;
 

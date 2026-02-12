@@ -3,10 +3,12 @@
 //! This module provides the main `Client` type for downloading planetoid metadata,
 //! bulk metadata, and node data from Google Earth's servers.
 
-use crate::cache::{Cache, NoCache};
-use crate::error::{Error, Result};
-use crate::types::{
-    BulkMetadata, BulkRequest, Mesh, Node, NodeMetadata, NodeRequest, Planetoid, TextureFormat,
+use crate::{
+    cache::{Cache, NoCache},
+    error::{Error, Result},
+    types::{
+        BulkMetadata, BulkRequest, Mesh, Node, NodeMetadata, NodeRequest, Planetoid, TextureFormat,
+    },
 };
 use glam::{DMat4, Vec3};
 use prost::Message;
