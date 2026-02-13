@@ -8,7 +8,13 @@ mod components;
 mod physics;
 
 use avian3d::prelude::*;
-use bevy::{asset::LoadedFolder, prelude::*, scene::SceneInstanceReady};
+use bevy::{
+    asset::LoadedFolder,
+    color::palettes::css,
+    gizmos::config::{GizmoConfig, GizmoConfigGroup, GizmoConfigStore},
+    prelude::*,
+    scene::SceneInstanceReady,
+};
 use bevy_egui::input::egui_wants_any_keyboard_input;
 use glam::DVec3;
 
@@ -21,7 +27,12 @@ use crate::{
     camera::{CameraModeState, CameraModeTransitions, FlightCamera, FollowedEntity, RadialFrame},
     floating_origin::{FloatingOriginCamera, WorldPosition},
     physics::DespawnOutsidePhysicsRange,
+    ui::DiagnosticsTabOpen,
 };
+
+/// Gizmo config group for vehicle debug visualization.
+#[derive(Default, Reflect, GizmoConfigGroup)]
+pub struct VehicleDebugGizmos;
 
 /// Plugin for vehicle functionality.
 pub struct VehiclePlugin;
@@ -29,7 +40,8 @@ pub struct VehiclePlugin;
 impl Plugin for VehiclePlugin {
     fn build(&self, app: &mut App) {
         // Register reflectable types for scene serialization.
-        app.register_type::<Vehicle>()
+        app.init_gizmo_group::<VehicleDebugGizmos>()
+            .register_type::<Vehicle>()
             .register_type::<VehicleThrusterConfig>()
             .register_type::<VehicleMovementConfig>()
             .register_type::<VehicleDragConfig>()
@@ -39,7 +51,10 @@ impl Plugin for VehiclePlugin {
             .init_resource::<VehicleActions>()
             .init_resource::<PendingVehicleSpawn>()
             .init_resource::<VehicleFolderLoader>()
-            .add_systems(Startup, start_loading_vehicle_folder)
+            .add_systems(
+                Startup,
+                (start_loading_vehicle_folder, configure_vehicle_debug_gizmos),
+            )
             .add_systems(FixedPreUpdate, physics::vehicle_physics_system)
             .add_systems(
                 Update,
@@ -54,6 +69,7 @@ impl Plugin for VehiclePlugin {
                     process_vehicle_actions,
                     toggle_vehicle_mode
                         .run_if(not(egui_wants_any_keyboard_input).and(physics::cursor_is_grabbed)),
+                    draw_thruster_gizmos.run_if(|tab: Res<DiagnosticsTabOpen>| tab.0),
                 ),
             )
             .add_observer(on_vehicle_scene_ready);
@@ -81,6 +97,15 @@ fn start_loading_vehicle_folder(
     let handle = asset_server.load_folder("vehicles");
     loader.folder_handle = Some(handle);
     tracing::info!("Started loading vehicles folder");
+}
+
+/// Configure vehicle debug gizmos to render on top of geometry.
+fn configure_vehicle_debug_gizmos(mut config_store: ResMut<GizmoConfigStore>) {
+    let gizmo_config = GizmoConfig {
+        depth_bias: -1.0,
+        ..Default::default()
+    };
+    config_store.insert(gizmo_config, VehicleDebugGizmos);
 }
 
 /// Check if the vehicle folder has finished loading and extract definitions.
@@ -509,6 +534,63 @@ fn toggle_vehicle_mode(
 
         if let Some((vehicle_entity, _)) = best {
             mode_transitions.request_follow_entity(vehicle_entity);
+        }
+    }
+}
+
+// ============================================================================
+// Thruster gizmos
+// ============================================================================
+
+/// Scale factor for force visualization (meters per Newton).
+const FORCE_GIZMO_SCALE: f32 = 0.00005;
+
+/// Draw gizmos showing thruster raycasts and forces.
+///
+/// Uses the physics `Position` component for accurate placement that stays
+/// synchronized with the physics simulation.
+fn draw_thruster_gizmos(
+    mut gizmos: Gizmos<VehicleDebugGizmos>,
+    vehicle_query: Query<(
+        &Position,
+        &Transform,
+        &Vehicle,
+        &VehicleState,
+        &VehicleThrusterConfig,
+    )>,
+) {
+    for (position, transform, vehicle, state, thruster_config) in &vehicle_query {
+        let scale = vehicle.scale;
+        let local_up = transform.rotation * Vec3::Y;
+
+        for (i, offset) in thruster_config.offsets.iter().enumerate() {
+            let Some(diag) = state.thruster_diagnostics.get(i) else {
+                continue;
+            };
+
+            // Compute thruster world position using physics Position for accuracy.
+            let scaled_offset = *offset * scale;
+            let local_offset = Vec3::new(scaled_offset.x, 0.0, scaled_offset.y);
+            let world_offset = transform.rotation * local_offset;
+            let thruster_pos = position.0 + world_offset;
+
+            if diag.hit {
+                // Draw raycast line from thruster to ground.
+                let ground_pos = thruster_pos - local_up * diag.altitude;
+                gizmos.line(thruster_pos, ground_pos, css::ORANGE);
+
+                // Draw small sphere at ground contact point.
+                gizmos.sphere(Isometry3d::from_translation(ground_pos), 0.1, css::ORANGE);
+
+                // Draw force vector (upward from thruster).
+                let force_length = diag.force_magnitude * FORCE_GIZMO_SCALE;
+                let force_end = thruster_pos + local_up * force_length;
+                gizmos.arrow(thruster_pos, force_end, css::LIME);
+            } else {
+                // No ground hit - draw a short red line to indicate no contact.
+                let no_hit_end = thruster_pos - local_up * 2.0;
+                gizmos.line(thruster_pos, no_hit_end, css::RED);
+            }
         }
     }
 }

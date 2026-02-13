@@ -15,6 +15,10 @@ use glam::DVec3;
 
 pub use diagnostics::VehicleRightRequest;
 
+/// Resource tracking whether the diagnostics tab is currently open.
+#[derive(Resource, Default)]
+pub struct DiagnosticsTabOpen(pub bool);
+
 /// Plugin for debug UI overlay.
 pub struct DebugUiPlugin;
 
@@ -29,6 +33,7 @@ impl Plugin for DebugUiPlugin {
             .init_resource::<DebugUiState>()
             .init_resource::<diagnostics::VehicleHistory>()
             .init_resource::<VehicleRightRequest>()
+            .init_resource::<DiagnosticsTabOpen>()
             .add_systems(
                 EguiPrimaryContextPass,
                 (
@@ -80,10 +85,12 @@ fn setup_fonts(mut contexts: EguiContexts, mut commands: Commands) {
 }
 
 /// Render the debug UI overlay.
+#[allow(clippy::too_many_arguments)]
 fn debug_ui_system(
     mut contexts: EguiContexts,
     time: Res<Time>,
     mut ui_state: ResMut<DebugUiState>,
+    mut diagnostics_tab_open: ResMut<DiagnosticsTabOpen>,
     mut location_params: location::LocationParams,
     mut camera_params: camera::CameraParams,
     mut gameplay_params: gameplay::GameplayParams,
@@ -121,6 +128,9 @@ fn debug_ui_system(
                 }
             });
             ui.separator();
+
+            // Update diagnostics tab open state.
+            diagnostics_tab_open.0 = ui_state.selected_tab == DebugTab::Diagnostics;
 
             match ui_state.selected_tab {
                 DebugTab::LocationAndTime => {
