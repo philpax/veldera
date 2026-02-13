@@ -271,6 +271,7 @@ fn render_vehicle_diagnostics(
                 .text("Target altitude"),
         );
         ui.add(egui::Slider::new(&mut thruster_config.k_p, 1000.0..=500000.0).text("k_p"));
+        ui.add(egui::Slider::new(&mut thruster_config.k_i, 0.0..=50000.0).text("k_i"));
         ui.add(egui::Slider::new(&mut thruster_config.k_d, -100000.0..=0.0).text("k_d"));
         ui.add(
             egui::Slider::new(&mut thruster_config.max_strength, 10000.0..=200000.0)

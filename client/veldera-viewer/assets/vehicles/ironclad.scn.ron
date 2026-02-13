@@ -11,6 +11,7 @@
         "veldera_viewer::vehicle::components::VehicleThrusterConfig": (
           offsets: [(-0.4, -1.4), (0.4, -1.4), (0.4, 1.4), (-0.4, 1.4)],
           k_p: 8000.0,
+          k_i: 0.0,
           k_d: -2000.0,
           target_altitude: 2.0,
           max_strength: 60000.0,

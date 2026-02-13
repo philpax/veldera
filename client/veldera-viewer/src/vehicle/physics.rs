@@ -206,14 +206,31 @@ pub fn vehicle_physics_system(
                 // PID force computation.
                 let error = target_altitude - altitude;
                 let p_term = thruster_config.k_p * error;
+
+                // Initialize integral error for this thruster if needed.
+                while state.integral_errors.len() <= i {
+                    state.integral_errors.push(0.0);
+                }
+
+                // Accumulate integral error, with anti-windup clamping.
+                state.integral_errors[i] += error * dt;
+                // Clamp integral to prevent windup (limit to ~10 seconds of max error).
+                let integral_limit =
+                    thruster_config.max_strength / thruster_config.k_i.abs().max(1.0);
+                state.integral_errors[i] =
+                    state.integral_errors[i].clamp(-integral_limit, integral_limit);
+
+                let i_term = thruster_config.k_i * state.integral_errors[i];
                 let d_term = thruster_config.k_d * altitude_derivative;
-                let force_magnitude = (p_term + d_term).clamp(0.0, thruster_config.max_strength);
+                let force_magnitude =
+                    (p_term + i_term + d_term).clamp(0.0, thruster_config.max_strength);
 
                 // Record thruster diagnostics.
                 state.thruster_diagnostics.push(ThrusterDiagnostic {
                     altitude,
                     error,
                     p_term,
+                    i_term,
                     d_term,
                     force_magnitude,
                     hit: true,
@@ -239,11 +256,15 @@ pub fn vehicle_physics_system(
                     total_torque += world_offset.cross(pitch_force);
                 }
             } else {
-                // No ground detected below thruster.
+                // No ground detected below thruster - reset integral to prevent windup.
+                if let Some(integral) = state.integral_errors.get_mut(i) {
+                    *integral = 0.0;
+                }
                 state.thruster_diagnostics.push(ThrusterDiagnostic {
                     altitude: f32::INFINITY,
                     error: 0.0,
                     p_term: 0.0,
+                    i_term: 0.0,
                     d_term: 0.0,
                     force_magnitude: 0.0,
                     hit: false,

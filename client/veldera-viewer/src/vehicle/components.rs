@@ -35,6 +35,8 @@ pub struct VehicleThrusterConfig {
     pub offsets: Vec<Vec2>,
     /// PID proportional gain.
     pub k_p: f32,
+    /// PID integral gain.
+    pub k_i: f32,
     /// PID derivative gain (negative for damping).
     pub k_d: f32,
     /// Target hover altitude in meters.
@@ -103,6 +105,8 @@ pub struct ThrusterDiagnostic {
     pub error: f32,
     /// Proportional term of PID controller.
     pub p_term: f32,
+    /// Integral term of PID controller.
+    pub i_term: f32,
     /// Derivative term of PID controller.
     pub d_term: f32,
     /// Final force magnitude applied.
@@ -116,6 +120,8 @@ pub struct ThrusterDiagnostic {
 pub struct VehicleState {
     /// Recent altitude readings for PID derivative computation.
     pub last_altitudes: Vec<f32>,
+    /// Accumulated integral error per thruster.
+    pub integral_errors: Vec<f32>,
     /// Time of last jump for cooldown.
     pub last_jump_time: f32,
     /// Time of last input for angular drag delay.
