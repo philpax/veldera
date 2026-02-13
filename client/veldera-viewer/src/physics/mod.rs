@@ -24,11 +24,18 @@ use bevy::{
 };
 
 use crate::{
-    camera::LogicalPlayer,
+    camera::{CameraModeTransitions, FollowEntityTarget, LogicalPlayer},
     floating_origin::{FloatingOriginCamera, WorldPosition},
 };
 
 pub use terrain::TerrainCollider;
+
+/// Marker component for entities that should despawn when outside physics range.
+///
+/// Attach this to any physics entity (projectiles, vehicles, etc.) that should
+/// be automatically cleaned up when it moves beyond [`PHYSICS_RANGE`] from the camera.
+#[derive(Component, Default)]
+pub struct DespawnOutsidePhysicsRange;
 
 /// Physics range from camera in meters.
 pub const PHYSICS_RANGE: f64 = 1000.0;
@@ -76,6 +83,7 @@ impl Plugin for PhysicsIntegrationPlugin {
                     projectile::click_to_fire_system,
                     projectile::despawn_projectiles,
                     projectile::projectile_collision_sound,
+                    despawn_outside_physics_range,
                 ),
             );
     }
@@ -200,5 +208,37 @@ fn sync_dynamic_world_position(
 
     for (pos, mut world_pos) in &mut query {
         world_pos.position = camera_pos + pos.0.as_dvec3();
+    }
+}
+
+/// Despawn entities marked with [`DespawnOutsidePhysicsRange`] when they exceed [`PHYSICS_RANGE`].
+///
+/// If the camera is following the entity being despawned, exits follow mode first.
+fn despawn_outside_physics_range(
+    mut commands: Commands,
+    mut mode_transitions: ResMut<CameraModeTransitions>,
+    camera_query: Query<(&FloatingOriginCamera, Option<&FollowEntityTarget>)>,
+    query: Query<(Entity, &WorldPosition), With<DespawnOutsidePhysicsRange>>,
+) {
+    let Ok((camera, follow_target)) = camera_query.single() else {
+        return;
+    };
+
+    for (entity, world_pos) in &query {
+        let distance = (world_pos.position - camera.position).length();
+
+        if distance > PHYSICS_RANGE {
+            // If we're following this specific entity, exit follow mode first.
+            if follow_target.is_some_and(|ft| ft.target == entity) {
+                mode_transitions.request_exit();
+            }
+
+            tracing::debug!(
+                "Despawning entity: exceeded physics range ({:.0}m > {:.0}m)",
+                distance,
+                PHYSICS_RANGE
+            );
+            commands.entity(entity).despawn();
+        }
     }
 }

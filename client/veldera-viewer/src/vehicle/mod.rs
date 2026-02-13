@@ -20,6 +20,7 @@ pub use components::{
 use crate::{
     camera::{CameraModeState, CameraModeTransitions, FlightCamera, FollowedEntity, RadialFrame},
     floating_origin::{FloatingOriginCamera, WorldPosition},
+    physics::DespawnOutsidePhysicsRange,
 };
 
 /// Plugin for vehicle functionality.
@@ -422,6 +423,8 @@ fn on_vehicle_scene_ready(
         AngularVelocity::default(),
         // Mark as followable for the camera system.
         FollowedEntity,
+        // Despawn when outside physics range.
+        DespawnOutsidePhysicsRange,
     ));
 
     // Load the GLTF model as a child.

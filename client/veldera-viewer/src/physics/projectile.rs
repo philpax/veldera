@@ -2,7 +2,7 @@
 //!
 //! Spawns physics-enabled spheres that can be shot from the camera.
 //! Left-click while cursor is grabbed to fire. Projectiles despawn when
-//! >500m from spawn position or when their contact tile unloads.
+//! outside physics range or when their contact tile unloads.
 
 use avian3d::prelude::*;
 use bevy::{
@@ -20,6 +20,8 @@ use crate::{
     lod::LodState,
 };
 
+use super::DespawnOutsidePhysicsRange;
+
 /// Handle to the bounce sound asset.
 #[derive(Resource)]
 pub struct BounceSoundHandle(Handle<AudioSource>);
@@ -27,9 +29,6 @@ pub struct BounceSoundHandle(Handle<AudioSource>);
 /// Handle to the fire sound asset.
 #[derive(Resource)]
 pub struct FireSoundHandle(Handle<AudioSource>);
-
-/// Maximum distance from spawn position before despawning.
-const DESPAWN_DISTANCE: f64 = 500.0;
 
 /// Base projectile radius in meters.
 const PROJECTILE_RADIUS_BASE: f32 = 1.0;
@@ -73,8 +72,6 @@ impl ProjectileFireState {
 /// Component marking an entity as a physics projectile.
 #[derive(Component)]
 pub struct Projectile {
-    /// World position where the projectile was spawned.
-    pub spawn_position: DVec3,
     /// Path of the tile the projectile last contacted (if any).
     pub contact_tile: Option<String>,
 }
@@ -215,30 +212,21 @@ fn spawn_projectile(
             Position(physics_pos),
             LinearVelocity(initial_velocity),
             Mass(mass),
-            Projectile {
-                spawn_position: spawn_world_pos,
-                contact_tile: None,
-            },
+            Projectile { contact_tile: None },
+            DespawnOutsidePhysicsRange,
         ))
         .id()
 }
 
-/// Despawn projectiles that are too far from spawn or whose contact tile unloaded.
+/// Despawn projectiles whose contact tile was unloaded.
+///
+/// Distance-based despawning is handled by [`DespawnOutsidePhysicsRange`].
 pub fn despawn_projectiles(
     mut commands: Commands,
     lod_state: Res<LodState>,
-    query: Query<(Entity, &WorldPosition, &Projectile)>,
+    query: Query<(Entity, &Projectile)>,
 ) {
-    for (entity, world_pos, projectile) in &query {
-        let distance = world_pos.position.distance(projectile.spawn_position);
-
-        // Despawn if too far from spawn position.
-        if distance > DESPAWN_DISTANCE {
-            tracing::debug!("Despawning projectile: exceeded {DESPAWN_DISTANCE}m from spawn");
-            commands.entity(entity).despawn();
-            continue;
-        }
-
+    for (entity, projectile) in &query {
         // Despawn if contact tile was unloaded.
         if let Some(ref tile_path) = projectile.contact_tile
             && !lod_state.is_node_loaded(tile_path)
