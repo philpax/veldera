@@ -258,7 +258,7 @@ pub fn vehicle_physics_system(
         let thrust = if input.throttle > 0.0 {
             input.throttle * movement_config.forward_force
         } else {
-            input.throttle * -movement_config.backward_force
+            input.throttle * movement_config.backward_force
         };
         total_force += forward * thrust;
 
