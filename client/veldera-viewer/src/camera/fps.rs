@@ -424,7 +424,6 @@ pub(super) fn preserve_and_cleanup(
 
 const ANGLE_EPSILON: f32 = 0.001953125;
 const SLIGHT_SCALE_DOWN: f32 = 0.9375;
-const GRAVITY: f32 = 9.81;
 
 fn clear_fixed_timestep_flag(
     mut did_fixed_timestep_run_this_frame: ResMut<DidFixedTimestepRunThisFrame>,
@@ -579,16 +578,13 @@ fn fps_controller_move(
                 }
             }
 
-            let mut add = acceleration(
+            let add = acceleration(
                 wish_direction,
                 wish_speed,
                 controller.acceleration,
                 velocity.0,
                 dt,
             );
-            if !has_traction {
-                add -= local_up * GRAVITY * dt;
-            }
             velocity.0 += add;
 
             if has_traction {
@@ -605,14 +601,13 @@ fn fps_controller_move(
             controller.ground_tick = 0;
             wish_speed = f32::min(wish_speed, controller.air_speed_cap);
 
-            let mut add = acceleration(
+            let add = acceleration(
                 wish_direction,
                 wish_speed,
                 controller.air_acceleration,
                 velocity.0,
                 dt,
             );
-            add -= local_up * GRAVITY * dt;
             velocity.0 += add;
 
             let vertical_component = velocity.0.dot(local_up) * local_up;

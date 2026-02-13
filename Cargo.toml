@@ -1,22 +1,22 @@
 [workspace]
 resolver = "2"
-members = ["client/*", "rocktree/*", "crates/*"]
+members = ["client/*", "crates/*", "rocktree/*"]
 default-members = ["client/veldera-viewer"]
 
 [workspace.package]
 edition = "2024"
-license = "MIT"
 repository = "https://github.com/philpax/veldera"
-
-[workspace.lints.rust]
-unsafe_code = "warn"
+license = "MIT"
 
 [workspace.lints.clippy]
 all = { level = "warn", priority = -1 }
-# Allow common patterns
-module_name_repetitions = "allow"
 missing_errors_doc = "allow"
 missing_panics_doc = "allow"
+# Allow common patterns
+module_name_repetitions = "allow"
+
+[workspace.lints.rust]
+unsafe_code = "warn"
 
 [profile.dev.package."*"]
 opt-level = 2

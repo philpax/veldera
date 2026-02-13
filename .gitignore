@@ -22,3 +22,6 @@ target
 
 test_vectors/
 build/
+
+# Physics telemetry debug output
+telemetry.csv

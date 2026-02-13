@@ -5,7 +5,9 @@
 //! runtime by loading the folder contents.
 
 mod components;
+pub mod core;
 mod physics;
+pub mod telemetry;
 
 use avian3d::prelude::*;
 use bevy::{
@@ -24,7 +26,10 @@ pub use components::{
 };
 
 use crate::{
-    camera::{CameraModeState, CameraModeTransitions, FlightCamera, FollowedEntity, RadialFrame},
+    camera::{
+        CameraModeState, CameraModeTransitions, FlightCamera, FollowedEntity, FpsController,
+        LogicalPlayer, RadialFrame,
+    },
     floating_origin::{FloatingOriginCamera, WorldPosition},
     physics::DespawnOutsidePhysicsRange,
     ui::DiagnosticsTabOpen,
@@ -302,6 +307,7 @@ fn process_vehicle_actions(
     definitions: Res<VehicleDefinitions>,
     asset_server: Res<AssetServer>,
     camera_query: Query<(Entity, &FloatingOriginCamera, Option<&FlightCamera>)>,
+    fps_query: Query<&FpsController, With<LogicalPlayer>>,
     existing_vehicles: Query<Entity, With<Vehicle>>,
 ) {
     // Handle spawn request.
@@ -312,6 +318,7 @@ fn process_vehicle_actions(
             &definitions,
             &asset_server,
             &camera_query,
+            &fps_query,
             &existing_vehicles,
             vehicle_index,
         );
@@ -326,12 +333,14 @@ fn process_vehicle_actions(
 }
 
 /// Spawn a vehicle scene at the camera position.
+#[allow(clippy::too_many_arguments)]
 fn spawn_vehicle_scene(
     commands: &mut Commands,
     pending_spawn: &mut PendingVehicleSpawn,
     definitions: &VehicleDefinitions,
     asset_server: &AssetServer,
     camera_query: &Query<(Entity, &FloatingOriginCamera, Option<&FlightCamera>)>,
+    fps_query: &Query<&FpsController, With<LogicalPlayer>>,
     existing_vehicles: &Query<Entity, With<Vehicle>>,
     vehicle_index: usize,
 ) {
@@ -339,6 +348,11 @@ fn spawn_vehicle_scene(
         tracing::warn!("Invalid vehicle index: {}", vehicle_index);
         return;
     };
+
+    // Reset telemetry file for this session.
+    if telemetry::EMIT_TELEMETRY {
+        telemetry::reset_telemetry();
+    }
 
     // Despawn any existing vehicles.
     for entity in existing_vehicles.iter() {
@@ -357,9 +371,14 @@ fn spawn_vehicle_scene(
     let frame = RadialFrame::from_ecef_position(spawn_ecef);
     let local_up = frame.up;
 
-    // Orient vehicle to face camera direction projected onto ground plane.
-    // Vehicle local -Z is forward, local +Y is up.
-    let forward = if let Some(fc) = flight_camera {
+    // Get yaw from either FPS controller or flycam direction.
+    // FPS controller stores yaw directly; flycam stores direction which we project.
+    let forward = if let Ok(fps) = fps_query.single() {
+        // FPS mode: compute forward from yaw in the radial frame.
+        // Yaw of 0 = facing north, positive yaw = clockwise rotation.
+        frame.north * fps.yaw.cos() - frame.east * fps.yaw.sin()
+    } else if let Some(fc) = flight_camera {
+        // Flycam mode: project camera direction onto ground plane.
         let forward_projected =
             (fc.direction - local_up * fc.direction.dot(local_up)).normalize_or_zero();
         if forward_projected.length_squared() > 0.01 {

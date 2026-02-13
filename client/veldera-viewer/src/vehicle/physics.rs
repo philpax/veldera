@@ -1,6 +1,7 @@
 //! Vehicle physics simulation.
 //!
 //! Implements PID-controlled hover thrusters with radial gravity integration.
+//! Uses core physics calculations for handling (thrust, turning, banking, drag).
 
 use avian3d::prelude::*;
 use bevy::{
@@ -8,13 +9,21 @@ use bevy::{
     window::{CursorGrabMode, CursorOptions},
 };
 
-use super::components::{
-    ThrusterDiagnostic, Vehicle, VehicleDragConfig, VehicleInput, VehicleMovementConfig,
-    VehiclePhysicsConfig, VehicleState, VehicleThrusterConfig,
+use super::{
+    components::{
+        ThrusterDiagnostic, Vehicle, VehicleDragConfig, VehicleInput, VehicleMovementConfig,
+        VehiclePhysicsConfig, VehicleState, VehicleThrusterConfig,
+    },
+    core::{
+        self, VehicleFrame, VehiclePhysicsParams, VehicleSimInput, VehicleSimState,
+        compute_inertia, compute_mass,
+    },
+    telemetry::{self, EMIT_TELEMETRY, TelemetrySnapshot},
 };
 use crate::{
     camera::{CameraModeState, RadialFrame},
     floating_origin::{FloatingOriginCamera, WorldPosition},
+    physics::GRAVITY,
     ui::VehicleRightRequest,
 };
 
@@ -23,9 +32,6 @@ const JUMP_COOLDOWN: f32 = 2.0;
 
 /// Number of altitude samples for derivative computation.
 const ALTITUDE_SAMPLES: usize = 3;
-
-/// Radial gravity constant (m/s²).
-const GRAVITY: f32 = 9.81;
 
 /// Capture vehicle input from keyboard.
 pub fn vehicle_input_system(
@@ -87,10 +93,62 @@ pub fn is_follow_entity_mode(state: Res<CameraModeState>) -> bool {
     state.is_follow_entity()
 }
 
+/// Build physics params from components.
+fn build_physics_params(
+    movement_config: &VehicleMovementConfig,
+    drag_config: &VehicleDragConfig,
+    mass: f32,
+    inertia: f32,
+) -> VehiclePhysicsParams {
+    VehiclePhysicsParams {
+        mass,
+        inertia,
+        forward_force: movement_config.forward_force,
+        backward_force: movement_config.backward_force.abs(),
+        acceleration_time: movement_config.acceleration_time,
+        base_turn_rate: movement_config.base_turn_rate,
+        speed_turn_falloff: movement_config.speed_turn_falloff,
+        reference_speed: movement_config.reference_speed,
+        max_bank_angle: movement_config.max_bank_angle,
+        bank_rate: movement_config.bank_rate,
+        surface_alignment_strength: movement_config.surface_alignment_strength,
+        surface_alignment_rate: movement_config.surface_alignment_rate,
+        air_control_authority: movement_config.air_control_authority,
+        forward_drag: drag_config.forward_drag,
+        lateral_drag: drag_config.lateral_drag,
+        angular_drag: drag_config.angular_drag,
+        jump_velocity: movement_config.jump_force,
+    }
+}
+
+/// Build sim state from vehicle state.
+fn build_sim_state(state: &VehicleState, altitude_ratio: f32) -> VehicleSimState {
+    VehicleSimState {
+        current_power: state.current_power,
+        current_bank: state.current_bank,
+        surface_normal: state.surface_normal,
+        time_grounded: state.time_grounded,
+        time_since_grounded: state.time_since_grounded,
+        grounded: state.grounded,
+        altitude_ratio,
+    }
+}
+
+/// Copy sim state back to vehicle state.
+fn copy_sim_state_back(state: &mut VehicleState, sim_state: &VehicleSimState) {
+    state.current_power = sim_state.current_power;
+    state.current_bank = sim_state.current_bank;
+    state.surface_normal = sim_state.surface_normal;
+    state.time_grounded = sim_state.time_grounded;
+    state.time_since_grounded = sim_state.time_since_grounded;
+    state.grounded = sim_state.grounded;
+}
+
 /// Apply physics forces to vehicles.
 ///
-/// Implements PID-controlled hover thrusters with radial gravity.
-/// Forces are applied as velocity changes, similar to the FPS controller approach.
+/// Implements PID-controlled hover thrusters with radial gravity, Wipeout-style
+/// handling including banking, surface alignment, momentum-based turning, and
+/// directional drag.
 #[allow(clippy::too_many_lines, clippy::type_complexity)]
 pub fn vehicle_physics_system(
     time: Res<Time<Fixed>>,
@@ -105,7 +163,7 @@ pub fn vehicle_physics_system(
         &VehiclePhysicsConfig,
         &VehicleInput,
         &mut VehicleState,
-        &mut Transform,
+        &Transform,
         &Position,
         &mut LinearVelocity,
         &mut AngularVelocity,
@@ -128,7 +186,7 @@ pub fn vehicle_physics_system(
         physics_config,
         input,
         mut state,
-        mut transform,
+        transform,
         position,
         mut linear_velocity,
         mut angular_velocity,
@@ -153,16 +211,21 @@ pub fn vehicle_physics_system(
         let filter = SpatialQueryFilter::default().with_excluded_entities([entity]);
         let down_dir = Dir3::new(-local_up).unwrap_or(Dir3::NEG_Y);
 
-        // Compute mass from density and collider volume (scaled).
+        // Compute mass and inertia from density and collider volume (scaled).
         let half_extents = physics_config.collider_half_extents * scale;
-        let volume = 8.0 * half_extents.x * half_extents.y * half_extents.z;
-        let mass = physics_config.density * volume;
+        let mass = compute_mass(physics_config.density, half_extents);
         let inv_mass = 1.0 / mass.max(0.1);
+        let inertia = compute_inertia(mass, half_extents);
+        let inv_inertia = 1.0 / inertia.max(0.1);
 
-        // Process each thruster.
-        let mut total_force = Vec3::ZERO;
-        let mut total_torque = Vec3::ZERO;
+        // Process each thruster - collect surface normals for alignment.
+        let mut hover_force = Vec3::ZERO;
+        let mut hover_torque = Vec3::ZERO;
         let mut any_grounded = false;
+        let mut surface_normal_sum = Vec3::ZERO;
+        let mut surface_normal_weight = 0.0;
+        let mut altitude_sum = 0.0;
+        let mut altitude_count = 0;
 
         // Clear and prepare thruster diagnostics.
         state.thruster_diagnostics.clear();
@@ -181,6 +244,13 @@ pub fn vehicle_physics_system(
             {
                 let altitude = hit.distance;
                 any_grounded = any_grounded || altitude < target_altitude * 1.5;
+                altitude_sum += altitude;
+                altitude_count += 1;
+
+                // Accumulate surface normal weighted by inverse altitude.
+                let normal_weight = 1.0 / (altitude + 0.1);
+                surface_normal_sum += hit.normal * normal_weight;
+                surface_normal_weight += normal_weight;
 
                 // Initialize altitude history for this thruster if needed.
                 let required_len = (i + 1) * ALTITUDE_SAMPLES;
@@ -214,7 +284,6 @@ pub fn vehicle_physics_system(
 
                 // Accumulate integral error, with anti-windup clamping.
                 state.integral_errors[i] += error * dt;
-                // Clamp integral to prevent windup (limit to ~10 seconds of max error).
                 let integral_limit =
                     thruster_config.max_strength / thruster_config.k_i.abs().max(1.0);
                 state.integral_errors[i] =
@@ -236,25 +305,14 @@ pub fn vehicle_physics_system(
                     hit: true,
                 });
 
-                // Apply force along local up.
-                let force = local_up * force_magnitude;
-                total_force += force;
-
-                // Apply turning force to front thrusters (positive z offset = front).
-                if offset.y > 0.0 {
-                    let right = transform.rotation * Vec3::X;
-                    let turn_force = right * input.turn * movement_config.turning_strength;
-                    total_force += turn_force;
-                    // Torque from force at offset.
-                    total_torque += -world_offset.cross(turn_force);
-                }
-
-                // Apply pitch force to front thrusters.
-                if offset.y > 0.0 {
-                    let pitch_force = local_up * -input.throttle * movement_config.pitch_strength;
-                    total_force += pitch_force;
-                    total_torque += world_offset.cross(pitch_force);
-                }
+                // Apply force along local up, with torque from offset position.
+                let thruster_force = local_up * force_magnitude;
+                hover_force += thruster_force;
+                // Torque = offset × force (creates pitch/roll from differential thrust).
+                // Scale down significantly - thrusters primarily provide lift, with subtle
+                // rotational effects. Too much torque causes wild tumbling.
+                let torque_scale = 0.02;
+                hover_torque += world_offset.cross(thruster_force) * torque_scale;
             } else {
                 // No ground detected below thruster - reset integral to prevent windup.
                 if let Some(integral) = state.integral_errors.get_mut(i) {
@@ -272,66 +330,134 @@ pub fn vehicle_physics_system(
             }
         }
 
+        // Update grounded state.
         state.grounded = any_grounded;
 
-        // Apply forward/backward thrust.
-        let forward = transform.rotation * Vec3::NEG_Z;
-        let thrust = if input.throttle > 0.0 {
-            input.throttle * movement_config.forward_force
+        // Update surface normal (averaged from raycasts).
+        if surface_normal_weight > 0.0 {
+            let target_normal = (surface_normal_sum / surface_normal_weight).normalize_or_zero();
+            let lerp_rate = movement_config.surface_alignment_rate * dt;
+            state.surface_normal = state.surface_normal.lerp(target_normal, lerp_rate.min(1.0));
+        }
+        if state.surface_normal == Vec3::ZERO {
+            state.surface_normal = local_up;
+        }
+
+        // Clamp extreme vertical velocity from collision responses.
+        // When hitting slopes at high speed, the physics engine's collision solver
+        // can add large upward velocities. We clamp these to prevent "launching into sky".
+        let vertical_vel = linear_velocity.0.dot(local_up);
+        let max_vertical_speed = 8.0; // m/s - reasonable for hover vehicle bumps.
+        if vertical_vel > max_vertical_speed {
+            let excess = vertical_vel - max_vertical_speed;
+            linear_velocity.0 -= local_up * excess;
+        }
+
+        // Aggressive damping when climbing fast while airborne.
+        // This catches cases where collision impulses accumulate over multiple frames.
+        let vertical_vel_after_clamp = linear_velocity.0.dot(local_up);
+        if !any_grounded && vertical_vel_after_clamp > 3.0 {
+            // Rapidly reduce upward velocity when airborne (half-life ~0.1s).
+            let damping = (-10.0 * dt).exp();
+            let target_vel = vertical_vel_after_clamp * damping;
+            linear_velocity.0 -= local_up * (vertical_vel_after_clamp - target_vel);
+        }
+
+        // Apply hover forces from thrusters.
+        linear_velocity.0 += hover_force * inv_mass * dt;
+        angular_velocity.0 += hover_torque * inv_inertia * dt;
+
+        // Front-heavy center of mass creates natural pitch-down torque when airborne.
+        // This simulates the effect of weight distribution being forward of geometric center.
+        // When grounded, hover thrusters counteract this; when airborne, it causes natural nose-down.
+        if !any_grounded {
+            let com_forward_offset = 0.08 * scale; // Center of mass is slightly forward.
+            let local_com_offset = Vec3::new(0.0, 0.0, -com_forward_offset); // -Z is forward.
+            let world_com_offset = transform.rotation * local_com_offset;
+            let gravity_force = -local_up * GRAVITY * mass;
+            let gravity_torque = world_com_offset.cross(gravity_force);
+            angular_velocity.0 += gravity_torque * inv_inertia * dt;
+        }
+
+        // Compute altitude ratio for thrust tapering.
+        let altitude_ratio = if altitude_count > 0 {
+            (altitude_sum / altitude_count as f32) / target_altitude
         } else {
-            input.throttle * movement_config.backward_force
+            // No ground detected - assume very high (thrust will be minimal).
+            10.0
         };
-        total_force += forward * thrust;
 
-        // Apply turning torque.
-        total_torque += local_up * -input.turn * movement_config.turning_strength;
+        // Build params and state for core physics.
+        let physics_params = build_physics_params(movement_config, drag_config, mass, inertia);
+        let mut sim_state = build_sim_state(&state, altitude_ratio);
 
-        // Apply radial gravity.
-        let gravity_dir = -ecef_pos.normalize().as_vec3();
-        total_force += gravity_dir * GRAVITY * mass;
-
-        // Convert forces to velocity changes: dv = F/m * dt.
-        linear_velocity.0 += total_force * inv_mass * dt;
-
-        // Approximate angular velocity change (simplified inertia tensor).
-        // Use a crude approximation: I ≈ m * r² where r is average half-extent.
-        let avg_extent = (half_extents.x + half_extents.y + half_extents.z) / 3.0;
-        let inertia = mass * avg_extent * avg_extent;
-        let inv_inertia = 1.0 / inertia.max(0.1);
-        angular_velocity.0 += total_torque * inv_inertia * dt;
-
-        // Apply jump impulse.
-        if input.jump && state.grounded && (elapsed - state.last_jump_time) > JUMP_COOLDOWN {
-            linear_velocity.0 += local_up * movement_config.jump_force;
+        // Handle jump cooldown separately (core doesn't track this).
+        let can_jump =
+            input.jump && state.grounded && (elapsed - state.last_jump_time) > JUMP_COOLDOWN;
+        if can_jump {
             state.last_jump_time = elapsed;
         }
 
-        // Apply linear drag.
-        let drag_factor = (-drag_config.linear_drag * dt).exp();
-        linear_velocity.0 *= drag_factor;
+        let sim_input = VehicleSimInput {
+            throttle: input.throttle,
+            turn: input.turn,
+            jump: can_jump,
+        };
 
-        // Apply angular drag after delay.
-        let time_since_input = elapsed - state.last_input_time;
-        if time_since_input > drag_config.angular_delay_secs {
-            let angular_drag_factor = (-drag_config.angular_drag * dt).exp();
-            angular_velocity.0 *= angular_drag_factor;
-        }
+        let sim_frame = VehicleFrame::new(transform.rotation, local_up);
+
+        // Compute core physics step (thrust, turning, banking, drag, alignment).
+        let output = core::compute_physics_step(
+            &physics_params,
+            &mut sim_state,
+            &sim_input,
+            &sim_frame,
+            linear_velocity.0,
+            angular_velocity.0,
+            dt,
+        );
+
+        // Apply output.
+        linear_velocity.0 = output.linear_velocity_after_drag;
+        angular_velocity.0 = output.angular_velocity_after_drag;
+
+        // Copy state back.
+        copy_sim_state_back(&mut state, &sim_state);
 
         // Update diagnostics.
         state.speed = linear_velocity.0.length();
-        state.total_force = total_force;
-        state.total_torque = total_torque;
+        state.total_force = output.total_force + hover_force;
+        state.total_torque = output.total_torque + hover_torque;
+        let gravity_dir = -ecef_pos.normalize().as_vec3();
         state.gravity_force = gravity_dir * GRAVITY * mass;
         state.mass = mass;
 
-        // Align vehicle up vector with local up (stabilization).
-        // This prevents the vehicle from tumbling by gradually correcting roll/pitch.
-        let current_up = transform.rotation * Vec3::Y;
-        let correction_axis = current_up.cross(local_up);
-        if correction_axis.length_squared() > 1e-6 {
-            let correction_angle = current_up.dot(local_up).acos().min(0.1 * dt);
-            let correction = Quat::from_axis_angle(correction_axis.normalize(), correction_angle);
-            transform.rotation = correction * transform.rotation;
+        // Telemetry logging for debugging physics issues.
+        if EMIT_TELEMETRY {
+            let snapshot = TelemetrySnapshot {
+                elapsed,
+                dt,
+                throttle: input.throttle,
+                turn: input.turn,
+                jump: input.jump,
+                grounded: state.grounded,
+                altitude_ratio,
+                current_power: sim_state.current_power,
+                current_bank: sim_state.current_bank,
+                surface_normal: state.surface_normal,
+                rotation: *transform.rotation.as_ref(),
+                linear_vel: linear_velocity.0,
+                angular_vel: angular_velocity.0,
+                local_up,
+                hover_force,
+                core_force: output.total_force,
+                core_torque: output.total_torque,
+                thruster_diagnostics: state.thruster_diagnostics.clone(),
+                mass,
+                time_grounded: state.time_grounded,
+                time_since_grounded: state.time_since_grounded,
+            };
+            telemetry::emit_telemetry(&snapshot);
         }
     }
 }

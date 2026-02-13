@@ -57,18 +57,36 @@ pub struct VehicleMovementConfig {
     pub forward_offset: Vec2,
     /// Jump impulse force.
     pub jump_force: f32,
-    /// Pitch control strength (nose up/down).
-    pub pitch_strength: f32,
     /// Turning torque strength (yaw).
     pub turning_strength: f32,
+    /// Time to reach full throttle power (seconds).
+    pub acceleration_time: f32,
+    /// Base turn rate at low speed (rad/s).
+    pub base_turn_rate: f32,
+    /// Turn rate multiplier at max speed (0.0-1.0).
+    pub speed_turn_falloff: f32,
+    /// Reference speed for turn falloff calculation (m/s).
+    pub reference_speed: f32,
+    /// Maximum bank angle when turning (radians).
+    pub max_bank_angle: f32,
+    /// How fast to reach target bank angle.
+    pub bank_rate: f32,
+    /// How strongly to align with terrain surface (0.0-1.0).
+    pub surface_alignment_strength: f32,
+    /// How fast to align with terrain surface.
+    pub surface_alignment_rate: f32,
+    /// Control authority when airborne (0.0-1.0).
+    pub air_control_authority: f32,
 }
 
 /// Drag and damping configuration.
 #[derive(Component, Reflect, Default, Clone)]
 #[reflect(Component)]
 pub struct VehicleDragConfig {
-    /// Linear velocity damping coefficient.
-    pub linear_drag: f32,
+    /// Forward momentum drag coefficient (low for momentum feel).
+    pub forward_drag: f32,
+    /// Lateral/sideways drag coefficient (high to reduce drift).
+    pub lateral_drag: f32,
     /// Angular velocity damping coefficient.
     pub angular_drag: f32,
     /// Delay before applying angular drag after input ceases.
@@ -140,6 +158,16 @@ pub struct VehicleState {
     pub gravity_force: Vec3,
     /// Computed mass from density and volume.
     pub mass: f32,
+    /// Current throttle power (ramped 0.0-1.0).
+    pub current_power: f32,
+    /// Current bank angle (radians).
+    pub current_bank: f32,
+    /// Averaged terrain surface normal.
+    pub surface_normal: Vec3,
+    /// Time since the vehicle was last grounded.
+    pub time_since_grounded: f32,
+    /// Time the vehicle has been grounded.
+    pub time_grounded: f32,
 }
 
 /// Input state for vehicle (not serialized in scenes).

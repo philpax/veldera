@@ -9,6 +9,7 @@
 //! When the camera moves, all physics positions shift by -delta to maintain
 //! correct relative positions.
 
+mod gravity;
 mod projectile;
 pub mod terrain;
 
@@ -24,10 +25,11 @@ use bevy::{
 };
 
 use crate::{
-    camera::{CameraModeTransitions, FollowEntityTarget, LogicalPlayer},
+    camera::{CameraModeTransitions, FollowEntityTarget},
     floating_origin::{FloatingOriginCamera, WorldPosition},
 };
 
+pub use gravity::GRAVITY;
 pub use terrain::TerrainCollider;
 
 /// Marker component for entities that should despawn when outside physics range.
@@ -73,7 +75,7 @@ impl Plugin for PhysicsIntegrationPlugin {
             )
             .add_systems(
                 FixedPostUpdate,
-                (apply_radial_gravity, sync_dynamic_world_position)
+                (gravity::apply_radial_gravity, sync_dynamic_world_position)
                     .chain()
                     .after(PhysicsSystems::Last),
             )
@@ -156,39 +158,6 @@ fn apply_origin_shift(
     }
 
     physics_state.last_camera_position = Some(camera_pos);
-}
-
-/// Apply radial gravity toward Earth center.
-///
-/// Gravity must point toward Earth center, not -Y. Since Position is
-/// camera-relative, we recover ECEF first to compute gravity direction.
-/// We directly modify LinearVelocity to apply gravitational acceleration.
-///
-/// Note: LogicalPlayer (FPS controller) handles its own radial gravity internally.
-#[allow(clippy::type_complexity)]
-fn apply_radial_gravity(
-    camera_query: Query<&FloatingOriginCamera>,
-    time: Res<Time>,
-    mut query: Query<(&Position, &mut LinearVelocity), (With<RigidBody>, Without<LogicalPlayer>)>,
-) {
-    let Ok(camera) = camera_query.single() else {
-        return;
-    };
-
-    let camera_pos = camera.position;
-    const GRAVITY: f32 = 9.81;
-    let dt = time.delta_secs();
-
-    for (pos, mut velocity) in &mut query {
-        // Recover absolute ECEF position.
-        let world_pos = camera_pos + pos.0.as_dvec3();
-
-        // Gravity points toward Earth center (negative normalized position).
-        let gravity_dir = -world_pos.normalize().as_vec3();
-
-        // Apply gravitational acceleration: v += g * dt.
-        velocity.0 += gravity_dir * GRAVITY * dt;
-    }
 }
 
 /// Sync WorldPosition from physics Position for dynamic bodies.
