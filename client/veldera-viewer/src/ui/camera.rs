@@ -7,8 +7,8 @@ use bevy_egui::egui;
 
 use crate::{
     camera::{
-        CameraMode, CameraModeState, CameraSettings, FlightCamera, MAX_SPEED, MIN_SPEED,
-        TeleportAnimationMode,
+        CameraMode, CameraModeState, CameraSettings, FlightCamera, FollowCameraConfig,
+        FollowEntityTarget, MAX_SPEED, MIN_SPEED, TeleportAnimationMode,
     },
     floating_origin::FloatingOriginCamera,
 };
@@ -27,6 +27,8 @@ pub(super) struct CameraParams<'w, 's> {
             &'static FlightCamera,
         ),
     >,
+    pub follow_target_query: Query<'w, 's, &'static FollowEntityTarget>,
+    pub follow_config_query: Query<'w, 's, &'static mut FollowCameraConfig>,
 }
 
 /// Render the camera tab content.
@@ -55,6 +57,12 @@ pub(super) fn render_camera_tab(ui: &mut egui::Ui, camera: &mut CameraParams) {
         ui.separator();
     }
 
+    // Follow camera config (only in follow entity mode).
+    if camera.camera_mode.is_follow_entity() {
+        render_follow_camera_config(ui, camera);
+        ui.separator();
+    }
+
     // Teleport animation mode selector.
     ui.horizontal(|ui| {
         ui.label("Teleport style:");
@@ -76,5 +84,34 @@ pub(super) fn render_camera_tab(ui: &mut egui::Ui, camera: &mut CameraParams) {
                     "Horizon",
                 );
             });
+    });
+}
+
+/// Render follow camera configuration sliders.
+fn render_follow_camera_config(ui: &mut egui::Ui, camera: &mut CameraParams) {
+    // Find the followed entity from the camera's FollowEntityTarget.
+    let Some(follow_target) = camera.follow_target_query.iter().next() else {
+        ui.label("No follow target");
+        return;
+    };
+
+    let Ok(mut config) = camera.follow_config_query.get_mut(follow_target.target) else {
+        ui.label("Target has no FollowCameraConfig");
+        return;
+    };
+
+    ui.collapsing("Follow camera", |ui| {
+        super::vec3_sliders(
+            ui,
+            "Camera offset:",
+            &mut config.camera_offset,
+            -50.0..=50.0,
+        );
+        super::vec3_sliders(
+            ui,
+            "Look target offset:",
+            &mut config.look_target_offset,
+            -50.0..=50.0,
+        );
     });
 }

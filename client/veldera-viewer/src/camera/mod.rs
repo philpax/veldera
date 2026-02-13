@@ -38,7 +38,7 @@ use crate::{
     launch_params::LaunchParams,
 };
 
-pub use follow::{FollowEntityTarget, FollowedEntity};
+pub use follow::{FollowCameraConfig, FollowEntityTarget, FollowedEntity};
 pub use fps::{LogicalPlayer, RadialFrame, RenderPlayer, direction_to_yaw_pitch, spawn_fps_player};
 pub use input::cursor_is_grabbed;
 
@@ -264,7 +264,8 @@ pub struct CameraControllerPlugin;
 
 impl Plugin for CameraControllerPlugin {
     fn build(&self, app: &mut App) {
-        app.init_resource::<CameraSettings>()
+        app.register_type::<follow::FollowCameraConfig>()
+            .init_resource::<CameraSettings>()
             .init_resource::<CameraModeState>()
             .init_resource::<CameraModeTransitions>()
             .init_resource::<AltitudeRequest>()

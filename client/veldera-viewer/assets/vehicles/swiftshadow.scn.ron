@@ -36,6 +36,10 @@
           path: "vehicles/craft_racer.glb#Scene0",
           scale: 1.5,
         ),
+        "veldera_viewer::camera::follow::FollowCameraConfig": (
+          camera_offset: (0.0, 4.5, 20.0),
+          look_target_offset: (0.0, 4.5, 12.0),
+        ),
       },
     ),
   },

@@ -44,6 +44,25 @@ pub struct FollowEntityTarget {
 #[derive(Component)]
 pub struct FollowedEntity;
 
+/// Configuration for the follow camera when following this entity.
+#[derive(Component, Reflect, Clone)]
+#[reflect(Component)]
+pub struct FollowCameraConfig {
+    /// Camera position offset in entity-local space (x=right, y=up, z=forward).
+    pub camera_offset: Vec3,
+    /// Look-at target offset in entity-local space.
+    pub look_target_offset: Vec3,
+}
+
+impl Default for FollowCameraConfig {
+    fn default() -> Self {
+        Self {
+            camera_offset: Vec3::new(0.0, 4.5, 20.0),
+            look_target_offset: Vec3::new(0.0, 4.5, 12.0),
+        }
+    }
+}
+
 // ============================================================================
 // Mode transition helpers
 // ============================================================================
@@ -72,15 +91,10 @@ pub(super) fn cleanup(
 // Camera system
 // ============================================================================
 
-/// Distance behind the entity for camera.
-const FOLLOW_DISTANCE_BEHIND: f32 = 12.0;
-
-/// Height above the entity for camera.
-const FOLLOW_HEIGHT_ABOVE: f32 = 3.0;
-
 /// Camera follows a target entity in third-person view.
 ///
 /// Positions the camera behind and above the entity, looking at it.
+/// Uses `FollowCameraConfig` if present on the target, otherwise uses defaults.
 fn follow_entity_camera_system(
     _time: Res<Time>,
     mut camera_query: Query<
@@ -91,35 +105,38 @@ fn follow_entity_camera_system(
         ),
         Without<FollowedEntity>,
     >,
-    target_query: Query<(&Transform, &WorldPosition), With<FollowedEntity>>,
+    target_query: Query<
+        (&Transform, &WorldPosition, Option<&FollowCameraConfig>),
+        With<FollowedEntity>,
+    >,
 ) {
     for (mut camera, mut camera_transform, follow_target) in &mut camera_query {
-        let Ok((target_transform, target_world_pos)) = target_query.get(follow_target.target)
+        let Ok((target_transform, target_world_pos, follow_config)) =
+            target_query.get(follow_target.target)
         else {
             continue;
         };
 
-        // Get entity's forward direction (local -Z transformed to world).
-        let entity_forward = target_transform.rotation * Vec3::NEG_Z;
+        // Get offsets from config or use defaults.
+        let fc = follow_config.cloned().unwrap_or_default();
 
         // Compute radial frame for the "up" direction at this location.
         let frame = RadialFrame::from_ecef_position(target_world_pos.position);
         let local_up = frame.up;
 
-        // Camera position: behind the entity and above it.
-        let behind_offset = -entity_forward * FOLLOW_DISTANCE_BEHIND;
-        let up_offset = local_up * FOLLOW_HEIGHT_ABOVE;
-        let camera_offset = behind_offset + up_offset;
+        // Transform the local-space offsets to world space using entity rotation.
+        let camera_offset = target_transform.rotation * fc.camera_offset;
+        let look_target_offset = target_transform.rotation * fc.look_target_offset;
 
+        // Camera position in world space.
         let camera_pos = target_world_pos.position + camera_offset.as_dvec3();
         camera.position = camera_pos;
 
         // Camera transform stays at origin (floating origin system).
         camera_transform.translation = Vec3::ZERO;
 
-        // Look at the entity (direction from camera to entity).
-        let look_target = entity_forward;
-        let look_direction = (look_target - camera_offset).normalize();
+        // Look at the target offset point (direction from camera to look target).
+        let look_direction = (look_target_offset - camera_offset).normalize();
 
         camera_transform.rotation = Transform::default()
             .looking_to(look_direction, local_up)

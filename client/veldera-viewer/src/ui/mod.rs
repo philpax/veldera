@@ -156,3 +156,45 @@ fn debug_ui_system(
 
     Ok(())
 }
+
+// ============================================================================
+// UI helpers
+// ============================================================================
+
+/// Render sliders for a Vec3 with configurable range (but uncapped input).
+///
+/// Returns true if any component was changed.
+pub fn vec3_sliders(
+    ui: &mut egui::Ui,
+    label: &str,
+    value: &mut Vec3,
+    range: std::ops::RangeInclusive<f32>,
+) -> bool {
+    let mut changed = false;
+    ui.horizontal(|ui| {
+        ui.label(label);
+    });
+    ui.horizontal(|ui| {
+        ui.label("X:");
+        changed |= ui
+            .add(
+                egui::DragValue::new(&mut value.x)
+                    .range(range.clone())
+                    .speed(0.1),
+            )
+            .changed();
+        ui.label("Y:");
+        changed |= ui
+            .add(
+                egui::DragValue::new(&mut value.y)
+                    .range(range.clone())
+                    .speed(0.1),
+            )
+            .changed();
+        ui.label("Z:");
+        changed |= ui
+            .add(egui::DragValue::new(&mut value.z).range(range).speed(0.1))
+            .changed();
+    });
+    changed
+}
