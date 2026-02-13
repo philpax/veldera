@@ -40,7 +40,6 @@
         ),
         "veldera_viewer::vehicle::components::VehiclePhysicsConfig": (
           density: 12.0,
-          collider_half_extents: (0.9, 1.5, 0.3),
         ),
         "veldera_viewer::vehicle::components::VehicleModel": (
           path: "vehicles/craft_speederA.glb#Scene0",

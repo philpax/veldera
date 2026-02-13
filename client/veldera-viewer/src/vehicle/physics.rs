@@ -14,10 +14,7 @@ use super::{
         ThrusterDiagnostic, Vehicle, VehicleDragConfig, VehicleInput, VehicleMovementConfig,
         VehiclePhysicsConfig, VehicleState, VehicleThrusterConfig,
     },
-    core::{
-        self, VehicleFrame, VehiclePhysicsParams, VehicleSimInput, VehicleSimState,
-        compute_inertia, compute_mass,
-    },
+    core::{self, VehicleFrame, VehiclePhysicsParams, VehicleSimInput, VehicleSimState},
     telemetry::{self, EMIT_TELEMETRY, TelemetrySnapshot},
 };
 use crate::{
@@ -160,13 +157,14 @@ pub fn vehicle_physics_system(
         &VehicleThrusterConfig,
         &VehicleMovementConfig,
         &VehicleDragConfig,
-        &VehiclePhysicsConfig,
         &VehicleInput,
         &mut VehicleState,
         &Transform,
         &Position,
         &mut LinearVelocity,
         &mut AngularVelocity,
+        &ComputedMass,
+        &ComputedAngularInertia,
     )>,
 ) {
     let dt = time.delta_secs();
@@ -183,13 +181,14 @@ pub fn vehicle_physics_system(
         thruster_config,
         movement_config,
         drag_config,
-        physics_config,
         input,
         mut state,
         transform,
         position,
         mut linear_velocity,
         mut angular_velocity,
+        computed_mass,
+        computed_inertia,
     ) in &mut query
     {
         // Compute ECEF position and radial frame.
@@ -211,11 +210,21 @@ pub fn vehicle_physics_system(
         let filter = SpatialQueryFilter::default().with_excluded_entities([entity]);
         let down_dir = Dir3::new(-local_up).unwrap_or(Dir3::NEG_Y);
 
-        // Compute mass and inertia from density and collider volume (scaled).
-        let half_extents = physics_config.collider_half_extents * scale;
-        let mass = compute_mass(physics_config.density, half_extents);
+        // Use computed mass and inertia from Avian3D (aggregated from collider hierarchy).
+        // Fall back to defaults if colliders haven't been generated yet.
+        let mass = if computed_mass.is_finite() {
+            computed_mass.value()
+        } else {
+            100.0
+        };
         let inv_mass = 1.0 / mass.max(0.1);
-        let inertia = compute_inertia(mass, half_extents);
+        // Use average of principal angular inertia for simplified scalar inertia.
+        let inertia = if computed_inertia.is_finite() {
+            let (principal, _) = computed_inertia.principal_angular_inertia_with_local_frame();
+            (principal.x + principal.y + principal.z) / 3.0
+        } else {
+            100.0
+        };
         let inv_inertia = 1.0 / inertia.max(0.1);
 
         // Process each thruster - collect surface normals for alignment.

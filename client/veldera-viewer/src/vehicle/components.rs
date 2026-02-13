@@ -99,8 +99,6 @@ pub struct VehicleDragConfig {
 pub struct VehiclePhysicsConfig {
     /// Mass density for physics simulation.
     pub density: f32,
-    /// Collider half-extents (x, y, z).
-    pub collider_half_extents: Vec3,
 }
 
 /// Model asset configuration.

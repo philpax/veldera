@@ -40,15 +40,14 @@
         ),
         "veldera_viewer::vehicle::components::VehiclePhysicsConfig": (
           density: 15.0,
-          collider_half_extents: (1.0, 1.6, 0.4),
         ),
         "veldera_viewer::vehicle::components::VehicleModel": (
           path: "vehicles/craft_miner.glb#Scene0",
           scale: 1.5,
         ),
         "veldera_viewer::camera::follow::FollowCameraConfig": (
-          camera_offset: (0.0, 4.0, -18.0),
-          look_target_offset: (0.0, 2.5, -14.0),
+          camera_offset: (0.0, 4.0, 18.0),
+          look_target_offset: (0.0, 4.0, 14.0),
         ),
       },
     ),

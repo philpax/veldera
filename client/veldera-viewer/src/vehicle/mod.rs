@@ -444,12 +444,12 @@ fn on_vehicle_scene_ready(
     // Clone data we need before borrowing commands.
     // Apply vehicle scale to both physics and visuals.
     let vehicle_scale = vehicle.scale;
-    let collider_half_extents = physics_config.collider_half_extents * vehicle_scale;
     let density = physics_config.density;
     let model_path = model.path.clone();
     let model_scale = model.scale * vehicle_scale;
 
     // Add runtime components not stored in scene.
+    // Collider will be generated from the mesh via ColliderConstructorHierarchy.
     commands.entity(vehicle_entity).insert((
         VehicleState::default(),
         VehicleInput::default(),
@@ -457,12 +457,10 @@ fn on_vehicle_scene_ready(
         Position(Vec3::ZERO),
         Transform::from_rotation(rotation),
         RigidBody::Dynamic,
-        Collider::cuboid(
-            collider_half_extents.x * 2.0,
-            collider_half_extents.z * 2.0,
-            collider_half_extents.y * 2.0,
-        ),
-        ColliderDensity(density),
+        // Provide initial mass to prevent "no mass or inertia" warning from Avian3D
+        // before colliders are generated from the GLTF mesh. This will be superseded
+        // by the computed mass once the `ColliderConstructorHierarchy` processes the mesh.
+        Mass(100.0),
         LinearVelocity::default(),
         AngularVelocity::default(),
         // Mark as followable for the camera system.
@@ -471,11 +469,14 @@ fn on_vehicle_scene_ready(
         DespawnOutsidePhysicsRange,
     ));
 
-    // Load the GLTF model as a child.
+    // Load the GLTF model as a child with automatic convex hull collider generation.
+    // Colliders on descendants are associated with the ancestor rigid body.
     let model_entity = commands
         .spawn((
             SceneRoot(asset_server.load(&model_path)),
             Transform::from_scale(Vec3::splat(model_scale)),
+            ColliderConstructorHierarchy::new(ColliderConstructor::ConvexHullFromMesh)
+                .with_default_density(density),
         ))
         .id();
     commands.entity(vehicle_entity).add_child(model_entity);
