@@ -39,10 +39,7 @@ impl Plugin for VehiclePlugin {
             .init_resource::<PendingVehicleSpawn>()
             .init_resource::<VehicleFolderLoader>()
             .add_systems(Startup, start_loading_vehicle_folder)
-            .add_systems(
-                FixedPreUpdate,
-                physics::vehicle_physics_system.run_if(physics::is_follow_entity_mode),
-            )
+            .add_systems(FixedPreUpdate, physics::vehicle_physics_system)
             .add_systems(
                 Update,
                 (
