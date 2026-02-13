@@ -141,7 +141,7 @@ pub fn vehicle_physics_system(
 
         // Apply vehicle scale to physics parameters.
         let scale = vehicle.scale;
-        let scaled_target_altitude = thruster_config.target_altitude * scale;
+        let target_altitude = thruster_config.target_altitude;
 
         // Track input timing for angular drag delay.
         let has_input = input.throttle.abs() > 0.01 || input.turn.abs() > 0.01;
@@ -175,12 +175,12 @@ pub fn vehicle_physics_system(
             let thruster_pos = transform.translation + world_offset;
 
             // Raycast downward from thruster.
-            let max_distance = scaled_target_altitude * 2.5;
+            let max_distance = target_altitude * 2.5;
             if let Some(hit) =
                 spatial_query.cast_ray(thruster_pos, down_dir, max_distance, true, &filter)
             {
                 let altitude = hit.distance;
-                any_grounded = any_grounded || altitude < scaled_target_altitude * 1.5;
+                any_grounded = any_grounded || altitude < target_altitude * 1.5;
 
                 // Initialize altitude history for this thruster if needed.
                 let required_len = (i + 1) * ALTITUDE_SAMPLES;
@@ -204,7 +204,7 @@ pub fn vehicle_physics_system(
                 state.last_altitudes[history_end - 1] = altitude;
 
                 // PID force computation.
-                let error = scaled_target_altitude - altitude;
+                let error = target_altitude - altitude;
                 let p_term = thruster_config.k_p * error;
                 let d_term = thruster_config.k_d * altitude_derivative;
                 let force_magnitude = (p_term + d_term).clamp(0.0, thruster_config.max_strength);
