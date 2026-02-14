@@ -1,8 +1,12 @@
 //! Vehicle physics telemetry logging.
 //!
-//! Outputs CSV data for analysis. File is reset each time a vehicle is entered.
+//! Outputs CSV data for analysis. Supports multiple output destinations via
+//! the `TelemetryOutput` trait. File output is reset each time a vehicle is entered.
 
-use std::{fs::File, io::Write};
+use std::{
+    fs::{File, OpenOptions},
+    io::Write,
+};
 
 use bevy::prelude::*;
 
@@ -39,9 +43,50 @@ pub struct TelemetrySnapshot {
     pub mass: f32,
 }
 
+/// Trait for telemetry output destinations.
+pub trait TelemetryOutput: Send + Sync {
+    /// Write the CSV header.
+    fn write_header(&mut self, header: &str);
+    /// Write a data row.
+    fn write_row(&mut self, row: &str);
+}
+
+/// File-based output (default behavior).
+#[derive(Default)]
+pub struct FileTelemetryOutput;
+
+impl TelemetryOutput for FileTelemetryOutput {
+    fn write_header(&mut self, header: &str) {
+        if let Ok(mut file) = File::create(TELEMETRY_PATH) {
+            let _ = writeln!(file, "{}", header);
+        }
+    }
+
+    fn write_row(&mut self, row: &str) {
+        if let Ok(mut file) = OpenOptions::new().append(true).open(TELEMETRY_PATH) {
+            let _ = writeln!(file, "{}", row);
+        }
+    }
+}
+
+/// Stdout output for headless tuner.
+#[allow(dead_code)]
+pub struct StdoutTelemetryOutput;
+
+impl TelemetryOutput for StdoutTelemetryOutput {
+    fn write_header(&mut self, header: &str) {
+        println!("{}", header);
+    }
+
+    fn write_row(&mut self, row: &str) {
+        println!("{}", row);
+    }
+}
+
 /// Macro to define CSV schema and generate telemetry functions.
 ///
-/// This generates both `reset_telemetry()` and `emit_telemetry()` functions
+/// This generates `reset_telemetry_to()`, `emit_telemetry_to()` (trait-based),
+/// and `reset_telemetry()`, `emit_telemetry()` (file-based convenience wrappers)
 /// from a single schema definition, keeping column names and formats in sync.
 macro_rules! define_telemetry {
     (
@@ -49,20 +94,17 @@ macro_rules! define_telemetry {
         prelude: |$snapshot:ident| { $( $prelude:stmt );* $(;)? },
         row_values: { $( $val:expr ),* $(,)? }
     ) => {
-        /// Reset telemetry file (call when entering a vehicle).
-        pub fn reset_telemetry() {
-            const CSV_HEADER: &str = concat!( $( stringify!($name), "," ),* );
-            if let Ok(mut file) = File::create(TELEMETRY_PATH) {
-                let header = CSV_HEADER.trim_end_matches(',');
-                let _ = writeln!(file, "{header}");
-            }
+        /// CSV header string.
+        const CSV_HEADER: &str = concat!( $( stringify!($name), "," ),* );
+
+        /// Reset telemetry (write header) to the specified output.
+        pub fn reset_telemetry_to(output: &mut dyn TelemetryOutput) {
+            output.write_header(CSV_HEADER.trim_end_matches(','));
         }
 
-        /// Write telemetry data to CSV file.
+        /// Write telemetry data to the specified output.
         #[allow(clippy::redundant_closure_call)]
-        pub fn emit_telemetry($snapshot: &TelemetrySnapshot) {
-            use std::fs::OpenOptions;
-
+        pub fn emit_telemetry_to($snapshot: &TelemetrySnapshot, output: &mut dyn TelemetryOutput) {
             // Execute prelude to compute derived values.
             $( $prelude )*
 
@@ -70,13 +112,17 @@ macro_rules! define_telemetry {
             let line = format!( concat!( $( $fmt, "," ),* ), $( $val ),* );
             let line = line.trim_end_matches(',');
 
-            if let Ok(mut file) = OpenOptions::new()
-                .create(true)
-                .append(true)
-                .open(TELEMETRY_PATH)
-            {
-                let _ = writeln!(file, "{line}");
-            }
+            output.write_row(line);
+        }
+
+        /// Reset telemetry file (call when entering a vehicle).
+        pub fn reset_telemetry() {
+            reset_telemetry_to(&mut FileTelemetryOutput);
+        }
+
+        /// Write telemetry data to CSV file.
+        pub fn emit_telemetry($snapshot: &TelemetrySnapshot) {
+            emit_telemetry_to($snapshot, &mut FileTelemetryOutput);
         }
     };
 }

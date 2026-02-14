@@ -6,7 +6,7 @@
 
 mod components;
 pub mod core;
-mod physics;
+pub mod physics;
 pub mod telemetry;
 
 use avian3d::prelude::*;
@@ -60,24 +60,33 @@ impl Plugin for VehiclePlugin {
                 Startup,
                 (start_loading_vehicle_folder, configure_vehicle_debug_gizmos),
             )
-            .add_systems(FixedPreUpdate, physics::vehicle_physics_system)
-            .add_systems(
-                Update,
-                (
-                    physics::vehicle_input_system.run_if(
-                        physics::is_follow_entity_mode
-                            .and(physics::cursor_is_grabbed)
-                            .and(not(egui_wants_any_keyboard_input)),
-                    ),
-                    physics::process_vehicle_right_request,
-                    check_vehicle_folder_loaded,
-                    process_vehicle_actions,
-                    toggle_vehicle_mode
-                        .run_if(not(egui_wants_any_keyboard_input).and(physics::cursor_is_grabbed)),
-                    draw_thruster_gizmos.run_if(|tab: Res<DiagnosticsTabOpen>| tab.0),
+            .add_systems(FixedPreUpdate, physics::vehicle_physics_system);
+
+        // Systems that require spherical-earth feature (camera modes, right request).
+        #[cfg(feature = "spherical-earth")]
+        app.add_systems(
+            Update,
+            (
+                physics::vehicle_input_system.run_if(
+                    physics::is_follow_entity_mode
+                        .and(physics::cursor_is_grabbed)
+                        .and(not(egui_wants_any_keyboard_input)),
                 ),
-            )
-            .add_observer(on_vehicle_scene_ready);
+                physics::process_vehicle_right_request,
+            ),
+        );
+
+        app.add_systems(
+            Update,
+            (
+                check_vehicle_folder_loaded,
+                process_vehicle_actions,
+                toggle_vehicle_mode
+                    .run_if(not(egui_wants_any_keyboard_input).and(physics::cursor_is_grabbed)),
+                draw_thruster_gizmos.run_if(|tab: Res<DiagnosticsTabOpen>| tab.0),
+            ),
+        )
+        .add_observer(on_vehicle_scene_ready);
     }
 }
 

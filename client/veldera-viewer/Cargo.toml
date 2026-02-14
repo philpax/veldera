@@ -94,8 +94,11 @@ default-features = false
 features = ["json"]
 
 [features]
-default = ["webgpu"]
+default = ["webgpu", "spherical-earth"]
 webgpu = ["bevy/webgpu"]
+# Enable spherical Earth physics with floating origin camera.
+# Disable for headless tuning binaries that use flat plane physics.
+spherical-earth = []
 
 [lints]
 workspace = true

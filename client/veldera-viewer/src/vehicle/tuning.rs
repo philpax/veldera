@@ -1,240 +1,638 @@
-//! Vehicle physics tuning simulation.
+//! Headless vehicle physics tuner.
 //!
-//! Run with: cargo run --bin vehicle-tuning
+//! Runs actual Avian3D physics on vehicle meshes to measure real mass, inertia,
+//! acceleration, top speed, and hover stability characteristics.
+//!
+//! This binary reuses the same `vehicle_physics_system` as the main application,
+//! just in flat plane mode (Y-up, 9.81 m/s² gravity).
+//!
+//! Run with: cargo run -p veldera-viewer --bin vehicle-tuning --no-default-features -- [vehicle_name]
+//! Example: cargo run -p veldera-viewer --bin vehicle-tuning --no-default-features -- swiftshadow
 
-use glam::Vec3;
-
-use veldera_viewer::vehicle::core::{
-    VehicleFrame, VehiclePhysicsParams, VehicleSimInput, VehicleSimState, compute_inertia,
-    compute_mass, compute_physics_step, required_force_for_speed, theoretical_top_speed,
-};
-
-/// Vehicle design specification.
-struct VehicleSpec {
-    name: &'static str,
-    density: f32,
-    half_extents: Vec3,
-    target_top_speed: f32,
-    time_to_90_percent: f32,
-    jump_height: f32,
+// This binary only works when spherical-earth is disabled.
+// When enabled, main() is a stub that prints an error.
+#[cfg(feature = "spherical-earth")]
+fn main() {
+    eprintln!("ERROR: vehicle-tuning must be built with --no-default-features");
+    eprintln!(
+        "Run: cargo run -p veldera-viewer --bin vehicle-tuning --no-default-features -- [vehicle_name]"
+    );
+    std::process::exit(1);
 }
 
-/// Simulate acceleration and return (top_speed, time_to_90%).
-fn simulate_acceleration(params: &VehiclePhysicsParams, max_time: f32) -> (f32, f32) {
-    let mut state = VehicleSimState {
-        grounded: true,
-        surface_normal: Vec3::Y,
-        altitude_ratio: 1.0, // At target hover altitude.
-        ..Default::default()
+#[cfg(not(feature = "spherical-earth"))]
+mod tuner {
+    use std::{env, f32::consts::PI};
+
+    use avian3d::prelude::*;
+    use bevy::{
+        app::ScheduleRunnerPlugin,
+        prelude::*,
+        render::settings::{RenderCreation, WgpuSettings},
+        scene::SceneInstanceReady,
     };
-    let input = VehicleSimInput {
-        throttle: 1.0,
-        turn: 0.0,
-        jump: false,
+
+    use veldera_viewer::{
+        camera::FollowCameraConfig,
+        vehicle::{
+            Vehicle, VehicleDragConfig, VehicleInput, VehicleModel, VehicleMovementConfig,
+            VehiclePhysicsConfig, VehicleState, VehicleThrusterConfig,
+            telemetry::{
+                StdoutTelemetryOutput, TelemetrySnapshot, emit_telemetry_to, reset_telemetry_to,
+            },
+            vehicle_physics_system,
+        },
     };
-    let frame = VehicleFrame::identity();
 
-    let dt = 1.0 / 60.0;
-    let mut velocity = Vec3::ZERO;
-    let mut time = 0.0;
-    let mut time_to_90 = 0.0;
-    let target_90 = theoretical_top_speed(params) * 0.9;
+    /// Fixed timestep for physics simulation (60 Hz).
+    const FIXED_TIMESTEP: f64 = 1.0 / 60.0;
 
-    while time < max_time {
-        let output =
-            compute_physics_step(params, &mut state, &input, &frame, velocity, Vec3::ZERO, dt);
-        velocity = output.linear_velocity_after_drag;
-        time += dt;
+    /// Maximum simulation time before timeout (seconds).
+    const MAX_SIMULATION_TIME: f32 = 30.0;
 
-        if time_to_90 == 0.0 && velocity.length() >= target_90 {
-            time_to_90 = time;
+    /// Time for hover test before switching to speed test.
+    const HOVER_TEST_TIME: f32 = 5.0;
+
+    /// Spawn height above ground for hover test (close to target for realistic settling).
+    const SPAWN_HEIGHT: f32 = 2.5;
+
+    /// State of the tuner simulation.
+    #[derive(Resource, Default)]
+    enum TunerState {
+        /// Waiting for the vehicle scene to load.
+        #[default]
+        LoadingScene,
+        /// Waiting for colliders to be generated from mesh.
+        WaitingForCollider,
+        /// Testing hover stability (drop from height, measure settling).
+        HoverTest {
+            elapsed: f32,
+            header_written: bool,
+            max_altitude: f32,
+            min_altitude: f32,
+            settled_time: f32,
+        },
+        /// Testing acceleration (full throttle, measure speed).
+        SpeedTest {
+            elapsed: f32,
+            equilibrium_timer: f32,
+        },
+        /// Simulation complete.
+        Complete,
+    }
+
+    /// Pending vehicle spawn tracking.
+    #[derive(Resource, Default)]
+    struct PendingVehicle {
+        scene_entity: Option<Entity>,
+    }
+
+    /// Measurement results accumulated during the test.
+    #[derive(Resource)]
+    struct MeasurementResults {
+        vehicle_name: String,
+        mass: f32,
+        inertia: Vec3,
+        target_altitude: f32,
+        // Hover test results.
+        hover_overshoot: f32,
+        hover_undershoot: f32,
+        hover_settling_time: f32,
+        // Speed test results.
+        max_speed: f32,
+        time_to_90_percent: Option<f32>,
+        target_90_percent: f32,
+        // Altitude during speed test.
+        speed_test_min_alt: f32,
+        speed_test_max_alt: f32,
+    }
+
+    impl Default for MeasurementResults {
+        fn default() -> Self {
+            Self {
+                vehicle_name: String::new(),
+                mass: 0.0,
+                inertia: Vec3::ZERO,
+                target_altitude: 0.0,
+                hover_overshoot: 0.0,
+                hover_undershoot: 0.0,
+                hover_settling_time: 0.0,
+                max_speed: 0.0,
+                time_to_90_percent: None,
+                target_90_percent: 0.0,
+                speed_test_min_alt: f32::MAX,
+                speed_test_max_alt: 0.0,
+            }
         }
     }
 
-    (velocity.length(), time_to_90)
-}
+    /// Set up the test environment with ground plane and vehicle.
+    fn setup_test_environment(mut commands: Commands, asset_server: Res<AssetServer>) {
+        // Ground plane using a large cuboid.
+        commands.spawn((
+            RigidBody::Static,
+            Collider::cuboid(10000.0, 1.0, 10000.0),
+            Transform::from_translation(Vec3::new(0.0, -0.5, 0.0)),
+        ));
 
-/// Calculate jump velocity for a target height: h = v²/(2g), so v = sqrt(2gh).
-fn jump_velocity_for_height(height: f32) -> f32 {
-    (2.0 * 9.81 * height).sqrt()
-}
+        // Get vehicle name from command line, default to swiftshadow.
+        let vehicle_name = env::args()
+            .nth(1)
+            .unwrap_or_else(|| "swiftshadow".to_string());
+        let scene_path = format!("vehicles/{}.scn.ron", vehicle_name);
 
-/// Design parameters for a vehicle given specs.
-fn design_vehicle(spec: &VehicleSpec) -> VehiclePhysicsParams {
-    let mass = compute_mass(spec.density, spec.half_extents);
+        // Load the vehicle scene.
+        let scene: Handle<DynamicScene> = asset_server.load(&scene_path);
+        let scene_entity = commands.spawn(DynamicSceneRoot(scene)).id();
 
-    // Choose drag based on desired time to 90% speed.
-    // Approximation: time constant τ ≈ 1/drag, time to 90% ≈ 2.3τ
-    // So drag ≈ 2.3 / time_to_90_percent
-    let forward_drag = 2.3 / spec.time_to_90_percent;
+        commands.insert_resource(PendingVehicle {
+            scene_entity: Some(scene_entity),
+        });
 
-    // Calculate force for target top speed.
-    let forward_force = required_force_for_speed(mass, forward_drag, spec.target_top_speed);
-
-    // Jump velocity for target height.
-    let jump_velocity = jump_velocity_for_height(spec.jump_height);
-
-    VehiclePhysicsParams {
-        mass,
-        inertia: compute_inertia(mass, spec.half_extents),
-        forward_force,
-        backward_force: forward_force * 0.4, // 40% of forward
-        acceleration_time: spec.time_to_90_percent * 0.1, // Power ramp is 10% of accel time
-        base_turn_rate: 2.5,
-        speed_turn_falloff: 0.3,
-        reference_speed: spec.target_top_speed,
-        max_bank_angle: 0.4,
-        bank_rate: 8.0,
-        surface_alignment_strength: 0.8,
-        surface_alignment_rate: 6.0,
-        air_control_authority: 0.3,
-        forward_drag,
-        lateral_drag: forward_drag * 50.0, // High lateral drag for grip
-        angular_drag: 0.5,
-        jump_velocity,
+        eprintln!("# Loading vehicle scene: {}", vehicle_name);
     }
-}
 
-fn print_vehicle_design(spec: &VehicleSpec) {
-    let params = design_vehicle(spec);
-    let (actual_top, actual_90_time) = simulate_acceleration(&params, 30.0);
-
-    println!("--- {} ---", spec.name);
-    println!(
-        "Target: {} m/s ({} km/h) in {:.1}s to 90%",
-        spec.target_top_speed,
-        spec.target_top_speed * 3.6,
-        spec.time_to_90_percent
-    );
-    println!(
-        "Actual: {:.1} m/s in {:.2}s to 90%",
-        actual_top, actual_90_time
-    );
-    println!();
-    println!("  mass: {:.1} kg", params.mass);
-    println!("  forward_force: {:.0}", params.forward_force);
-    println!("  backward_force: {:.0}", params.backward_force);
-    println!("  acceleration_time: {:.2}", params.acceleration_time);
-    println!("  forward_drag: {:.3}", params.forward_drag);
-    println!("  lateral_drag: {:.2}", params.lateral_drag);
-    println!(
-        "  jump_velocity: {:.1} (height: {:.1}m)",
-        params.jump_velocity, spec.jump_height
-    );
-    println!();
-}
-
-fn print_ron_values(spec: &VehicleSpec) {
-    let params = design_vehicle(spec);
-
-    println!("// {}", spec.name);
-    println!("\"veldera_viewer::vehicle::components::VehicleMovementConfig\": (");
-    println!("  forward_force: {:.1},", params.forward_force);
-    println!("  backward_force: {:.1},", params.backward_force);
-    println!("  forward_offset: (0.0, 1.2),");
-    println!("  jump_force: {:.1},", params.jump_velocity);
-    println!("  turning_strength: 400.0,");
-    println!("  acceleration_time: {:.2},", params.acceleration_time);
-    println!("  base_turn_rate: {:.1},", params.base_turn_rate);
-    println!("  speed_turn_falloff: {:.1},", params.speed_turn_falloff);
-    println!("  reference_speed: {:.1},", params.reference_speed);
-    println!("  max_bank_angle: {:.2},", params.max_bank_angle);
-    println!("  bank_rate: {:.1},", params.bank_rate);
-    println!(
-        "  surface_alignment_strength: {:.1},",
-        params.surface_alignment_strength
-    );
-    println!(
-        "  surface_alignment_rate: {:.1},",
-        params.surface_alignment_rate
-    );
-    println!(
-        "  air_control_authority: {:.1},",
-        params.air_control_authority
-    );
-    println!("),");
-    println!("\"veldera_viewer::vehicle::components::VehicleDragConfig\": (");
-    println!("  forward_drag: {:.3},", params.forward_drag);
-    println!("  lateral_drag: {:.2},", params.lateral_drag);
-    println!("  angular_drag: {:.2},", params.angular_drag);
-    println!("  angular_delay_secs: 0.25,");
-    println!("),");
-    println!();
-}
-
-fn print_turning_behavior(spec: &VehicleSpec) {
-    let params = design_vehicle(spec);
-
-    println!("--- {} turning at various speeds ---", spec.name);
-    println!("Speed\t\tTurn rate\tRadius");
-
-    for speed in [10.0, 50.0, 100.0, 150.0, 200.0] {
-        let speed_factor = 1.0
-            - (speed / params.reference_speed).clamp(0.0, 1.0) * (1.0 - params.speed_turn_falloff);
-        let turn_rate = params.base_turn_rate * speed_factor;
-        let radius = if turn_rate > 0.01 {
-            speed / turn_rate
-        } else {
-            f32::INFINITY
+    /// Observer called when the vehicle scene finishes loading.
+    fn on_scene_ready(
+        trigger: On<SceneInstanceReady>,
+        mut commands: Commands,
+        pending: Res<PendingVehicle>,
+        asset_server: Res<AssetServer>,
+        mut state: ResMut<TunerState>,
+        mut results: ResMut<MeasurementResults>,
+        vehicle_query: Query<(
+            Entity,
+            &Vehicle,
+            &VehiclePhysicsConfig,
+            &VehicleModel,
+            &VehicleThrusterConfig,
+        )>,
+    ) {
+        let Some(scene_entity) = pending.scene_entity else {
+            return;
         };
 
-        println!(
-            "{:.0} m/s\t\t{:.2} rad/s\t{:.0} m",
-            speed, turn_rate, radius
+        if trigger.event_target() != scene_entity {
+            return;
+        }
+
+        let Some((vehicle_entity, vehicle, physics_config, model, thruster_config)) =
+            vehicle_query.iter().next()
+        else {
+            eprintln!("# ERROR: Vehicle scene loaded but no Vehicle component found");
+            std::process::exit(1);
+        };
+
+        // Store vehicle info.
+        results.vehicle_name = vehicle.name.clone();
+        results.target_altitude = thruster_config.target_altitude;
+
+        let vehicle_scale = vehicle.scale;
+        let density = physics_config.density;
+        let model_path = model.path.clone();
+        let model_scale = model.scale * vehicle_scale;
+
+        // Spawn above target altitude for hover test.
+        let spawn_pos = Vec3::new(0.0, SPAWN_HEIGHT, 0.0);
+
+        // Add runtime components.
+        // The physics system handles forces internally through velocity changes.
+        commands.entity(vehicle_entity).insert((
+            VehicleState::default(),
+            VehicleInput::default(),
+            Transform::from_translation(spawn_pos).with_rotation(Quat::from_rotation_y(PI)),
+            RigidBody::Dynamic,
+            LinearVelocity::default(),
+            AngularVelocity::default(),
+        ));
+
+        // Load the GLTF model as a child with automatic convex hull collider generation.
+        let model_entity = commands
+            .spawn((
+                SceneRoot(asset_server.load(&model_path)),
+                Transform::from_scale(Vec3::splat(model_scale)),
+                ColliderConstructorHierarchy::new(ColliderConstructor::ConvexHullFromMesh)
+                    .with_default_density(density),
+            ))
+            .id();
+        commands.entity(vehicle_entity).add_child(model_entity);
+
+        *state = TunerState::WaitingForCollider;
+        eprintln!("# Scene loaded, waiting for collider generation...");
+    }
+
+    /// Wait for collider generation to complete.
+    fn wait_for_collider(
+        mut state: ResMut<TunerState>,
+        mut results: ResMut<MeasurementResults>,
+        query: Query<
+            (
+                &ComputedMass,
+                &ComputedAngularInertia,
+                &VehicleMovementConfig,
+                &VehicleDragConfig,
+                &VehicleThrusterConfig,
+            ),
+            With<Vehicle>,
+        >,
+    ) {
+        let TunerState::WaitingForCollider = &*state else {
+            return;
+        };
+
+        let Ok((computed_mass, computed_inertia, movement_config, drag_config, thruster_config)) =
+            query.single()
+        else {
+            return;
+        };
+
+        // Extract principal angular inertia.
+        let (principal, _) = computed_inertia.principal_angular_inertia_with_local_frame();
+
+        // Check if mass has been computed from collider.
+        let mass = computed_mass.value();
+        if !mass.is_finite() || mass < 1.0 || principal.length_squared() < 0.001 {
+            return;
+        }
+
+        // Compute theoretical top speed for 90% threshold.
+        let forward_drag = drag_config.forward_drag;
+        let forward_force = movement_config.forward_force;
+        let theoretical_top_speed = forward_force / (mass * forward_drag);
+
+        // Store results.
+        results.mass = mass;
+        results.inertia = principal;
+        results.target_90_percent = theoretical_top_speed * 0.9;
+
+        *state = TunerState::HoverTest {
+            elapsed: 0.0,
+            header_written: false,
+            max_altitude: 0.0,
+            min_altitude: f32::MAX,
+            settled_time: 0.0,
+        };
+
+        eprintln!("# Collider generated:");
+        eprintln!("#   Mass: {:.2} kg", mass);
+        eprintln!(
+            "#   Inertia: ({:.2}, {:.2}, {:.2})",
+            principal.x, principal.y, principal.z
         );
+        eprintln!(
+            "#   Target hover altitude: {:.2} m",
+            thruster_config.target_altitude
+        );
+        eprintln!("# Running hover test...");
     }
-    println!();
-}
 
+    /// Apply test inputs to the vehicle.
+    ///
+    /// During speed test, applies full throttle. During hover test, no input.
+    /// The actual physics (hover, thrust, drag) are handled by `vehicle_physics_system`.
+    fn apply_test_inputs(
+        state: Res<TunerState>,
+        mut query: Query<&mut VehicleInput, With<Vehicle>>,
+    ) {
+        let is_speed_test = matches!(&*state, TunerState::SpeedTest { .. });
+
+        for mut input in &mut query {
+            // Full throttle during speed test, zero otherwise.
+            input.throttle = if is_speed_test { 1.0 } else { 0.0 };
+            input.turn = 0.0;
+            input.jump = false;
+        }
+    }
+
+    /// Measure vehicle state and track test metrics.
+    ///
+    /// Observes the results of `vehicle_physics_system` and records hover/speed metrics.
+    #[allow(clippy::type_complexity)]
+    fn measure_and_track(
+        time: Res<Time>,
+        mut state: ResMut<TunerState>,
+        mut results: ResMut<MeasurementResults>,
+        query: Query<
+            (
+                &VehicleState,
+                &VehicleThrusterConfig,
+                &Transform,
+                &LinearVelocity,
+                &AngularVelocity,
+                &ComputedMass,
+            ),
+            With<Vehicle>,
+        >,
+    ) {
+        let dt = time.delta_secs();
+        if dt == 0.0 {
+            return;
+        }
+
+        // Handle test state transitions.
+        let (elapsed, header_written, max_alt, min_alt, settled_time, is_hover_test) =
+            match &mut *state {
+                TunerState::HoverTest {
+                    elapsed,
+                    header_written,
+                    max_altitude,
+                    min_altitude,
+                    settled_time,
+                } => (
+                    elapsed,
+                    header_written,
+                    max_altitude,
+                    min_altitude,
+                    settled_time,
+                    true,
+                ),
+                TunerState::SpeedTest {
+                    elapsed,
+                    equilibrium_timer,
+                } => (
+                    elapsed,
+                    &mut false,
+                    &mut 0.0f32,
+                    &mut 0.0f32,
+                    equilibrium_timer,
+                    false,
+                ),
+                _ => return,
+            };
+
+        *elapsed += dt;
+
+        let Ok((
+            vehicle_state,
+            thruster_config,
+            transform,
+            linear_velocity,
+            angular_velocity,
+            computed_mass,
+        )) = query.single()
+        else {
+            return;
+        };
+
+        let target_altitude = thruster_config.target_altitude;
+        let mass = computed_mass.value();
+
+        // Calculate current altitude from thruster diagnostics.
+        let current_altitude = if !vehicle_state.thruster_diagnostics.is_empty() {
+            let sum: f32 = vehicle_state
+                .thruster_diagnostics
+                .iter()
+                .filter(|d| d.hit)
+                .map(|d| d.altitude)
+                .sum();
+            let count = vehicle_state
+                .thruster_diagnostics
+                .iter()
+                .filter(|d| d.hit)
+                .count();
+            if count > 0 {
+                sum / count as f32
+            } else {
+                transform.translation.y
+            }
+        } else {
+            transform.translation.y
+        };
+
+        // Calculate hover force from diagnostics.
+        let hover_force = Vec3::Y
+            * vehicle_state
+                .thruster_diagnostics
+                .iter()
+                .map(|d| d.force_magnitude)
+                .sum::<f32>();
+
+        // Track hover metrics.
+        if is_hover_test {
+            if current_altitude > *max_alt {
+                *max_alt = current_altitude;
+            }
+            if current_altitude < *min_alt && current_altitude > 0.0 {
+                *min_alt = current_altitude;
+            }
+
+            // Check if settled (within 5% of target for 0.5s).
+            let error_pct = ((current_altitude - target_altitude) / target_altitude).abs();
+            if error_pct < 0.05 {
+                *settled_time += dt;
+            } else {
+                *settled_time = 0.0;
+            }
+
+            // Emit telemetry.
+            if !*header_written {
+                reset_telemetry_to(&mut StdoutTelemetryOutput);
+                *header_written = true;
+            }
+
+            let snapshot = TelemetrySnapshot {
+                elapsed: *elapsed,
+                dt,
+                throttle: 0.0,
+                turn: 0.0,
+                jump: false,
+                grounded: vehicle_state.grounded,
+                altitude_ratio: current_altitude / target_altitude,
+                time_grounded: vehicle_state.time_grounded,
+                time_since_grounded: vehicle_state.time_since_grounded,
+                current_power: vehicle_state.current_power,
+                current_bank: vehicle_state.current_bank,
+                surface_normal: vehicle_state.surface_normal,
+                rotation: *transform.rotation.as_ref(),
+                linear_vel: linear_velocity.0,
+                angular_vel: angular_velocity.0,
+                local_up: Vec3::Y,
+                hover_force,
+                core_force: vehicle_state.total_force,
+                core_torque: vehicle_state.total_torque,
+                thruster_diagnostics: vehicle_state.thruster_diagnostics.clone(),
+                mass,
+            };
+            emit_telemetry_to(&snapshot, &mut StdoutTelemetryOutput);
+
+            // Transition to speed test after hover test time or if settled.
+            if *elapsed >= HOVER_TEST_TIME || *settled_time >= 0.5 {
+                results.hover_overshoot = (*max_alt - target_altitude).max(0.0);
+                results.hover_undershoot = (target_altitude - *min_alt).max(0.0);
+                results.hover_settling_time = *elapsed - *settled_time;
+
+                eprintln!("# Hover test complete:");
+                eprintln!("#   Max altitude: {:.3} m", *max_alt);
+                eprintln!("#   Min altitude: {:.3} m", *min_alt);
+                eprintln!(
+                    "#   Overshoot: {:.1}%",
+                    (results.hover_overshoot / target_altitude) * 100.0
+                );
+                eprintln!("#   Settling time: {:.2} s", results.hover_settling_time);
+                eprintln!("# Running speed test...");
+
+                *state = TunerState::SpeedTest {
+                    elapsed: 0.0,
+                    equilibrium_timer: 0.0,
+                };
+            }
+        } else {
+            // Speed test tracking.
+            let speed = vehicle_state.speed;
+            if speed > results.max_speed {
+                results.max_speed = speed;
+            }
+            if results.time_to_90_percent.is_none() && speed >= results.target_90_percent {
+                results.time_to_90_percent = Some(*elapsed);
+            }
+
+            // Track altitude during speed test.
+            results.speed_test_min_alt = results.speed_test_min_alt.min(current_altitude).max(0.0);
+            results.speed_test_max_alt = results.speed_test_max_alt.max(current_altitude);
+
+            // Emit telemetry during speed test too (header already written).
+            let snapshot = TelemetrySnapshot {
+                elapsed: *elapsed + HOVER_TEST_TIME,
+                dt,
+                throttle: 1.0,
+                turn: 0.0,
+                jump: false,
+                grounded: vehicle_state.grounded,
+                altitude_ratio: current_altitude / target_altitude,
+                time_grounded: vehicle_state.time_grounded,
+                time_since_grounded: vehicle_state.time_since_grounded,
+                current_power: vehicle_state.current_power,
+                current_bank: vehicle_state.current_bank,
+                surface_normal: vehicle_state.surface_normal,
+                rotation: *transform.rotation.as_ref(),
+                linear_vel: linear_velocity.0,
+                angular_vel: angular_velocity.0,
+                local_up: Vec3::Y,
+                hover_force,
+                core_force: vehicle_state.total_force,
+                core_torque: vehicle_state.total_torque,
+                thruster_diagnostics: vehicle_state.thruster_diagnostics.clone(),
+                mass,
+            };
+            emit_telemetry_to(&snapshot, &mut StdoutTelemetryOutput);
+
+            // Check equilibrium.
+            let target_speed = results.target_90_percent / 0.9;
+            if speed >= target_speed * 0.95 {
+                *settled_time += dt;
+            } else {
+                *settled_time = 0.0;
+            }
+
+            if *settled_time >= 2.0 || *elapsed >= MAX_SIMULATION_TIME - HOVER_TEST_TIME {
+                *state = TunerState::Complete;
+            }
+        }
+    }
+
+    /// Check for completion and output summary.
+    fn check_complete(state: Res<TunerState>, results: Res<MeasurementResults>) {
+        let TunerState::Complete = &*state else {
+            return;
+        };
+
+        eprintln!();
+        eprintln!("# === {} ===", results.vehicle_name);
+        eprintln!("# Mass: {:.2} kg", results.mass);
+        eprintln!(
+            "#   Inertia: ({:.2}, {:.2}, {:.2})",
+            results.inertia.x, results.inertia.y, results.inertia.z
+        );
+        eprintln!("# Hover:");
+        eprintln!("#   Target altitude: {:.2} m", results.target_altitude);
+        eprintln!(
+            "#   Overshoot: {:.1}%",
+            (results.hover_overshoot / results.target_altitude) * 100.0
+        );
+        eprintln!("#   Settling time: {:.2} s", results.hover_settling_time);
+        eprintln!("# Speed:");
+        eprintln!(
+            "#   Max Speed: {:.1} m/s ({:.1} km/h)",
+            results.max_speed,
+            results.max_speed * 3.6
+        );
+        if let Some(time) = results.time_to_90_percent {
+            eprintln!("#   Time to 90%: {:.2} s", time);
+        } else {
+            eprintln!("#   Time to 90%: (not reached)");
+        }
+        // Altitude stability during movement.
+        let alt_deviation_low = ((results.target_altitude - results.speed_test_min_alt)
+            / results.target_altitude)
+            * 100.0;
+        let alt_deviation_high = ((results.speed_test_max_alt - results.target_altitude)
+            / results.target_altitude)
+            * 100.0;
+        eprintln!(
+            "#   Altitude during movement: {:.2}m - {:.2}m ({:.1}% / +{:.1}%)",
+            results.speed_test_min_alt,
+            results.speed_test_max_alt,
+            -alt_deviation_low,
+            alt_deviation_high
+        );
+
+        std::process::exit(0);
+    }
+
+    /// Entry point for the tuner.
+    pub fn run() {
+        App::new()
+            // Headless plugins: DefaultPlugins without windowing, with headless rendering.
+            .add_plugins(
+                DefaultPlugins
+                    .set(bevy::render::RenderPlugin {
+                        render_creation: RenderCreation::Automatic(WgpuSettings {
+                            backends: None,
+                            ..default()
+                        }),
+                        ..default()
+                    })
+                    .disable::<bevy::winit::WinitPlugin>(),
+            )
+            // Schedule runner for headless loop.
+            .add_plugins(ScheduleRunnerPlugin::run_loop(
+                std::time::Duration::from_secs_f64(FIXED_TIMESTEP),
+            ))
+            // Physics with fixed timestep.
+            .add_plugins(PhysicsPlugins::default().with_length_unit(1.0))
+            .insert_resource(Gravity(Vec3::NEG_Y * 9.81))
+            .insert_resource(Time::<Fixed>::from_seconds(FIXED_TIMESTEP))
+            // Register types for scene deserialization.
+            .register_type::<Vehicle>()
+            .register_type::<VehicleThrusterConfig>()
+            .register_type::<VehicleMovementConfig>()
+            .register_type::<VehicleDragConfig>()
+            .register_type::<VehiclePhysicsConfig>()
+            .register_type::<VehicleModel>()
+            .register_type::<FollowCameraConfig>()
+            // Tuner resources.
+            .init_resource::<TunerState>()
+            .init_resource::<PendingVehicle>()
+            .init_resource::<MeasurementResults>()
+            // Systems.
+            .add_systems(Startup, setup_test_environment)
+            // Use the SAME physics system as the main app (flat plane mode).
+            .add_systems(FixedPreUpdate, vehicle_physics_system)
+            .add_systems(
+                Update,
+                (
+                    wait_for_collider,
+                    apply_test_inputs,
+                    measure_and_track,
+                    check_complete,
+                ),
+            )
+            .add_observer(on_scene_ready)
+            .run();
+    }
+} // mod tuner
+
+#[cfg(not(feature = "spherical-earth"))]
 fn main() {
-    let specs = [
-        VehicleSpec {
-            name: "Swiftshadow",
-            density: 10.0,
-            half_extents: Vec3::new(0.9, 1.5, 0.3) * 2.0,
-            target_top_speed: 200.0,
-            time_to_90_percent: 3.0,
-            jump_height: 5.0,
-        },
-        VehicleSpec {
-            name: "Thunderstrike",
-            density: 12.0,
-            half_extents: Vec3::new(0.9, 1.5, 0.3) * 2.0,
-            target_top_speed: 150.0,
-            time_to_90_percent: 4.0,
-            jump_height: 4.0,
-        },
-        VehicleSpec {
-            name: "Ironclad",
-            density: 15.0,
-            half_extents: Vec3::new(1.0, 1.6, 0.4) * 2.0,
-            target_top_speed: 100.0,
-            time_to_90_percent: 5.0,
-            jump_height: 3.0,
-        },
-    ];
-
-    println!("==========================================================");
-    println!("VEHICLE PHYSICS DESIGN");
-    println!("==========================================================\n");
-
-    for spec in &specs {
-        print_vehicle_design(spec);
-    }
-
-    println!("==========================================================");
-    println!("TURNING BEHAVIOR");
-    println!("==========================================================\n");
-
-    for spec in &specs {
-        print_turning_behavior(spec);
-    }
-
-    println!("==========================================================");
-    println!("RON FILE VALUES");
-    println!("==========================================================\n");
-
-    for spec in &specs {
-        print_ron_values(spec);
-    }
+    tuner::run();
 }

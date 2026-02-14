@@ -29,6 +29,7 @@ use crate::{
     floating_origin::{FloatingOriginCamera, WorldPosition},
 };
 
+#[cfg(feature = "spherical-earth")]
 pub use gravity::GRAVITY;
 pub use terrain::TerrainCollider;
 
