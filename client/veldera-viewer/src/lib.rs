@@ -18,8 +18,8 @@ pub mod vehicle {
     pub mod physics;
 
     pub use components::{
-        ThrusterDiagnostic, Vehicle, VehicleDragConfig, VehicleInput, VehicleModel,
-        VehicleMovementConfig, VehiclePhysicsConfig, VehicleState, VehicleThrusterConfig,
+        GameLayer, Vehicle, VehicleDragConfig, VehicleHoverConfig, VehicleInput, VehicleModel,
+        VehicleMovementConfig, VehiclePhysicsConfig, VehicleState,
     };
 
     #[cfg(not(feature = "spherical-earth"))]

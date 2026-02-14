@@ -8,13 +8,11 @@
           description: "Fast and agile",
           scale: 2,
         ),
-        "veldera_viewer::vehicle::components::VehicleThrusterConfig": (
-          offsets: [(-0.3, -1.2), (0.3, -1.2), (0.3, 1.2), (-0.3, 1.2)],
-          k_p: 25000.0,
-          k_i: 3000.0,
-          k_d: -8000.0,
+        "veldera_viewer::vehicle::components::VehicleHoverConfig": (
           target_altitude: 1.75,
-          max_strength: 120000.0,
+          spring: 60000.0,
+          damper: 18000.0,
+          max_force: 200000.0,
         ),
         "veldera_viewer::vehicle::components::VehicleMovementConfig": (
           forward_force: 100000.0,
@@ -28,8 +26,8 @@
           reference_speed: 120.0,
           max_bank_angle: 0.5,
           bank_rate: 10.0,
-          surface_alignment_strength: 0.8,
-          surface_alignment_rate: 6.0,
+          upright_spring: 15000.0,
+          upright_damper: 8000.0,
           air_control_authority: 0.4,
         ),
         "veldera_viewer::vehicle::components::VehicleDragConfig": (

@@ -8,13 +8,11 @@
           description: "Heavy and stable",
           scale: 2,
         ),
-        "veldera_viewer::vehicle::components::VehicleThrusterConfig": (
-          offsets: [(-0.4, -1.4), (0.4, -1.4), (0.4, 1.4), (-0.4, 1.4)],
-          k_p: 50000.0,
-          k_i: 4000.0,
-          k_d: -15000.0,
+        "veldera_viewer::vehicle::components::VehicleHoverConfig": (
           target_altitude: 2.0,
-          max_strength: 280000.0,
+          spring: 160000.0,
+          damper: 45000.0,
+          max_force: 500000.0,
         ),
         "veldera_viewer::vehicle::components::VehicleMovementConfig": (
           forward_force: 100000.0,
@@ -28,8 +26,8 @@
           reference_speed: 55.0,
           max_bank_angle: 0.35,
           bank_rate: 7.0,
-          surface_alignment_strength: 0.9,
-          surface_alignment_rate: 5.0,
+          upright_spring: 25000.0,
+          upright_damper: 12000.0,
           air_control_authority: 0.25,
         ),
         "veldera_viewer::vehicle::components::VehicleDragConfig": (

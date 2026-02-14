@@ -10,8 +10,6 @@ use std::{
 
 use bevy::prelude::*;
 
-use super::components::ThrusterDiagnostic;
-
 /// Enable telemetry logging to `telemetry.csv` for debugging physics issues.
 pub const EMIT_TELEMETRY: bool = true;
 
@@ -39,7 +37,7 @@ pub struct TelemetrySnapshot {
     pub hover_force: Vec3,
     pub core_force: Vec3,
     pub core_torque: Vec3,
-    pub thruster_diagnostics: Vec<ThrusterDiagnostic>,
+    pub altitude: f32,
     pub mass: f32,
 }
 
@@ -135,6 +133,7 @@ define_telemetry! {
         turn: "{:.3}",
         jump: "{}",
         grounded: "{}",
+        altitude: "{:.3}",
         alt_ratio: "{:.3}",
         t_grounded: "{:.3}",
         t_airborne: "{:.3}",
@@ -164,14 +163,6 @@ define_telemetry! {
         surf_y: "{:.3}",
         surf_z: "{:.3}",
         mass: "{:.1}",
-        thr0_alt: "{:.3}",
-        thr0_force: "{:.1}",
-        thr1_alt: "{:.3}",
-        thr1_force: "{:.1}",
-        thr2_alt: "{:.3}",
-        thr2_force: "{:.1}",
-        thr3_alt: "{:.3}",
-        thr3_force: "{:.1}",
     },
     prelude: |t| {
         let vertical_vel = t.linear_vel.dot(t.local_up);
@@ -179,21 +170,7 @@ define_telemetry! {
         let horizontal_speed = horizontal_vel.length();
         let quat = Quat::from_array(t.rotation);
         let (yaw, pitch, roll) = quat.to_euler(EulerRot::YXZ);
-        let thr = |i: usize| -> (f32, f32) {
-            t.thruster_diagnostics
-                .get(i)
-                .map(|td| {
-                    (
-                        if td.altitude.is_finite() { td.altitude } else { -1.0 },
-                        td.force_magnitude,
-                    )
-                })
-                .unwrap_or((-1.0, 0.0))
-        };
-        let (t0a, t0f) = thr(0);
-        let (t1a, t1f) = thr(1);
-        let (t2a, t2f) = thr(2);
-        let (t3a, t3f) = thr(3);
+        let altitude_display = if t.altitude.is_finite() { t.altitude } else { -1.0 };
     },
     row_values: {
         t.elapsed,
@@ -202,6 +179,7 @@ define_telemetry! {
         t.turn,
         t.jump as u8,
         t.grounded as u8,
+        altitude_display,
         t.altitude_ratio,
         t.time_grounded,
         t.time_since_grounded,
@@ -231,13 +209,5 @@ define_telemetry! {
         t.surface_normal.y,
         t.surface_normal.z,
         t.mass,
-        t0a,
-        t0f,
-        t1a,
-        t1f,
-        t2a,
-        t2f,
-        t3a,
-        t3f,
     }
 }

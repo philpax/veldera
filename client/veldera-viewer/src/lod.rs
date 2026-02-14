@@ -44,6 +44,7 @@ use crate::{
 use crate::{
     floating_origin::WorldPosition,
     physics::{PHYSICS_LOD_DEPTH, PHYSICS_RANGE, terrain::TerrainCollider},
+    vehicle::GameLayer,
 };
 
 use avian3d::prelude::*;
@@ -868,6 +869,8 @@ fn update_physics_colliders(
                 Transform::from_translation(physics_pos),
                 WorldPosition::from_dvec3(node_data.world_position),
                 TerrainCollider { path: path.clone() },
+                // Ground layer so vehicle hover raycast can detect terrain.
+                CollisionLayers::new([GameLayer::Ground], [GameLayer::Ground, GameLayer::Vehicle]),
                 // Enable debug rendering for this collider.
                 DebugRender::default(),
             ))

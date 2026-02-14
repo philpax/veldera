@@ -20,8 +20,8 @@ use crate::{
     mesh::RocktreeMeshMarker,
     physics::{is_physics_debug_enabled, toggle_physics_debug},
     vehicle::{
-        Vehicle, VehicleDragConfig, VehicleInput, VehicleMovementConfig, VehicleState,
-        VehicleThrusterConfig,
+        Vehicle, VehicleDragConfig, VehicleHoverConfig, VehicleInput, VehicleMovementConfig,
+        VehicleState,
     },
 };
 
@@ -33,44 +33,40 @@ const VEHICLE_HISTORY_SIZE: usize = 120;
 pub struct VehicleHistory {
     /// Speed history (m/s).
     speed: VecDeque<f32>,
-    /// Total force magnitude history (N).
-    force_magnitude: VecDeque<f32>,
-    /// Per-thruster force history.
-    thruster_forces: Vec<VecDeque<f32>>,
+    /// Altitude history (m).
+    altitude: VecDeque<f32>,
+    /// Hover force magnitude history (N).
+    hover_force: VecDeque<f32>,
 }
 
 impl VehicleHistory {
     /// Push a new sample, maintaining the history size limit.
-    fn push_sample(&mut self, speed: f32, force_mag: f32, thruster_forces: &[f32]) {
+    fn push_sample(&mut self, speed: f32, altitude: f32, hover_force: f32) {
         // Push speed.
         self.speed.push_back(speed);
         if self.speed.len() > VEHICLE_HISTORY_SIZE {
             self.speed.pop_front();
         }
 
-        // Push force magnitude.
-        self.force_magnitude.push_back(force_mag);
-        if self.force_magnitude.len() > VEHICLE_HISTORY_SIZE {
-            self.force_magnitude.pop_front();
+        // Push altitude.
+        let alt = if altitude.is_finite() { altitude } else { 0.0 };
+        self.altitude.push_back(alt);
+        if self.altitude.len() > VEHICLE_HISTORY_SIZE {
+            self.altitude.pop_front();
         }
 
-        // Push per-thruster forces.
-        while self.thruster_forces.len() < thruster_forces.len() {
-            self.thruster_forces.push(VecDeque::new());
-        }
-        for (i, &force) in thruster_forces.iter().enumerate() {
-            self.thruster_forces[i].push_back(force);
-            if self.thruster_forces[i].len() > VEHICLE_HISTORY_SIZE {
-                self.thruster_forces[i].pop_front();
-            }
+        // Push hover force magnitude.
+        self.hover_force.push_back(hover_force);
+        if self.hover_force.len() > VEHICLE_HISTORY_SIZE {
+            self.hover_force.pop_front();
         }
     }
 
     /// Clear all history.
     fn clear(&mut self) {
         self.speed.clear();
-        self.force_magnitude.clear();
-        self.thruster_forces.clear();
+        self.altitude.clear();
+        self.hover_force.clear();
     }
 }
 
@@ -95,7 +91,7 @@ pub(super) struct DiagnosticsParams<'w, 's> {
             &'static Vehicle,
             &'static VehicleState,
             &'static VehicleInput,
-            &'static mut VehicleThrusterConfig,
+            &'static mut VehicleHoverConfig,
             &'static mut VehicleMovementConfig,
             &'static mut VehicleDragConfig,
         ),
@@ -143,23 +139,12 @@ pub(super) fn render_diagnostics_tab(
     }
 
     // Vehicle diagnostics (if in a vehicle).
-    if let Some((
-        vehicle,
-        state,
-        input,
-        mut thruster_config,
-        mut movement_config,
-        mut drag_config,
-    )) = diag.vehicle_query.iter_mut().next()
+    if let Some((vehicle, state, input, mut hover_config, mut movement_config, mut drag_config)) =
+        diag.vehicle_query.iter_mut().next()
     {
         // Update history with new sample.
-        let thruster_forces: Vec<f32> = state
-            .thruster_diagnostics
-            .iter()
-            .map(|d| d.force_magnitude)
-            .collect();
         diag.vehicle_history
-            .push_sample(state.speed, state.total_force.length(), &thruster_forces);
+            .push_sample(state.speed, state.altitude, state.hover_force.length());
 
         ui.separator();
         render_vehicle_diagnostics(
@@ -167,7 +152,7 @@ pub(super) fn render_diagnostics_tab(
             vehicle,
             state,
             input,
-            &mut thruster_config,
+            &mut hover_config,
             &mut movement_config,
             &mut drag_config,
             &diag.vehicle_history,
@@ -186,7 +171,7 @@ fn render_vehicle_diagnostics(
     vehicle: &Vehicle,
     state: &VehicleState,
     input: &VehicleInput,
-    thruster_config: &mut VehicleThrusterConfig,
+    hover_config: &mut VehicleHoverConfig,
     movement_config: &mut VehicleMovementConfig,
     drag_config: &mut VehicleDragConfig,
     history: &VehicleHistory,
@@ -290,16 +275,19 @@ fn render_vehicle_diagnostics(
             ui.separator();
 
             // Tuning sliders in collapsible sections.
-            ui.collapsing("Thruster tuning", |ui| {
+            ui.collapsing("Hover tuning", |ui| {
                 ui.add(
-                    egui::Slider::new(&mut thruster_config.target_altitude, 0.5..=5.0)
+                    egui::Slider::new(&mut hover_config.target_altitude, 0.5..=5.0)
                         .text("Target altitude"),
                 );
-                ui.add(egui::Slider::new(&mut thruster_config.k_p, 1000.0..=500000.0).text("k_p"));
-                ui.add(egui::Slider::new(&mut thruster_config.k_i, 0.0..=50000.0).text("k_i"));
-                ui.add(egui::Slider::new(&mut thruster_config.k_d, -100000.0..=0.0).text("k_d"));
                 ui.add(
-                    egui::Slider::new(&mut thruster_config.max_strength, 10000.0..=200000.0)
+                    egui::Slider::new(&mut hover_config.spring, 10000.0..=100000.0).text("Spring"),
+                );
+                ui.add(
+                    egui::Slider::new(&mut hover_config.damper, 5000.0..=50000.0).text("Damper"),
+                );
+                ui.add(
+                    egui::Slider::new(&mut hover_config.max_force, 50000.0..=500000.0)
                         .text("Max force"),
                 );
             });
@@ -337,7 +325,7 @@ fn render_vehicle_diagnostics(
                         .text("Turn falloff"),
                 );
                 ui.add(
-                    egui::Slider::new(&mut movement_config.reference_speed, 10.0..=100.0)
+                    egui::Slider::new(&mut movement_config.reference_speed, 10.0..=200.0)
                         .text("Ref speed"),
                 );
                 ui.add(
@@ -348,12 +336,12 @@ fn render_vehicle_diagnostics(
                     egui::Slider::new(&mut movement_config.bank_rate, 1.0..=20.0).text("Bank rate"),
                 );
                 ui.add(
-                    egui::Slider::new(&mut movement_config.surface_alignment_strength, 0.0..=1.0)
-                        .text("Surface align"),
+                    egui::Slider::new(&mut movement_config.upright_spring, 1000.0..=30000.0)
+                        .text("Upright spring"),
                 );
                 ui.add(
-                    egui::Slider::new(&mut movement_config.surface_alignment_rate, 1.0..=15.0)
-                        .text("Align rate"),
+                    egui::Slider::new(&mut movement_config.upright_damper, 500.0..=15000.0)
+                        .text("Upright damper"),
                 );
                 ui.add(
                     egui::Slider::new(&mut movement_config.air_control_authority, 0.0..=1.0)
@@ -416,101 +404,65 @@ fn render_vehicle_diagnostics(
 
             ui.separator();
 
-            // Thruster table.
+            // Hover info.
             ui.label(format!(
-                "Thrusters (target: {:.2}m):",
-                thruster_config.target_altitude
+                "Hover (target: {:.2}m):",
+                hover_config.target_altitude
             ));
             TableBuilder::new(ui)
-                .column(Column::exact(20.0))
-                .column(Column::exact(55.0))
-                .column(Column::exact(40.0))
-                .column(Column::exact(45.0))
-                .column(Column::exact(50.0))
-                .header(16.0, |mut header| {
-                    header.col(|ui| {
-                        ui.label("#");
-                    });
-                    header.col(|ui| {
-                        ui.label("Offset");
-                    });
-                    header.col(|ui| {
-                        ui.label("Alt");
-                    });
-                    header.col(|ui| {
-                        ui.label("Err");
-                    });
-                    header.col(|ui| {
-                        ui.label("Force");
-                    });
-                })
+                .column(Column::exact(80.0))
+                .column(Column::exact(100.0))
                 .body(|mut body| {
-                    for (i, diag) in state.thruster_diagnostics.iter().enumerate() {
-                        let offset = thruster_config.offsets.get(i);
-                        body.row(16.0, |mut row| {
-                            row.col(|ui| {
-                                ui.label(format!("{i}"));
-                            });
-                            row.col(|ui| {
-                                if let Some(o) = offset {
-                                    ui.label(format!("{:+.1},{:+.1}", o.x, o.y));
-                                } else {
-                                    ui.label("?");
-                                }
-                            });
-                            row.col(|ui| {
-                                if diag.hit {
-                                    ui.label(format!("{:.2}", diag.altitude));
-                                } else {
-                                    ui.colored_label(egui::Color32::GRAY, "-");
-                                }
-                            });
-                            row.col(|ui| {
-                                if diag.hit {
-                                    ui.label(format!("{:+.2}", diag.error));
-                                } else {
-                                    ui.colored_label(egui::Color32::GRAY, "-");
-                                }
-                            });
-                            row.col(|ui| {
-                                if diag.hit {
-                                    ui.label(format!("{:.0}", diag.force_magnitude));
-                                } else {
-                                    ui.colored_label(egui::Color32::GRAY, "-");
-                                }
-                            });
+                    body.row(18.0, |mut row| {
+                        row.col(|ui| {
+                            ui.label("Altitude:");
                         });
-                    }
+                        row.col(|ui| {
+                            if state.altitude.is_finite() {
+                                let error = hover_config.target_altitude - state.altitude;
+                                ui.label(format!("{:.2}m ({:+.2})", state.altitude, error));
+                            } else {
+                                ui.colored_label(egui::Color32::GRAY, "No ground");
+                            }
+                        });
+                    });
+                    body.row(18.0, |mut row| {
+                        row.col(|ui| {
+                            ui.label("Hover force:");
+                        });
+                        row.col(|ui| {
+                            ui.label(format!("{:.0} N", state.hover_force.length()));
+                        });
+                    });
                 });
 
-            // Thruster force plot.
-            if !history.thruster_forces.is_empty() {
-                ui.add_space(4.0);
-                ui.label("Thruster forces:");
-                Plot::new("thruster_plot")
-                    .height(60.0)
-                    .show_axes(false)
-                    .allow_drag(false)
-                    .allow_zoom(false)
-                    .allow_scroll(false)
-                    .legend(egui_plot::Legend::default())
-                    .show(ui, |plot_ui| {
-                        let colors = [
-                            egui::Color32::RED,
-                            egui::Color32::GREEN,
-                            egui::Color32::YELLOW,
-                            egui::Color32::LIGHT_BLUE,
-                        ];
-                        for (i, forces) in history.thruster_forces.iter().enumerate() {
-                            let points: PlotPoints = forces
-                                .iter()
-                                .enumerate()
-                                .map(|(j, &v)| [j as f64, v as f64])
-                                .collect();
-                            let color = colors[i % colors.len()];
-                            plot_ui.line(Line::new(format!("T{i}"), points).color(color));
-                        }
-                    });
-            }
+            // Altitude plot.
+            ui.add_space(4.0);
+            ui.label("Altitude history:");
+            let altitude_points: PlotPoints = history
+                .altitude
+                .iter()
+                .enumerate()
+                .map(|(i, &v)| [i as f64, v as f64])
+                .collect();
+            let target_line: PlotPoints = (0..VEHICLE_HISTORY_SIZE)
+                .map(|i| [i as f64, hover_config.target_altitude as f64])
+                .collect();
+            Plot::new("altitude_plot")
+                .height(60.0)
+                .show_axes(false)
+                .allow_drag(false)
+                .allow_zoom(false)
+                .allow_scroll(false)
+                .show(ui, |plot_ui| {
+                    plot_ui.line(
+                        Line::new("altitude", altitude_points).color(egui::Color32::LIGHT_BLUE),
+                    );
+                    plot_ui.line(
+                        Line::new("target", target_line)
+                            .color(egui::Color32::GRAY)
+                            .style(egui_plot::LineStyle::dashed_dense()),
+                    );
+                });
         });
 }

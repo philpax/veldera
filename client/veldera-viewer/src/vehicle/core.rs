@@ -28,10 +28,10 @@ pub struct VehiclePhysicsParams {
     pub max_bank_angle: f32,
     /// How fast to reach target bank angle.
     pub bank_rate: f32,
-    /// How strongly to align with terrain surface (0.0-1.0).
-    pub surface_alignment_strength: f32,
-    /// How fast to align with terrain surface.
-    pub surface_alignment_rate: f32,
+    /// Angular spring constant for staying upright (Nm/rad).
+    pub upright_spring: f32,
+    /// Angular damping for staying upright (Nm per rad/s).
+    pub upright_damper: f32,
     /// Control authority when airborne (0.0-1.0).
     pub air_control_authority: f32,
     /// Forward momentum drag coefficient.
@@ -261,39 +261,39 @@ pub fn compute_physics_step(
     // Angular drag factor (applied after alignment torque).
     let angular_drag_factor = (-params.angular_drag * dt).exp();
 
-    // Surface alignment with banking (only when grounded).
-    // When airborne, differential thrust from hover thrusters creates natural pitch torque.
-    if state.grounded {
-        // Grounded: blend between gravity direction and surface normal.
-        let target_up_base = if state.surface_normal != Vec3::ZERO {
-            frame
-                .local_up
-                .lerp(state.surface_normal, params.surface_alignment_strength)
-        } else {
-            frame.local_up
-        };
+    // Stay upright with banking.
+    // Full strength when grounded, reduced strength when airborne.
+    let upright_authority = if state.grounded {
+        1.0
+    } else {
+        params.air_control_authority
+    };
 
+    // Target up: use local up (gravity direction) with banking applied (only when grounded).
+    let target_up = if state.grounded {
         let bank_rotation = Quat::from_axis_angle(frame.forward, state.current_bank);
-        let target_up = bank_rotation * target_up_base;
+        bank_rotation * frame.local_up
+    } else {
+        // When airborne, just try to stay level (no banking).
+        frame.local_up
+    };
 
-        let current_up = frame.rotation * Vec3::Y;
-        let alignment_axis = current_up.cross(target_up);
-        if alignment_axis.length_squared() > 1e-6 {
-            let axis_normalized = alignment_axis.normalize();
-            let alignment_angle = current_up.dot(target_up).clamp(-1.0, 1.0).acos();
+    let current_up = frame.rotation * Vec3::Y;
 
-            // PD controller for alignment.
-            let p_torque = axis_normalized * alignment_angle * params.surface_alignment_rate;
-            let angular_vel_in_axis = new_angular_velocity.dot(axis_normalized);
-            let damping_factor = 2.0 * params.surface_alignment_rate.sqrt();
-            let d_torque = -axis_normalized * angular_vel_in_axis * damping_factor;
+    // Compute rotation error as a cross product (axis scaled by sin of angle).
+    let rotation_error = current_up.cross(target_up);
+    let error_magnitude = rotation_error.length();
 
-            let alignment_torque = (p_torque + d_torque) * params.mass;
-            new_angular_velocity += alignment_torque * inv_inertia * dt;
-        }
+    if error_magnitude > 1e-6 {
+        // Spring torque: proportional to rotation error.
+        let spring_torque = rotation_error * params.upright_spring * upright_authority;
+
+        // Damping torque: opposes angular velocity.
+        let damping_torque = -new_angular_velocity * params.upright_damper * upright_authority;
+
+        let upright_torque = spring_torque + damping_torque;
+        new_angular_velocity += upright_torque * inv_inertia * dt;
     }
-    // When airborne: no explicit alignment. Angular momentum from differential thrust
-    // (computed in physics.rs from thruster offsets) creates natural pitching.
 
     VehicleSimOutput {
         delta_linear_velocity,

@@ -2,7 +2,23 @@
 //!
 //! All vehicle components use `Reflect` for serialization in scene files.
 
+use avian3d::prelude::PhysicsLayer;
 use bevy::prelude::*;
+
+/// Collision layers for vehicle physics.
+///
+/// Used to separate vehicle colliders from ground for raycasting purposes.
+/// The hover raycast should only hit ground, not the vehicle's own mesh colliders.
+#[derive(PhysicsLayer, Clone, Copy, Debug, Default)]
+pub enum GameLayer {
+    /// Ground and terrain surfaces.
+    #[default]
+    Ground,
+    /// Vehicle bodies and their mesh colliders.
+    /// Used by tuner binary and main app (with spherical-earth feature).
+    #[allow(dead_code)]
+    Vehicle,
+}
 
 /// Vehicle marker with metadata.
 #[derive(Component, Reflect, Clone)]
@@ -27,22 +43,18 @@ impl Default for Vehicle {
     }
 }
 
-/// Thruster PID configuration.
+/// Hover spring-damper configuration.
 #[derive(Component, Reflect, Default, Clone)]
 #[reflect(Component)]
-pub struct VehicleThrusterConfig {
-    /// Thruster positions relative to vehicle center (x, z pairs).
-    pub offsets: Vec<Vec2>,
-    /// PID proportional gain.
-    pub k_p: f32,
-    /// PID integral gain.
-    pub k_i: f32,
-    /// PID derivative gain (negative for damping).
-    pub k_d: f32,
+pub struct VehicleHoverConfig {
     /// Target hover altitude in meters.
     pub target_altitude: f32,
-    /// Maximum force per thruster.
-    pub max_strength: f32,
+    /// Spring constant (N/m error) - higher = snappier hover.
+    pub spring: f32,
+    /// Damping constant (N per m/s) - suppresses oscillation.
+    pub damper: f32,
+    /// Safety cap on hover force (N).
+    pub max_force: f32,
 }
 
 /// Movement force configuration.
@@ -71,10 +83,10 @@ pub struct VehicleMovementConfig {
     pub max_bank_angle: f32,
     /// How fast to reach target bank angle.
     pub bank_rate: f32,
-    /// How strongly to align with terrain surface (0.0-1.0).
-    pub surface_alignment_strength: f32,
-    /// How fast to align with terrain surface.
-    pub surface_alignment_rate: f32,
+    /// Angular spring constant for staying upright (Nm/rad).
+    pub upright_spring: f32,
+    /// Angular damping for staying upright (Nm per rad/s).
+    pub upright_damper: f32,
     /// Control authority when airborne (0.0-1.0).
     pub air_control_authority: f32,
 }
@@ -111,35 +123,9 @@ pub struct VehicleModel {
     pub scale: f32,
 }
 
-/// Diagnostic data for a single thruster.
-#[derive(Clone, Default)]
-#[allow(dead_code)]
-pub struct ThrusterDiagnostic {
-    /// Measured altitude from raycast.
-    pub altitude: f32,
-    /// Error from target altitude (target - actual).
-    pub error: f32,
-    /// Proportional term of PID controller.
-    pub p_term: f32,
-    /// Integral term of PID controller.
-    pub i_term: f32,
-    /// Derivative term of PID controller.
-    pub d_term: f32,
-    /// Final force magnitude applied.
-    pub force_magnitude: f32,
-    /// Whether the raycast hit ground.
-    pub hit: bool,
-}
-
 /// Runtime state for vehicle (not serialized in scenes).
 #[derive(Component, Default)]
 pub struct VehicleState {
-    /// Last altitude reading per thruster for derivative computation.
-    pub last_altitudes: Vec<f32>,
-    /// Smoothed altitude derivative per thruster.
-    pub smoothed_derivatives: Vec<f32>,
-    /// Accumulated integral error per thruster.
-    pub integral_errors: Vec<f32>,
     /// Time of last jump for cooldown.
     pub last_jump_time: f32,
     /// Time of last input for angular drag delay.
@@ -148,14 +134,16 @@ pub struct VehicleState {
     pub grounded: bool,
     /// Current speed magnitude for display.
     pub speed: f32,
-    /// Per-thruster diagnostic data.
-    pub thruster_diagnostics: Vec<ThrusterDiagnostic>,
+    /// Current altitude from raycast.
+    pub altitude: f32,
     /// Total force applied this frame.
     pub total_force: Vec3,
     /// Total torque applied this frame.
     pub total_torque: Vec3,
     /// Gravity force component.
     pub gravity_force: Vec3,
+    /// Hover force from spring-damper.
+    pub hover_force: Vec3,
     /// Computed mass from density and volume.
     pub mass: f32,
     /// Current throttle power (ramped 0.0-1.0).

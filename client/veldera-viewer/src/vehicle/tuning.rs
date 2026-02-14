@@ -35,8 +35,8 @@ mod tuner {
     use veldera_viewer::{
         camera::FollowCameraConfig,
         vehicle::{
-            Vehicle, VehicleDragConfig, VehicleInput, VehicleModel, VehicleMovementConfig,
-            VehiclePhysicsConfig, VehicleState, VehicleThrusterConfig,
+            GameLayer, Vehicle, VehicleDragConfig, VehicleHoverConfig, VehicleInput, VehicleModel,
+            VehicleMovementConfig, VehiclePhysicsConfig, VehicleState,
             telemetry::{
                 StdoutTelemetryOutput, TelemetrySnapshot, emit_telemetry_to, reset_telemetry_to,
             },
@@ -52,9 +52,6 @@ mod tuner {
 
     /// Time for hover test before switching to speed test.
     const HOVER_TEST_TIME: f32 = 5.0;
-
-    /// Spawn height above ground for hover test (close to target for realistic settling).
-    const SPAWN_HEIGHT: f32 = 2.5;
 
     /// State of the tuner simulation.
     #[derive(Resource, Default)]
@@ -129,10 +126,12 @@ mod tuner {
     /// Set up the test environment with ground plane and vehicle.
     fn setup_test_environment(mut commands: Commands, asset_server: Res<AssetServer>) {
         // Ground plane using a large cuboid.
+        // Uses Ground layer so vehicle raycast can detect it.
         commands.spawn((
             RigidBody::Static,
             Collider::cuboid(10000.0, 1.0, 10000.0),
             Transform::from_translation(Vec3::new(0.0, -0.5, 0.0)),
+            CollisionLayers::new([GameLayer::Ground], [GameLayer::Ground, GameLayer::Vehicle]),
         ));
 
         // Get vehicle name from command line, default to swiftshadow.
@@ -165,7 +164,7 @@ mod tuner {
             &Vehicle,
             &VehiclePhysicsConfig,
             &VehicleModel,
-            &VehicleThrusterConfig,
+            &VehicleHoverConfig,
         )>,
     ) {
         let Some(scene_entity) = pending.scene_entity else {
@@ -176,7 +175,7 @@ mod tuner {
             return;
         }
 
-        let Some((vehicle_entity, vehicle, physics_config, model, thruster_config)) =
+        let Some((vehicle_entity, vehicle, physics_config, model, hover_config)) =
             vehicle_query.iter().next()
         else {
             eprintln!("# ERROR: Vehicle scene loaded but no Vehicle component found");
@@ -185,15 +184,15 @@ mod tuner {
 
         // Store vehicle info.
         results.vehicle_name = vehicle.name.clone();
-        results.target_altitude = thruster_config.target_altitude;
+        results.target_altitude = hover_config.target_altitude;
 
         let vehicle_scale = vehicle.scale;
         let density = physics_config.density;
         let model_path = model.path.clone();
         let model_scale = model.scale * vehicle_scale;
 
-        // Spawn above target altitude for hover test.
-        let spawn_pos = Vec3::new(0.0, SPAWN_HEIGHT, 0.0);
+        // Spawn at target altitude for hover test.
+        let spawn_pos = Vec3::new(0.0, hover_config.target_altitude, 0.0);
 
         // Add runtime components.
         // The physics system handles forces internally through velocity changes.
@@ -207,12 +206,17 @@ mod tuner {
         ));
 
         // Load the GLTF model as a child with automatic convex hull collider generation.
+        // Uses Vehicle layer so hover raycast ignores the vehicle's own colliders.
         let model_entity = commands
             .spawn((
                 SceneRoot(asset_server.load(&model_path)),
                 Transform::from_scale(Vec3::splat(model_scale)),
                 ColliderConstructorHierarchy::new(ColliderConstructor::ConvexHullFromMesh)
-                    .with_default_density(density),
+                    .with_default_density(density)
+                    .with_default_layers(CollisionLayers::new(
+                        [GameLayer::Vehicle],
+                        [GameLayer::Ground, GameLayer::Vehicle],
+                    )),
             ))
             .id();
         commands.entity(vehicle_entity).add_child(model_entity);
@@ -231,7 +235,7 @@ mod tuner {
                 &ComputedAngularInertia,
                 &VehicleMovementConfig,
                 &VehicleDragConfig,
-                &VehicleThrusterConfig,
+                &VehicleHoverConfig,
             ),
             With<Vehicle>,
         >,
@@ -240,7 +244,7 @@ mod tuner {
             return;
         };
 
-        let Ok((computed_mass, computed_inertia, movement_config, drag_config, thruster_config)) =
+        let Ok((computed_mass, computed_inertia, movement_config, drag_config, hover_config)) =
             query.single()
         else {
             return;
@@ -281,7 +285,7 @@ mod tuner {
         );
         eprintln!(
             "#   Target hover altitude: {:.2} m",
-            thruster_config.target_altitude
+            hover_config.target_altitude
         );
         eprintln!("# Running hover test...");
     }
@@ -315,7 +319,7 @@ mod tuner {
         query: Query<
             (
                 &VehicleState,
-                &VehicleThrusterConfig,
+                &VehicleHoverConfig,
                 &Transform,
                 &LinearVelocity,
                 &AngularVelocity,
@@ -364,7 +368,7 @@ mod tuner {
 
         let Ok((
             vehicle_state,
-            thruster_config,
+            hover_config,
             transform,
             linear_velocity,
             angular_velocity,
@@ -374,38 +378,18 @@ mod tuner {
             return;
         };
 
-        let target_altitude = thruster_config.target_altitude;
+        let target_altitude = hover_config.target_altitude;
         let mass = computed_mass.value();
 
-        // Calculate current altitude from thruster diagnostics.
-        let current_altitude = if !vehicle_state.thruster_diagnostics.is_empty() {
-            let sum: f32 = vehicle_state
-                .thruster_diagnostics
-                .iter()
-                .filter(|d| d.hit)
-                .map(|d| d.altitude)
-                .sum();
-            let count = vehicle_state
-                .thruster_diagnostics
-                .iter()
-                .filter(|d| d.hit)
-                .count();
-            if count > 0 {
-                sum / count as f32
-            } else {
-                transform.translation.y
-            }
+        // Use current altitude from vehicle state.
+        let current_altitude = if vehicle_state.altitude.is_finite() {
+            vehicle_state.altitude
         } else {
             transform.translation.y
         };
 
-        // Calculate hover force from diagnostics.
-        let hover_force = Vec3::Y
-            * vehicle_state
-                .thruster_diagnostics
-                .iter()
-                .map(|d| d.force_magnitude)
-                .sum::<f32>();
+        // Use scaled hover force from physics system.
+        let hover_force = vehicle_state.hover_force;
 
         // Track hover metrics.
         if is_hover_test {
@@ -450,7 +434,7 @@ mod tuner {
                 hover_force,
                 core_force: vehicle_state.total_force,
                 core_torque: vehicle_state.total_torque,
-                thruster_diagnostics: vehicle_state.thruster_diagnostics.clone(),
+                altitude: current_altitude,
                 mass,
             };
             emit_telemetry_to(&snapshot, &mut StdoutTelemetryOutput);
@@ -511,7 +495,7 @@ mod tuner {
                 hover_force,
                 core_force: vehicle_state.total_force,
                 core_torque: vehicle_state.total_torque,
-                thruster_diagnostics: vehicle_state.thruster_diagnostics.clone(),
+                altitude: current_altitude,
                 mass,
             };
             emit_telemetry_to(&snapshot, &mut StdoutTelemetryOutput);
@@ -604,7 +588,7 @@ mod tuner {
             .insert_resource(Time::<Fixed>::from_seconds(FIXED_TIMESTEP))
             // Register types for scene deserialization.
             .register_type::<Vehicle>()
-            .register_type::<VehicleThrusterConfig>()
+            .register_type::<VehicleHoverConfig>()
             .register_type::<VehicleMovementConfig>()
             .register_type::<VehicleDragConfig>()
             .register_type::<VehiclePhysicsConfig>()

@@ -11,8 +11,8 @@ use bevy::{
 
 use super::{
     components::{
-        ThrusterDiagnostic, Vehicle, VehicleDragConfig, VehicleInput, VehicleMovementConfig,
-        VehicleState, VehicleThrusterConfig,
+        GameLayer, Vehicle, VehicleDragConfig, VehicleHoverConfig, VehicleInput,
+        VehicleMovementConfig, VehicleState,
     },
     core::{self, VehicleFrame, VehiclePhysicsParams, VehicleSimInput, VehicleSimState},
     telemetry::{self, EMIT_TELEMETRY, TelemetrySnapshot},
@@ -27,18 +27,6 @@ use crate::{
 
 /// Jump cooldown in seconds.
 const JUMP_COOLDOWN: f32 = 2.0;
-
-/// Smoothing factor for derivative computation (0-1).
-/// Lower = smoother but more lag, higher = more responsive but noisier.
-const DERIVATIVE_SMOOTHING: f32 = 0.3;
-
-/// Maximum altitude derivative (m/s) to prevent force spikes from collisions.
-/// A vehicle falling at terminal velocity (~50 m/s) shouldn't exceed this rate of change.
-const MAX_ALTITUDE_DERIVATIVE: f32 = 15.0;
-
-/// Altitude change threshold (m) to detect collision/clipping.
-/// If altitude drops by more than this in one frame, treat it as a collision.
-const COLLISION_ALTITUDE_THRESHOLD: f32 = 0.5;
 
 /// Capture vehicle input from keyboard.
 #[cfg(feature = "spherical-earth")]
@@ -120,8 +108,8 @@ fn build_physics_params(
         reference_speed: movement_config.reference_speed,
         max_bank_angle: movement_config.max_bank_angle,
         bank_rate: movement_config.bank_rate,
-        surface_alignment_strength: movement_config.surface_alignment_strength,
-        surface_alignment_rate: movement_config.surface_alignment_rate,
+        upright_spring: movement_config.upright_spring,
+        upright_damper: movement_config.upright_damper,
         air_control_authority: movement_config.air_control_authority,
         forward_drag: drag_config.forward_drag,
         lateral_drag: drag_config.lateral_drag,
@@ -173,7 +161,7 @@ pub fn vehicle_physics_system(
     mut query: Query<(
         Entity,
         &Vehicle,
-        &VehicleThrusterConfig,
+        &VehicleHoverConfig,
         &VehicleMovementConfig,
         &VehicleDragConfig,
         &VehicleInput,
@@ -194,7 +182,7 @@ pub fn vehicle_physics_system(
     for (
         entity,
         vehicle,
-        thruster_config,
+        hover_config,
         movement_config,
         drag_config,
         input,
@@ -223,7 +211,7 @@ pub fn vehicle_physics_system(
             &spatial_query,
             entity,
             vehicle,
-            thruster_config,
+            hover_config,
             movement_config,
             drag_config,
             input,
@@ -250,7 +238,7 @@ pub fn vehicle_physics_system(
     mut query: Query<(
         Entity,
         &Vehicle,
-        &VehicleThrusterConfig,
+        &VehicleHoverConfig,
         &VehicleMovementConfig,
         &VehicleDragConfig,
         &VehicleInput,
@@ -268,7 +256,7 @@ pub fn vehicle_physics_system(
     for (
         entity,
         vehicle,
-        thruster_config,
+        hover_config,
         movement_config,
         drag_config,
         input,
@@ -290,7 +278,7 @@ pub fn vehicle_physics_system(
             &spatial_query,
             entity,
             vehicle,
-            thruster_config,
+            hover_config,
             movement_config,
             drag_config,
             input,
@@ -307,14 +295,16 @@ pub fn vehicle_physics_system(
 }
 
 /// Inner physics computation shared between spherical and flat plane modes.
+///
+/// Uses a simple spring-damper hover system with a single central raycast.
 #[allow(clippy::too_many_arguments)]
 fn vehicle_physics_inner(
     dt: f32,
     elapsed: f32,
     spatial_query: &SpatialQuery,
-    entity: Entity,
+    _entity: Entity,
     vehicle: &Vehicle,
-    thruster_config: &VehicleThrusterConfig,
+    hover_config: &VehicleHoverConfig,
     movement_config: &VehicleMovementConfig,
     drag_config: &VehicleDragConfig,
     input: &VehicleInput,
@@ -327,9 +317,8 @@ fn vehicle_physics_inner(
     local_up: Vec3,
     gravity: f32,
 ) {
-    // Apply vehicle scale to physics parameters.
     let scale = vehicle.scale;
-    let target_altitude = thruster_config.target_altitude;
+    let target_altitude = hover_config.target_altitude;
 
     // Track input timing for angular drag delay.
     let has_input = input.throttle.abs() > 0.01 || input.turn.abs() > 0.01;
@@ -337,8 +326,8 @@ fn vehicle_physics_inner(
         state.last_input_time = elapsed;
     }
 
-    // Raycast filter excludes self.
-    let filter = SpatialQueryFilter::default().with_excluded_entities([entity]);
+    // Raycast filter: only check ground layer (not vehicle colliders).
+    let filter = SpatialQueryFilter::default().with_mask([GameLayer::Ground]);
     let down_dir = Dir3::new(-local_up).unwrap_or(Dir3::NEG_Y);
 
     // Use computed mass and inertia from Avian3D (aggregated from collider hierarchy).
@@ -349,6 +338,7 @@ fn vehicle_physics_inner(
         100.0
     };
     let inv_mass = 1.0 / mass.max(0.1);
+
     // Use average of principal angular inertia for simplified scalar inertia.
     let inertia = if computed_inertia.is_finite() {
         let (principal, _) = computed_inertia.principal_angular_inertia_with_local_frame();
@@ -356,189 +346,59 @@ fn vehicle_physics_inner(
     } else {
         100.0
     };
-    let inv_inertia = 1.0 / inertia.max(0.1);
 
-    // Process each thruster - collect surface normals for alignment.
-    let mut hover_force = Vec3::ZERO;
-    let mut hover_torque = Vec3::ZERO;
-    let mut any_grounded = false;
-    let mut surface_normal_sum = Vec3::ZERO;
-    let mut surface_normal_weight = 0.0;
-    let mut altitude_sum = 0.0;
-    let mut altitude_count = 0;
+    // Simple spring-damper hover: single raycast from vehicle center.
+    // Includes gravity compensation so vehicle hovers at target altitude, not below.
+    let max_ray_distance = target_altitude * 3.0;
+    let weight = mass * gravity;
+    let (hover_force, grounded, altitude, surface_normal) = if let Some(hit) = spatial_query
+        .cast_ray(
+            transform.translation,
+            down_dir,
+            max_ray_distance,
+            true,
+            &filter,
+        ) {
+        let altitude = hit.distance;
+        let error = target_altitude - altitude;
+        let vertical_vel = linear_velocity.0.dot(local_up);
 
-    // Clear and prepare thruster diagnostics.
-    state.thruster_diagnostics.clear();
+        // Spring-damper formula with gravity compensation: F = k*error - c*velocity + weight.
+        // At target altitude (error=0, velocity=0), force equals weight, achieving equilibrium.
+        let force_magnitude =
+            hover_config.spring * error - hover_config.damper * vertical_vel + weight;
 
-    for (i, offset) in thruster_config.offsets.iter().enumerate() {
-        // Transform thruster offset to world space (scaled by vehicle scale).
-        let scaled_offset = *offset * scale;
-        let local_offset = Vec3::new(scaled_offset.x, 0.0, scaled_offset.y);
-        let world_offset = transform.rotation * local_offset;
-        let thruster_pos = transform.translation + world_offset;
+        // Clamp to [0, max_force] - no pushing down, and safety cap.
+        let force_magnitude = force_magnitude.clamp(0.0, hover_config.max_force);
 
-        // Raycast downward from thruster.
-        let max_distance = target_altitude * 2.5;
-        if let Some(hit) =
-            spatial_query.cast_ray(thruster_pos, down_dir, max_distance, true, &filter)
-        {
-            let altitude = hit.distance;
-            any_grounded = any_grounded || altitude < target_altitude * 1.5;
-            altitude_sum += altitude;
-            altitude_count += 1;
+        let grounded = altitude < target_altitude * 1.5;
+        (local_up * force_magnitude, grounded, altitude, hit.normal)
+    } else {
+        (Vec3::ZERO, false, f32::INFINITY, local_up)
+    };
 
-            // Accumulate surface normal weighted by inverse altitude.
-            let normal_weight = 1.0 / (altitude + 0.1);
-            surface_normal_sum += hit.normal * normal_weight;
-            surface_normal_weight += normal_weight;
+    // Update state.
+    state.grounded = grounded;
+    state.altitude = altitude;
 
-            // Initialize last altitude for this thruster if needed.
-            while state.last_altitudes.len() <= i {
-                state.last_altitudes.push(altitude);
-            }
-
-            // Initialize smoothed derivative for this thruster if needed.
-            while state.smoothed_derivatives.len() <= i {
-                state.smoothed_derivatives.push(0.0);
-            }
-
-            // Compute instantaneous derivative (rate of change).
-            let last_altitude = state.last_altitudes[i];
-            let altitude_change = altitude - last_altitude;
-
-            // Detect collision: sudden altitude drop indicates ground contact or clipping.
-            // When this happens, don't trust the derivative - reset smoothing and skip spike.
-            let is_collision = altitude_change < -COLLISION_ALTITUDE_THRESHOLD;
-
-            let altitude_derivative = if is_collision {
-                // Collision detected: reset smoothed derivative to zero to avoid force spike.
-                state.smoothed_derivatives[i] = 0.0;
-                0.0
-            } else {
-                // Normal case: compute derivative with smoothing.
-                let instant_derivative = altitude_change / dt.max(0.001);
-
-                // Clamp derivative to prevent extreme spikes from edge cases.
-                let clamped_derivative =
-                    instant_derivative.clamp(-MAX_ALTITUDE_DERIVATIVE, MAX_ALTITUDE_DERIVATIVE);
-
-                // Apply exponential smoothing to reduce noise.
-                let smoothed = state.smoothed_derivatives[i];
-                let filtered = DERIVATIVE_SMOOTHING * clamped_derivative
-                    + (1.0 - DERIVATIVE_SMOOTHING) * smoothed;
-                state.smoothed_derivatives[i] = filtered;
-                filtered
-            };
-
-            // Store current altitude for next frame.
-            state.last_altitudes[i] = altitude;
-
-            // PID force computation.
-            let error = target_altitude - altitude;
-            let p_term = thruster_config.k_p * error;
-
-            // Initialize integral error for this thruster if needed.
-            while state.integral_errors.len() <= i {
-                state.integral_errors.push(0.0);
-            }
-
-            // On collision, reset integral to prevent windup from sudden state changes.
-            if is_collision {
-                state.integral_errors[i] = 0.0;
-            }
-
-            // Accumulate integral error, with anti-windup clamping.
-            // Limit integral to provide at most 25% of max force to prevent windup.
-            state.integral_errors[i] += error * dt;
-            let integral_limit =
-                (thruster_config.max_strength * 0.25) / thruster_config.k_i.abs().max(1.0);
-            state.integral_errors[i] =
-                state.integral_errors[i].clamp(-integral_limit, integral_limit);
-
-            let i_term = thruster_config.k_i * state.integral_errors[i];
-            let d_term = thruster_config.k_d * altitude_derivative;
-            let force_magnitude =
-                (p_term + i_term + d_term).clamp(0.0, thruster_config.max_strength);
-
-            // Record thruster diagnostics.
-            state.thruster_diagnostics.push(ThrusterDiagnostic {
-                altitude,
-                error,
-                p_term,
-                i_term,
-                d_term,
-                force_magnitude,
-                hit: true,
-            });
-
-            // Apply force along local up, with torque from offset position.
-            let thruster_force = local_up * force_magnitude;
-            hover_force += thruster_force;
-            // Torque = offset × force (creates pitch/roll from differential thrust).
-            // Scale down significantly - thrusters primarily provide lift, with subtle
-            // rotational effects. Too much torque causes wild tumbling.
-            let torque_scale = 0.02;
-            hover_torque += world_offset.cross(thruster_force) * torque_scale;
-        } else {
-            // No ground detected below thruster - reset integral to prevent windup.
-            if let Some(integral) = state.integral_errors.get_mut(i) {
-                *integral = 0.0;
-            }
-            state.thruster_diagnostics.push(ThrusterDiagnostic {
-                altitude: f32::INFINITY,
-                error: 0.0,
-                p_term: 0.0,
-                i_term: 0.0,
-                d_term: 0.0,
-                force_magnitude: 0.0,
-                hit: false,
-            });
-        }
-    }
-
-    // Update grounded state.
-    state.grounded = any_grounded;
-
-    // Update surface normal (averaged from raycasts).
-    if surface_normal_weight > 0.0 {
-        let target_normal = (surface_normal_sum / surface_normal_weight).normalize_or_zero();
-        let lerp_rate = movement_config.surface_alignment_rate * dt;
-        state.surface_normal = state.surface_normal.lerp(target_normal, lerp_rate.min(1.0));
+    // Smoothly update surface normal.
+    if grounded {
+        let lerp_rate = (5.0 * dt).min(1.0);
+        state.surface_normal = state.surface_normal.lerp(surface_normal, lerp_rate);
     }
     if state.surface_normal == Vec3::ZERO {
         state.surface_normal = local_up;
     }
 
-    // Clamp extreme vertical velocity from collision responses.
-    // When hitting slopes at high speed, the physics engine's collision solver
-    // can add large upward velocities. We clamp these to prevent "launching into sky".
-    let vertical_vel = linear_velocity.0.dot(local_up);
-    let max_vertical_speed = 8.0; // m/s - reasonable for hover vehicle bumps.
-    if vertical_vel > max_vertical_speed {
-        let excess = vertical_vel - max_vertical_speed;
-        linear_velocity.0 -= local_up * excess;
-    }
-
-    // Aggressive damping when climbing fast while airborne.
-    // This catches cases where collision impulses accumulate over multiple frames.
-    let vertical_vel_after_clamp = linear_velocity.0.dot(local_up);
-    if !any_grounded && vertical_vel_after_clamp > 3.0 {
-        // Rapidly reduce upward velocity when airborne (half-life ~0.1s).
-        let damping = (-10.0 * dt).exp();
-        let target_vel = vertical_vel_after_clamp * damping;
-        linear_velocity.0 -= local_up * (vertical_vel_after_clamp - target_vel);
-    }
-
-    // Apply hover forces from thrusters.
+    // Apply hover force.
     linear_velocity.0 += hover_force * inv_mass * dt;
-    angular_velocity.0 += hover_torque * inv_inertia * dt;
 
     // Front-heavy center of mass creates natural pitch-down torque when airborne.
-    // This simulates the effect of weight distribution being forward of geometric center.
     // When grounded, hover thrusters counteract this; when airborne, it causes natural nose-down.
-    if !any_grounded {
-        let com_forward_offset = 0.08 * scale; // Center of mass is slightly forward.
-        let local_com_offset = Vec3::new(0.0, 0.0, -com_forward_offset); // -Z is forward.
+    if !grounded {
+        let inv_inertia = 1.0 / inertia.max(0.1);
+        let com_forward_offset = 0.08 * scale;
+        let local_com_offset = Vec3::new(0.0, 0.0, -com_forward_offset);
         let world_com_offset = transform.rotation * local_com_offset;
         let gravity_force = -local_up * gravity * mass;
         let gravity_torque = world_com_offset.cross(gravity_force);
@@ -546,10 +406,9 @@ fn vehicle_physics_inner(
     }
 
     // Compute altitude ratio for thrust tapering.
-    let altitude_ratio = if altitude_count > 0 {
-        (altitude_sum / altitude_count as f32) / target_altitude
+    let altitude_ratio = if altitude.is_finite() {
+        altitude / target_altitude
     } else {
-        // No ground detected - assume very high (thrust will be minimal).
         10.0
     };
 
@@ -557,7 +416,7 @@ fn vehicle_physics_inner(
     let physics_params = build_physics_params(movement_config, drag_config, mass, inertia);
     let mut sim_state = build_sim_state(state, altitude_ratio);
 
-    // Handle jump cooldown separately (core doesn't track this).
+    // Handle jump cooldown.
     let can_jump = input.jump && state.grounded && (elapsed - state.last_jump_time) > JUMP_COOLDOWN;
     if can_jump {
         state.last_jump_time = elapsed;
@@ -571,7 +430,7 @@ fn vehicle_physics_inner(
 
     let sim_frame = VehicleFrame::new(transform.rotation, local_up);
 
-    // Compute core physics step (thrust, turning, banking, drag, alignment).
+    // Compute core physics step (thrust, turning, banking, drag, upright torque).
     let output = core::compute_physics_step(
         &physics_params,
         &mut sim_state,
@@ -592,11 +451,12 @@ fn vehicle_physics_inner(
     // Update diagnostics.
     state.speed = linear_velocity.0.length();
     state.total_force = output.total_force + hover_force;
-    state.total_torque = output.total_torque + hover_torque;
+    state.total_torque = output.total_torque;
     state.gravity_force = -local_up * gravity * mass;
+    state.hover_force = hover_force;
     state.mass = mass;
 
-    // Telemetry logging for debugging physics issues.
+    // Telemetry logging.
     if EMIT_TELEMETRY {
         let snapshot = TelemetrySnapshot {
             elapsed,
@@ -616,7 +476,7 @@ fn vehicle_physics_inner(
             hover_force,
             core_force: output.total_force,
             core_torque: output.total_torque,
-            thruster_diagnostics: state.thruster_diagnostics.clone(),
+            altitude,
             mass,
             time_grounded: state.time_grounded,
             time_since_grounded: state.time_since_grounded,

@@ -21,8 +21,8 @@ use bevy_egui::input::egui_wants_any_keyboard_input;
 use glam::DVec3;
 
 pub use components::{
-    Vehicle, VehicleDragConfig, VehicleInput, VehicleModel, VehicleMovementConfig,
-    VehiclePhysicsConfig, VehicleState, VehicleThrusterConfig,
+    GameLayer, Vehicle, VehicleDragConfig, VehicleHoverConfig, VehicleInput, VehicleModel,
+    VehicleMovementConfig, VehiclePhysicsConfig, VehicleState,
 };
 
 use crate::{
@@ -47,7 +47,7 @@ impl Plugin for VehiclePlugin {
         // Register reflectable types for scene serialization.
         app.init_gizmo_group::<VehicleDebugGizmos>()
             .register_type::<Vehicle>()
-            .register_type::<VehicleThrusterConfig>()
+            .register_type::<VehicleHoverConfig>()
             .register_type::<VehicleMovementConfig>()
             .register_type::<VehicleDragConfig>()
             .register_type::<VehiclePhysicsConfig>()
@@ -480,12 +480,17 @@ fn on_vehicle_scene_ready(
 
     // Load the GLTF model as a child with automatic convex hull collider generation.
     // Colliders on descendants are associated with the ancestor rigid body.
+    // Uses Vehicle layer so hover raycast ignores the vehicle's own colliders.
     let model_entity = commands
         .spawn((
             SceneRoot(asset_server.load(&model_path)),
             Transform::from_scale(Vec3::splat(model_scale)),
             ColliderConstructorHierarchy::new(ColliderConstructor::ConvexHullFromMesh)
-                .with_default_density(density),
+                .with_default_density(density)
+                .with_default_layers(CollisionLayers::new(
+                    [GameLayer::Vehicle],
+                    [GameLayer::Ground, GameLayer::Vehicle],
+                )),
         ))
         .id();
     commands.entity(vehicle_entity).add_child(model_entity);
@@ -568,58 +573,40 @@ fn toggle_vehicle_mode(
 }
 
 // ============================================================================
-// Thruster gizmos
+// Hover gizmos
 // ============================================================================
 
 /// Scale factor for force visualization (meters per Newton).
 const FORCE_GIZMO_SCALE: f32 = 0.00005;
 
-/// Draw gizmos showing thruster raycasts and forces.
+/// Draw gizmos showing hover raycast and force.
 ///
 /// Uses the physics `Position` component for accurate placement that stays
 /// synchronized with the physics simulation.
 fn draw_thruster_gizmos(
     mut gizmos: Gizmos<VehicleDebugGizmos>,
-    vehicle_query: Query<(
-        &Position,
-        &Transform,
-        &Vehicle,
-        &VehicleState,
-        &VehicleThrusterConfig,
-    )>,
+    vehicle_query: Query<(&Position, &Transform, &VehicleState)>,
 ) {
-    for (position, transform, vehicle, state, thruster_config) in &vehicle_query {
-        let scale = vehicle.scale;
+    for (position, transform, state) in &vehicle_query {
         let local_up = transform.rotation * Vec3::Y;
+        let vehicle_pos = position.0;
 
-        for (i, offset) in thruster_config.offsets.iter().enumerate() {
-            let Some(diag) = state.thruster_diagnostics.get(i) else {
-                continue;
-            };
+        if state.altitude.is_finite() {
+            // Draw raycast line from vehicle center to ground.
+            let ground_pos = vehicle_pos - local_up * state.altitude;
+            gizmos.line(vehicle_pos, ground_pos, css::ORANGE);
 
-            // Compute thruster world position using physics Position for accuracy.
-            let scaled_offset = *offset * scale;
-            let local_offset = Vec3::new(scaled_offset.x, 0.0, scaled_offset.y);
-            let world_offset = transform.rotation * local_offset;
-            let thruster_pos = position.0 + world_offset;
+            // Draw small sphere at ground contact point.
+            gizmos.sphere(Isometry3d::from_translation(ground_pos), 0.1, css::ORANGE);
 
-            if diag.hit {
-                // Draw raycast line from thruster to ground.
-                let ground_pos = thruster_pos - local_up * diag.altitude;
-                gizmos.line(thruster_pos, ground_pos, css::ORANGE);
-
-                // Draw small sphere at ground contact point.
-                gizmos.sphere(Isometry3d::from_translation(ground_pos), 0.1, css::ORANGE);
-
-                // Draw force vector (upward from thruster).
-                let force_length = diag.force_magnitude * FORCE_GIZMO_SCALE;
-                let force_end = thruster_pos + local_up * force_length;
-                gizmos.arrow(thruster_pos, force_end, css::LIME);
-            } else {
-                // No ground hit - draw a short red line to indicate no contact.
-                let no_hit_end = thruster_pos - local_up * 2.0;
-                gizmos.line(thruster_pos, no_hit_end, css::RED);
-            }
+            // Draw hover force vector (upward from vehicle center).
+            let force_length = state.hover_force.length() * FORCE_GIZMO_SCALE;
+            let force_end = vehicle_pos + local_up * force_length;
+            gizmos.arrow(vehicle_pos, force_end, css::LIME);
+        } else {
+            // No ground hit - draw a short red line to indicate no contact.
+            let no_hit_end = vehicle_pos - local_up * 2.0;
+            gizmos.line(vehicle_pos, no_hit_end, css::RED);
         }
     }
 }
