@@ -360,13 +360,27 @@ fn vehicle_physics_inner(
             &filter,
         ) {
         let altitude = hit.distance;
-        let error = target_altitude - altitude;
         let vertical_vel = linear_velocity.0.dot(local_up);
+
+        // Clamp error to prevent explosive force on hard impacts.
+        // Max error of target_altitude means spring force caps at spring * target.
+        let raw_error = target_altitude - altitude;
+        let error = raw_error.clamp(-target_altitude, target_altitude);
+
+        // Progressive damping: extra damping when approaching ground fast.
+        // This prevents bouncing on hard landings.
+        let impact_damping = if vertical_vel < -5.0 && altitude < target_altitude {
+            // Falling fast toward ground - add extra damping proportional to speed.
+            hover_config.damper * (-vertical_vel / 10.0).min(2.0)
+        } else {
+            0.0
+        };
+        let effective_damper = hover_config.damper + impact_damping;
 
         // Spring-damper formula with gravity compensation: F = k*error - c*velocity + weight.
         // At target altitude (error=0, velocity=0), force equals weight, achieving equilibrium.
         let force_magnitude =
-            hover_config.spring * error - hover_config.damper * vertical_vel + weight;
+            hover_config.spring * error - effective_damper * vertical_vel + weight;
 
         // Clamp to [0, max_force] - no pushing down, and safety cap.
         let force_magnitude = force_magnitude.clamp(0.0, hover_config.max_force);
@@ -392,6 +406,19 @@ fn vehicle_physics_inner(
 
     // Apply hover force.
     linear_velocity.0 += hover_force * inv_mass * dt;
+
+    // Clamp collision ejection velocities.
+    // When grounded but moving upward very fast, it's likely a physics collision ejection
+    // (collider intersecting terrain). Dampen this to prevent launching into the sky.
+    let vertical_vel_after = linear_velocity.0.dot(local_up);
+    let max_upward_vel_when_grounded = 10.0; // m/s - reasonable jump/hover velocity
+    if grounded && vertical_vel_after > max_upward_vel_when_grounded {
+        // Decompose velocity and clamp the vertical component.
+        let vertical_component = local_up * vertical_vel_after;
+        let horizontal_component = linear_velocity.0 - vertical_component;
+        let clamped_vertical = local_up * max_upward_vel_when_grounded;
+        linear_velocity.0 = horizontal_component + clamped_vertical;
+    }
 
     // Front-heavy center of mass creates natural pitch-down torque when airborne.
     // When grounded, hover thrusters counteract this; when airborne, it causes natural nose-down.

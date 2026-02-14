@@ -65,7 +65,11 @@ mod tuner {
         HoverTest {
             elapsed: f32,
             header_written: bool,
-            max_altitude: f32,
+            /// Has the vehicle reached near-target altitude at least once?
+            /// Used to measure true overshoot (rebound after initial descent).
+            reached_target: bool,
+            /// Max altitude AFTER reaching target (true overshoot from rebound).
+            max_altitude_after_target: f32,
             min_altitude: f32,
             settled_time: f32,
         },
@@ -123,7 +127,10 @@ mod tuner {
         }
     }
 
-    /// Set up the test environment with ground plane and vehicle.
+    /// Spawn clearance above target altitude to prevent collider intersection at spawn.
+    const SPAWN_CLEARANCE: f32 = 1.0;
+
+    /// Set up the test environment with ground plane, slope, and vehicle.
     fn setup_test_environment(mut commands: Commands, asset_server: Res<AssetServer>) {
         // Ground plane using a large cuboid.
         // Uses Ground layer so vehicle raycast can detect it.
@@ -131,6 +138,26 @@ mod tuner {
             RigidBody::Static,
             Collider::cuboid(10000.0, 1.0, 10000.0),
             Transform::from_translation(Vec3::new(0.0, -0.5, 0.0)),
+            CollisionLayers::new([GameLayer::Ground], [GameLayer::Ground, GameLayer::Vehicle]),
+        ));
+
+        // Add a slope/ramp for testing slope behavior.
+        // Positioned ahead of spawn point so vehicle drives onto it during speed test.
+        // 15-degree incline, 50m long, starts 20m ahead.
+        let slope_angle = 15.0_f32.to_radians();
+        let slope_length = 50.0;
+        let slope_width = 20.0;
+        let slope_thickness = 1.0;
+        // Position: starts at z=-20, rises toward z=-70.
+        // Center of slope is at z=-45, y = (slope_length/2 * sin(angle)) / 2.
+        let slope_height = slope_length * slope_angle.sin();
+        let slope_center_y = slope_height / 2.0;
+        let slope_center_z = -20.0 - slope_length / 2.0;
+        commands.spawn((
+            RigidBody::Static,
+            Collider::cuboid(slope_width, slope_thickness, slope_length),
+            Transform::from_translation(Vec3::new(0.0, slope_center_y, slope_center_z))
+                .with_rotation(Quat::from_rotation_x(-slope_angle)),
             CollisionLayers::new([GameLayer::Ground], [GameLayer::Ground, GameLayer::Vehicle]),
         ));
 
@@ -191,8 +218,9 @@ mod tuner {
         let model_path = model.path.clone();
         let model_scale = model.scale * vehicle_scale;
 
-        // Spawn at target altitude for hover test.
-        let spawn_pos = Vec3::new(0.0, hover_config.target_altitude, 0.0);
+        // Spawn above target altitude with clearance to prevent collider intersection.
+        // The vehicle will settle down to target altitude during hover test.
+        let spawn_pos = Vec3::new(0.0, hover_config.target_altitude + SPAWN_CLEARANCE, 0.0);
 
         // Add runtime components.
         // The physics system handles forces internally through velocity changes.
@@ -272,7 +300,8 @@ mod tuner {
         *state = TunerState::HoverTest {
             elapsed: 0.0,
             header_written: false,
-            max_altitude: 0.0,
+            reached_target: false,
+            max_altitude_after_target: 0.0,
             min_altitude: f32::MAX,
             settled_time: 0.0,
         };
@@ -334,35 +363,45 @@ mod tuner {
         }
 
         // Handle test state transitions.
-        let (elapsed, header_written, max_alt, min_alt, settled_time, is_hover_test) =
-            match &mut *state {
-                TunerState::HoverTest {
-                    elapsed,
-                    header_written,
-                    max_altitude,
-                    min_altitude,
-                    settled_time,
-                } => (
-                    elapsed,
-                    header_written,
-                    max_altitude,
-                    min_altitude,
-                    settled_time,
-                    true,
-                ),
-                TunerState::SpeedTest {
-                    elapsed,
-                    equilibrium_timer,
-                } => (
-                    elapsed,
-                    &mut false,
-                    &mut 0.0f32,
-                    &mut 0.0f32,
-                    equilibrium_timer,
-                    false,
-                ),
-                _ => return,
-            };
+        let (
+            elapsed,
+            header_written,
+            reached_target,
+            max_alt_after_target,
+            min_alt,
+            settled_time,
+            is_hover_test,
+        ) = match &mut *state {
+            TunerState::HoverTest {
+                elapsed,
+                header_written,
+                reached_target,
+                max_altitude_after_target,
+                min_altitude,
+                settled_time,
+            } => (
+                elapsed,
+                header_written,
+                reached_target,
+                max_altitude_after_target,
+                min_altitude,
+                settled_time,
+                true,
+            ),
+            TunerState::SpeedTest {
+                elapsed,
+                equilibrium_timer,
+            } => (
+                elapsed,
+                &mut false,
+                &mut false,
+                &mut 0.0f32,
+                &mut 0.0f32,
+                equilibrium_timer,
+                false,
+            ),
+            _ => return,
+        };
 
         *elapsed += dt;
 
@@ -393,11 +432,21 @@ mod tuner {
 
         // Track hover metrics.
         if is_hover_test {
-            if current_altitude > *max_alt {
-                *max_alt = current_altitude;
-            }
+            // Track min altitude (always).
             if current_altitude < *min_alt && current_altitude > 0.0 {
                 *min_alt = current_altitude;
+            }
+
+            // Track when vehicle first reaches near-target altitude (within 20%).
+            // This lets us measure true overshoot from rebound, not spawn position.
+            let near_target = (current_altitude - target_altitude).abs() < target_altitude * 0.2;
+            if near_target && !*reached_target {
+                *reached_target = true;
+            }
+
+            // Track max altitude only AFTER reaching target (true overshoot).
+            if *reached_target && current_altitude > *max_alt_after_target {
+                *max_alt_after_target = current_altitude;
             }
 
             // Check if settled (within 5% of target for 0.5s).
@@ -441,12 +490,16 @@ mod tuner {
 
             // Transition to speed test after hover test time or if settled.
             if *elapsed >= HOVER_TEST_TIME || *settled_time >= 0.5 {
-                results.hover_overshoot = (*max_alt - target_altitude).max(0.0);
+                // True overshoot: max altitude above target AFTER first reaching target.
+                results.hover_overshoot = (*max_alt_after_target - target_altitude).max(0.0);
                 results.hover_undershoot = (target_altitude - *min_alt).max(0.0);
                 results.hover_settling_time = *elapsed - *settled_time;
 
                 eprintln!("# Hover test complete:");
-                eprintln!("#   Max altitude: {:.3} m", *max_alt);
+                eprintln!(
+                    "#   Max altitude (after settling): {:.3} m",
+                    *max_alt_after_target
+                );
                 eprintln!("#   Min altitude: {:.3} m", *min_alt);
                 eprintln!(
                     "#   Overshoot: {:.1}%",

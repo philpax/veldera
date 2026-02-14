@@ -269,10 +269,25 @@ pub fn compute_physics_step(
         params.air_control_authority
     };
 
-    // Target up: use local up (gravity direction) with banking applied (only when grounded).
+    // Target up: blend surface normal with local up for slope matching.
+    // When grounded, tilt to match terrain while maintaining some gravity alignment.
+    // This prevents the vehicle from fighting slopes while still staying stable.
     let target_up = if state.grounded {
+        // Blend: 60% surface normal, 40% gravity up for natural slope following.
+        // The surface normal is already smoothed in physics.rs.
+        let surface_blend = 0.6;
+        let blended_up = state
+            .surface_normal
+            .lerp(frame.local_up, 1.0 - surface_blend)
+            .normalize_or_zero();
+        let base_up = if blended_up.length_squared() > 0.5 {
+            blended_up
+        } else {
+            frame.local_up
+        };
+        // Apply banking on top of the blended up direction.
         let bank_rotation = Quat::from_axis_angle(frame.forward, state.current_bank);
-        bank_rotation * frame.local_up
+        bank_rotation * base_up
     } else {
         // When airborne, just try to stay level (no banking).
         frame.local_up
