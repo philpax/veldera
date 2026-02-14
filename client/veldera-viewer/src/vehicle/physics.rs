@@ -28,8 +28,17 @@ use crate::{
 /// Jump cooldown in seconds.
 const JUMP_COOLDOWN: f32 = 2.0;
 
-/// Number of altitude samples for derivative computation.
-const ALTITUDE_SAMPLES: usize = 3;
+/// Smoothing factor for derivative computation (0-1).
+/// Lower = smoother but more lag, higher = more responsive but noisier.
+const DERIVATIVE_SMOOTHING: f32 = 0.3;
+
+/// Maximum altitude derivative (m/s) to prevent force spikes from collisions.
+/// A vehicle falling at terminal velocity (~50 m/s) shouldn't exceed this rate of change.
+const MAX_ALTITUDE_DERIVATIVE: f32 = 15.0;
+
+/// Altitude change threshold (m) to detect collision/clipping.
+/// If altitude drops by more than this in one frame, treat it as a collision.
+const COLLISION_ALTITUDE_THRESHOLD: f32 = 0.5;
 
 /// Capture vehicle input from keyboard.
 #[cfg(feature = "spherical-earth")]
@@ -383,26 +392,46 @@ fn vehicle_physics_inner(
             surface_normal_sum += hit.normal * normal_weight;
             surface_normal_weight += normal_weight;
 
-            // Initialize altitude history for this thruster if needed.
-            let required_len = (i + 1) * ALTITUDE_SAMPLES;
-            while state.last_altitudes.len() < required_len {
+            // Initialize last altitude for this thruster if needed.
+            while state.last_altitudes.len() <= i {
                 state.last_altitudes.push(altitude);
             }
-            let history_start = i * ALTITUDE_SAMPLES;
-            let history_end = history_start + ALTITUDE_SAMPLES;
 
-            // Compute derivative from altitude history.
-            let avg_altitude: f32 = state.last_altitudes[history_start..history_end]
-                .iter()
-                .sum::<f32>()
-                / ALTITUDE_SAMPLES as f32;
-            let altitude_derivative = (altitude - avg_altitude) / dt.max(0.001);
-
-            // Shift history.
-            for j in history_start..history_end - 1 {
-                state.last_altitudes[j] = state.last_altitudes[j + 1];
+            // Initialize smoothed derivative for this thruster if needed.
+            while state.smoothed_derivatives.len() <= i {
+                state.smoothed_derivatives.push(0.0);
             }
-            state.last_altitudes[history_end - 1] = altitude;
+
+            // Compute instantaneous derivative (rate of change).
+            let last_altitude = state.last_altitudes[i];
+            let altitude_change = altitude - last_altitude;
+
+            // Detect collision: sudden altitude drop indicates ground contact or clipping.
+            // When this happens, don't trust the derivative - reset smoothing and skip spike.
+            let is_collision = altitude_change < -COLLISION_ALTITUDE_THRESHOLD;
+
+            let altitude_derivative = if is_collision {
+                // Collision detected: reset smoothed derivative to zero to avoid force spike.
+                state.smoothed_derivatives[i] = 0.0;
+                0.0
+            } else {
+                // Normal case: compute derivative with smoothing.
+                let instant_derivative = altitude_change / dt.max(0.001);
+
+                // Clamp derivative to prevent extreme spikes from edge cases.
+                let clamped_derivative =
+                    instant_derivative.clamp(-MAX_ALTITUDE_DERIVATIVE, MAX_ALTITUDE_DERIVATIVE);
+
+                // Apply exponential smoothing to reduce noise.
+                let smoothed = state.smoothed_derivatives[i];
+                let filtered = DERIVATIVE_SMOOTHING * clamped_derivative
+                    + (1.0 - DERIVATIVE_SMOOTHING) * smoothed;
+                state.smoothed_derivatives[i] = filtered;
+                filtered
+            };
+
+            // Store current altitude for next frame.
+            state.last_altitudes[i] = altitude;
 
             // PID force computation.
             let error = target_altitude - altitude;
@@ -413,9 +442,16 @@ fn vehicle_physics_inner(
                 state.integral_errors.push(0.0);
             }
 
+            // On collision, reset integral to prevent windup from sudden state changes.
+            if is_collision {
+                state.integral_errors[i] = 0.0;
+            }
+
             // Accumulate integral error, with anti-windup clamping.
+            // Limit integral to provide at most 25% of max force to prevent windup.
             state.integral_errors[i] += error * dt;
-            let integral_limit = thruster_config.max_strength / thruster_config.k_i.abs().max(1.0);
+            let integral_limit =
+                (thruster_config.max_strength * 0.25) / thruster_config.k_i.abs().max(1.0);
             state.integral_errors[i] =
                 state.integral_errors[i].clamp(-integral_limit, integral_limit);
 

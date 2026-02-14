@@ -134,8 +134,10 @@ pub struct ThrusterDiagnostic {
 /// Runtime state for vehicle (not serialized in scenes).
 #[derive(Component, Default)]
 pub struct VehicleState {
-    /// Recent altitude readings for PID derivative computation.
+    /// Last altitude reading per thruster for derivative computation.
     pub last_altitudes: Vec<f32>,
+    /// Smoothed altitude derivative per thruster.
+    pub smoothed_derivatives: Vec<f32>,
     /// Accumulated integral error per thruster.
     pub integral_errors: Vec<f32>,
     /// Time of last jump for cooldown.
