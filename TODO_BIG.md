@@ -1,0 +1,8 @@
+- refactor remaining mega-modules into folders
+- shouldn't be able to shoot projectiles when in camera transition or after switching camera modes or when deselecting ui lock
+- actual water tiles: will need to bring in a shader and potentially find and mask out the world tiles that correspond to water
+- grappling: on-foot medium-scale traversal
+- landmarks: a list of landmarks around the world that the user can travel on, to be stored remotely at some point. initially extracted from Wikipedia, maybe?
+- webgpu on web if possible
+- scripted camera moves: a sequence of camera moves, potentially defined at runtime, capable of both micro- and macro- scale moves
+- consider modifying the meshes to make way for roads in proximity - probably need to get local road data from OSM, but even then, can we do that kind of modification to the collision meshes? seems potentially quite gnarly

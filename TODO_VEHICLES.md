@@ -1,0 +1,5 @@
+- add lerping to the camera or similar to give the camera a bit more swing and weight
+- particle effects for thrusters
+- holo-HUD for vehicle with current speed
+- we should exit to the side of the vehicle, not where the camera is
+- don't despawn vehicles when spawning a new one
