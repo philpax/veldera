@@ -43,7 +43,6 @@ pub use fps::{
     FpsController, LogicalPlayer, RadialFrame, RenderPlayer, direction_to_yaw_pitch,
     spawn_fps_player,
 };
-pub use input::cursor_is_grabbed;
 
 // ============================================================================
 // Constants

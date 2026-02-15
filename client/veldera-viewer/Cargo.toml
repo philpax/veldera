@@ -40,6 +40,7 @@ bevy_pbr_atmosphere_planet = { path = "../../crates/bevy_pbr_atmosphere_planet" 
 egui_extras = "0.33.3"
 egui_plot = "0.34.0"
 glam = "0.30"
+leafwing-input-manager = "0.20"
 # Random number generation.
 rand = "0.9"
 rocktree = { path = "../../rocktree/rocktree" }

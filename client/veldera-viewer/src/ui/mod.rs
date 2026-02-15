@@ -10,10 +10,11 @@ mod location;
 use std::sync::Arc;
 
 use bevy::{diagnostic::FrameTimeDiagnosticsPlugin, prelude::*};
-use bevy_egui::{
-    EguiContexts, EguiPlugin, EguiPrimaryContextPass, egui, input::egui_wants_any_keyboard_input,
-};
+use bevy_egui::{EguiContexts, EguiPlugin, EguiPrimaryContextPass, egui};
 use glam::DVec3;
+use leafwing_input_manager::prelude::*;
+
+use crate::input::CameraAction;
 
 pub use diagnostics::VehicleRightRequest;
 
@@ -47,10 +48,7 @@ impl Plugin for DebugUiPlugin {
             .init_resource::<VehicleRightRequest>()
             .init_resource::<DiagnosticsTabOpen>()
             .init_resource::<UiVisible>()
-            .add_systems(
-                Update,
-                toggle_ui_visible.run_if(not(egui_wants_any_keyboard_input)),
-            )
+            .add_systems(Update, toggle_ui_visible)
             .add_systems(
                 EguiPrimaryContextPass,
                 (
@@ -101,9 +99,16 @@ fn setup_fonts(mut contexts: EguiContexts, mut commands: Commands) {
     commands.insert_resource(HasInitialisedFonts);
 }
 
-/// Toggle UI visibility with the Q key.
-fn toggle_ui_visible(keyboard: Res<ButtonInput<KeyCode>>, mut visible: ResMut<UiVisible>) {
-    if keyboard.just_pressed(KeyCode::KeyQ) {
+/// Toggle UI visibility with Q.
+fn toggle_ui_visible(
+    action_query: Query<&ActionState<CameraAction>>,
+    mut visible: ResMut<UiVisible>,
+) {
+    let Ok(action_state) = action_query.single() else {
+        return;
+    };
+
+    if action_state.just_pressed(&CameraAction::ToggleUi) {
         visible.0 = !visible.0;
     }
 }

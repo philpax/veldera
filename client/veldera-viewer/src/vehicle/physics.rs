@@ -4,10 +4,7 @@
 //! Uses core physics calculations for handling (thrust, turning, banking, drag).
 
 use avian3d::prelude::*;
-use bevy::{
-    prelude::*,
-    window::{CursorGrabMode, CursorOptions},
-};
+use bevy::prelude::*;
 
 use super::{
     components::{
@@ -24,64 +21,29 @@ use crate::{
     physics::GRAVITY,
     ui::VehicleRightRequest,
 };
+#[cfg(feature = "spherical-earth")]
+use leafwing_input_manager::prelude::*;
 
 /// Jump cooldown in seconds.
 const JUMP_COOLDOWN: f32 = 2.0;
 
-/// Capture vehicle input from keyboard.
+/// Capture vehicle input from action state.
 #[cfg(feature = "spherical-earth")]
 pub fn vehicle_input_system(
-    keyboard: Res<ButtonInput<KeyCode>>,
-    cursor: Single<&CursorOptions>,
+    action_query: Query<&ActionState<crate::input::VehicleAction>>,
     mut query: Query<&mut VehicleInput, With<Vehicle>>,
 ) {
-    // Only process input when cursor is grabbed.
-    let is_grabbed = matches!(
-        cursor.grab_mode,
-        CursorGrabMode::Locked | CursorGrabMode::Confined
-    );
-    if !is_grabbed {
+    let Ok(action_state) = action_query.single() else {
         return;
-    }
+    };
+
+    let drive = action_state.clamped_axis_pair(&crate::input::VehicleAction::Drive);
 
     for mut input in &mut query {
-        // Throttle: W/S keys.
-        let forward = if keyboard.pressed(KeyCode::KeyW) {
-            1.0
-        } else {
-            0.0
-        };
-        let backward = if keyboard.pressed(KeyCode::KeyS) {
-            1.0
-        } else {
-            0.0
-        };
-        input.throttle = forward - backward;
-
-        // Turn: A/D keys.
-        let turn_left = if keyboard.pressed(KeyCode::KeyA) {
-            1.0
-        } else {
-            0.0
-        };
-        let turn_right = if keyboard.pressed(KeyCode::KeyD) {
-            1.0
-        } else {
-            0.0
-        };
-        input.turn = turn_right - turn_left;
-
-        // Jump: Space key.
-        input.jump = keyboard.just_pressed(KeyCode::Space);
+        input.throttle = drive.y;
+        input.turn = drive.x;
+        input.jump = action_state.just_pressed(&crate::input::VehicleAction::Jump);
     }
-}
-
-/// Run condition: cursor is grabbed.
-pub fn cursor_is_grabbed(cursor: Single<&CursorOptions>) -> bool {
-    matches!(
-        cursor.grab_mode,
-        CursorGrabMode::Locked | CursorGrabMode::Confined
-    )
 }
 
 /// Run condition: FollowEntity mode is active.

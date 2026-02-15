@@ -7,5 +7,4 @@
 - scripted camera moves: a sequence of camera moves, potentially defined at runtime, capable of both micro- and macro- scale moves
 - consider modifying the meshes to make way for roads in proximity - probably need to get local road data from OSM, but even then, can we do that kind of modification to the collision meshes? seems potentially quite gnarly
 - instant teleport camera mode
-- integrate leafwing-input-manager for input
 - fix vehicle physics... again...

@@ -10,6 +10,7 @@ mod camera;
 mod coords;
 mod floating_origin;
 mod geo;
+mod input;
 mod launch_params;
 mod loader;
 mod lod;
@@ -31,6 +32,7 @@ use camera::{CameraControllerPlugin, CameraSettings, FlightCamera};
 use coords::lat_lon_to_ecef;
 use floating_origin::{FloatingOriginCamera, FloatingOriginPlugin};
 use geo::GeoPlugin;
+use input::InputPlugin;
 use launch_params::LaunchParams;
 use loader::DataLoaderPlugin;
 use lod::LodPlugin;
@@ -46,6 +48,7 @@ impl Plugin for AppPlugin {
         app.add_plugins((
             assets::AssetsPlugin,
             FloatingOriginPlugin,
+            InputPlugin,
             CameraControllerPlugin,
             DataLoaderPlugin,
             GeoPlugin,
@@ -119,6 +122,8 @@ fn setup_scene(
         SpatialListener::default(),
         // Spherical atmosphere for Earth.
         AtmosphereBundle::earth(earth_medium, start_position),
+        // Input map for camera actions.
+        input::default_camera_input_map(),
     ));
 
     // Directional light representing the sun (required for atmosphere).

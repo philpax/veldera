@@ -2,22 +2,17 @@
 //!
 //! Handles WASD movement, mouse look, and speed adjustment for the free-flight camera.
 
-use bevy::{
-    ecs::message::MessageReader,
-    input::mouse::{MouseMotion, MouseScrollUnit, MouseWheel},
-    prelude::*,
-};
-use bevy_egui::input::egui_wants_any_keyboard_input;
+use bevy::prelude::*;
 use glam::DVec3;
+use leafwing_input_manager::prelude::*;
 
 use crate::{
     floating_origin::{FloatingOrigin, FloatingOriginCamera},
     geo::TeleportAnimation,
+    input::CameraAction,
 };
 
-use super::{
-    CameraModeState, CameraSettings, FlightCamera, MAX_SPEED, MIN_SPEED, cursor_is_grabbed,
-};
+use super::{CameraModeState, CameraSettings, FlightCamera, MAX_SPEED, MIN_SPEED};
 
 // ============================================================================
 // Plugin
@@ -31,18 +26,9 @@ impl Plugin for FlycamPlugin {
         app.add_systems(
             Update,
             (
-                adjust_speed_with_scroll.run_if(cursor_is_grabbed.and(is_flycam_mode)),
-                camera_look.run_if(
-                    cursor_is_grabbed
-                        .and(is_flycam_mode)
-                        .and(teleport_animation_not_active),
-                ),
-                camera_movement.run_if(
-                    cursor_is_grabbed
-                        .and(not(egui_wants_any_keyboard_input))
-                        .and(is_flycam_mode)
-                        .and(teleport_animation_not_active),
-                ),
+                adjust_speed_with_scroll.run_if(is_flycam_mode),
+                camera_look.run_if(is_flycam_mode.and(teleport_animation_not_active)),
+                camera_movement.run_if(is_flycam_mode.and(teleport_animation_not_active)),
                 // Sync floating origin AFTER camera systems update their position.
                 // This also runs in FollowEntity mode since follow.rs updates the camera position.
                 sync_floating_origin.run_if(is_flycam_mode.or(is_follow_entity_mode)),
@@ -77,34 +63,32 @@ fn is_follow_entity_mode(state: Res<CameraModeState>) -> bool {
 
 /// Adjust speed with mouse scroll wheel.
 fn adjust_speed_with_scroll(
-    mut scroll_events: MessageReader<MouseWheel>,
+    action_query: Query<&ActionState<CameraAction>>,
     mut settings: ResMut<CameraSettings>,
 ) {
-    for event in scroll_events.read() {
-        // Normalize scroll value: web reports pixels, native reports lines.
-        let scroll = match event.unit {
-            MouseScrollUnit::Line => event.y,
-            MouseScrollUnit::Pixel => event.y / 120.0,
-        };
-        if scroll != 0.0 {
-            // Adjust speed logarithmically for smooth scaling.
-            let factor = 1.1_f32.powf(scroll);
-            settings.base_speed = (settings.base_speed * factor).clamp(MIN_SPEED, MAX_SPEED);
-        }
+    let Ok(action_state) = action_query.single() else {
+        return;
+    };
+
+    let scroll = action_state.clamped_value(&CameraAction::AdjustSpeed);
+    if scroll != 0.0 {
+        // Adjust speed logarithmically for smooth scaling.
+        let factor = 1.1_f32.powf(scroll);
+        settings.base_speed = (settings.base_speed * factor).clamp(MIN_SPEED, MAX_SPEED);
     }
 }
 
 /// Handle mouse look rotation.
 fn camera_look(
-    mut mouse_motion: MessageReader<MouseMotion>,
+    action_query: Query<&ActionState<CameraAction>>,
     settings: Res<CameraSettings>,
     mut query: Query<(&FloatingOriginCamera, &mut Transform, &mut FlightCamera)>,
 ) {
-    let mut delta = Vec2::ZERO;
-    for event in mouse_motion.read() {
-        delta += event.delta;
-    }
+    let Ok(action_state) = action_query.single() else {
+        return;
+    };
 
+    let delta = action_state.axis_pair(&CameraAction::Look);
     if delta == Vec2::ZERO {
         return;
     }
@@ -149,10 +133,14 @@ fn camera_look(
 /// Handle WASD + Space/Ctrl movement with shift boost.
 fn camera_movement(
     time: Res<Time>,
-    keyboard: Res<ButtonInput<KeyCode>>,
+    action_query: Query<&ActionState<CameraAction>>,
     settings: Res<CameraSettings>,
     mut query: Query<(&mut FloatingOriginCamera, &mut Transform, &mut FlightCamera)>,
 ) {
+    let Ok(action_state) = action_query.single() else {
+        return;
+    };
+
     for (mut origin_camera, mut transform, mut camera) in &mut query {
         // Calculate altitude-based speed using high-precision position.
         let altitude = origin_camera.position.length() - settings.earth_radius;
@@ -163,7 +151,7 @@ fn camera_movement(
         let speed_factor = speed_factor.min(2600.0) as f32;
 
         let mut speed = settings.base_speed * speed_factor;
-        if keyboard.pressed(KeyCode::ShiftLeft) || keyboard.pressed(KeyCode::ShiftRight) {
+        if action_state.pressed(&CameraAction::Sprint) {
             speed *= settings.boost_multiplier;
         }
 
@@ -172,31 +160,21 @@ fn camera_movement(
         let forward = camera.direction;
         let right = forward.cross(old_up).normalize();
 
-        // Accumulate movement.
+        // Accumulate movement from dual axis.
+        let move_input = action_state.clamped_axis_pair(&CameraAction::Move);
         let mut movement = Vec3::ZERO;
 
-        // Forward/backward.
-        if keyboard.pressed(KeyCode::KeyW) {
-            movement += forward;
-        }
-        if keyboard.pressed(KeyCode::KeyS) {
-            movement -= forward;
-        }
-
-        // Strafe left/right.
-        if keyboard.pressed(KeyCode::KeyA) {
-            movement -= right;
-        }
-        if keyboard.pressed(KeyCode::KeyD) {
-            movement += right;
-        }
+        // Forward/backward (Y axis of the virtual DPad).
+        movement += forward * move_input.y;
+        // Strafe left/right (X axis of the virtual DPad).
+        movement += right * move_input.x;
 
         // Ascend/descend relative to camera's local up (not world altitude).
         let camera_up = right.cross(forward).normalize();
-        if keyboard.pressed(KeyCode::Space) {
+        if action_state.pressed(&CameraAction::Ascend) {
             movement += camera_up;
         }
-        if keyboard.pressed(KeyCode::ControlLeft) || keyboard.pressed(KeyCode::ControlRight) {
+        if action_state.pressed(&CameraAction::Descend) {
             movement -= camera_up;
         }
 

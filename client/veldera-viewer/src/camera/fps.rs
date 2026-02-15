@@ -9,20 +9,17 @@ use avian3d::{
     parry::{math::Point, shape::SharedShape},
     prelude::*,
 };
-use bevy::{
-    ecs::message::MessageReader,
-    input::mouse::MouseMotion,
-    prelude::*,
-    window::{CursorGrabMode, CursorOptions},
-};
+use bevy::prelude::*;
 use glam::DVec3;
+use leafwing_input_manager::prelude::*;
 
 use crate::{
     floating_origin::{FloatingOrigin, FloatingOriginCamera, WorldPosition},
     geo::TeleportAnimation,
+    input::CameraAction,
 };
 
-use super::{CameraModeState, FlightCamera};
+use super::{CameraModeState, CameraSettings, FlightCamera};
 
 // ============================================================================
 // Radial frame
@@ -86,7 +83,7 @@ impl Plugin for FpsControllerPlugin {
                 (
                     (fps_controller_input, fps_controller_look)
                         .chain()
-                        .run_if(cursor_is_grabbed.and(teleport_animation_not_active))
+                        .run_if(teleport_animation_not_active)
                         .in_set(RunFixedMainLoopSystems::BeforeFixedMainLoop),
                     (
                         clear_input.run_if(did_fixed_timestep_run_this_frame),
@@ -113,14 +110,6 @@ fn teleport_animation_not_active(anim: Res<TeleportAnimation>) -> bool {
 /// Run condition: FPS controller mode is active.
 fn is_fps_mode(state: Res<CameraModeState>) -> bool {
     state.is_fps_controller()
-}
-
-/// Run condition: cursor is grabbed.
-fn cursor_is_grabbed(cursor: Single<&CursorOptions>) -> bool {
-    matches!(
-        cursor.grab_mode,
-        CursorGrabMode::Locked | CursorGrabMode::Confined
-    )
 }
 
 // ============================================================================
@@ -159,6 +148,7 @@ pub struct FpsControllerInput {
 /// FPS controller component.
 ///
 /// Note: Gravity is handled radially (toward Earth center) rather than as a configurable field.
+/// Key bindings and sensitivity are managed by the centralized input system.
 #[derive(Component)]
 #[allow(dead_code)]
 pub struct FpsController {
@@ -189,16 +179,8 @@ pub struct FpsController {
     pub yaw: f32,
     pub ground_tick: u8,
     pub stop_speed: f32,
-    pub sensitivity: f32,
     pub enable_input: bool,
     pub experimental_step_offset: f32,
-    pub key_forward: KeyCode,
-    pub key_back: KeyCode,
-    pub key_left: KeyCode,
-    pub key_right: KeyCode,
-    pub key_sprint: KeyCode,
-    pub key_jump: KeyCode,
-    pub key_crouch: KeyCode,
     pub experimental_enable_ledge_cling: bool,
 
     pub previous_translation: Option<Vec3>,
@@ -233,14 +215,6 @@ impl Default for FpsController {
             jump_speed: 4.0,
             experimental_step_offset: 0.0,
             enable_input: true,
-            key_forward: KeyCode::KeyW,
-            key_back: KeyCode::KeyS,
-            key_left: KeyCode::KeyA,
-            key_right: KeyCode::KeyD,
-            key_sprint: KeyCode::ShiftLeft,
-            key_jump: KeyCode::Space,
-            key_crouch: KeyCode::ControlLeft,
-            sensitivity: 0.001,
             experimental_enable_ledge_cling: false,
 
             previous_translation: None,
@@ -449,19 +423,19 @@ fn clear_input(mut query: Query<&mut FpsControllerInput>) {
 }
 
 fn fps_controller_input(
-    key_input: Res<ButtonInput<KeyCode>>,
-    mut mouse_events: MessageReader<MouseMotion>,
+    action_query: Query<&ActionState<CameraAction>>,
+    settings: Res<CameraSettings>,
     mut query: Query<(&FpsController, &mut FpsControllerInput)>,
 ) {
-    for (controller, mut input) in query
+    let Ok(action_state) = action_query.single() else {
+        return;
+    };
+
+    for (_controller, mut input) in query
         .iter_mut()
         .filter(|(controller, _)| controller.enable_input)
     {
-        let mut mouse_delta = Vec2::ZERO;
-        for mouse_event in mouse_events.read() {
-            mouse_delta += mouse_event.delta;
-        }
-        mouse_delta *= controller.sensitivity;
+        let mouse_delta = action_state.axis_pair(&CameraAction::Look) * settings.mouse_sensitivity;
 
         input.pitch = (input.pitch - mouse_delta.y)
             .clamp(-FRAC_PI_2 + ANGLE_EPSILON, FRAC_PI_2 - ANGLE_EPSILON);
@@ -470,14 +444,11 @@ fn fps_controller_input(
             input.yaw = input.yaw.rem_euclid(TAU);
         }
 
-        input.movement = Vec3::new(
-            get_axis(&key_input, controller.key_right, controller.key_left),
-            0.0,
-            get_axis(&key_input, controller.key_forward, controller.key_back),
-        );
-        input.sprint |= key_input.pressed(controller.key_sprint);
-        input.jump |= key_input.pressed(controller.key_jump);
-        input.crouch |= key_input.pressed(controller.key_crouch);
+        let move_input = action_state.clamped_axis_pair(&CameraAction::Move);
+        input.movement = Vec3::new(move_input.x, 0.0, move_input.y);
+        input.sprint |= action_state.pressed(&CameraAction::Sprint);
+        input.jump |= action_state.pressed(&CameraAction::Ascend);
+        input.crouch |= action_state.pressed(&CameraAction::Descend);
     }
 }
 
@@ -778,14 +749,6 @@ fn acceleration(
 
     let acceleration_speed = f32::min(acceleration * wish_speed * dt, add_speed);
     wish_direction * acceleration_speed
-}
-
-fn get_pressed(key_input: &Res<ButtonInput<KeyCode>>, key: KeyCode) -> f32 {
-    if key_input.pressed(key) { 1.0 } else { 0.0 }
-}
-
-fn get_axis(key_input: &Res<ButtonInput<KeyCode>>, key_pos: KeyCode, key_neg: KeyCode) -> f32 {
-    get_pressed(key_input, key_pos) - get_pressed(key_input, key_neg)
 }
 
 // ============================================================================

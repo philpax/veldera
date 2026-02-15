@@ -5,18 +5,15 @@
 //! outside physics range or when their contact tile unloads.
 
 use avian3d::prelude::*;
-use bevy::{
-    audio::Volume,
-    prelude::*,
-    window::{CursorGrabMode, CursorOptions},
-};
-use bevy_egui::EguiContexts;
+use bevy::{audio::Volume, prelude::*};
 use glam::DVec3;
+use leafwing_input_manager::prelude::*;
 use rand::Rng;
 
 use crate::{
     camera::CameraModeState,
     floating_origin::{FloatingOriginCamera, WorldPosition},
+    input::CameraAction,
     lod::LodState,
 };
 
@@ -79,17 +76,16 @@ pub struct Projectile {
 /// System that fires projectiles on left-click when cursor is grabbed.
 ///
 /// Includes debouncing to prevent rapid-fire spam. Only fires in FPS mode.
+/// Input focus (cursor grab, UI state) is managed centrally by the input system.
 #[allow(clippy::too_many_arguments)]
 pub fn click_to_fire_system(
     mut commands: Commands,
     time: Res<Time>,
-    mouse: Res<ButtonInput<MouseButton>>,
-    cursor: Single<&CursorOptions>,
+    action_query: Query<&ActionState<CameraAction>>,
     mode_state: Res<CameraModeState>,
     mut fire_state: ResMut<ProjectileFireState>,
     mut meshes: ResMut<Assets<Mesh>>,
     mut materials: ResMut<Assets<StandardMaterial>>,
-    mut contexts: EguiContexts,
     fire_sound: Option<Res<FireSoundHandle>>,
     camera_query: Query<(&FloatingOriginCamera, &Transform)>,
 ) {
@@ -101,26 +97,12 @@ pub fn click_to_fire_system(
         return;
     }
 
-    // Only fire when cursor is grabbed.
-    let is_grabbed = matches!(
-        cursor.grab_mode,
-        CursorGrabMode::Locked | CursorGrabMode::Confined
-    );
-    if !is_grabbed {
+    let Ok(action_state) = action_query.single() else {
         return;
-    }
+    };
 
-    // Check if left mouse button was just pressed.
-    if !mouse.just_pressed(MouseButton::Left) {
-        return;
-    }
-
-    // Don't fire if clicking on UI.
-    if contexts
-        .ctx_mut()
-        .ok()
-        .is_some_and(|ctx| ctx.is_pointer_over_area())
-    {
+    // Check if fire action was just pressed.
+    if !action_state.just_pressed(&CameraAction::Fire) {
         return;
     }
 

@@ -17,8 +17,10 @@ use bevy::{
     prelude::*,
     scene::SceneInstanceReady,
 };
-use bevy_egui::input::egui_wants_any_keyboard_input;
 use glam::DVec3;
+use leafwing_input_manager::prelude::*;
+
+use crate::input::CameraAction;
 
 pub use components::{
     GameLayer, Vehicle, VehicleDragConfig, VehicleHoverConfig, VehicleInput, VehicleModel,
@@ -67,11 +69,7 @@ impl Plugin for VehiclePlugin {
         app.add_systems(
             Update,
             (
-                physics::vehicle_input_system.run_if(
-                    physics::is_follow_entity_mode
-                        .and(physics::cursor_is_grabbed)
-                        .and(not(egui_wants_any_keyboard_input)),
-                ),
+                physics::vehicle_input_system.run_if(physics::is_follow_entity_mode),
                 physics::process_vehicle_right_request,
             ),
         );
@@ -81,8 +79,7 @@ impl Plugin for VehiclePlugin {
             (
                 check_vehicle_folder_loaded,
                 process_vehicle_actions,
-                toggle_vehicle_mode
-                    .run_if(not(egui_wants_any_keyboard_input).and(physics::cursor_is_grabbed)),
+                toggle_vehicle_mode,
                 draw_thruster_gizmos.run_if(|tab: Res<DiagnosticsTabOpen>| tab.0),
             ),
         )
@@ -476,6 +473,8 @@ fn on_vehicle_scene_ready(
         FollowedEntity,
         // Despawn when outside physics range.
         DespawnOutsidePhysicsRange,
+        // Input map for vehicle actions.
+        crate::input::default_vehicle_input_map(),
     ));
 
     // Load the GLTF model as a child with automatic convex hull collider generation.
@@ -519,14 +518,18 @@ const VEHICLE_LOOK_THRESHOLD: f64 = 0.7;
 /// When following a vehicle, E exits to the previous camera mode.
 /// When not following, E enters the vehicle you're looking at (if within range).
 fn toggle_vehicle_mode(
-    keyboard: Res<ButtonInput<KeyCode>>,
+    action_query: Query<&ActionState<CameraAction>>,
     state: Res<CameraModeState>,
     mut actions: ResMut<VehicleActions>,
     mut mode_transitions: ResMut<CameraModeTransitions>,
     camera_query: Query<(&FloatingOriginCamera, &Transform)>,
     vehicle_query: Query<(Entity, &WorldPosition), With<Vehicle>>,
 ) {
-    if !keyboard.just_pressed(KeyCode::KeyE) {
+    let Ok(action_state) = action_query.single() else {
+        return;
+    };
+
+    if !action_state.just_pressed(&CameraAction::InteractVehicle) {
         return;
     }
 
