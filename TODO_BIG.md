@@ -8,3 +8,5 @@
 - instant teleport camera mode
 - fix vehicle physics... again...
 - fix bug where we occasionally end up in space
+- fix atmosphere flickering during top-down movements
+- account for actual destination altitude during teleport trajectories - force-load chunk ahead of time and use that to query position? slow down on arrival in general to make way for loading? unsure
