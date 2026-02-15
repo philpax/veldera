@@ -166,7 +166,7 @@ fn main() {
 
     #[allow(unused_mut)]
     let mut window = Window {
-        title: "veldera-viewer".to_string(),
+        title: "veldera".to_string(),
         resolution: (1920, 1080).into(),
         position: WindowPosition::Centered(MonitorSelection::Primary),
         ..Default::default()

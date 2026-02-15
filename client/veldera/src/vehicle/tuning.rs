@@ -6,8 +6,8 @@
 //! This binary reuses the same `vehicle_physics_system` as the main application,
 //! just in flat plane mode (Y-up, 9.81 m/s² gravity).
 //!
-//! Run with: cargo run -p veldera-viewer --bin vehicle-tuning --no-default-features -- [vehicle_name]
-//! Example: cargo run -p veldera-viewer --bin vehicle-tuning --no-default-features -- swiftshadow
+//! Run with: cargo run -p veldera --bin vehicle-tuning --no-default-features -- [vehicle_name]
+//! Example: cargo run -p veldera --bin vehicle-tuning --no-default-features -- swiftshadow
 
 // This binary only works when spherical-earth is disabled.
 // When enabled, main() is a stub that prints an error.
@@ -15,7 +15,7 @@
 fn main() {
     eprintln!("ERROR: vehicle-tuning must be built with --no-default-features");
     eprintln!(
-        "Run: cargo run -p veldera-viewer --bin vehicle-tuning --no-default-features -- [vehicle_name]"
+        "Run: cargo run -p veldera --bin vehicle-tuning --no-default-features -- [vehicle_name]"
     );
     std::process::exit(1);
 }
@@ -32,7 +32,7 @@ mod tuner {
         scene::SceneInstanceReady,
     };
 
-    use veldera_viewer::{
+    use veldera::{
         camera::FollowCameraConfig,
         vehicle::{
             GameLayer, Vehicle, VehicleDragConfig, VehicleHoverConfig, VehicleInput, VehicleModel,
@@ -637,7 +637,7 @@ mod tuner {
             ))
             // Physics with fixed timestep.
             .add_plugins(PhysicsPlugins::default().with_length_unit(1.0))
-            .insert_resource(Gravity(Vec3::NEG_Y * veldera_viewer::constants::GRAVITY))
+            .insert_resource(Gravity(Vec3::NEG_Y * veldera::constants::GRAVITY))
             .insert_resource(Time::<Fixed>::from_seconds(FIXED_TIMESTEP))
             // Register types for scene deserialization.
             .register_type::<Vehicle>()

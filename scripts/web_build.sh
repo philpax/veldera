@@ -1,27 +1,27 @@
 #!/bin/sh
 set -e
-cargo build --release -p veldera-viewer --target wasm32-unknown-unknown --no-default-features
+cargo build --release -p veldera --target wasm32-unknown-unknown --no-default-features
 wasm-bindgen \
     --no-typescript \
     --target web \
     --out-dir ./build/ \
-    --out-name "veldera_viewer" \
-    ./target/wasm32-unknown-unknown/release/veldera-viewer.wasm
+    --out-name "veldera" \
+    ./target/wasm32-unknown-unknown/release/veldera.wasm
 
 # Optimize WASM if wasm-opt is available.
 if command -v wasm-opt > /dev/null 2>&1; then
-    wasm-opt -Oz -o build/veldera_viewer_bg.wasm build/veldera_viewer_bg.wasm
+    wasm-opt -Oz -o build/veldera_bg.wasm build/veldera_bg.wasm
 fi
 
 cat <<EOF > build/index.html
 <!DOCTYPE html>
 <html lang="en">
   <head>
-    <title>veldera-viewer</title>
+    <title>veldera</title>
   </head>
   <body style="margin: 0px; width: 100vw; height: 100vh;">
     <script type="module">
-      import init from "./veldera_viewer.js";
+      import init from "./veldera.js";
 
       init().catch((error) => {
         if (

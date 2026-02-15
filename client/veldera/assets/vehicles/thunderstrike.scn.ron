@@ -3,18 +3,18 @@
   entities: {
     1: (
       components: {
-        "veldera_viewer::vehicle::components::Vehicle": (
+        "veldera::vehicle::components::Vehicle": (
           name: "Thunderstrike",
           description: "Balanced handling",
           scale: 2,
         ),
-        "veldera_viewer::vehicle::components::VehicleHoverConfig": (
+        "veldera::vehicle::components::VehicleHoverConfig": (
           target_altitude: 1.75,
           spring: 85000.0,
           damper: 25000.0,
           max_force: 280000.0,
         ),
-        "veldera_viewer::vehicle::components::VehicleMovementConfig": (
+        "veldera::vehicle::components::VehicleMovementConfig": (
           forward_force: 80000.0,
           backward_force: 32000.0,
           forward_offset: (0.0, 0.4),
@@ -30,20 +30,20 @@
           upright_damper: 5000.0,
           air_control_authority: 0.35,
         ),
-        "veldera_viewer::vehicle::components::VehicleDragConfig": (
+        "veldera::vehicle::components::VehicleDragConfig": (
           forward_drag: 0.55,
           lateral_drag: 32.0,
           angular_drag: 0.55,
           angular_delay_secs: 0.25,
         ),
-        "veldera_viewer::vehicle::components::VehiclePhysicsConfig": (
+        "veldera::vehicle::components::VehiclePhysicsConfig": (
           density: 12.0,
         ),
-        "veldera_viewer::vehicle::components::VehicleModel": (
+        "veldera::vehicle::components::VehicleModel": (
           path: "vehicles/craft_speederA.glb#Scene0",
           scale: 1.5,
         ),
-        "veldera_viewer::camera::follow::FollowCameraConfig": (
+        "veldera::camera::follow::FollowCameraConfig": (
           camera_offset: (0.0, 4.5, 20.0),
           look_target_offset: (0.0, 4.5, 12.0),
         ),

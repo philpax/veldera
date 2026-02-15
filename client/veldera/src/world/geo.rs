@@ -89,7 +89,7 @@ fn load_teleport_sounds(mut commands: Commands, asset_server: Res<AssetServer>) 
 }
 
 /// User agent for API requests.
-const USER_AGENT: &str = "veldera-viewer/0.1 (https://github.com/philpax/veldera)";
+const USER_AGENT: &str = "veldera/0.1 (https://github.com/philpax/veldera)";
 
 /// Shared HTTP client for all API requests.
 ///

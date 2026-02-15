@@ -108,8 +108,8 @@ jobs:
       - name: Check rocktree (WASM)
         run: cargo check --target wasm32-unknown-unknown -p rocktree
 
-      - name: Check veldera-viewer (WASM)
-        run: cargo check --target wasm32-unknown-unknown -p veldera-viewer
+      - name: Check veldera (WASM)
+        run: cargo check --target wasm32-unknown-unknown -p veldera
 
-      - name: Check veldera-viewer with webgpu (WASM)
-        run: cargo check --target wasm32-unknown-unknown -p veldera-viewer --no-default-features --features webgpu
+      - name: Check veldera with webgpu (WASM)
+        run: cargo check --target wasm32-unknown-unknown -p veldera --no-default-features --features webgpu

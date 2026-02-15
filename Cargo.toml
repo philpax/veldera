@@ -1,7 +1,7 @@
 [workspace]
 resolver = "2"
 members = ["client/*", "crates/*", "rocktree/*"]
-default-members = ["client/veldera-viewer"]
+default-members = ["client/veldera"]
 
 [workspace.package]
 edition = "2024"

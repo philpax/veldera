@@ -99,7 +99,7 @@ Within each module, organize code as follows:
 ### Native build
 
 ```sh
-cargo run -p veldera-viewer
+cargo run -p veldera
 ```
 
 ### Web/WASM build

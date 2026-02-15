@@ -1,11 +1,11 @@
 [package]
-name = "veldera-viewer"
+name = "veldera"
 version = "0.1.0"
 edition.workspace = true
 description = "3D viewer for Google Earth mesh data using Bevy"
 repository.workspace = true
 license.workspace = true
-default-run = "veldera-viewer"
+default-run = "veldera"
 
 [[bin]]
 name = "vehicle-tuning"

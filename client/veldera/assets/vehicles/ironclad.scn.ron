@@ -3,18 +3,18 @@
   entities: {
     1: (
       components: {
-        "veldera_viewer::vehicle::components::Vehicle": (
+        "veldera::vehicle::components::Vehicle": (
           name: "Ironclad",
           description: "Heavy and stable",
           scale: 2,
         ),
-        "veldera_viewer::vehicle::components::VehicleHoverConfig": (
+        "veldera::vehicle::components::VehicleHoverConfig": (
           target_altitude: 2.0,
           spring: 160000.0,
           damper: 45000.0,
           max_force: 500000.0,
         ),
-        "veldera_viewer::vehicle::components::VehicleMovementConfig": (
+        "veldera::vehicle::components::VehicleMovementConfig": (
           forward_force: 100000.0,
           backward_force: 40000.0,
           forward_offset: (0.0, 1.4),
@@ -30,20 +30,20 @@
           upright_damper: 12000.0,
           air_control_authority: 0.25,
         ),
-        "veldera_viewer::vehicle::components::VehicleDragConfig": (
+        "veldera::vehicle::components::VehicleDragConfig": (
           forward_drag: 0.56,
           lateral_drag: 26.0,
           angular_drag: 0.45,
           angular_delay_secs: 0.3,
         ),
-        "veldera_viewer::vehicle::components::VehiclePhysicsConfig": (
+        "veldera::vehicle::components::VehiclePhysicsConfig": (
           density: 15.0,
         ),
-        "veldera_viewer::vehicle::components::VehicleModel": (
+        "veldera::vehicle::components::VehicleModel": (
           path: "vehicles/craft_miner.glb#Scene0",
           scale: 1.5,
         ),
-        "veldera_viewer::camera::follow::FollowCameraConfig": (
+        "veldera::camera::follow::FollowCameraConfig": (
           camera_offset: (0.0, 4.0, 18.0),
           look_target_offset: (0.0, 4.0, 14.0),
         ),

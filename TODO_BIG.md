@@ -8,4 +8,3 @@
 - instant teleport camera mode
 - fix vehicle physics... again...
 - fix bug where we occasionally end up in space
-- rename to veldera
