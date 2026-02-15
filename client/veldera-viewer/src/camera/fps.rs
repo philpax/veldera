@@ -196,8 +196,6 @@ pub struct FpsController {
     pub key_back: KeyCode,
     pub key_left: KeyCode,
     pub key_right: KeyCode,
-    pub key_up: KeyCode,
-    pub key_down: KeyCode,
     pub key_sprint: KeyCode,
     pub key_jump: KeyCode,
     pub key_crouch: KeyCode,
@@ -239,8 +237,6 @@ impl Default for FpsController {
             key_back: KeyCode::KeyS,
             key_left: KeyCode::KeyA,
             key_right: KeyCode::KeyD,
-            key_up: KeyCode::KeyQ,
-            key_down: KeyCode::KeyE,
             key_sprint: KeyCode::ShiftLeft,
             key_jump: KeyCode::Space,
             key_crouch: KeyCode::ControlLeft,
@@ -476,7 +472,7 @@ fn fps_controller_input(
 
         input.movement = Vec3::new(
             get_axis(&key_input, controller.key_right, controller.key_left),
-            get_axis(&key_input, controller.key_up, controller.key_down),
+            0.0,
             get_axis(&key_input, controller.key_forward, controller.key_back),
         );
         input.sprint |= key_input.pressed(controller.key_sprint);

@@ -10,7 +10,9 @@ mod location;
 use std::sync::Arc;
 
 use bevy::{diagnostic::FrameTimeDiagnosticsPlugin, prelude::*};
-use bevy_egui::{EguiContexts, EguiPlugin, EguiPrimaryContextPass, egui};
+use bevy_egui::{
+    EguiContexts, EguiPlugin, EguiPrimaryContextPass, egui, input::egui_wants_any_keyboard_input,
+};
 use glam::DVec3;
 
 pub use diagnostics::VehicleRightRequest;
@@ -18,6 +20,16 @@ pub use diagnostics::VehicleRightRequest;
 /// Resource tracking whether the diagnostics tab is currently open.
 #[derive(Resource, Default)]
 pub struct DiagnosticsTabOpen(pub bool);
+
+/// Resource controlling whether the debug UI is visible.
+#[derive(Resource)]
+pub struct UiVisible(pub bool);
+
+impl Default for UiVisible {
+    fn default() -> Self {
+        Self(true)
+    }
+}
 
 /// Plugin for debug UI overlay.
 pub struct DebugUiPlugin;
@@ -34,11 +46,16 @@ impl Plugin for DebugUiPlugin {
             .init_resource::<diagnostics::VehicleHistory>()
             .init_resource::<VehicleRightRequest>()
             .init_resource::<DiagnosticsTabOpen>()
+            .init_resource::<UiVisible>()
+            .add_systems(
+                Update,
+                toggle_ui_visible.run_if(not(egui_wants_any_keyboard_input)),
+            )
             .add_systems(
                 EguiPrimaryContextPass,
                 (
                     setup_fonts.run_if(not(resource_exists::<HasInitialisedFonts>)),
-                    debug_ui_system,
+                    debug_ui_system.run_if(|visible: Res<UiVisible>| visible.0),
                 ),
             );
     }
@@ -82,6 +99,13 @@ fn setup_fonts(mut contexts: EguiContexts, mut commands: Commands) {
 
     ctx.set_fonts(fonts);
     commands.insert_resource(HasInitialisedFonts);
+}
+
+/// Toggle UI visibility with the Q key.
+fn toggle_ui_visible(keyboard: Res<ButtonInput<KeyCode>>, mut visible: ResMut<UiVisible>) {
+    if keyboard.just_pressed(KeyCode::KeyQ) {
+        visible.0 = !visible.0;
+    }
 }
 
 /// Render the debug UI overlay.
