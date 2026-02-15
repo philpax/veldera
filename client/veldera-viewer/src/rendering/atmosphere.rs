@@ -9,7 +9,7 @@ use bevy_pbr_atmosphere_planet::{
     AtmosphereSettings, SphericalAtmosphere, SphericalAtmosphereCamera,
 };
 
-use crate::floating_origin::FloatingOriginCamera;
+use crate::world::floating_origin::FloatingOriginCamera;
 
 /// Earth's radius in meters.
 pub const EARTH_RADIUS: f32 = 6_371_000.0;

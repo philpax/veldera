@@ -9,9 +9,13 @@ use glam::DVec3;
 use crate::{
     async_runtime::TaskSpawner,
     camera::{AltitudeRequest, CameraSettings},
-    coords::ecef_to_lat_lon,
-    geo::{GEOCODING_THROTTLE_SECS, GeocodingState, HttpClient, TeleportAnimation, TeleportState},
-    time_of_day::{TimeMode, TimeOfDayState},
+    world::{
+        coords::ecef_to_lat_lon,
+        geo::{
+            GEOCODING_THROTTLE_SECS, GeocodingState, HttpClient, TeleportAnimation, TeleportState,
+        },
+        time_of_day::{TimeMode, TimeOfDayState},
+    },
 };
 
 /// State for the lat/long text input fields.

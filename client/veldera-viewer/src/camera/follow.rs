@@ -4,7 +4,7 @@
 
 use bevy::prelude::*;
 
-use crate::floating_origin::{FloatingOriginCamera, WorldPosition};
+use crate::world::floating_origin::{FloatingOriginCamera, WorldPosition};
 
 use super::{CameraModeState, FlightCamera, fps::RadialFrame};
 

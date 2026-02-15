@@ -10,7 +10,7 @@ use crate::{
         CameraMode, CameraModeState, CameraSettings, FlightCamera, FollowCameraConfig,
         FollowEntityTarget, MAX_SPEED, MIN_SPEED, TeleportAnimationMode,
     },
-    floating_origin::FloatingOriginCamera,
+    world::floating_origin::FloatingOriginCamera,
 };
 
 /// Resources for camera display and control.

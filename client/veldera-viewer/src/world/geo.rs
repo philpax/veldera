@@ -14,8 +14,10 @@ use crate::{
         CameraMode, CameraModeState, CameraSettings, FlightCamera, LogicalPlayer, RadialFrame,
         RenderPlayer, TeleportAnimationMode, direction_to_yaw_pitch, spawn_fps_player,
     },
-    coords::{lat_lon_to_ecef, slerp_dvec3, smootherstep},
-    floating_origin::FloatingOriginCamera,
+    world::{
+        coords::{lat_lon_to_ecef, slerp_dvec3, smootherstep},
+        floating_origin::FloatingOriginCamera,
+    },
 };
 
 /// Handle to the woosh sound asset.

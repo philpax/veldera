@@ -38,7 +38,7 @@ pub struct TerrainMaterialExtension {
 
 impl MaterialExtension for TerrainMaterialExtension {
     fn vertex_shader() -> ShaderRef {
-        "embedded://veldera_viewer/terrain_material.wgsl".into()
+        "embedded://veldera_viewer/rendering/terrain_material.wgsl".into()
     }
 
     fn fragment_shader() -> ShaderRef {

@@ -32,9 +32,9 @@ use crate::{
         CameraModeState, CameraModeTransitions, FlightCamera, FollowedEntity, FpsController,
         LogicalPlayer, RadialFrame,
     },
-    floating_origin::{FloatingOriginCamera, WorldPosition},
     physics::DespawnOutsidePhysicsRange,
     ui::DiagnosticsTabOpen,
+    world::floating_origin::{FloatingOriginCamera, WorldPosition},
 };
 
 /// Gizmo config group for vehicle debug visualization.

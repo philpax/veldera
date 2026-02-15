@@ -33,18 +33,20 @@ use rocktree_decode::OrientedBoundingBox;
 
 use crate::{
     async_runtime::TaskSpawner,
-    floating_origin::FloatingOriginCamera,
-    loader::LoaderState,
-    mesh::{
-        RocktreeMeshMarker, convert_mesh, convert_texture, matrix_to_world_position_and_transform,
+    rendering::{
+        mesh::{
+            RocktreeMeshMarker, convert_mesh, convert_texture,
+            matrix_to_world_position_and_transform,
+        },
+        terrain_material::{TerrainMaterial, TerrainMaterialExtension},
     },
-    terrain_material::{TerrainMaterial, TerrainMaterialExtension},
+    world::{floating_origin::FloatingOriginCamera, loader::LoaderState},
 };
 
 use crate::{
-    floating_origin::WorldPosition,
     physics::{PHYSICS_LOD_DEPTH, PHYSICS_RANGE, terrain::TerrainCollider},
     vehicle::GameLayer,
+    world::floating_origin::WorldPosition,
 };
 
 use avian3d::prelude::*;
@@ -446,7 +448,7 @@ fn update_frustum(
         (
             &Transform,
             &Projection,
-            &crate::floating_origin::FloatingOriginCamera,
+            &crate::world::floating_origin::FloatingOriginCamera,
         ),
         With<Camera3d>,
     >,

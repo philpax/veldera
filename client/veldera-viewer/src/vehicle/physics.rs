@@ -17,9 +17,9 @@ use super::{
 #[cfg(feature = "spherical-earth")]
 use crate::{
     camera::{CameraModeState, RadialFrame},
-    floating_origin::{FloatingOriginCamera, WorldPosition},
     physics::GRAVITY,
     ui::VehicleRightRequest,
+    world::floating_origin::{FloatingOriginCamera, WorldPosition},
 };
 #[cfg(feature = "spherical-earth")]
 use leafwing_input_manager::prelude::*;

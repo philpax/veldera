@@ -26,7 +26,7 @@ use bevy::{
 
 use crate::{
     camera::{CameraModeTransitions, FollowEntityTarget},
-    floating_origin::{FloatingOriginCamera, WorldPosition},
+    world::floating_origin::{FloatingOriginCamera, WorldPosition},
 };
 
 #[cfg(feature = "spherical-earth")]

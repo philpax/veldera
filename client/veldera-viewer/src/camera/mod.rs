@@ -34,8 +34,8 @@ use avian3d::prelude::*;
 use bevy::prelude::*;
 
 use crate::{
-    floating_origin::{FloatingOriginCamera, WorldPosition},
     launch_params::LaunchParams,
+    world::floating_origin::{FloatingOriginCamera, WorldPosition},
 };
 
 pub use follow::{FollowCameraConfig, FollowEntityTarget, FollowedEntity};

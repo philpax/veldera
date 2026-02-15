@@ -7,9 +7,11 @@ use glam::DVec3;
 use leafwing_input_manager::prelude::*;
 
 use crate::{
-    floating_origin::{FloatingOrigin, FloatingOriginCamera},
-    geo::TeleportAnimation,
     input::CameraAction,
+    world::{
+        floating_origin::{FloatingOrigin, FloatingOriginCamera},
+        geo::TeleportAnimation,
+    },
 };
 
 use super::{CameraModeState, CameraSettings, FlightCamera, MAX_SPEED, MIN_SPEED};

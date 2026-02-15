@@ -1,4 +1,3 @@
-- refactor remaining mega-modules into folders
 - shouldn't be able to shoot projectiles when in camera transition or after switching camera modes or when deselecting ui lock
 - actual water tiles: will need to bring in a shader and potentially find and mask out the world tiles that correspond to water
 - grappling: on-foot medium-scale traversal

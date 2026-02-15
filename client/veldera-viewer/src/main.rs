@@ -5,40 +5,37 @@
 
 mod assets;
 mod async_runtime;
-mod atmosphere;
 mod camera;
-mod coords;
-mod floating_origin;
-mod geo;
 mod input;
 mod launch_params;
-mod loader;
-mod lod;
-mod mesh;
 mod physics;
-mod terrain_material;
-mod time_of_day;
+mod rendering;
 mod ui;
 mod vehicle;
+mod world;
 
 use async_runtime::AsyncRuntimePlugin;
-use atmosphere::{AtmosphereBundle, AtmosphereIntegrationPlugin};
 use bevy::{
     audio::SpatialListener, camera::Exposure, core_pipeline::tonemapping::Tonemapping,
     light::light_consts::lux, pbr::ScatteringMedium, post_process::bloom::Bloom, prelude::*,
     render::view::Hdr,
 };
 use camera::{CameraControllerPlugin, CameraSettings, FlightCamera};
-use coords::lat_lon_to_ecef;
-use floating_origin::{FloatingOriginCamera, FloatingOriginPlugin};
-use geo::GeoPlugin;
 use input::InputPlugin;
 use launch_params::LaunchParams;
-use loader::DataLoaderPlugin;
-use lod::LodPlugin;
-use terrain_material::TerrainMaterialPlugin;
-use time_of_day::{SimpleDate, Sun, TimeOfDayPlugin, TimeOfDayState};
+use rendering::{
+    atmosphere::{AtmosphereBundle, AtmosphereIntegrationPlugin},
+    terrain_material::TerrainMaterialPlugin,
+};
 use ui::DebugUiPlugin;
+use world::{
+    coords::lat_lon_to_ecef,
+    floating_origin::{FloatingOriginCamera, FloatingOriginPlugin},
+    geo::GeoPlugin,
+    loader::DataLoaderPlugin,
+    lod::LodPlugin,
+    time_of_day::{SimpleDate, Sun, TimeOfDayPlugin, TimeOfDayState},
+};
 
 /// Plugin for the main application.
 pub struct AppPlugin;

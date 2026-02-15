@@ -12,9 +12,11 @@ use rand::Rng;
 
 use crate::{
     camera::CameraModeState,
-    floating_origin::{FloatingOriginCamera, WorldPosition},
     input::CameraAction,
-    lod::LodState,
+    world::{
+        floating_origin::{FloatingOriginCamera, WorldPosition},
+        lod::LodState,
+    },
 };
 
 use super::DespawnOutsidePhysicsRange;

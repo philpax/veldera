@@ -11,8 +11,8 @@ use bevy_egui::EguiContexts;
 use leafwing_input_manager::prelude::*;
 
 use crate::{
-    geo::TeleportAnimation,
     input::{CameraAction, set_cursor_grab},
+    world::geo::TeleportAnimation,
 };
 
 use super::{CameraMode, CameraModeState, CameraModeTransitions};

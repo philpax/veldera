@@ -16,13 +16,13 @@ use egui_plot::{Line, Plot, PlotPoints};
 use glam::DVec3;
 
 use crate::{
-    lod::LodState,
-    mesh::RocktreeMeshMarker,
     physics::{is_physics_debug_enabled, toggle_physics_debug},
+    rendering::mesh::RocktreeMeshMarker,
     vehicle::{
         Vehicle, VehicleDragConfig, VehicleHoverConfig, VehicleInput, VehicleMovementConfig,
         VehicleState,
     },
+    world::lod::LodState,
 };
 
 /// Number of samples to keep in vehicle history.

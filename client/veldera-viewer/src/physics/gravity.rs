@@ -7,7 +7,7 @@
 use avian3d::prelude::*;
 use bevy::prelude::*;
 
-use crate::floating_origin::WorldPosition;
+use crate::world::floating_origin::WorldPosition;
 
 /// Gravitational acceleration constant (m/s²).
 pub const GRAVITY: f32 = 9.81;
