@@ -637,7 +637,7 @@ mod tuner {
             ))
             // Physics with fixed timestep.
             .add_plugins(PhysicsPlugins::default().with_length_unit(1.0))
-            .insert_resource(Gravity(Vec3::NEG_Y * 9.81))
+            .insert_resource(Gravity(Vec3::NEG_Y * veldera_viewer::constants::GRAVITY))
             .insert_resource(Time::<Fixed>::from_seconds(FIXED_TIMESTEP))
             // Register types for scene deserialization.
             .register_type::<Vehicle>()

@@ -379,8 +379,6 @@ impl TeleportPhase {
 
 /// Parameters for the arc trajectory.
 struct ArcTrajectory {
-    /// The base Earth radius.
-    earth_radius: f64,
     /// Peak altitude above surface at the apex.
     apex_altitude: f64,
     /// Starting altitude above surface.
@@ -391,12 +389,8 @@ struct ArcTrajectory {
 
 impl ArcTrajectory {
     /// Create a new arc trajectory based on start and target positions.
-    fn new(
-        start: DVec3,
-        target: DVec3,
-        earth_radius: f64,
-        animation_mode: TeleportAnimationMode,
-    ) -> Self {
+    fn new(start: DVec3, target: DVec3, animation_mode: TeleportAnimationMode) -> Self {
+        let earth_radius = crate::constants::EARTH_RADIUS_M_F64;
         let start_altitude = start.length() - earth_radius;
         let target_altitude = target.length() - earth_radius;
 
@@ -417,7 +411,6 @@ impl ArcTrajectory {
         };
 
         Self {
-            earth_radius,
             apex_altitude,
             start_altitude,
             target_altitude,
@@ -571,7 +564,7 @@ impl ArcTrajectory {
         let altitude = self.altitude_at_t(t);
 
         // Final position is the unit sphere position scaled by (earth_radius + altitude).
-        horizontal_dir * (self.earth_radius + altitude)
+        horizontal_dir * (crate::constants::EARTH_RADIUS_M_F64 + altitude)
     }
 }
 
@@ -780,7 +773,7 @@ fn poll_teleport(
                     let start_direction = flight_camera.direction;
 
                     // Set radius to earth_radius + elevation + small offset above ground.
-                    let radius = settings.earth_radius + elevation + 10.0;
+                    let radius = crate::constants::EARTH_RADIUS_M_F64 + elevation + 10.0;
                     let target_position = lat_lon_to_ecef(pending.lat, pending.lon, radius);
 
                     // Check for very short distance: skip animation.
@@ -802,13 +795,12 @@ fn poll_teleport(
                     let start_norm = start_position.normalize();
                     let target_norm = target_position.normalize();
                     let arc_angle = start_norm.dot(target_norm).clamp(-1.0, 1.0).acos();
-                    let surface_distance = arc_angle * settings.earth_radius;
+                    let surface_distance = arc_angle * crate::constants::EARTH_RADIUS_M_F64;
 
                     // Create the trajectory.
                     let trajectory = ArcTrajectory::new(
                         start_position,
                         target_position,
-                        settings.earth_radius,
                         settings.teleport_animation_mode,
                     );
                     let duration = ArcTrajectory::compute_duration(surface_distance);

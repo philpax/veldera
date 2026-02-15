@@ -9,13 +9,10 @@ use bevy_pbr_atmosphere_planet::{
     AtmosphereSettings, SphericalAtmosphere, SphericalAtmosphereCamera,
 };
 
-use crate::world::floating_origin::FloatingOriginCamera;
-
-/// Earth's radius in meters.
-pub const EARTH_RADIUS: f32 = 6_371_000.0;
-
-/// Top of atmosphere radius in meters (100km above surface).
-pub const ATMOSPHERE_TOP_RADIUS: f32 = 6_471_000.0;
+use crate::{
+    constants::{ATMOSPHERE_TOP_RADIUS_M, EARTH_RADIUS_M},
+    world::floating_origin::FloatingOriginCamera,
+};
 
 /// Plugin that integrates spherical atmosphere with floating origin cameras.
 pub struct AtmosphereIntegrationPlugin;
@@ -60,8 +57,8 @@ impl AtmosphereBundle {
     pub fn earth(medium: Handle<ScatteringMedium>, initial_ecef: glam::DVec3) -> Self {
         Self {
             atmosphere: SphericalAtmosphere {
-                bottom_radius: EARTH_RADIUS,
-                top_radius: ATMOSPHERE_TOP_RADIUS,
+                bottom_radius: EARTH_RADIUS_M,
+                top_radius: ATMOSPHERE_TOP_RADIUS_M,
                 ground_albedo: Vec3::splat(0.3),
                 medium,
             },

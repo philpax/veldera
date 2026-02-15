@@ -7,3 +7,5 @@
 - consider modifying the meshes to make way for roads in proximity - probably need to get local road data from OSM, but even then, can we do that kind of modification to the collision meshes? seems potentially quite gnarly
 - instant teleport camera mode
 - fix vehicle physics... again...
+- fix bug where we occasionally end up in space
+- rename to veldera

@@ -6,6 +6,7 @@
 mod assets;
 mod async_runtime;
 mod camera;
+mod constants;
 mod input;
 mod launch_params;
 mod physics;
@@ -20,7 +21,7 @@ use bevy::{
     light::light_consts::lux, pbr::ScatteringMedium, post_process::bloom::Bloom, prelude::*,
     render::view::Hdr,
 };
-use camera::{CameraControllerPlugin, CameraSettings, FlightCamera};
+use camera::{CameraControllerPlugin, FlightCamera};
 use input::InputPlugin;
 use launch_params::LaunchParams;
 use rendering::{
@@ -66,10 +67,9 @@ fn setup_scene(
     mut commands: Commands,
     mut media: ResMut<Assets<ScatteringMedium>>,
     params: Res<LaunchParams>,
-    settings: Res<CameraSettings>,
 ) {
     // Convert launch parameters to ECEF position.
-    let radius = settings.earth_radius + params.altitude;
+    let radius = constants::EARTH_RADIUS_M_F64 + params.altitude;
     let start_position = lat_lon_to_ecef(params.lat, params.lon, radius);
 
     // Compute initial viewing direction: look north along the surface.

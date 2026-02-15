@@ -17,7 +17,6 @@ use super::{
 #[cfg(feature = "spherical-earth")]
 use crate::{
     camera::{CameraModeState, RadialFrame},
-    physics::GRAVITY,
     ui::VehicleRightRequest,
     world::floating_origin::{FloatingOriginCamera, WorldPosition},
 };
@@ -103,8 +102,7 @@ fn copy_sim_state_back(state: &mut VehicleState, sim_state: &VehicleSimState) {
     state.grounded = sim_state.grounded;
 }
 
-/// Flat-plane gravity constant (m/s²).
-const FLAT_PLANE_GRAVITY: f32 = 9.81;
+use crate::constants;
 
 /// Apply physics forces to vehicles.
 ///
@@ -162,9 +160,9 @@ pub fn vehicle_physics_system(
         let (local_up, gravity) = if let Some(cam_pos) = camera_pos {
             let ecef_pos = cam_pos + transform.translation.as_dvec3();
             let frame = RadialFrame::from_ecef_position(ecef_pos);
-            (frame.up, GRAVITY)
+            (frame.up, constants::GRAVITY)
         } else {
-            (Vec3::Y, FLAT_PLANE_GRAVITY)
+            (Vec3::Y, constants::GRAVITY)
         };
 
         vehicle_physics_inner(
@@ -232,7 +230,7 @@ pub fn vehicle_physics_system(
     {
         // Flat plane mode: Y-up, standard gravity.
         let local_up = Vec3::Y;
-        let gravity = FLAT_PLANE_GRAVITY;
+        let gravity = constants::GRAVITY;
 
         vehicle_physics_inner(
             dt,

@@ -8,7 +8,7 @@ use glam::DVec3;
 
 use crate::{
     async_runtime::TaskSpawner,
-    camera::{AltitudeRequest, CameraSettings},
+    camera::AltitudeRequest,
     world::{
         coords::ecef_to_lat_lon,
         geo::{
@@ -45,11 +45,10 @@ pub(super) fn render_location_tab(
     ui: &mut egui::Ui,
     time: &Time,
     location: &mut LocationParams,
-    settings: &CameraSettings,
     position: DVec3,
 ) {
     let (lat_deg, lon_deg) = ecef_to_lat_lon(position);
-    let altitude = position.length() - settings.earth_radius;
+    let altitude = position.length() - crate::constants::EARTH_RADIUS_M_F64;
 
     // Update text fields when not editing and not teleporting.
     if !location.coord_state.is_editing && !location.teleport_state.is_pending() {

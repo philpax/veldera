@@ -130,7 +130,7 @@ fn debug_ui_system(
     // Compute camera position and altitude (needed for lat/lon and diagnostics).
     let (position, _altitude) = if let Ok((cam, _, _)) = camera_params.camera_query.single() {
         let pos = cam.position;
-        let alt_m = pos.length() - camera_params.settings.earth_radius;
+        let alt_m = pos.length() - crate::constants::EARTH_RADIUS_M_F64;
         (pos, alt_m)
     } else {
         (DVec3::ZERO, 0.0)
@@ -163,13 +163,7 @@ fn debug_ui_system(
 
             match ui_state.selected_tab {
                 DebugTab::LocationAndTime => {
-                    location::render_location_tab(
-                        ui,
-                        &time,
-                        &mut location_params,
-                        &camera_params.settings,
-                        position,
-                    );
+                    location::render_location_tab(ui, &time, &mut location_params, position);
                 }
                 DebugTab::Camera => {
                     camera::render_camera_tab(ui, &mut camera_params);

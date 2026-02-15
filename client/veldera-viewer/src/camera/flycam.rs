@@ -145,7 +145,7 @@ fn camera_movement(
 
     for (mut origin_camera, mut transform, mut camera) in &mut query {
         // Calculate altitude-based speed using high-precision position.
-        let altitude = origin_camera.position.length() - settings.earth_radius;
+        let altitude = origin_camera.position.length() - crate::constants::EARTH_RADIUS_M_F64;
         let altitude = altitude.max(0.0);
 
         // Speed scales with altitude: faster when high, slower when near ground.
@@ -192,8 +192,8 @@ fn camera_movement(
             let mut new_position = origin_camera.position + movement_dvec;
 
             // Clamp altitude to valid range while preserving lateral movement.
-            let min_radius = settings.earth_radius - 100.0;
-            let max_radius = settings.earth_radius + 10_000_000.0;
+            let min_radius = crate::constants::EARTH_RADIUS_M_F64 - 100.0;
+            let max_radius = crate::constants::EARTH_RADIUS_M_F64 + 10_000_000.0;
             let new_radius = new_position.length().clamp(min_radius, max_radius);
             new_position = new_position.normalize() * new_radius;
 

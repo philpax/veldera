@@ -356,13 +356,9 @@ fn days_since_epoch_to_date(days: i32) -> SimpleDate {
     }
 }
 
-/// Earth radius in meters.
-#[allow(dead_code)]
-const EARTH_RADIUS_M: f64 = 6_371_000.0;
-
-/// Atmosphere height in meters (100km).
-#[allow(dead_code)]
-const ATMOSPHERE_HEIGHT_M: f64 = 100_000.0;
+#[cfg(target_family = "wasm")]
+use crate::constants::ATMOSPHERE_HEIGHT_M;
+use crate::constants::EARTH_RADIUS_M_F64;
 
 /// System that updates the sky color based on local time.
 ///
@@ -379,7 +375,7 @@ fn update_sky_color(
     };
 
     // Calculate altitude from camera position.
-    let altitude_m = floating_camera.position.length() - EARTH_RADIUS_M;
+    let altitude_m = floating_camera.position.length() - EARTH_RADIUS_M_F64;
 
     // Determine the clear color based on platform and altitude.
     // On WebGPU (native), the atmosphere shader handles everything - use black.

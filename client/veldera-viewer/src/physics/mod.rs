@@ -29,8 +29,6 @@ use crate::{
     world::floating_origin::{FloatingOriginCamera, WorldPosition},
 };
 
-#[cfg(feature = "spherical-earth")]
-pub use gravity::GRAVITY;
 pub use terrain::TerrainCollider;
 
 /// Marker component for entities that should despawn when outside physics range.

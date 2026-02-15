@@ -201,8 +201,6 @@ pub struct CameraSettings {
     pub boost_multiplier: f32,
     /// Mouse sensitivity for look rotation.
     pub mouse_sensitivity: f32,
-    /// Earth radius in meters (for altitude calculation).
-    pub earth_radius: f64,
     /// Which teleport animation style to use.
     pub teleport_animation_mode: TeleportAnimationMode,
 }
@@ -213,7 +211,6 @@ impl Default for CameraSettings {
             base_speed: 1000.0,
             boost_multiplier: 5.0,
             mouse_sensitivity: 0.001,
-            earth_radius: 6_371_000.0,
             teleport_animation_mode: TeleportAnimationMode::default(),
         }
     }
@@ -546,7 +543,6 @@ fn exit_current_mode(
 #[allow(clippy::type_complexity)]
 fn process_altitude_request(
     mut request: ResMut<AltitudeRequest>,
-    settings: Res<CameraSettings>,
     mode_state: Res<CameraModeState>,
     mut camera_query: Query<&mut FloatingOriginCamera>,
     mut player_query: Query<
@@ -565,7 +561,7 @@ fn process_altitude_request(
         // 3. Position - reset to zero so physics starts fresh at the new location
         // 4. LinearVelocity - reset to zero to stop any falling
         if let Ok((mut world_pos, mut physics_pos, mut velocity)) = player_query.single_mut() {
-            let new_radius = settings.earth_radius + altitude;
+            let new_radius = crate::constants::EARTH_RADIUS_M_F64 + altitude;
             let new_ecef = world_pos.position.normalize() * new_radius;
 
             world_pos.position = new_ecef;
@@ -580,7 +576,7 @@ fn process_altitude_request(
     } else {
         // In flycam or follow entity mode, update the camera position.
         if let Ok(mut camera) = camera_query.single_mut() {
-            let new_radius = settings.earth_radius + altitude;
+            let new_radius = crate::constants::EARTH_RADIUS_M_F64 + altitude;
             camera.position = camera.position.normalize() * new_radius;
         }
     }

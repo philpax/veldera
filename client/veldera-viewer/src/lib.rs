@@ -3,6 +3,9 @@
 //! This library exposes the vehicle physics core and telemetry for standalone
 //! simulation binaries like the vehicle tuner.
 
+/// Shared physical constants.
+pub mod constants;
+
 /// Vehicle types and physics core.
 ///
 /// This module provides the shared vehicle components that can be used

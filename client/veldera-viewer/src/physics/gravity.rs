@@ -7,10 +7,7 @@
 use avian3d::prelude::*;
 use bevy::prelude::*;
 
-use crate::world::floating_origin::WorldPosition;
-
-/// Gravitational acceleration constant (m/s²).
-pub const GRAVITY: f32 = 9.81;
+use crate::{constants::GRAVITY, world::floating_origin::WorldPosition};
 
 /// Apply radial gravity toward Earth center.
 ///

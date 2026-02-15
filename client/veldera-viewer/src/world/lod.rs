@@ -51,8 +51,7 @@ use crate::{
 
 use avian3d::prelude::*;
 
-/// Earth radius in meters (for altitude calculation).
-const EARTH_RADIUS: f64 = 6_371_000.0;
+use crate::constants::EARTH_RADIUS_M_F64;
 
 /// Maximum altitude (above terrain) at which forced proximity loading applies.
 /// Above this height, normal frustum culling is used for all nodes.
@@ -266,7 +265,7 @@ fn bfs_traversal(lod_state: &LodState, frustum: Frustum, lod_metrics: LodMetrics
                 // Frustum culling using the OBB, with proximity exception.
                 // When the camera is at low altitude, keep nodes within a small radius
                 // loaded regardless of frustum to ensure ground is always available.
-                let camera_altitude = lod_metrics.camera_position.length() - EARTH_RADIUS;
+                let camera_altitude = lod_metrics.camera_position.length() - EARTH_RADIUS_M_F64;
                 let is_low_altitude = camera_altitude <= PROXIMITY_LOADING_MAX_ALTITUDE;
                 let distance_to_node = lod_metrics.camera_position.distance(node.obb.center);
                 let is_nearby = distance_to_node <= PROXIMITY_LOADING_RADIUS;
@@ -755,7 +754,7 @@ fn cull_meshes(
         // Check frustum visibility, with proximity exception.
         let in_frustum = frustum.intersects_obb(&marker.obb);
         let force_visible = camera_pos.is_some_and(|cam_pos| {
-            let altitude = cam_pos.length() - EARTH_RADIUS;
+            let altitude = cam_pos.length() - EARTH_RADIUS_M_F64;
             let distance = cam_pos.distance(marker.obb.center);
             altitude <= PROXIMITY_LOADING_MAX_ALTITUDE && distance <= PROXIMITY_LOADING_RADIUS
         });
