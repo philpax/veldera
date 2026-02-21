@@ -3,3 +3,7 @@
 - holo-HUD for vehicle with current speed
 - we should exit to the side of the vehicle, not where the camera is
 - don't despawn vehicles when spawning a new one
+- use car-like physics instead (h/t kale):
+  - <https://www.asawicki.info/Mirror/Car%20Physics%20for%20Games/Car%20Physics%20for%20Games.html>
+  - <https://github.com/DigitalRune/DigitalRune/blob/master/Source%2FDigitalRune.Physics.Specialized%2FVehicles%2FVehicleForceEffect.cs>
+  - <https://github.com/bulletphysics/bullet3/blob/master/src%2FBulletDynamics%2FVehicle%2FbtRaycastVehicle.cpp>
