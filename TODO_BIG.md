@@ -10,3 +10,6 @@
 - fix bug where we occasionally end up in space
 - fix atmosphere flickering during top-down movements
 - account for actual destination altitude during teleport trajectories - force-load chunk ahead of time and use that to query position? slow down on arrival in general to make way for loading? unsure
+- road-hyperlapse teleport that follows the road to your destination:
+  - <https://project-osrm.org/docs/v5.5.1/api/#route-service>
+  - <https://github.com/Jorl17/open-elevation/blob/master/docs/host-your-own.md>
