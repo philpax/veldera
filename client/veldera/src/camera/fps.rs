@@ -1,14 +1,11 @@
 //! First-person controller camera mode.
 //!
 //! Adapted from https://github.com/qhdwight/bevy_fps_controller for floating origin
-//! and radial gravity. Provides walking, jumping, and crouching on terrain.
+//! and radial gravity. Uses Avian's `MoveAndSlide` for collision resolution.
 
 use std::f32::consts::*;
 
-use avian3d::{
-    parry::{math::Point, shape::SharedShape},
-    prelude::*,
-};
+use avian3d::{parry::shape::SharedShape, prelude::*};
 use bevy::prelude::*;
 use glam::DVec3;
 use leafwing_input_manager::prelude::*;
@@ -77,7 +74,13 @@ impl Plugin for FpsControllerPlugin {
             .add_systems(PreUpdate, clear_fixed_timestep_flag)
             .add_systems(
                 FixedPreUpdate,
-                (set_fixed_time_step_flag, fps_controller_move)
+                (
+                    set_fixed_time_step_flag,
+                    fps_controller_prepare,
+                    fps_controller_slide,
+                    fps_controller_sync_position,
+                )
+                    .chain()
                     .run_if(is_fps_mode.and(teleport_animation_not_active)),
             )
             .add_systems(
@@ -152,11 +155,7 @@ pub struct FpsControllerInput {
 /// Note: Gravity is handled radially (toward Earth center) rather than as a configurable field.
 /// Key bindings and sensitivity are managed by the centralized input system.
 #[derive(Component)]
-#[allow(dead_code)]
 pub struct FpsController {
-    pub radius: f32,
-    /// If the distance to the ground is less than this value, the player is considered grounded.
-    pub grounded_distance: f32,
     pub walk_speed: f32,
     pub run_speed: f32,
     pub forward_speed: f32,
@@ -182,8 +181,6 @@ pub struct FpsController {
     pub ground_tick: u8,
     pub stop_speed: f32,
     pub enable_input: bool,
-    pub experimental_step_offset: f32,
-    pub experimental_enable_ledge_cling: bool,
 
     pub previous_translation: Option<Vec3>,
 }
@@ -191,8 +188,6 @@ pub struct FpsController {
 impl Default for FpsController {
     fn default() -> Self {
         Self {
-            grounded_distance: 0.5,
-            radius: 0.5,
             walk_speed: 9.0,
             run_speed: 14.0,
             forward_speed: 30.0,
@@ -215,9 +210,7 @@ impl Default for FpsController {
             ground_tick: 0,
             stop_speed: 1.0,
             jump_speed: 4.0,
-            experimental_step_offset: 0.0,
             enable_input: true,
-            experimental_enable_ledge_cling: false,
 
             previous_translation: None,
         }
@@ -250,9 +243,10 @@ pub fn spawn_fps_player(
             LogicalPlayer,
             Transform::from_translation(physics_pos),
             WorldPosition::from_dvec3(ecef_pos),
-            RigidBody::Dynamic,
+            RigidBody::Kinematic,
             Collider::capsule(0.5, 1.0),
             Position(physics_pos),
+            CustomPositionIntegration,
             LinearVelocity::default(),
             LockedAxes::ROTATION_LOCKED,
             FpsController {
@@ -395,7 +389,6 @@ pub(super) fn preserve_and_cleanup(
 // ============================================================================
 
 const ANGLE_EPSILON: f32 = 0.001953125;
-const SLIGHT_SCALE_DOWN: f32 = 0.9375;
 
 fn clear_fixed_timestep_flag(
     mut did_fixed_timestep_run_this_frame: ResMut<DidFixedTimestepRunThisFrame>,
@@ -461,18 +454,19 @@ fn fps_controller_look(mut query: Query<(&mut FpsController, &FpsControllerInput
     }
 }
 
-#[allow(clippy::too_many_lines, clippy::type_complexity)]
-fn fps_controller_move(
+/// Prepare velocity and collider for the FPS controller before collision resolution.
+///
+/// Computes wish direction, applies gravity, friction, acceleration, crouch resizing.
+/// Runs before `fps_controller_slide` so that the collider and velocity are ready.
+#[allow(clippy::type_complexity)]
+fn fps_controller_prepare(
     time: Res<Time<Fixed>>,
-    spatial_query_pipeline: Res<SpatialQueryPipeline>,
     camera_query: Query<&FloatingOriginCamera>,
     mut query: Query<
         (
-            Entity,
             &FpsControllerInput,
             &mut FpsController,
             &mut Collider,
-            &mut Transform,
             &mut LinearVelocity,
             &Position,
         ),
@@ -486,15 +480,12 @@ fn fps_controller_move(
     };
     let camera_pos = camera.position;
 
-    for (entity, input, mut controller, mut collider, mut transform, mut velocity, position) in
-        query.iter_mut()
-    {
-        controller.previous_translation = Some(transform.translation);
-
+    for (input, mut controller, mut collider, mut velocity, position) in query.iter_mut() {
         let ecef_pos = camera_pos + position.0.as_dvec3();
         let frame = RadialFrame::from_ecef_position(ecef_pos);
         let local_up = frame.up;
 
+        // Compute wish direction in the radial frame.
         let speeds = Vec3::new(controller.side_speed, 0.0, controller.forward_speed);
 
         let forward = frame.north * input.yaw.cos() - frame.east * input.yaw.sin();
@@ -515,38 +506,31 @@ fn fps_controller_move(
         };
         wish_speed = f32::min(wish_speed, max_speed);
 
-        let down_dir = Dir3::new(-local_up).unwrap_or(Dir3::NEG_Y);
+        // Apply gravity.
+        let gravity_dir = -local_up;
+        velocity.0 += gravity_dir * crate::constants::GRAVITY * dt;
 
-        let filter = SpatialQueryFilter::default().with_excluded_entities([entity]);
-        if let Some(hit) = spatial_query_pipeline.cast_shape(
-            &scaled_collider_laterally(&collider, SLIGHT_SCALE_DOWN),
-            transform.translation,
-            transform.rotation,
-            down_dir,
-            &ShapeCastConfig::from_max_distance(controller.grounded_distance),
-            &filter,
-        ) {
-            let has_traction = Vec3::dot(hit.normal1, local_up) > controller.traction_normal_cutoff;
+        // Determine grounded state and apply friction/acceleration before move_and_slide.
+        let is_grounded = controller.ground_tick >= 1;
 
-            if controller.ground_tick >= 1 && has_traction {
-                let vertical_component = velocity.0.dot(local_up) * local_up;
-                let lateral_velocity = velocity.0 - vertical_component;
-                let lateral_speed = lateral_velocity.length();
+        if is_grounded {
+            // Ground friction.
+            let vertical_component = velocity.0.dot(local_up) * local_up;
+            let lateral_velocity = velocity.0 - vertical_component;
+            let lateral_speed = lateral_velocity.length();
 
-                if lateral_speed > controller.friction_speed_cutoff {
-                    let control = f32::max(lateral_speed, controller.stop_speed);
-                    let drop = control * controller.friction * dt;
-                    let new_speed = f32::max((lateral_speed - drop) / lateral_speed, 0.0);
-                    velocity.0 = vertical_component
-                        + lateral_velocity.normalize() * lateral_speed * new_speed;
-                } else {
-                    velocity.0 = Vec3::ZERO;
-                }
-                if controller.ground_tick == 1 {
-                    velocity.0 -= local_up * hit.distance;
-                }
+            if lateral_speed > controller.friction_speed_cutoff {
+                let control = f32::max(lateral_speed, controller.stop_speed);
+                let drop = control * controller.friction * dt;
+                let new_speed = f32::max((lateral_speed - drop) / lateral_speed, 0.0);
+                velocity.0 =
+                    vertical_component + lateral_velocity.normalize() * lateral_speed * new_speed;
+            } else {
+                // Keep vertical velocity (gravity), zero out lateral.
+                velocity.0 = vertical_component;
             }
 
+            // Ground acceleration.
             let add = acceleration(
                 wish_direction,
                 wish_speed,
@@ -556,29 +540,23 @@ fn fps_controller_move(
             );
             velocity.0 += add;
 
-            if has_traction {
-                let linear_velocity = velocity.0;
-                velocity.0 -= Vec3::dot(linear_velocity, hit.normal1) * hit.normal1;
-
-                if input.jump {
-                    velocity.0 += local_up * controller.jump_speed;
-                }
+            // Jump.
+            if input.jump {
+                velocity.0 += local_up * controller.jump_speed;
             }
-
-            controller.ground_tick = controller.ground_tick.saturating_add(1);
         } else {
-            controller.ground_tick = 0;
-            wish_speed = f32::min(wish_speed, controller.air_speed_cap);
-
+            // Air acceleration.
+            let capped_wish_speed = f32::min(wish_speed, controller.air_speed_cap);
             let add = acceleration(
                 wish_direction,
-                wish_speed,
+                capped_wish_speed,
                 controller.air_acceleration,
                 velocity.0,
                 dt,
             );
             velocity.0 += add;
 
+            // Clamp air speed.
             let vertical_component = velocity.0.dot(local_up) * local_up;
             let lateral_velocity = velocity.0 - vertical_component;
             let air_speed = lateral_velocity.length();
@@ -586,22 +564,23 @@ fn fps_controller_move(
                 let ratio = controller.max_air_speed / air_speed;
                 velocity.0 = vertical_component + lateral_velocity * ratio;
             }
-        };
+        }
 
-        let crouch_height = controller.crouch_height;
-        let upright_height = controller.upright_height;
-
+        // Update crouch height.
         let crouch_speed = if input.crouch {
             -controller.crouch_speed
         } else {
             controller.uncrouch_speed
         };
         controller.height += dt * crouch_speed;
-        controller.height = controller.height.clamp(crouch_height, upright_height);
+        controller.height = controller
+            .height
+            .clamp(controller.crouch_height, controller.upright_height);
 
+        // Resize collider to match current height.
         if let Some(capsule) = collider.shape().as_capsule() {
             let radius = capsule.radius;
-            let half = Point::from(local_up * (controller.height * 0.5 - radius));
+            let half = local_up * (controller.height * 0.5 - radius);
             collider.set_shape(SharedShape::capsule(-half, half, radius));
         } else if let Some(cylinder) = collider.shape().as_cylinder() {
             let radius = cylinder.radius;
@@ -609,66 +588,81 @@ fn fps_controller_move(
         } else {
             panic!("Controller must use a cylinder or capsule collider")
         }
+    }
+}
 
-        if collider.shape().as_cylinder().is_some()
-            && controller.experimental_step_offset > f32::EPSILON
-            && controller.ground_tick >= 1
-        {
-            let future_position = transform.translation + velocity.0 * dt;
-            let future_position_lifted =
-                future_position + local_up * controller.experimental_step_offset;
-            if let Some(hit) = spatial_query_pipeline.cast_shape(
-                &collider,
-                future_position_lifted,
-                transform.rotation,
-                down_dir,
-                &ShapeCastConfig::from_max_distance(
-                    controller.experimental_step_offset * SLIGHT_SCALE_DOWN,
-                ),
-                &filter,
-            ) {
-                let has_traction_on_ledge =
-                    Vec3::dot(hit.normal1, local_up) > controller.traction_normal_cutoff;
-                if has_traction_on_ledge {
-                    transform.translation +=
-                        local_up * (controller.experimental_step_offset - hit.distance);
-                }
-            }
-        }
+/// Resolve collisions using `MoveAndSlide` and update position.
+///
+/// Runs after `fps_controller_prepare` which sets up velocity and collider.
+/// Separated to avoid query conflicts: `MoveAndSlide` reads `Collider`/`Position`
+/// while `fps_controller_prepare` writes them.
+#[allow(clippy::type_complexity)]
+fn fps_controller_slide(
+    time: Res<Time<Fixed>>,
+    move_and_slide: MoveAndSlide,
+    camera_query: Query<&FloatingOriginCamera>,
+    mut query: Query<
+        (
+            Entity,
+            &mut FpsController,
+            &Collider,
+            &mut Transform,
+            &mut LinearVelocity,
+        ),
+        (With<LogicalPlayer>, Without<RenderPlayer>),
+    >,
+) {
+    let Ok(camera) = camera_query.single() else {
+        return;
+    };
+    let camera_pos = camera.position;
 
-        if controller.experimental_enable_ledge_cling
-            && controller.ground_tick >= 1
-            && input.crouch
-            && !input.jump
-        {
-            for _ in 0..2 {
-                let overhang = overhang_component(
-                    entity,
-                    &collider,
-                    transform.as_ref(),
-                    &spatial_query_pipeline,
-                    velocity.0,
-                    dt,
-                    local_up,
-                );
-                if let Some(overhang) = overhang {
-                    velocity.0 -= overhang;
+    for (entity, mut controller, collider, mut transform, mut velocity) in query.iter_mut() {
+        controller.previous_translation = Some(transform.translation);
+
+        let ecef_pos = camera_pos + transform.translation.as_dvec3();
+        let frame = RadialFrame::from_ecef_position(ecef_pos);
+        let local_up = frame.up;
+
+        let filter = SpatialQueryFilter::from_excluded_entities([entity]);
+        let mut ground_hit = false;
+        let traction_cutoff = controller.traction_normal_cutoff;
+
+        let output = move_and_slide.move_and_slide(
+            collider,
+            transform.translation,
+            transform.rotation,
+            velocity.0,
+            time.delta(),
+            &MoveAndSlideConfig::default(),
+            &filter,
+            |hit| {
+                if hit.normal.dot(local_up) > traction_cutoff {
+                    ground_hit = true;
                 }
-            }
-            if overhang_component(
-                entity,
-                &collider,
-                transform.as_ref(),
-                &spatial_query_pipeline,
-                velocity.0,
-                dt,
-                local_up,
-            )
-            .is_some()
-            {
-                velocity.0 = Vec3::ZERO;
-            }
+                MoveAndSlideHitResponse::Accept
+            },
+        );
+
+        transform.translation = output.position;
+        velocity.0 = output.projected_velocity;
+
+        if ground_hit {
+            controller.ground_tick = controller.ground_tick.saturating_add(1);
+        } else {
+            controller.ground_tick = 0;
         }
+    }
+}
+
+/// Sync the physics `Position` from `Transform` for the FPS player.
+///
+/// Separate from `fps_controller_slide` to avoid query conflicts with `MoveAndSlide`.
+fn fps_controller_sync_position(
+    mut query: Query<(&Transform, &mut Position), With<LogicalPlayer>>,
+) {
+    for (transform, mut position) in &mut query {
+        position.0 = transform.translation;
     }
 }
 
@@ -681,59 +675,6 @@ fn collider_y_offset(collider: &Collider, local_up: Vec3) -> Vec3 {
         } else {
             panic!("Controller must use a cylinder or capsule collider")
         }
-}
-
-fn scaled_collider_laterally(collider: &Collider, scale: f32) -> Collider {
-    if let Some(cylinder) = collider.shape().as_cylinder() {
-        Collider::cylinder(cylinder.radius * scale, cylinder.half_height * 2.0)
-    } else if let Some(capsule) = collider.shape().as_capsule() {
-        Collider::capsule(capsule.radius * scale, capsule.segment.length())
-    } else {
-        panic!("Controller must use a cylinder or capsule collider")
-    }
-}
-
-fn overhang_component(
-    entity: Entity,
-    collider: &Collider,
-    transform: &Transform,
-    spatial_query: &SpatialQueryPipeline,
-    velocity: Vec3,
-    dt: f32,
-    local_up: Vec3,
-) -> Option<Vec3> {
-    if velocity == Vec3::ZERO {
-        return None;
-    }
-
-    let cast_capsule = Collider::capsule(0.01, 0.5);
-    let filter = SpatialQueryFilter::default().with_excluded_entities([entity]);
-    let collider_offset = collider_y_offset(collider, local_up);
-    let future_position = transform.translation - collider_offset + velocity * dt;
-
-    if let Some(hit) = spatial_query.cast_shape(
-        &cast_capsule,
-        future_position,
-        transform.rotation,
-        Dir3::new((-velocity).normalize()).ok()?,
-        &ShapeCastConfig::from_max_distance(0.5),
-        &filter,
-    ) {
-        let down_dir = Dir3::new(-local_up).unwrap_or(Dir3::NEG_Y);
-        let cast = spatial_query.cast_ray(
-            future_position + local_up * 0.125,
-            down_dir,
-            0.375,
-            false,
-            &filter,
-        );
-        if cast.is_none() {
-            let normal = -hit.normal1;
-            let alignment = Vec3::dot(velocity, normal);
-            return Some(alignment * normal);
-        }
-    }
-    None
 }
 
 fn acceleration(

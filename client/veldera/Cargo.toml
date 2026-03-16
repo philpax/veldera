@@ -15,7 +15,7 @@ path = "src/vehicle/tuning.rs"
 # Platform-agnostic async channel (replaces tokio::sync::mpsc).
 async-channel = "2"
 # Physics engine.
-avian3d = "0.5"
+avian3d = "0.6"
 # Base Bevy features that work on both native and WASM.
 bevy = { version = "0.18.0", default-features = false, features = [
   "bevy_asset",

@@ -7,15 +7,20 @@
 use avian3d::prelude::*;
 use bevy::prelude::*;
 
-use crate::{constants::GRAVITY, world::floating_origin::WorldPosition};
+use crate::{camera::LogicalPlayer, constants::GRAVITY, world::floating_origin::WorldPosition};
 
 /// Apply radial gravity toward Earth center.
 ///
 /// Gravity direction is derived from each entity's [`WorldPosition`] (ECEF),
 /// ensuring it remains stable regardless of camera movement.
+/// The FPS player is excluded because it applies gravity manually in its controller.
+#[allow(clippy::type_complexity)]
 pub fn apply_radial_gravity(
     time: Res<Time>,
-    mut query: Query<(&WorldPosition, &mut LinearVelocity), With<RigidBody>>,
+    mut query: Query<
+        (&WorldPosition, &mut LinearVelocity),
+        (With<RigidBody>, Without<LogicalPlayer>),
+    >,
 ) {
     let dt = time.delta_secs();
 
