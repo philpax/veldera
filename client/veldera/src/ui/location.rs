@@ -2,7 +2,7 @@
 //!
 //! Provides geocoding search, coordinate input, altitude control, and time-of-day settings.
 
-use bevy::{ecs::system::SystemParam, prelude::*};
+use bevy::{camera::Exposure, ecs::system::SystemParam, prelude::*};
 use bevy_egui::egui;
 use glam::DVec3;
 
@@ -14,6 +14,7 @@ use crate::{
         geo::{
             GEOCODING_THROTTLE_SECS, GeocodingState, HttpClient, TeleportAnimation, TeleportState,
         },
+        moon::compute_moon_state,
         time_of_day::{TimeMode, TimeOfDayState},
     },
 };
@@ -38,6 +39,7 @@ pub(super) struct LocationParams<'w, 's> {
     pub http_client: Res<'w, HttpClient>,
     pub spawner: TaskSpawner<'w, 's>,
     pub altitude_request: ResMut<'w, AltitudeRequest>,
+    pub exposure_query: Query<'w, 's, &'static Exposure, With<Camera3d>>,
 }
 
 /// Render the location & time tab content and execute any resulting actions.
@@ -290,6 +292,27 @@ pub(super) fn render_location_tab(
         // Show sun declination for reference.
         let declination = location.time_of_day.sun_declination_deg();
         ui.label(format!("Sun declination: {declination:.1}\u{00b0}"));
+    }
+
+    // Moon state — useful for verifying night-side lighting and phase logic.
+    let moon = compute_moon_state(&location.time_of_day);
+    let local_up = position.normalize().as_vec3();
+    let moon_altitude_deg = moon.altitude_at(local_up).to_degrees();
+    let visible = if moon_altitude_deg > 0.0 {
+        "up"
+    } else {
+        "down"
+    };
+    ui.label(format!(
+        "Moon: {phase} ({pct:.0}%), altitude {alt:.1}\u{00b0} ({visible})",
+        phase = moon.phase_name(),
+        pct = moon.illuminated_fraction * 100.0,
+        alt = moon_altitude_deg,
+    ));
+
+    // Camera exposure — driven by sun + moon illuminance at the camera.
+    if let Ok(exposure) = location.exposure_query.single() {
+        ui.label(format!("Camera EV: {:.2}", exposure.ev100));
     }
 
     // Speed buttons.

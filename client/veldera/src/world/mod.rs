@@ -8,4 +8,5 @@ pub mod floating_origin;
 pub mod geo;
 pub mod loader;
 pub mod lod;
+pub mod moon;
 pub mod time_of_day;

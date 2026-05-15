@@ -17,15 +17,20 @@ mod world;
 
 use async_runtime::AsyncRuntimePlugin;
 use bevy::{
-    audio::SpatialListener, camera::Exposure, core_pipeline::tonemapping::Tonemapping,
-    light::light_consts::lux, pbr::ScatteringMedium, post_process::bloom::Bloom, prelude::*,
+    audio::SpatialListener,
+    camera::Exposure,
+    core_pipeline::tonemapping::Tonemapping,
+    light::{GlobalAmbientLight, SunDisk, light_consts::lux},
+    pbr::ScatteringMedium,
+    post_process::bloom::Bloom,
+    prelude::*,
     render::view::Hdr,
 };
 use camera::{CameraControllerPlugin, FlightCamera};
 use input::InputPlugin;
 use launch_params::LaunchParams;
 use rendering::{
-    atmosphere::{AtmosphereBundle, AtmosphereIntegrationPlugin},
+    atmosphere::{AtmosphereBundle, AtmosphereIntegrationPlugin, AtmosphericLight},
     terrain_material::TerrainMaterialPlugin,
 };
 use ui::DebugUiPlugin;
@@ -35,6 +40,7 @@ use world::{
     geo::GeoPlugin,
     loader::DataLoaderPlugin,
     lod::LodPlugin,
+    moon::{MOON_ANGULAR_DIAMETER, Moon, MoonPlugin},
     time_of_day::{SimpleDate, Sun, TimeOfDayPlugin, TimeOfDayState},
 };
 
@@ -52,6 +58,7 @@ impl Plugin for AppPlugin {
             GeoPlugin,
             LodPlugin,
             TimeOfDayPlugin,
+            MoonPlugin,
             DebugUiPlugin,
             TerrainMaterialPlugin,
             AtmosphereIntegrationPlugin,
@@ -68,6 +75,17 @@ fn setup_scene(
     mut media: ResMut<Assets<ScatteringMedium>>,
     params: Res<LaunchParams>,
 ) {
+    // Ambient calibrated against the EV clamp floor: enough that surfaces
+    // remain readable through twilight and moonless night, but low enough
+    // that photogrammetry textures (which bake in their captured-day
+    // reflectance) don't look mid-day-bright. During the day this is
+    // dwarfed by direct sun and the env-map IBL.
+    commands.insert_resource(GlobalAmbientLight {
+        color: Color::WHITE,
+        brightness: 50.0,
+        affects_lightmapped_meshes: true,
+    });
+
     // Convert launch parameters to ECEF position.
     let radius = constants::EARTH_RADIUS_M_F64 + params.altitude;
     let start_position = lat_lon_to_ecef(params.lat, params.lon, radius);
@@ -106,7 +124,10 @@ fn setup_scene(
         Tonemapping::AcesFitted,
         // HDR is required for atmosphere rendering.
         Hdr,
-        // Exposure compensation for the bright atmospheric illuminance.
+        // Initial exposure — overwritten each frame by
+        // `update_scene_exposure` based on sun + moon illuminance at the
+        // camera. Starting value gives a sensible first frame before the
+        // exposure system runs.
         Exposure { ev100: 13.0 },
         // Bloom gives the sun a natural glow.
         Bloom::NATURAL,
@@ -136,6 +157,35 @@ fn setup_scene(
             illuminance: lux::RAW_SUNLIGHT,
             shadows_enabled: true,
             ..default()
+        },
+        AtmosphericLight {
+            base_color: LinearRgba::WHITE,
+        },
+        Transform::default(),
+    ));
+
+    // Directional light representing the moon. Position, illuminance, and
+    // disk visibility are driven by `MoonPlugin` from UTC date/time.
+    // Atmospheric extinction (including planet occlusion below horizon) is
+    // applied by the same system that handles the sun, via the light's color.
+    commands.spawn((
+        Moon,
+        DirectionalLight {
+            illuminance: 0.0, // updated each frame by `update_moon`.
+            // Shadows from the moon would be expensive and rarely visible;
+            // skip them. We can revisit if night gameplay warrants it.
+            shadows_enabled: false,
+            ..default()
+        },
+        AtmosphericLight {
+            // Slight warm-grey tint — closer to actual lunar surface color
+            // than pure white. Multiplied by extinction transmittance each
+            // frame.
+            base_color: LinearRgba::new(1.0, 0.96, 0.9, 1.0),
+        },
+        SunDisk {
+            angular_size: MOON_ANGULAR_DIAMETER,
+            intensity: 1.0,
         },
         Transform::default(),
     ));
