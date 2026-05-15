@@ -14,11 +14,13 @@
 //! - The atmosphere LUT coordinate system adapts to the camera's position on the sphere
 //! - Designed to integrate with floating origin camera systems for large-scale planets
 
+mod environment;
 mod node;
 mod resources;
+mod sun_transmittance;
 
 use bevy::{
-    app::{App, Plugin},
+    app::{App, Plugin, Update},
     asset::{Handle, embedded_asset},
     ecs::{
         component::Component,
@@ -46,11 +48,19 @@ use tracing::warn;
 use bevy::{
     asset::AssetId,
     core_pipeline::core_3d::graph::{Core3d, Node3d},
+    pbr::generate::{GeneratorNode, generate_environment_map_light},
     prelude::Camera3d,
 };
 
+pub use environment::{AtmosphereEnvironmentMap, SphericalAtmosphereEnvironmentMapLight};
 pub use resources::{AtmosphereTransforms, GpuAtmosphere, RenderSkyBindGroupLayouts};
+pub use sun_transmittance::compute_sun_transmittance;
 
+use environment::{
+    EnvironmentNode, init_atmosphere_probe_layout, init_atmosphere_probe_pipeline,
+    prepare_atmosphere_probe_bind_groups, prepare_atmosphere_probe_components,
+    prepare_probe_textures,
+};
 use node::{AtmosphereLutsNode, AtmosphereNode, RenderSkyNode};
 use resources::{
     AtmosphereBindGroupLayouts, AtmosphereLutPipelines, AtmosphereSampler,
@@ -73,14 +83,24 @@ impl Plugin for SphericalAtmospherePlugin {
         embedded_asset!(app, "shaders/sky_view_lut.wgsl");
         embedded_asset!(app, "shaders/aerial_view_lut.wgsl");
         embedded_asset!(app, "shaders/render_sky.wgsl");
+        embedded_asset!(app, "shaders/environment.wgsl");
 
         app.add_plugins((
             ExtractComponentPlugin::<SphericalAtmosphere>::default(),
             ExtractComponentPlugin::<GpuAtmosphereSettings>::default(),
             ExtractComponentPlugin::<SphericalAtmosphereCamera>::default(),
+            ExtractComponentPlugin::<SphericalAtmosphereEnvironmentMapLight>::default(),
+            ExtractComponentPlugin::<AtmosphereEnvironmentMap>::default(),
             UniformComponentPlugin::<GpuAtmosphere>::default(),
             UniformComponentPlugin::<GpuAtmosphereSettings>::default(),
-        ));
+        ))
+        // Must run before Bevy's `generate_environment_map_light` so the IBL
+        // filter sees our source cubemap and matching `EnvironmentMapLight`
+        // on the same frame the user attaches the component.
+        .add_systems(
+            Update,
+            prepare_atmosphere_probe_components.before(generate_environment_map_light),
+        );
     }
 
     fn finish(&self, app: &mut App) {
@@ -117,18 +137,30 @@ impl Plugin for SphericalAtmospherePlugin {
             .init_resource::<AtmosphereLutPipelines>()
             .init_resource::<AtmosphereTransforms>()
             .init_resource::<SpecializedRenderPipelines<RenderSkyBindGroupLayouts>>()
-            .add_systems(RenderStartup, resources::init_atmosphere_buffer)
+            .add_systems(
+                RenderStartup,
+                (
+                    resources::init_atmosphere_buffer,
+                    init_atmosphere_probe_layout,
+                    init_atmosphere_probe_pipeline,
+                )
+                    .chain(),
+            )
             .add_systems(
                 Render,
                 (
                     configure_camera_depth_usages.in_set(RenderSystems::ManageViews),
                     queue_render_sky_pipelines.in_set(RenderSystems::Queue),
                     prepare_atmosphere_textures.in_set(RenderSystems::PrepareResources),
+                    prepare_probe_textures
+                        .in_set(RenderSystems::PrepareResources)
+                        .after(prepare_atmosphere_textures),
                     prepare_atmosphere_uniforms
                         .before(RenderSystems::PrepareResources)
                         .after(RenderSystems::PrepareAssets),
                     prepare_atmosphere_transforms.in_set(RenderSystems::PrepareResources),
                     prepare_atmosphere_bind_groups.in_set(RenderSystems::PrepareBindGroups),
+                    prepare_atmosphere_probe_bind_groups.in_set(RenderSystems::PrepareBindGroups),
                     resources::write_atmosphere_buffer.in_set(RenderSystems::PrepareResources),
                 ),
             )
@@ -136,14 +168,27 @@ impl Plugin for SphericalAtmospherePlugin {
                 Core3d,
                 AtmosphereNode::RenderLuts,
             )
+            .add_render_graph_node::<ViewNodeRunner<EnvironmentNode>>(
+                Core3d,
+                AtmosphereNode::Environment,
+            )
             .add_render_graph_edges(
                 Core3d,
                 (
-                    // END_PRE_PASSES -> RENDER_LUTS -> MAIN_PASS
+                    // END_PRE_PASSES -> RENDER_LUTS -> ENVIRONMENT -> MAIN_PASS
                     Node3d::EndPrepasses,
                     AtmosphereNode::RenderLuts,
+                    AtmosphereNode::Environment,
                     Node3d::StartMainPass,
                 ),
+            )
+            // Ensure the IBL prefilter reads the cubemap *after* it is
+            // written. Without this, Bevy's Downsampling/Filtering graph
+            // can run before AtmosphereNode::Environment, producing zero
+            // irradiance for the first/every frame.
+            .add_render_graph_edges(
+                Core3d,
+                (AtmosphereNode::Environment, GeneratorNode::Downsampling),
             )
             .add_render_graph_node::<ViewNodeRunner<RenderSkyNode>>(
                 Core3d,

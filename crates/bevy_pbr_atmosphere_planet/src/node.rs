@@ -32,6 +32,7 @@ use crate::{
 #[derive(PartialEq, Eq, Debug, Copy, Clone, Hash, RenderLabel)]
 pub enum AtmosphereNode {
     RenderLuts,
+    Environment,
     RenderSky,
 }
 
