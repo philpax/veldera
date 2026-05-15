@@ -124,10 +124,11 @@ fn setup_scene(
         Tonemapping::AcesFitted,
         // HDR is required for atmosphere rendering.
         Hdr,
-        // Initial exposure — overwritten each frame by
-        // `update_scene_exposure` based on sun + moon illuminance at the
-        // camera. Starting value gives a sensible first frame before the
-        // exposure system runs.
+        // Fixed exposure calibrated for daytime. With CPU sun extinction
+        // dimming the sun's `DirectionalLight.color` through twilight, the
+        // scene naturally darkens as the sun sets — no eye-adaptation curve
+        // needed. Night is intentionally dark; lift it with explicit lights
+        // (street lights, etc.) rather than cranking exposure sensitivity.
         Exposure { ev100: 13.0 },
         // Bloom gives the sun a natural glow.
         Bloom::NATURAL,

@@ -2,7 +2,7 @@
 //!
 //! Provides geocoding search, coordinate input, altitude control, and time-of-day settings.
 
-use bevy::{camera::Exposure, ecs::system::SystemParam, prelude::*};
+use bevy::{ecs::system::SystemParam, prelude::*};
 use bevy_egui::egui;
 use glam::DVec3;
 
@@ -39,7 +39,6 @@ pub(super) struct LocationParams<'w, 's> {
     pub http_client: Res<'w, HttpClient>,
     pub spawner: TaskSpawner<'w, 's>,
     pub altitude_request: ResMut<'w, AltitudeRequest>,
-    pub exposure_query: Query<'w, 's, &'static Exposure, With<Camera3d>>,
 }
 
 /// Render the location & time tab content and execute any resulting actions.
@@ -309,11 +308,6 @@ pub(super) fn render_location_tab(
         pct = moon.illuminated_fraction * 100.0,
         alt = moon_altitude_deg,
     ));
-
-    // Camera exposure — driven by sun + moon illuminance at the camera.
-    if let Ok(exposure) = location.exposure_query.single() {
-        ui.label(format!("Camera EV: {:.2}", exposure.ev100));
-    }
 
     // Speed buttons.
     ui.horizontal(|ui| {
