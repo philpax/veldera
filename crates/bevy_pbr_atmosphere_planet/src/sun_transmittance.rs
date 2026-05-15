@@ -59,7 +59,13 @@ pub fn compute_sun_transmittance(
 
         let r_i = (t_i * t_i + 2.0 * r * mu * t_i + r * r).sqrt();
         let altitude = (r_i - atmosphere.bottom_radius).max(0.0);
-        let p = (altitude / atm_height).clamp(0.0, 1.0);
+        // Bevy's `Falloff::sample` is parameterised by *depth from the top*
+        // (`p = 0` → top of atmosphere → low density; `p = 1` → ground →
+        // peak density). The GPU shader's `sample_density_lut` does the
+        // same inversion (`uv.x = 1.0 - normalized_altitude`), so we must
+        // match it on CPU or the optical-depth profile comes out upside-
+        // down (heavy extinction at altitude, none at ground).
+        let p = (1.0 - altitude / atm_height).clamp(0.0, 1.0);
 
         let extinction = extinction_at(medium, p);
         optical_depth += extinction * dt;
