@@ -15,6 +15,7 @@
         atmosphere, settings, view, lights, transmittance_lut, atmosphere_lut_sampler,
         multiscattering_lut, sky_view_lut, aerial_view_lut, atmosphere_transforms,
         medium_density_lut, medium_scattering_lut, medium_sampler,
+        atmosphere_lights,
     },
     bruneton_functions::{
         transmittance_lut_r_mu_to_uv, ray_intersects_ground,
@@ -223,11 +224,11 @@ fn sample_local_inscattering(local_scattering: vec3<f32>, ray_dir: vec3<f32>, at
     let local_r = length(atmo_pos);
     let local_up = normalize(atmo_pos);
     var inscattering = vec3(0.0);
-    for (var light_i: u32 = 0u; light_i < lights.n_directional_lights; light_i++) {
-        let light = &lights.directional_lights[light_i];
+    for (var light_i: u32 = 0u; light_i < atmosphere_lights.count; light_i++) {
+        let light = atmosphere_lights.lights[light_i];
 
         // Transform light direction from world space to atmosphere space.
-        let light_dir_as = direction_world_to_atmosphere((*light).direction_to_light, atmosphere_transforms.local_up);
+        let light_dir_as = direction_world_to_atmosphere(light.direction_to_light, atmosphere_transforms.local_up);
 
         let mu_light = dot(light_dir_as, local_up);
 
@@ -246,7 +247,7 @@ fn sample_local_inscattering(local_scattering: vec3<f32>, ray_dir: vec3<f32>, at
         let psi_ms = sample_multiscattering_lut(local_r, mu_light);
         let multiscattering_factor = psi_ms * local_scattering;
 
-        inscattering += (*light).color.rgb * (scattering_factor + multiscattering_factor);
+        inscattering += light.color * (scattering_factor + multiscattering_factor);
     }
     return inscattering;
 }
@@ -260,19 +261,19 @@ fn sample_sun_radiance(ray_dir_as: vec3<f32>) -> vec3<f32> {
     let mu_view = dot(ray_dir_as, up);
     let shadow_factor = f32(!ray_intersects_ground(r, mu_view));
     var sun_radiance = vec3(0.0);
-    for (var light_i: u32 = 0u; light_i < lights.n_directional_lights; light_i++) {
-        let light = &lights.directional_lights[light_i];
+    for (var light_i: u32 = 0u; light_i < atmosphere_lights.count; light_i++) {
+        let light = atmosphere_lights.lights[light_i];
         // Transform light direction from world space to atmosphere space.
-        let light_dir_as = direction_world_to_atmosphere((*light).direction_to_light, atmosphere_transforms.local_up);
+        let light_dir_as = direction_world_to_atmosphere(light.direction_to_light, atmosphere_transforms.local_up);
         let neg_LdotV = dot(light_dir_as, ray_dir_as);
         let angle_to_sun = fast_acos(clamp(neg_LdotV, -1.0, 1.0));
         let w = max(0.5 * fwidth(angle_to_sun), 1e-6);
-        let sun_angular_size = (*light).sun_disk_angular_size;
-        let sun_intensity = (*light).sun_disk_intensity;
+        let sun_angular_size = light.sun_disk_angular_size;
+        let sun_intensity = light.sun_disk_intensity;
         if sun_angular_size > 0.0 && sun_intensity > 0.0 {
             let factor = 1 - smoothstep(sun_angular_size * 0.5 - w, sun_angular_size * 0.5 + w, angle_to_sun);
             let sun_solid_angle = (sun_angular_size * sun_angular_size) * 0.25 * PI;
-            sun_radiance += ((*light).color.rgb / sun_solid_angle) * sun_intensity * factor * shadow_factor;
+            sun_radiance += (light.color / sun_solid_angle) * sun_intensity * factor * shadow_factor;
         }
     }
     return sun_radiance;
@@ -523,10 +524,10 @@ fn raymarch_atmosphere(
 
     // Include reflected luminance from planet ground.
     if ground && ray_intersects_ground(r, mu) {
-        for (var light_i: u32 = 0u; light_i < lights.n_directional_lights; light_i++) {
-            let light = &lights.directional_lights[light_i];
-            let light_dir = (*light).direction_to_light;
-            let light_color = (*light).color.rgb;
+        for (var light_i: u32 = 0u; light_i < atmosphere_lights.count; light_i++) {
+            let light = atmosphere_lights.lights[light_i];
+            let light_dir = light.direction_to_light;
+            let light_color = light.color;
             let transmittance_to_ground = exp(-optical_depth);
             // Position on the sphere and get the sphere normal (up).
             let sphere_point = pos + ray_dir * t_end;

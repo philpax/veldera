@@ -4,10 +4,18 @@
 //! `FloatingOriginCamera` to provide correct atmospheric scattering on a
 //! spherical Earth.
 
-use bevy::{camera::Exposure, math::UVec2, pbr::ScatteringMedium, prelude::*};
+use bevy::{
+    camera::Exposure,
+    light::SunDisk,
+    math::UVec2,
+    pbr::ScatteringMedium,
+    prelude::*,
+    render::{Extract, ExtractSchedule, RenderApp},
+};
 use bevy_pbr_atmosphere_planet::{
-    AtmosphereSettings, SphericalAtmosphere, SphericalAtmosphereCamera,
-    SphericalAtmosphereEnvironmentMapLight, compute_sun_transmittance,
+    AtmosphereSettings, ExtractedAtmosphereLights, GpuAtmosphereLight, MAX_ATMOSPHERE_LIGHTS,
+    SphericalAtmosphere, SphericalAtmosphereCamera, SphericalAtmosphereEnvironmentMapLight,
+    compute_sun_transmittance,
 };
 
 use crate::{
@@ -34,6 +42,65 @@ impl Plugin for AtmosphereIntegrationPlugin {
                 ),
             );
     }
+
+    fn finish(&self, app: &mut App) {
+        // Extract atmospheric lights to the render world so the atmosphere
+        // shaders can read the pre-extinction emission, separately from
+        // Bevy's `lights.directional_lights` (which carry the CPU-
+        // attenuated colour for surface PBR).
+        if let Some(render_app) = app.get_sub_app_mut(RenderApp) {
+            render_app.add_systems(ExtractSchedule, extract_atmosphere_lights);
+        }
+    }
+}
+
+/// Extracts atmospheric-light entities into [`ExtractedAtmosphereLights`].
+///
+/// We pack the *unattenuated* emission (base_color × illuminance) plus disk
+/// parameters for each entity bearing [`AtmosphericLight`]. The atmosphere
+/// crate's render-world `prepare_atmosphere_lights_buffer` consumes this and
+/// writes the GPU uniform.
+#[allow(clippy::type_complexity)]
+fn extract_atmosphere_lights(
+    lights: Extract<
+        Query<(
+            &AtmosphericLight,
+            &DirectionalLight,
+            &GlobalTransform,
+            Option<&SunDisk>,
+        )>,
+    >,
+    mut extracted: ResMut<ExtractedAtmosphereLights>,
+) {
+    let mut data = ExtractedAtmosphereLights::default();
+    let mut count: usize = 0;
+    for (atmo, dl, gt, sun_disk) in lights.iter() {
+        if count >= MAX_ATMOSPHERE_LIGHTS {
+            break;
+        }
+        // `Transform::looking_to(-direction, up)` made the entity's `back`
+        // axis point toward the light source. Use `GlobalTransform` so the
+        // value already reflects the latest update.
+        let direction_to_light = gt.back().as_vec3();
+        let base = atmo.base_color;
+        let color = Vec3::new(base.red, base.green, base.blue) * dl.illuminance;
+        // Match Bevy's `extract_lights`: when `SunDisk` is missing, fall
+        // back to `SunDisk::EARTH`, so a bare `DirectionalLight` still
+        // renders a visible disk in the atmosphere shader.
+        let (sun_disk_angular_size, sun_disk_intensity) = sun_disk
+            .map(|s| (s.angular_size, s.intensity))
+            .unwrap_or_else(|| (SunDisk::EARTH.angular_size, SunDisk::EARTH.intensity));
+
+        data.0.lights[count] = GpuAtmosphereLight {
+            direction_to_light,
+            sun_disk_angular_size,
+            color,
+            sun_disk_intensity,
+        };
+        count += 1;
+    }
+    data.0.count = count as u32;
+    *extracted = data;
 }
 
 /// Tag for a [`DirectionalLight`] whose color should be modulated each frame

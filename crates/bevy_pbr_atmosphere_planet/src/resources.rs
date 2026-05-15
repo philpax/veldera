@@ -32,6 +32,59 @@ use std::ops::Deref;
 
 use crate::{ExtractedAtmosphere, GpuAtmosphereSettings, SphericalAtmosphereCamera};
 
+/// Maximum number of atmospheric lights (sun, moon, etc.) we pass to the
+/// atmosphere shader at once. Chosen well above plausible use.
+pub const MAX_ATMOSPHERE_LIGHTS: usize = 4;
+
+/// Per-light data fed directly to the atmosphere shaders. Separate from
+/// Bevy's `GpuDirectionalLight` so the atmosphere can read *unattenuated*
+/// emission while surface PBR continues to read CPU-extinction-modulated
+/// colours from `lights.directional_lights`.
+#[derive(Clone, Copy, ShaderType, Default)]
+pub struct GpuAtmosphereLight {
+    /// World-space unit vector pointing toward the light source.
+    pub direction_to_light: Vec3,
+    pub sun_disk_angular_size: f32,
+    /// Unattenuated emission in cd/m² (base_color × illuminance). The
+    /// atmosphere shader applies its own transmittance integration on top.
+    pub color: Vec3,
+    pub sun_disk_intensity: f32,
+}
+
+/// Uniform-buffer payload: a count plus a fixed-size array.
+///
+/// `encase`/`ShaderType` derives the std140 layout: `count` (4 bytes) is
+/// followed by implicit padding up to a 16-byte boundary before the array,
+/// matching how WGSL aligns arrays in a uniform block. We deliberately do
+/// not declare a manual padding field — `[u32; 3]` would be treated as an
+/// array with 4-byte stride and panic at buffer-build time.
+#[derive(Clone, ShaderType)]
+pub struct GpuAtmosphereLights {
+    pub count: u32,
+    pub lights: [GpuAtmosphereLight; MAX_ATMOSPHERE_LIGHTS],
+}
+
+impl Default for GpuAtmosphereLights {
+    fn default() -> Self {
+        Self {
+            count: 0,
+            lights: [GpuAtmosphereLight::default(); MAX_ATMOSPHERE_LIGHTS],
+        }
+    }
+}
+
+/// Render-world resource: the GPU-side uniform buffer of atmospheric lights.
+#[derive(Resource, Default)]
+pub struct AtmosphereLightsBuffer {
+    pub buffer: UniformBuffer<GpuAtmosphereLights>,
+}
+
+/// Extracted snapshot of atmospheric lights from the main world. Built each
+/// frame by `extract_atmosphere_lights` and consumed by
+/// `prepare_atmosphere_lights_buffer` to write the uniform.
+#[derive(Resource, Clone, Default)]
+pub struct ExtractedAtmosphereLights(pub GpuAtmosphereLights);
+
 #[derive(Resource)]
 pub(crate) struct AtmosphereBindGroupLayouts {
     pub transmittance_lut: BindGroupLayoutDescriptor,
@@ -117,6 +170,9 @@ impl AtmosphereBindGroupLayouts {
                     (8, texture_2d(TextureSampleType::default())), // Transmittance.
                     (9, texture_2d(TextureSampleType::default())), // Multiscattering.
                     (12, sampler(SamplerBindingType::Filtering)),
+                    // Per-light unattenuated emission (atmosphere uses this
+                    // instead of the CPU-extinguished `lights` uniform).
+                    (14, uniform_buffer::<GpuAtmosphereLights>(false)),
                     // Sky view LUT storage texture.
                     (
                         13,
@@ -147,6 +203,9 @@ impl AtmosphereBindGroupLayouts {
                     (8, texture_2d(TextureSampleType::default())), // Transmittance.
                     (9, texture_2d(TextureSampleType::default())), // Multiscattering.
                     (12, sampler(SamplerBindingType::Filtering)),
+                    // Per-light unattenuated emission (atmosphere uses this
+                    // instead of the CPU-extinguished `lights` uniform).
+                    (14, uniform_buffer::<GpuAtmosphereLights>(false)),
                     // Aerial view LUT storage texture.
                     (
                         13,
@@ -192,6 +251,8 @@ impl FromWorld for RenderSkyBindGroupLayouts {
                     (12, sampler(SamplerBindingType::Filtering)),
                     // View depth texture.
                     (13, texture_2d(TextureSampleType::Depth)),
+                    // Per-light unattenuated emission.
+                    (14, uniform_buffer::<GpuAtmosphereLights>(false)),
                 ),
             ),
         );
@@ -218,6 +279,8 @@ impl FromWorld for RenderSkyBindGroupLayouts {
                     (12, sampler(SamplerBindingType::Filtering)),
                     // View depth texture.
                     (13, texture_2d_multisampled(TextureSampleType::Depth)),
+                    // Per-light unattenuated emission.
+                    (14, uniform_buffer::<GpuAtmosphereLights>(false)),
                 ),
             ),
         );
@@ -626,6 +689,7 @@ enum AtmosphereBindGroupError {
     Settings,
     ViewUniforms,
     LightUniforms,
+    AtmosphereLights,
 }
 
 impl std::fmt::Display for AtmosphereBindGroupError {
@@ -661,6 +725,12 @@ impl std::fmt::Display for AtmosphereBindGroupError {
                     "failed to prepare atmosphere bind groups: light uniform buffer missing"
                 )
             }
+            Self::AtmosphereLights => {
+                write!(
+                    f,
+                    "failed to prepare atmosphere bind groups: atmosphere lights uniform buffer missing"
+                )
+            }
         }
     }
 }
@@ -688,6 +758,7 @@ pub(super) fn prepare_atmosphere_bind_groups(
     atmosphere_transforms: Res<AtmosphereTransforms>,
     atmosphere_uniforms: Res<ComponentUniforms<GpuAtmosphere>>,
     settings_uniforms: Res<ComponentUniforms<GpuAtmosphereSettings>>,
+    atmosphere_lights: Res<AtmosphereLightsBuffer>,
     gpu_media: Res<RenderAssets<GpuScatteringMedium>>,
     medium_sampler: Res<ScatteringMediumSampler>,
     pipeline_cache: Res<PipelineCache>,
@@ -719,6 +790,11 @@ pub(super) fn prepare_atmosphere_bind_groups(
         .view_gpu_lights
         .binding()
         .ok_or(AtmosphereBindGroupError::LightUniforms)?;
+
+    let atmosphere_lights_binding = atmosphere_lights
+        .buffer
+        .binding()
+        .ok_or(AtmosphereBindGroupError::AtmosphereLights)?;
 
     for (entity, atmosphere, textures, view_depth_texture, msaa) in &views {
         let gpu_medium = gpu_media
@@ -778,6 +854,7 @@ pub(super) fn prepare_atmosphere_bind_groups(
                 (8, &textures.transmittance_lut.default_view),
                 (9, &textures.multiscattering_lut.default_view),
                 (12, &**atmosphere_sampler),
+                (14, atmosphere_lights_binding.clone()),
                 // Sky view LUT storage texture.
                 (13, &textures.sky_view_lut.default_view),
             )),
@@ -801,6 +878,7 @@ pub(super) fn prepare_atmosphere_bind_groups(
                 (8, &textures.transmittance_lut.default_view),
                 (9, &textures.multiscattering_lut.default_view),
                 (12, &**atmosphere_sampler),
+                (14, atmosphere_lights_binding.clone()),
                 // Aerial view LUT storage texture.
                 (13, &textures.aerial_view_lut.default_view),
             )),
@@ -832,6 +910,7 @@ pub(super) fn prepare_atmosphere_bind_groups(
                 (12, &**atmosphere_sampler),
                 // View depth texture.
                 (13, view_depth_texture.view()),
+                (14, atmosphere_lights_binding.clone()),
             )),
         );
 
@@ -865,6 +944,18 @@ pub fn init_atmosphere_buffer(mut commands: Commands) {
             settings: GpuAtmosphereSettings::default(),
         }),
     });
+}
+
+/// Render-world system: copies the extracted atmosphere-lights snapshot into
+/// the GPU uniform buffer that the atmosphere shaders read each frame.
+pub(crate) fn prepare_atmosphere_lights_buffer(
+    extracted: Res<ExtractedAtmosphereLights>,
+    mut buffer: ResMut<AtmosphereLightsBuffer>,
+    render_device: Res<RenderDevice>,
+    render_queue: Res<RenderQueue>,
+) {
+    buffer.buffer.set(extracted.0.clone());
+    buffer.buffer.write_buffer(&render_device, &render_queue);
 }
 
 #[derive(Resource)]

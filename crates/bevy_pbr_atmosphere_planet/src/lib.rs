@@ -53,7 +53,10 @@ use bevy::{
 };
 
 pub use environment::{AtmosphereEnvironmentMap, SphericalAtmosphereEnvironmentMapLight};
-pub use resources::{AtmosphereTransforms, GpuAtmosphere, RenderSkyBindGroupLayouts};
+pub use resources::{
+    AtmosphereLightsBuffer, AtmosphereTransforms, ExtractedAtmosphereLights, GpuAtmosphere,
+    GpuAtmosphereLight, GpuAtmosphereLights, MAX_ATMOSPHERE_LIGHTS, RenderSkyBindGroupLayouts,
+};
 pub use sun_transmittance::compute_sun_transmittance;
 
 use environment::{
@@ -64,8 +67,8 @@ use environment::{
 use node::{AtmosphereLutsNode, AtmosphereNode, RenderSkyNode};
 use resources::{
     AtmosphereBindGroupLayouts, AtmosphereLutPipelines, AtmosphereSampler,
-    prepare_atmosphere_bind_groups, prepare_atmosphere_textures, prepare_atmosphere_transforms,
-    prepare_atmosphere_uniforms, queue_render_sky_pipelines,
+    prepare_atmosphere_bind_groups, prepare_atmosphere_lights_buffer, prepare_atmosphere_textures,
+    prepare_atmosphere_transforms, prepare_atmosphere_uniforms, queue_render_sky_pipelines,
 };
 
 /// Plugin that enables atmospheric scattering for spherical planets.
@@ -136,6 +139,8 @@ impl Plugin for SphericalAtmospherePlugin {
             .init_resource::<AtmosphereSampler>()
             .init_resource::<AtmosphereLutPipelines>()
             .init_resource::<AtmosphereTransforms>()
+            .init_resource::<AtmosphereLightsBuffer>()
+            .init_resource::<ExtractedAtmosphereLights>()
             .init_resource::<SpecializedRenderPipelines<RenderSkyBindGroupLayouts>>()
             .add_systems(
                 RenderStartup,
@@ -162,6 +167,11 @@ impl Plugin for SphericalAtmospherePlugin {
                     prepare_atmosphere_bind_groups.in_set(RenderSystems::PrepareBindGroups),
                     prepare_atmosphere_probe_bind_groups.in_set(RenderSystems::PrepareBindGroups),
                     resources::write_atmosphere_buffer.in_set(RenderSystems::PrepareResources),
+                    // Must run before bind groups are made so the uniform
+                    // is available for binding.
+                    prepare_atmosphere_lights_buffer
+                        .in_set(RenderSystems::PrepareResources)
+                        .before(prepare_atmosphere_bind_groups),
                 ),
             )
             .add_render_graph_node::<ViewNodeRunner<AtmosphereLutsNode>>(

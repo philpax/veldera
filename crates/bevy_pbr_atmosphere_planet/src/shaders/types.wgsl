@@ -46,3 +46,22 @@ struct AtmosphereData {
     atmosphere: Atmosphere,
     settings: AtmosphereSettings,
 }
+
+// Per-light data fed to the atmosphere scattering / sun-disk shaders.
+// `color` is the *unattenuated* emission (base_color × illuminance, in cd/m²),
+// since the atmosphere applies its own transmittance integration. Must
+// match `GpuAtmosphereLight` in resources.rs.
+struct AtmosphereLight {
+    direction_to_light: vec3<f32>,
+    sun_disk_angular_size: f32,
+    color: vec3<f32>,
+    sun_disk_intensity: f32,
+}
+
+// Container for up to 4 atmospheric lights. Must match `GpuAtmosphereLights`
+// in resources.rs. WGSL automatically pads between `count` and the array to
+// the array's 16-byte alignment, matching std140.
+struct AtmosphereLights {
+    count: u32,
+    lights: array<AtmosphereLight, 4>,
+}
