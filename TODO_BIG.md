@@ -1,15 +1,16 @@
-- shouldn't be able to shoot projectiles when in camera transition or after switching camera modes or when deselecting ui lock
-- actual water tiles: will need to bring in a shader and potentially find and mask out the world tiles that correspond to water
-- grappling: on-foot medium-scale traversal
-- landmarks: a list of landmarks around the world that the user can travel on, to be stored remotely at some point. initially extracted from Wikipedia, maybe?
-- webgpu on web if possible
-- scripted camera moves: a sequence of camera moves, potentially defined at runtime, capable of both micro- and macro- scale moves
-- consider modifying the meshes to make way for roads in proximity - probably need to get local road data from OSM, but even then, can we do that kind of modification to the collision meshes? seems potentially quite gnarly
-- instant teleport camera mode
-- fix vehicle physics... again...
-- fix bug where we occasionally end up in space
-- fix atmosphere flickering during top-down movements
-- account for actual destination altitude during teleport trajectories - force-load chunk ahead of time and use that to query position? slow down on arrival in general to make way for loading? unsure
-- road-hyperlapse teleport that follows the road to your destination:
+- [ ] refactor into multiple crates, engine / game
+- [ ] shouldn't be able to shoot projectiles when in camera transition or after switching camera modes or when deselecting ui lock
+- [ ] actual water tiles: will need to bring in a shader and potentially find and mask out the world tiles that correspond to water
+- [ ] grappling: on-foot medium-scale traversal
+- [ ] landmarks: a list of landmarks around the world that the user can travel on, to be stored remotely at some point. initially extracted from Wikipedia, maybe?
+- [ ] webgpu on web if possible
+- [ ] scripted camera moves: a sequence of camera moves, potentially defined at runtime, capable of both micro- and macro- scale moves
+- [ ] consider modifying the meshes to make way for roads in proximity - probably need to get local road data from OSM, but even then, can we do that kind of modification to the collision meshes? seems potentially quite gnarly
+- [ ] instant teleport camera mode
+- [ ] fix vehicle physics... again...
+- [ ] fix bug where we occasionally end up in space
+- [ ] fix atmosphere flickering during top-down movements
+- [ ] account for actual destination altitude during teleport trajectories - force-load chunk ahead of time and use that to query position? slow down on arrival in general to make way for loading? unsure
+- [ ] road-hyperlapse teleport that follows the road to your destination:
   - <https://project-osrm.org/docs/v5.5.1/api/#route-service>
   - <https://github.com/Jorl17/open-elevation/blob/master/docs/host-your-own.md>
