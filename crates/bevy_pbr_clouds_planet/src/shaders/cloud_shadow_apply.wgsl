@@ -54,7 +54,11 @@ fn main(in: FullscreenVertexOutput) -> @location(0) vec4<f32> {
     }
 
     let transmittance = textureSampleLevel(shadow_map, lut_sampler, shadow_uv, 0.0).r;
-    // Map transmittance ∈ [0, 1] to brightness ∈ [SHADOW_FLOOR, 1].
-    let dim = mix(SHADOW_FLOOR, 1.0, transmittance);
+    // Map transmittance ∈ [0, 1] to brightness ∈ [SHADOW_FLOOR, 1], then
+    // fade the dimming itself by `shadow_strength` so when the sun is
+    // below the horizon the apply pass becomes a no-op (no direct sun ⇒
+    // no directional occlusion of pure ambient light).
+    let base_dim = mix(SHADOW_FLOOR, 1.0, transmittance);
+    let dim = mix(1.0, base_dim, cloud.shadow_strength);
     return vec4<f32>(dim, dim, dim, 1.0);
 }

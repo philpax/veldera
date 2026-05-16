@@ -55,7 +55,11 @@ struct CloudUniform {
     shadow_from_world: mat4x4<f32>,
     // Half-side of the shadow map's square footprint, in metres.
     shadow_footprint: f32,
-    _pad_shadow0: u32,
+    // 0..1 attenuation of the shadow apply pass, smoothstepped from sun
+    // elevation. Goes to 0 once the sun's below the horizon so the
+    // shadow doesn't nonsensically dim pure ambient illumination at
+    // night.
+    shadow_strength: f32,
     _pad_shadow1: u32,
     _pad_shadow2: u32,
 }

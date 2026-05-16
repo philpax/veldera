@@ -127,7 +127,12 @@ pub struct GpuCloudUniform {
     /// camera centre fall outside the shadow map and the apply pass
     /// treats them as fully unshadowed (transmittance = 1).
     pub shadow_footprint: f32,
-    pub _pad_shadow0: u32,
+    /// Per-frame attenuation of the shadow effect. Smoothstepped from 0
+    /// (sun well below horizon — no direct sun to block, so the shadow
+    /// would be a nonsensical dimming of pure ambient light) to 1 (sun
+    /// well above horizon). The apply pass uses this to fade the shadow
+    /// effect across twilight rather than letting it apply at night.
+    pub shadow_strength: f32,
     pub _pad_shadow1: u32,
     pub _pad_shadow2: u32,
 }
@@ -765,7 +770,15 @@ pub(super) fn prepare_cloud_uniforms(
             layers: gpu_layers,
             shadow_from_world,
             shadow_footprint: footprint,
-            _pad_shadow0: 0,
+            // Sun elevation at the camera, smoothstepped through twilight
+            // so the apply pass fades the shadow effect out once the sun
+            // sets (no direct sun ⇒ no directional occlusion).
+            // -0.1 .. 0.2 in mu = -5.7° .. +11.5° elevation.
+            shadow_strength: {
+                let sun_mu = sun_dir_ws.dot(up);
+                let t = ((sun_mu - -0.1) / (0.2 - -0.1)).clamp(0.0, 1.0);
+                t * t * (3.0 - 2.0 * t)
+            },
             _pad_shadow1: 0,
             _pad_shadow2: 0,
         });
