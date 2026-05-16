@@ -691,6 +691,31 @@ pub(super) fn prepare_cloud_uniforms(
             || sph_cam.local_up.normalize_or_zero().as_dvec3() * f64::from(sph_cam.camera_radius),
             |c| c.0,
         );
+        let camera_altitude_m = (camera_ecef_f64.length()
+            - f64::from(atmosphere.bottom_radius)) as f32;
+
+        // Altitude-driven LOD on primary march steps. From ground level
+        // a grazing ray can spend ~50 km inside the shell and benefits
+        // from every sample; from orbital altitude the visible cloud cap
+        // shrinks to a small angular region per pixel, so the same fine
+        // step count is wasted work. Scale linearly from 1.0 below 10 km
+        // (camera near or inside the shell) to `LOD_MIN` above 200 km
+        // (well into orbit). Floors at `STEP_FLOOR` so the lowest LOD
+        // still resolves the shell.
+        let lod = {
+            const LOD_FULL_ALT: f32 = 10_000.0;
+            const LOD_MIN_ALT: f32 = 200_000.0;
+            const LOD_MIN: f32 = 0.25;
+            let t = ((camera_altitude_m - LOD_FULL_ALT)
+                / (LOD_MIN_ALT - LOD_FULL_ALT))
+                .clamp(0.0, 1.0);
+            // Smoothstep so the transition is gentle.
+            let s = t * t * (3.0 - 2.0 * t);
+            1.0 - s * (1.0 - LOD_MIN)
+        };
+        const STEP_FLOOR: u32 = 16;
+        let base_steps = quality.primary_steps();
+        let max_primary_steps = ((base_steps as f32 * lod) as u32).max(STEP_FLOOR);
 
         // Pack up to MAX_CLOUD_LAYERS sub-layers into the uniform array.
         // Wind offset is `velocity * world_time` (wrapped to bound f32
@@ -795,7 +820,7 @@ pub(super) fn prepare_cloud_uniforms(
         let history_valid = prev.initialised && !teleported;
 
         commands.entity(entity).insert(GpuCloudUniform {
-            max_primary_steps: quality.primary_steps(),
+            max_primary_steps,
             light_steps: quality.light_steps(),
             octaves: quality.octaves(),
             debug_mode: cloud.debug_mode as u32,
