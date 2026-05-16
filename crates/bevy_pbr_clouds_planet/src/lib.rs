@@ -39,7 +39,7 @@ use bevy::{
         schedule::IntoScheduleConfigs,
         system::lifetimeless::Read,
     },
-    math::Vec2,
+    math::{DVec3, Vec2},
     render::{
         Render, RenderApp, RenderStartup, RenderSystems,
         extract_component::{ExtractComponent, ExtractComponentPlugin, UniformComponentPlugin},
@@ -98,6 +98,7 @@ impl Plugin for CloudsPlanetPlugin {
 
         app.add_plugins((
             ExtractComponentPlugin::<CloudLayers>::default(),
+            ExtractComponentPlugin::<CloudCameraEcef>::default(),
             UniformComponentPlugin::<GpuCloudUniform>::default(),
         ));
     }
@@ -524,5 +525,24 @@ impl ExtractComponent for CloudLayers {
 
     fn extract_component(item: QueryItem<'_, '_, Self::QueryData>) -> Option<Self::Out> {
         Some(item.clone())
+    }
+}
+
+/// High-precision ECEF camera position, carried in f64 to the render
+/// world. The client must populate this each frame from its
+/// floating-origin camera's f64 position (the existing
+/// `SphericalAtmosphereCamera::camera_radius` is f32, quantising the
+/// position to ~0.6 m steps at 6.4×10⁶ m magnitude — visibly enough to
+/// jitter the per-layer `noise_uv_offset` that's precomputed in f64).
+#[derive(Component, Clone, Copy, Debug, Default)]
+pub struct CloudCameraEcef(pub DVec3);
+
+impl ExtractComponent for CloudCameraEcef {
+    type QueryData = Read<CloudCameraEcef>;
+    type QueryFilter = With<Camera3d>;
+    type Out = CloudCameraEcef;
+
+    fn extract_component(item: QueryItem<'_, '_, Self::QueryData>) -> Option<Self::Out> {
+        Some(*item)
     }
 }

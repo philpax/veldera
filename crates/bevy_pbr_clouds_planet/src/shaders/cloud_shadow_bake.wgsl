@@ -44,13 +44,11 @@ fn sample_layer_density(layer_i: u32, world_pos: vec3<f32>, sample_pos_local: ve
     if layer.enabled == 0u {
         return 0.0;
     }
-    // Same f32-precise altitude formula as the main raymarch — avoids
-    // `length(world_pos)` of a ~6.4×10⁶ m vec.
-    let dot_up = dot(atmosphere_transforms.local_up, sample_pos_local);
-    let perp_sqr = dot(sample_pos_local, sample_pos_local) - dot_up * dot_up;
-    let altitude_above_inner = layer.altitude_at_camera_above_inner
-                             + dot_up
-                             + perp_sqr / (2.0 * atmosphere_transforms.camera_radius);
+    // Direct `length(world_pos) - inner_radius`. The paraboloidal
+    // approximation is tempting (no length on a 6.4×10⁶ m vec) but it
+    // rejects valid samples at orbital distances. The 0.5 m f32 jitter
+    // on length here translates to invisible noise-y jitter.
+    let altitude_above_inner = length(world_pos) - layer.inner_radius;
     let shell_thickness = layer.outer_radius - layer.inner_radius;
     if altitude_above_inner < 0.0 || altitude_above_inner > shell_thickness {
         return 0.0;

@@ -8,9 +8,9 @@
 use bevy::prelude::*;
 #[allow(unused_imports)]
 pub use bevy_pbr_clouds_planet::CloudDebugMode;
-use bevy_pbr_clouds_planet::{CloudLayers, CloudsPlanetPlugin};
+use bevy_pbr_clouds_planet::{CloudCameraEcef, CloudLayers, CloudsPlanetPlugin};
 
-use crate::world::time_of_day::TimeOfDayState;
+use crate::world::{floating_origin::FloatingOriginCamera, time_of_day::TimeOfDayState};
 
 /// Plugin that registers the cloud renderer and provides a default
 /// [`CloudLayers`] configuration. Also drives the cloud system's world
@@ -22,7 +22,22 @@ pub struct CloudIntegrationPlugin;
 impl Plugin for CloudIntegrationPlugin {
     fn build(&self, app: &mut App) {
         app.add_plugins(CloudsPlanetPlugin)
-            .add_systems(Update, sync_cloud_world_time);
+            .add_systems(Update, (sync_cloud_world_time, sync_cloud_camera_ecef));
+    }
+}
+
+/// Copies the floating-origin camera's f64 ECEF position into
+/// [`CloudCameraEcef`] on every camera that has a [`CloudLayers`]. The
+/// cloud crate's render-side prep uses this in f64 to derive precision-
+/// sensitive per-layer values (noise UV anchors, altitude above shell
+/// inner) without inheriting the ~0.6 m f32 quantisation of
+/// `SphericalAtmosphereCamera::camera_radius`.
+fn sync_cloud_camera_ecef(
+    mut commands: Commands,
+    cameras: Query<(Entity, &FloatingOriginCamera), With<CloudLayers>>,
+) {
+    for (entity, cam) in &cameras {
+        commands.entity(entity).insert(CloudCameraEcef(cam.position));
     }
 }
 

@@ -28,11 +28,12 @@ struct CloudSubLayer {
     // noise pattern aligns to absolute world space without ever dividing
     // a 6.4×10⁶ m ECEF coord by a 4 km tile in shader-side f32.
     noise_uv_offset: vec3<f32>,
-    // CPU-computed `(camera_radius - inner_radius)` in f64; shader uses
-    // this as the precise base for `shell_h` so we never call
-    // `length(world_pos)` on a ~6.4×10⁶ m vec (whose f32 precision is
-    // ~0.6 m, jittering the noise's Y axis visibly).
-    altitude_at_camera_above_inner: f32,
+    _pad_noise: u32,
+    // CPU-computed `(camera_ecef / warp_tile).fract()` (warp_tile = 4×
+    // noise_tile). The warp lookup uses this so it wraps cleanly at
+    // 16 km boundaries instead of popping 0.25 cycles every 4 km.
+    warp_uv_offset: vec3<f32>,
+    _pad_warp: u32,
 }
 
 struct CloudUniform {

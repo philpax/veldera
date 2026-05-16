@@ -32,7 +32,7 @@ use bevy_pbr_atmosphere_planet::{
     SphericalAtmosphereCamera,
 };
 
-use crate::{CloudLayers, MAX_CLOUD_LAYERS, noise::NoiseTextures};
+use crate::{CloudCameraEcef, CloudLayers, MAX_CLOUD_LAYERS, noise::NoiseTextures};
 
 /// Per-view uniform consumed by the cloud raymarch and composite shaders.
 ///
@@ -77,13 +77,13 @@ pub struct GpuCloudSubLayer {
     /// of ~10⁻⁴ corresponds to ~0.8 m of world position — visibly
     /// shifting the noise as the camera moves smoothly).
     pub noise_uv_offset: Vec3,
-    /// Pre-computed `(camera_radius − inner_radius)` in f64, cast to
-    /// f32. The shader uses this to compute a sample point's altitude
-    /// inside the shell without ever calling `length()` on the huge
-    /// ECEF sample position — `length()` of a ~6.4×10⁶ m vec has f32
-    /// precision ≈ 0.6 m, which jitters the `shell_h` term in the
-    /// noise lookup's vertical axis by ~5 % of a noise cell.
-    pub altitude_at_camera_above_inner: f32,
+    pub _pad_noise: u32,
+    /// Pre-computed `(camera_ecef / warp_tile).fract()` (warp_tile = 4×
+    /// noise_tile). Used by the warp noise lookup so the warp pattern
+    /// wraps at warp-tile boundaries (16 km) cleanly instead of popping
+    /// by 0.25 cycles every noise-tile boundary (4 km).
+    pub warp_uv_offset: Vec3,
+    pub _pad_warp: u32,
 }
 
 #[derive(Component, ShaderType, Clone)]
@@ -656,6 +656,7 @@ pub(super) fn prepare_cloud_uniforms(
         &ExtractedAtmosphere,
         &ExtractedView,
         &SphericalAtmosphereCamera,
+        Option<&CloudCameraEcef>,
         Option<&CloudPrevFrame>,
         Option<&ExtractedCamera>,
     )>,
@@ -670,7 +671,7 @@ pub(super) fn prepare_cloud_uniforms(
         Vec3::Y
     };
 
-    for (entity, cloud, atmosphere, view, sph_cam, prev_state, camera) in &layers {
+    for (entity, cloud, atmosphere, view, sph_cam, cam_ecef, prev_state, camera) in &layers {
         let quality = cloud.quality;
         let world_time = cloud.world_time_seconds;
         let full_size = camera
@@ -682,11 +683,14 @@ pub(super) fn prepare_cloud_uniforms(
 
         let prev = prev_state.copied().unwrap_or_default();
 
-        // Camera position in f64 (reconstructed from the spherical-cam
-        // up + radius). Used to pre-compute per-layer noise UV anchors
-        // in f64 precision before quantising to f32 for the GPU.
-        let camera_ecef_f64 =
-            sph_cam.local_up.normalize_or_zero().as_dvec3() * f64::from(sph_cam.camera_radius);
+        // High-precision camera position. Prefer the client-supplied f64
+        // ECEF when present; fall back to reconstructing from the
+        // SphericalAtmosphereCamera's f32 fields if not (the fallback
+        // suffers ~0.6 m quantisation at 6.4×10⁶ m magnitude).
+        let camera_ecef_f64 = cam_ecef.map_or_else(
+            || sph_cam.local_up.normalize_or_zero().as_dvec3() * f64::from(sph_cam.camera_radius),
+            |c| c.0,
+        );
 
         // Pack up to MAX_CLOUD_LAYERS sub-layers into the uniform array.
         // Wind offset is `velocity * world_time` (wrapped to bound f32
@@ -704,15 +708,13 @@ pub(super) fn prepare_cloud_uniforms(
             // in the shader.
             let cam_uv = (camera_ecef_f64 / tile).map(|v| v.rem_euclid(1.0));
             let noise_uv_offset = cam_uv.as_vec3();
-            // `(camera_radius - inner_radius)` in f64. Shader uses this
-            // as the f32-precise base value for shell altitude, avoiding
-            // a `length(world_pos)` of a ~6.4×10⁶ m vector (which has
-            // f32 precision ≈ 0.6 m → jitters `shell_h * vertical_cycles`
-            // visibly).
-            let inner_radius_f64 =
-                f64::from(atmosphere.bottom_radius) + f64::from(sub.inner_altitude);
-            let altitude_at_camera_above_inner =
-                (f64::from(sph_cam.camera_radius) - inner_radius_f64) as f32;
+            // Same idea for the warp scale (tile × 4). Without a
+            // dedicated offset, the warp lookup wraps at the noise tile
+            // boundary (4 km) instead of its own (16 km), popping
+            // 0.25 cycles every noise-tile crossing.
+            let warp_tile_f64 = tile * 4.0;
+            let warp_uv = (camera_ecef_f64 / warp_tile_f64).map(|v| v.rem_euclid(1.0));
+            let warp_uv_offset = warp_uv.as_vec3();
             gpu_layers[i] = GpuCloudSubLayer {
                 inner_radius: atmosphere.bottom_radius + sub.inner_altitude,
                 outer_radius: atmosphere.bottom_radius + sub.outer_altitude,
@@ -728,7 +730,9 @@ pub(super) fn prepare_cloud_uniforms(
                 wind_offset,
                 _pad_wind: 0,
                 noise_uv_offset,
-                altitude_at_camera_above_inner,
+                _pad_noise: 0,
+                warp_uv_offset,
+                _pad_warp: 0,
                 enabled: u32::from(sub.enabled),
             };
         }

@@ -130,21 +130,18 @@ fn sample_layer_density(layer_i: u32, world_pos: vec3<f32>, sample_pos_local: ve
     if layer.enabled == 0u {
         return 0.0;
     }
-    // Altitude above the layer's inner shell. Derived as a sum of small
-    // values (precise) rather than `length(world_pos) - inner_radius`
-    // (lossy, ~0.6 m f32 noise per frame on the giant ECEF length).
+    // Altitude above the layer's inner shell. We use `length(world_pos)`
+    // directly — the paraboloidal Taylor approximation
+    // `dot_up + perp²/(2r)` was tempting because the leading terms are
+    // small, but it diverges past ~few % of `|sp_local|/r`. At orbital
+    // altitudes that means samples on the cloud shell hundreds of km
+    // away come out classified as below the inner shell and get
+    // rejected, leaving a hard circular cutoff in the cloud cap.
     //
-    //   altitude_above_inner ≈ (camera_r - inner_r)         (CPU-baked)
-    //                        + dot(local_up, sp_local)       (radial Δ)
-    //                        + perp²/(2·camera_r)           (curvature)
-    //
-    // The Taylor curvature correction matters for samples far from the
-    // camera (≈ 500 m correction at 80 km horizontal distance).
-    let dot_up = dot(atmosphere_transforms.local_up, sample_pos_local);
-    let perp_sqr = dot(sample_pos_local, sample_pos_local) - dot_up * dot_up;
-    let altitude_above_inner = layer.altitude_at_camera_above_inner
-                             + dot_up
-                             + perp_sqr / (2.0 * atmosphere_transforms.camera_radius);
+    // The precision concern with `length()` on a 6.4×10⁶ m vec (≈ 0.5 m
+    // f32 jitter) translates to ≈ 0.04 noise-texels of `shell_h`
+    // jitter — invisible.
+    let altitude_above_inner = length(world_pos) - layer.inner_radius;
     let shell_thickness = layer.outer_radius - layer.inner_radius;
     if altitude_above_inner < 0.0 || altitude_above_inner > shell_thickness {
         return 0.0;
@@ -153,12 +150,12 @@ fn sample_layer_density(layer_i: u32, world_pos: vec3<f32>, sample_pos_local: ve
     let v_profile = smoothstep(0.0, 0.2, shell_h) * (1.0 - smoothstep(0.6, 1.0, shell_h));
 
     // Domain warp — low-frequency noise at 4× the tile, perturbs the main
-    // noise lookup. Tile is ~16 km here so precision drift is mild
-    // relative to the ±20 % warp amplitude, but we still use the
-    // camera-relative form for consistency. Time modulates the warp
+    // noise lookup. Uses a SEPARATE `warp_uv_offset` (precomputed against
+    // warp_tile) so it wraps at warp-tile boundaries rather than popping
+    // 0.25 cycles every noise-tile boundary. Time modulates the warp
     // slowly per the layer's evolution_rate.
     let warp_tile = layer.noise_tile * 4.0;
-    var warp_uv = sample_pos_local / warp_tile + layer.noise_uv_offset * 0.25;
+    var warp_uv = sample_pos_local / warp_tile + layer.warp_uv_offset;
     warp_uv += vec3<f32>(0.0, cloud.time_seconds * layer.evolution_rate, 0.0);
     let warp_n = textureSampleLevel(noise_3d, cloud_sampler, fract(warp_uv), 0.0);
     let warp = (warp_n.gb - 0.5) * 0.4; // ±20 % of tile
