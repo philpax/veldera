@@ -749,23 +749,30 @@ pub(super) fn prepare_cloud_uniforms(
         // Altitude-driven LOD on primary march steps. From ground level
         // a grazing ray can spend ~50 km inside the shell and benefits
         // from every sample; from orbital altitude the visible cloud cap
-        // shrinks to a small angular region per pixel, so the same fine
-        // step count is wasted work. Scale linearly from 1.0 below 10 km
-        // (camera near or inside the shell) to `LOD_MIN` above 200 km
-        // (well into orbit). Floors at `STEP_FLOOR` so the lowest LOD
-        // still resolves the shell.
+        // shrinks to a small angular region per pixel. Scale linearly
+        // from 1.0 below 10 km to `LOD_MIN` above 200 km, smoothstepped
+        // for a gentle transition, floored at `STEP_FLOOR`.
+        //
+        // `LOD_MIN` was 0.25 (32 steps from a 128 base) but that's
+        // coarse enough — `dt ≈ 2.5 km` — that one dense sample
+        // dominates the integral and the entire ray's colour collapses
+        // to that sample's lighting. From orbit at sunset the sample's
+        // sun-direction radiance is heavily orange (long-path
+        // atmospheric extinction); collapsing the integral to one
+        // sample amplifies the orange into a brown wash. 0.6 (76
+        // steps) keeps the per-ray integration smooth enough to
+        // average the orange-lit tops with their ambient earth-shine.
         let lod = {
             const LOD_FULL_ALT: f32 = 10_000.0;
             const LOD_MIN_ALT: f32 = 200_000.0;
-            const LOD_MIN: f32 = 0.25;
+            const LOD_MIN: f32 = 0.6;
             let t = ((camera_altitude_m - LOD_FULL_ALT)
                 / (LOD_MIN_ALT - LOD_FULL_ALT))
                 .clamp(0.0, 1.0);
-            // Smoothstep so the transition is gentle.
             let s = t * t * (3.0 - 2.0 * t);
             1.0 - s * (1.0 - LOD_MIN)
         };
-        const STEP_FLOOR: u32 = 16;
+        const STEP_FLOOR: u32 = 32;
         let base_steps = quality.primary_steps();
         let max_primary_steps = ((base_steps as f32 * lod) as u32).max(STEP_FLOOR);
 

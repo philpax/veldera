@@ -42,14 +42,17 @@ fn depth_to_camera_dist(uv: vec2<f32>, depth: f32) -> f32 {
 // Wrenninge multi-scatter octave coefficients. Octave count comes from the
 // quality-tier-driven `cloud.octaves`. Each successive octave scales the
 // sun-direction optical depth, contribution, and HG eccentricity by these
-// factors. Tuned with `contribution > attenuation` and a slower
-// eccentricity decay so the highest octaves contribute meaningfully and
-// flatten quickly toward isotropic — this is what makes cloud tops appear
-// bright white from sub-solar viewing rather than washed-out grey, where
-// the directional phase function would otherwise produce only a small
-// per-pixel contribution.
-const WRENNINGE_ATTENUATION: f32 = 0.4;
-const WRENNINGE_CONTRIBUTION: f32 = 0.75;
+// factors. Tuned for `contribution > attenuation` so deeper octaves
+// model the diffuse multi-scattered light that real cumulus tops
+// exhibit — without this the directional phase function dominates and
+// tops read as warm-tinted (sun colour through phase) rather than
+// soft-white. Bumped contribution 0.75 → 0.9 and attenuation 0.4 → 0.55
+// because at sunset / from-orbit views the per-sample sun colour is a
+// saturated orange (long-path atmospheric extinction), and the higher
+// multi-scatter weight is what keeps cloud tops looking like satellite
+// imagery (warm-white) rather than brown.
+const WRENNINGE_ATTENUATION: f32 = 0.55;
+const WRENNINGE_CONTRIBUTION: f32 = 0.9;
 const WRENNINGE_ECCENTRICITY: f32 = 0.6;
 
 // Debug-mode constants matching CloudDebugMode in lib.rs.
@@ -197,8 +200,16 @@ fn main(@builtin(global_invocation_id) idx: vec3<u32>) {
         let up_as = direction_world_to_atmosphere(sample_up, atmosphere_transforms.local_up);
 
         // Earth-shine: real sky colour in the upward hemisphere as ambient
-        // illumination on the cloud sample. Same for every layer.
-        let earth_shine = sample_sky_view(local_r, up_as);
+        // illumination on the cloud sample. Sampled in a single direction
+        // (the cloud sample's local up) but multiplied by an approximate
+        // hemispherical integral factor — a real cloud receives diffuse
+        // skylight from the entire upper hemisphere and bounces it through
+        // multi-scatter, which is what keeps cloud tops bright pink-white
+        // at sunset rather than dim-orange when the directional sun
+        // contribution would otherwise dominate. 3.0 is a Schneider-style
+        // figure that lands sunset cloud tops at recognisably "satellite
+        // imagery" brightness without washing out close-up views.
+        let earth_shine = sample_sky_view(local_r, up_as) * 3.0;
         var radiance = earth_shine;
 
         // Cone-march toward each light is shared across layers (it
