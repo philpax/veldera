@@ -1,25 +1,30 @@
 //! Volumetric clouds for spherical planets.
 //!
-//! Adds a single stratocumulus shell raymarched per-pixel and composited over
-//! the existing HDR scene. Couples to the [`bevy_pbr_atmosphere_planet`]
-//! crate's transmittance and aerial-view lookup tables for physically-correct
-//! sun colour and atmospheric haze.
+//! Renders up to [`MAX_CLOUD_LAYERS`] cloud layers (e.g. stratocumulus +
+//! cirrus + ground fog) per camera in a single raymarch pass and composites
+//! the result over the HDR scene. Couples to the [`bevy_pbr_atmosphere_planet`]
+//! crate's transmittance, aerial-view, and sky-view LUTs for sun colour,
+//! atmospheric haze, and Earth-shine ambient.
 //!
 //! # Architecture
 //!
-//! Two render-graph nodes are inserted between the atmosphere's sky pass and
-//! the transparent pass:
+//! Four render-graph nodes are inserted between the atmosphere's sky pass
+//! and the transparent pass:
 //!
-//! - [`CloudNode::Raymarch`]: compute pass that raymarches the cloud shell at
-//!   a configurable resolution scale (default 1/2) into an `Rgba16Float`
-//!   storage texture. RGB carries inscattered radiance, A carries
-//!   transmittance to the camera.
-//! - [`CloudNode::Composite`]: fragment pass that bilateral-upsamples the
-//!   raymarch result and blends it over the HDR view target.
+//! - [`CloudNode::NoiseBake`]: one-shot 3D Perlin-Worley + Worley noise
+//!   bake. Becomes a no-op after the first frame.
+//! - [`CloudNode::Raymarch`]: half-resolution multi-layer raymarch with
+//!   Wrenninge multi-scatter octaves and a 6-tap cone-shadow march.
+//! - [`CloudNode::Temporal`]: reprojects the previous frame's history into
+//!   the current frame, neighbourhood-clamps to suppress ghosting, and
+//!   blends current with history.
+//! - [`CloudNode::Composite`]: bilateral upsample + over-blend into the
+//!   HDR view target.
 //!
-//! A one-shot compute bake at startup writes a 3D Perlin-Worley noise texture
-//! used for cloud density. The bake runs once via [`NoiseBakeState`], then is
-//! skipped on subsequent frames.
+//! Quality is controlled by a [`CloudQuality`] enum that drives sample
+//! counts at runtime; the per-layer parameters (altitude, density, phase,
+//! noise tile size, wind) are configured per [`CloudSubLayer`] inside the
+//! [`CloudLayers`] component.
 
 mod noise;
 mod node;
@@ -64,6 +69,10 @@ use resources::{
     prepare_cloud_textures, prepare_cloud_uniforms, queue_cloud_composite_pipelines,
 };
 
+/// Maximum number of cloud sub-layers in a single [`CloudLayers`] container.
+/// Must match the WGSL constant of the same name.
+pub const MAX_CLOUD_LAYERS: usize = 3;
+
 /// Plugin that registers the volumetric-cloud render pipeline.
 ///
 /// Add this **after** [`bevy_pbr_atmosphere_planet::SphericalAtmospherePlugin`]
@@ -82,7 +91,7 @@ impl Plugin for CloudsPlanetPlugin {
         embedded_asset!(app, "shaders/cloud_composite.wgsl");
 
         app.add_plugins((
-            ExtractComponentPlugin::<CloudLayer>::default(),
+            ExtractComponentPlugin::<CloudLayers>::default(),
             UniformComponentPlugin::<GpuCloudUniform>::default(),
         ));
     }
@@ -127,9 +136,6 @@ impl Plugin for CloudsPlanetPlugin {
             .add_systems(
                 Render,
                 (
-                    // Mirror the atmosphere crate's pattern: uniforms must
-                    // land before PrepareResources so UniformComponentPlugin
-                    // can write the buffer before bind groups are built.
                     prepare_cloud_uniforms
                         .before(RenderSystems::PrepareResources)
                         .after(RenderSystems::PrepareAssets),
@@ -173,17 +179,117 @@ impl Plugin for CloudsPlanetPlugin {
     }
 }
 
-/// Component placed on a camera to enable a single cloud layer.
+/// Quality tier driving runtime cost vs. visual fidelity. Selects per-tier
+/// values for primary raymarch steps, light-shadow steps, multi-scatter
+/// octaves, and the buffer resolution scale.
 ///
-/// Multiple `CloudLayer` components per camera are not supported in v1; the
-/// raymarch shader marches a single shell. Future phases will widen this to
-/// a layered array.
+/// Defaults to [`CloudQuality::High`] on desktop and [`CloudQuality::Low`]
+/// on WASM (see [`CloudQuality::default_for_platform`]).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[repr(u32)]
+pub enum CloudQuality {
+    /// 32 primary steps, 3 light steps, 2 multi-scatter octaves, 1/4 res.
+    Low = 0,
+    /// 64 primary steps, 5 light steps, 3 multi-scatter octaves, 1/2 res.
+    Medium = 1,
+    /// 128 primary steps, 6 light steps, 4 multi-scatter octaves, 1/2 res.
+    High = 2,
+}
+
+impl Default for CloudQuality {
+    fn default() -> Self {
+        Self::default_for_platform()
+    }
+}
+
+impl CloudQuality {
+    /// Sensible per-platform default. WASM gets `Low`; everything else gets
+    /// `High`. Override explicitly via the field on [`CloudLayers`] if you
+    /// want a different tier for a given camera.
+    pub const fn default_for_platform() -> Self {
+        #[cfg(target_family = "wasm")]
+        {
+            Self::Low
+        }
+        #[cfg(not(target_family = "wasm"))]
+        {
+            Self::High
+        }
+    }
+
+    /// Maximum primary raymarch steps along the camera ray.
+    pub const fn primary_steps(self) -> u32 {
+        match self {
+            Self::Low => 32,
+            Self::Medium => 64,
+            Self::High => 128,
+        }
+    }
+
+    /// Number of cone-shadow taps toward the sun.
+    pub const fn light_steps(self) -> u32 {
+        match self {
+            Self::Low => 3,
+            Self::Medium => 5,
+            Self::High => 6,
+        }
+    }
+
+    /// Number of Wrenninge multi-scatter octaves per direct light sample.
+    pub const fn octaves(self) -> u32 {
+        match self {
+            Self::Low => 2,
+            Self::Medium => 3,
+            Self::High => 4,
+        }
+    }
+
+    /// Half-res output buffer scale relative to the full HDR target.
+    pub const fn resolution_scale(self) -> f32 {
+        match self {
+            Self::Low => 0.25,
+            Self::Medium => 0.5,
+            Self::High => 0.5,
+        }
+    }
+}
+
+/// Type tag for a cloud sub-layer. Mostly for UI display; the renderer
+/// doesn't dispatch on it — every sub-layer goes through the same shader
+/// with its own parameters.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum CloudLayerKind {
+    /// Mid-altitude (~1.5-5 km) puffy cumulus / stratocumulus.
+    Stratocumulus,
+    /// High-altitude (~9-12 km) thin, wispy cirrus. Forward-peaked phase,
+    /// large noise tile, low density.
+    Cirrus,
+    /// Low (~0-500 m) dense ground fog. Currently a thin shell rather than
+    /// truly depth-aware fog (Phase 6+).
+    GroundFog,
+}
+
+impl CloudLayerKind {
+    pub const fn name(self) -> &'static str {
+        match self {
+            Self::Stratocumulus => "Stratocumulus",
+            Self::Cirrus => "Cirrus",
+            Self::GroundFog => "Ground fog",
+        }
+    }
+}
+
+/// One cloud layer in a [`CloudLayers`] container. Holds the geometry,
+/// density, and lighting parameters for a single shell.
 ///
-/// Heights are altitudes above the planet surface (above
-/// [`SphericalAtmosphere::bottom_radius`]).
-#[derive(Clone, Component, Debug)]
-#[require(Camera3d, Hdr)]
-pub struct CloudLayer {
+/// Layers can overlap in altitude; the raymarch sums their densities at
+/// each sample. With non-overlapping layers (the typical case for a
+/// stratocumulus + cirrus combo) this is a no-op since only one layer
+/// contributes density at any given altitude.
+#[derive(Clone, Debug)]
+pub struct CloudSubLayer {
+    pub kind: CloudLayerKind,
+    pub enabled: bool,
     /// Inner shell altitude above the planet surface, in metres.
     pub inner_altitude: f32,
     /// Outer shell altitude above the planet surface, in metres.
@@ -191,27 +297,134 @@ pub struct CloudLayer {
     /// Coverage threshold (0..1). Density below this value is clipped to
     /// zero. Lower values produce more cloud cover.
     pub coverage: f32,
-    /// Density multiplier applied after coverage clipping.
+    /// Density multiplier applied after coverage clipping. Units 1/m.
     pub density_scale: f32,
-    /// Resolution scale for the raymarch buffer (0.5 = half-res).
-    pub resolution_scale: f32,
-    /// Maximum number of primary raymarch steps along the camera ray.
-    pub max_primary_steps: u32,
-    /// Number of light-sample steps toward the sun for self-shadowing.
-    pub light_steps: u32,
+    /// Noise tile size in metres. Larger values = larger cloud features.
+    pub noise_tile: f32,
     /// Asymmetry parameter for the forward Henyey-Greenstein lobe.
     pub hg_forward: f32,
     /// Asymmetry parameter for the backward Henyey-Greenstein lobe.
     pub hg_backward: f32,
-    /// Blend weight between the forward and backward HG lobes (0 = pure
-    /// backward, 1 = pure forward).
+    /// Blend weight between the forward and backward HG lobes.
     pub hg_blend: f32,
-    /// Wind velocity in metres/second in the local tangent plane (east,
-    /// north). Phase 5 wires animated UV scrolling against this; v1 keeps
-    /// it as a static offset that re-samples the noise tile.
+    /// Wind velocity in m/s in the local tangent plane (east, north).
+    /// Phase 5 wires animated UV scrolling against this; v1 is a static
+    /// offset.
     pub wind_velocity: Vec2,
-    /// Debug visualization mode. See [`CloudDebugMode`].
+}
+
+impl CloudSubLayer {
+    /// Mid-altitude (~1.5-5 km) puffy cumulus / stratocumulus.
+    pub fn stratocumulus() -> Self {
+        Self {
+            kind: CloudLayerKind::Stratocumulus,
+            enabled: true,
+            inner_altitude: 1500.0,
+            outer_altitude: 5000.0,
+            coverage: 0.65,
+            density_scale: 0.005,
+            noise_tile: 2000.0,
+            hg_forward: 0.8,
+            hg_backward: -0.3,
+            hg_blend: 0.7,
+            wind_velocity: Vec2::ZERO,
+        }
+    }
+
+    /// High-altitude (~9-12 km) thin cirrus. Forward-scattering, large tile.
+    pub fn cirrus() -> Self {
+        Self {
+            kind: CloudLayerKind::Cirrus,
+            enabled: true,
+            inner_altitude: 9_000.0,
+            outer_altitude: 12_000.0,
+            coverage: 0.78,
+            density_scale: 0.0008,
+            noise_tile: 6000.0,
+            // Ice-crystal cirrus is strongly forward-scattering, with a
+            // narrow forward lobe and minimal back-lobe.
+            hg_forward: 0.92,
+            hg_backward: -0.1,
+            hg_blend: 0.85,
+            wind_velocity: Vec2::ZERO,
+        }
+    }
+
+    /// Low (~0-500 m) ground fog. Off by default in the helpers because
+    /// it's currently a thin shell rather than true depth-aware fog.
+    pub fn ground_fog() -> Self {
+        Self {
+            kind: CloudLayerKind::GroundFog,
+            enabled: false,
+            inner_altitude: 0.0,
+            outer_altitude: 500.0,
+            coverage: 0.4,
+            density_scale: 0.003,
+            noise_tile: 1500.0,
+            hg_forward: 0.6,
+            hg_backward: -0.2,
+            hg_blend: 0.6,
+            wind_velocity: Vec2::ZERO,
+        }
+    }
+}
+
+/// Container component placed on a camera. Holds up to [`MAX_CLOUD_LAYERS`]
+/// cloud sub-layers, plus shared rendering settings.
+///
+/// Heights inside each sub-layer are altitudes above the planet surface
+/// (above [`SphericalAtmosphere::bottom_radius`]).
+#[derive(Clone, Component, Debug)]
+#[require(Camera3d, Hdr)]
+pub struct CloudLayers {
+    /// Sub-layers, processed in array order each frame. Indices beyond
+    /// `MAX_CLOUD_LAYERS` are ignored.
+    pub layers: Vec<CloudSubLayer>,
+    /// Quality tier; controls sample counts and resolution scale.
+    pub quality: CloudQuality,
+    /// Debug visualisation mode. See [`CloudDebugMode`].
     pub debug_mode: CloudDebugMode,
+}
+
+impl Default for CloudLayers {
+    fn default() -> Self {
+        Self::stratocumulus_only()
+    }
+}
+
+impl CloudLayers {
+    /// Single stratocumulus layer, no cirrus, no fog.
+    pub fn stratocumulus_only() -> Self {
+        Self {
+            layers: vec![CloudSubLayer::stratocumulus()],
+            quality: CloudQuality::default(),
+            debug_mode: CloudDebugMode::Off,
+        }
+    }
+
+    /// Stratocumulus + cirrus (the "typical good-weather sky" preset).
+    pub fn stratocumulus_with_cirrus() -> Self {
+        Self {
+            layers: vec![CloudSubLayer::stratocumulus(), CloudSubLayer::cirrus()],
+            quality: CloudQuality::default(),
+            debug_mode: CloudDebugMode::Off,
+        }
+    }
+
+    /// All three layers (cumulus + cirrus + ground fog). Ground fog is
+    /// flagged disabled by default in [`CloudSubLayer::ground_fog`]; flip
+    /// `enabled` on it to actually render it.
+    pub fn all() -> Self {
+        Self {
+            layers: vec![
+                CloudSubLayer::stratocumulus(),
+                CloudSubLayer::cirrus(),
+                CloudSubLayer::ground_fog(),
+            ],
+            quality: CloudQuality::default(),
+            debug_mode: CloudDebugMode::Off,
+        }
+    }
 }
 
 /// Per-pixel debug visualisations for the cloud raymarch shader. Useful
@@ -237,44 +450,12 @@ pub enum CloudDebugMode {
     Opacity = 4,
 }
 
-impl Default for CloudLayer {
-    fn default() -> Self {
-        Self::stratocumulus()
-    }
-}
-
-impl CloudLayer {
-    /// Default stratocumulus configuration: ~1.5 km to ~5 km, moderate
-    /// coverage, balanced sample counts for desktop.
-    pub fn stratocumulus() -> Self {
-        Self {
-            inner_altitude: 1500.0,
-            outer_altitude: 5000.0,
-            // Higher coverage threshold + denser per-pixel extinction
-            // produces discrete cloud puffs instead of a uniform haze.
-            // Roughly the parameters that visually look most like real
-            // stratocumulus once Earth-shine + Wrenninge octaves are on.
-            coverage: 0.65,
-            density_scale: 0.005,
-            resolution_scale: 0.5,
-            max_primary_steps: 96,
-            light_steps: 6,
-            hg_forward: 0.8,
-            hg_backward: -0.3,
-            hg_blend: 0.7,
-            wind_velocity: Vec2::ZERO,
-            debug_mode: CloudDebugMode::Off,
-        }
-    }
-}
-
-impl ExtractComponent for CloudLayer {
-    type QueryData = Read<CloudLayer>;
+impl ExtractComponent for CloudLayers {
+    type QueryData = Read<CloudLayers>;
     type QueryFilter = (With<Camera3d>, With<SphericalAtmosphere>);
-    type Out = CloudLayer;
+    type Out = CloudLayers;
 
     fn extract_component(item: QueryItem<'_, '_, Self::QueryData>) -> Option<Self::Out> {
         Some(item.clone())
     }
 }
-

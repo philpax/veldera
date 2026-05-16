@@ -30,28 +30,53 @@ use bevy_pbr_atmosphere_planet::{
     ExtractedAtmosphere, GpuAtmosphere, GpuAtmosphereLights, SphericalAtmosphereCamera,
 };
 
-use crate::{CloudLayer, noise::NoiseTextures};
+use crate::{CloudLayers, MAX_CLOUD_LAYERS, noise::NoiseTextures};
 
 /// Per-view uniform consumed by the cloud raymarch and composite shaders.
 ///
 /// All fields are explicit so the WGSL `struct CloudUniform` stays trivially
 /// in sync. Padding fields keep the struct aligned to 16 bytes per member, as
 /// required by the `uniform` address space.
-#[derive(Component, ShaderType, Clone)]
-pub struct GpuCloudUniform {
+/// Per-layer GPU data — must mirror `CloudSubLayerGpu` in WGSL `types.wgsl`.
+/// 16-byte aligned via the trailing pad fields (each `vec3` field is
+/// followed by `f32` padding so the struct lays out as 4×vec4 rows).
+#[derive(ShaderType, Clone, Copy, Default)]
+pub struct GpuCloudSubLayer {
+    /// Inner shell radius from planet centre, m.
     pub inner_radius: f32,
+    /// Outer shell radius from planet centre, m.
     pub outer_radius: f32,
     pub coverage: f32,
     pub density_scale: f32,
+
     pub hg_forward: f32,
     pub hg_backward: f32,
     pub hg_blend: f32,
+    pub noise_tile: f32,
+
+    pub wind_offset: Vec2,
+    /// 0 = disabled, 1 = enabled. Disabled layers contribute no density
+    /// and the shader skips the per-step inner loop branch.
+    pub enabled: u32,
+    pub _pad0: u32,
+}
+
+#[derive(Component, ShaderType, Clone)]
+pub struct GpuCloudUniform {
     pub max_primary_steps: u32,
     pub light_steps: u32,
+    pub octaves: u32,
     pub debug_mode: u32,
-    pub wind_offset: Vec2,
+
     pub buffer_size: UVec2,
     pub full_size: UVec2,
+
+    /// Number of valid entries in `layers`. Always ≤ `MAX_CLOUD_LAYERS`.
+    pub layer_count: u32,
+    pub _pad_top0: u32,
+    pub _pad_top1: u32,
+    pub _pad_top2: u32,
+
     /// Previous frame's `clip_from_world` matrix. Used by the temporal
     /// pass to reproject each pixel into the previous frame's screen
     /// position so we can sample the history buffer there.
@@ -65,17 +90,18 @@ pub struct GpuCloudUniform {
     /// frame's absolute world point into the prev frame's render-world
     /// (camera-relative) coordinate system before reprojecting.
     pub prev_camera_ecef: Vec3,
-    /// Frame index, modulo a small power of two. Bit 0 selects which of
-    /// the two ping-pong history textures is "previous" vs "current"
-    /// for this frame.
+    /// Frame index, incremented each frame. Bit 0 selects which of the
+    /// two ping-pong history textures is "previous" vs "current".
     pub frame_index: u32,
     /// 0 on the first frame after spawn or after a teleport; the
     /// temporal blend uses this to ignore the (uninitialised or stale)
     /// history and write the raw raymarch instead.
     pub temporal_history_valid: u32,
-    pub _pad0: u32,
-    pub _pad1: u32,
-    pub _pad2: u32,
+    pub _pad_bot0: u32,
+    pub _pad_bot1: u32,
+    pub _pad_bot2: u32,
+
+    pub layers: [GpuCloudSubLayer; MAX_CLOUD_LAYERS],
 }
 
 /// Per-view storage texture written by the raymarch pass and read by the
@@ -367,7 +393,7 @@ pub struct CloudCompositePipelineId(pub CachedRenderPipelineId);
 /// camera's MSAA configuration.
 #[allow(clippy::type_complexity)]
 pub(super) fn queue_cloud_composite_pipelines(
-    views: Query<(Entity, &Msaa), (With<Camera>, With<CloudLayer>)>,
+    views: Query<(Entity, &Msaa), (With<Camera>, With<CloudLayers>)>,
     pipeline_cache: Res<PipelineCache>,
     layouts: Res<CloudBindGroupLayouts>,
     mut specializer: ResMut<SpecializedRenderPipelines<CloudBindGroupLayouts>>,
@@ -424,7 +450,7 @@ pub(super) fn prepare_cloud_uniforms(
     mut commands: Commands,
     layers: Query<(
         Entity,
-        &CloudLayer,
+        &CloudLayers,
         &ExtractedAtmosphere,
         &ExtractedView,
         &SphericalAtmosphereCamera,
@@ -432,55 +458,67 @@ pub(super) fn prepare_cloud_uniforms(
         Option<&ExtractedCamera>,
     )>,
 ) {
-    for (entity, layer, atmosphere, view, sph_cam, prev_state, camera) in &layers {
+    for (entity, cloud, atmosphere, view, sph_cam, prev_state, camera) in &layers {
+        let quality = cloud.quality;
         let full_size = camera
             .and_then(|c| c.physical_target_size)
             .unwrap_or(UVec2::splat(1));
-        let buffer_size = (full_size.as_vec2() * layer.resolution_scale)
+        let buffer_size = (full_size.as_vec2() * quality.resolution_scale())
             .max(Vec2::splat(1.0))
             .as_uvec2();
 
-        // Current frame state.
+        // Pack up to MAX_CLOUD_LAYERS sub-layers into the uniform array.
+        // Extras beyond the limit are silently dropped.
+        let mut gpu_layers = [GpuCloudSubLayer::default(); MAX_CLOUD_LAYERS];
+        let layer_count = cloud.layers.len().min(MAX_CLOUD_LAYERS);
+        for (i, sub) in cloud.layers.iter().take(MAX_CLOUD_LAYERS).enumerate() {
+            gpu_layers[i] = GpuCloudSubLayer {
+                inner_radius: atmosphere.bottom_radius + sub.inner_altitude,
+                outer_radius: atmosphere.bottom_radius + sub.outer_altitude,
+                coverage: sub.coverage,
+                density_scale: sub.density_scale,
+                hg_forward: sub.hg_forward,
+                hg_backward: sub.hg_backward,
+                hg_blend: sub.hg_blend,
+                noise_tile: sub.noise_tile.max(1.0),
+                wind_offset: sub.wind_velocity,
+                enabled: u32::from(sub.enabled),
+                _pad0: 0,
+            };
+        }
+
+        // Current frame state for temporal reprojection.
         let current_clip_from_world = view.clip_from_world.unwrap_or_else(|| {
-            // Bevy 0.18 should always have this set on extracted views;
-            // the fallback avoids a panic if the assumption breaks.
             view.clip_from_view * view.world_from_view.to_matrix().inverse()
         });
         let current_camera_ecef = sph_cam.local_up * sph_cam.camera_radius;
 
-        // Pick up prev state, defaulting to "no history yet" for fresh
-        // entities. On the very first frame we keep `temporal_history_valid
-        // = 0` so the temporal pass writes the raw raymarch into history
-        // without trying to reproject from an uninitialised buffer.
         let prev = prev_state.copied().unwrap_or_default();
         let teleported = prev.initialised
             && current_camera_ecef.distance(prev.camera_ecef) > TELEPORT_THRESHOLD_M;
         let history_valid = prev.initialised && !teleported;
 
         commands.entity(entity).insert(GpuCloudUniform {
-            inner_radius: atmosphere.bottom_radius + layer.inner_altitude,
-            outer_radius: atmosphere.bottom_radius + layer.outer_altitude,
-            coverage: layer.coverage,
-            density_scale: layer.density_scale,
-            hg_forward: layer.hg_forward,
-            hg_backward: layer.hg_backward,
-            hg_blend: layer.hg_blend,
-            max_primary_steps: layer.max_primary_steps,
-            light_steps: layer.light_steps,
-            debug_mode: layer.debug_mode as u32,
-            wind_offset: layer.wind_velocity,
+            max_primary_steps: quality.primary_steps(),
+            light_steps: quality.light_steps(),
+            octaves: quality.octaves(),
+            debug_mode: cloud.debug_mode as u32,
             buffer_size,
             full_size,
+            layer_count: layer_count as u32,
+            _pad_top0: 0,
+            _pad_top1: 0,
+            _pad_top2: 0,
             prev_clip_from_world: prev.clip_from_world,
             prev_camera_ecef: prev.camera_ecef,
             frame_index: prev.frame_index.wrapping_add(1),
             temporal_history_valid: u32::from(history_valid),
-            _pad0: 0,
-            _pad1: 0,
-            _pad2: 0,
+            _pad_bot0: 0,
+            _pad_bot1: 0,
+            _pad_bot2: 0,
+            layers: gpu_layers,
         });
 
-        // Stash this frame's state so next frame can read it as `prev`.
         commands.entity(entity).insert(CloudPrevFrame {
             clip_from_world: current_clip_from_world,
             camera_ecef: current_camera_ecef,
@@ -494,7 +532,7 @@ pub(super) fn prepare_cloud_uniforms(
 /// `layer.resolution_scale * camera.target_size`.
 pub(super) fn prepare_cloud_textures(
     mut commands: Commands,
-    layers: Query<(Entity, &GpuCloudUniform), With<CloudLayer>>,
+    layers: Query<(Entity, &GpuCloudUniform), With<CloudLayers>>,
     render_device: Res<RenderDevice>,
     mut texture_cache: ResMut<TextureCache>,
 ) {
@@ -525,7 +563,7 @@ pub(super) fn prepare_cloud_textures(
 /// reused frame-to-frame so the data carries over.
 pub(super) fn prepare_cloud_history_textures(
     mut commands: Commands,
-    layers: Query<(Entity, &GpuCloudUniform, Option<&CloudHistoryTextures>), With<CloudLayer>>,
+    layers: Query<(Entity, &GpuCloudUniform, Option<&CloudHistoryTextures>), With<CloudLayers>>,
     render_device: Res<RenderDevice>,
 ) {
     for (entity, uniform, existing) in &layers {
@@ -601,7 +639,7 @@ pub(super) fn prepare_cloud_bind_groups(
             &SphericalAtmosphereCamera,
             &ViewDepthTexture,
         ),
-        With<CloudLayer>,
+        With<CloudLayers>,
     >,
     render_device: Res<RenderDevice>,
     layouts: Res<CloudBindGroupLayouts>,

@@ -17,7 +17,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use tracing::info;
 
 use crate::{
-    CloudLayer,
+    CloudLayers,
     resources::{
         CloudBindGroups, CloudCompositePipelineId, CloudPipelines, CloudTextures, GpuCloudUniform,
     },
@@ -45,7 +45,7 @@ pub(super) struct CloudRaymarchNode;
 
 impl ViewNode for CloudRaymarchNode {
     type ViewQuery = (
-        Read<CloudLayer>,
+        Read<CloudLayers>,
         Read<CloudTextures>,
         Read<CloudBindGroups>,
         Read<DynamicUniformIndex<GpuCloudUniform>>,
@@ -117,7 +117,7 @@ pub(super) struct CloudTemporalNode;
 
 impl ViewNode for CloudTemporalNode {
     type ViewQuery = (
-        Read<CloudLayer>,
+        Read<CloudLayers>,
         Read<CloudTextures>,
         Read<CloudBindGroups>,
         Read<DynamicUniformIndex<GpuCloudUniform>>,

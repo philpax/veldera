@@ -94,68 +94,74 @@ fn henyey_greenstein(cos_theta: f32, g: f32) -> f32 {
     return (1.0 - g2) / (4.0 * PI * max(denom, 1e-6));
 }
 
-// Dual-lobe HG: blend a forward-peaked and backward-peaked lobe to capture
-// both the silver-lining (forward) and ambient-side (backward) scattering.
-fn dual_henyey_greenstein(cos_theta: f32) -> f32 {
-    let f = henyey_greenstein(cos_theta, cloud.hg_forward);
-    let b = henyey_greenstein(cos_theta, cloud.hg_backward);
-    return mix(b, f, cloud.hg_blend);
+// Dual-lobe HG with per-layer parameters. Each layer has its own forward /
+// backward / blend, so cirrus (sharp forward lobe) and cumulus (broader
+// dual lobe) shade differently relative to the sun.
+fn dual_henyey_greenstein_layer(layer_i: u32, cos_theta: f32) -> f32 {
+    let layer = cloud.layers[layer_i];
+    let f = henyey_greenstein(cos_theta, layer.hg_forward);
+    let b = henyey_greenstein(cos_theta, layer.hg_backward);
+    return mix(b, f, layer.hg_blend);
 }
 
-// Dual-lobe HG with both g values softened by `eccentricity` (≤ 1). Used by
-// the Wrenninge multi-scatter octave loop: each successive octave passes a
-// progressively smaller eccentricity, gradually flattening the phase
-// function toward isotropic to model the diffusion of light over multiple
+// Per-layer dual-HG with both g values softened by `eccentricity` (≤ 1).
+// Used by the Wrenninge multi-scatter octave loop — each successive octave
+// passes a progressively smaller eccentricity, gradually flattening the
+// phase toward isotropic to model the diffusion of light over multiple
 // scattering events.
-fn dual_henyey_greenstein_eccentric(cos_theta: f32, eccentricity: f32) -> f32 {
-    let f = henyey_greenstein(cos_theta, cloud.hg_forward * eccentricity);
-    let b = henyey_greenstein(cos_theta, cloud.hg_backward * eccentricity);
-    return mix(b, f, cloud.hg_blend);
+fn dual_henyey_greenstein_layer_eccentric(layer_i: u32, cos_theta: f32, eccentricity: f32) -> f32 {
+    let layer = cloud.layers[layer_i];
+    let f = henyey_greenstein(cos_theta, layer.hg_forward * eccentricity);
+    let b = henyey_greenstein(cos_theta, layer.hg_backward * eccentricity);
+    return mix(b, f, layer.hg_blend);
 }
 
-// Cloud density at a world-space sample position.
+// Cloud density at a world-space sample position for ONE specific sub-layer.
 //
-// Phase 1 keeps this simple: derive a normalised altitude inside the shell,
-// build a vertical-density profile that's zero at the inner/outer shells and
-// peaks in the middle, then modulate by 3D noise. Wind translates the noise
-// sample point.
-fn sample_cloud_density(world_pos: vec3<f32>) -> f32 {
+// Each layer has its own altitude range, coverage threshold, density scale,
+// and noise tile size. Returns 0 when the position is outside the layer's
+// shell or when the layer is disabled.
+fn sample_layer_density(layer_i: u32, world_pos: vec3<f32>) -> f32 {
+    let layer = cloud.layers[layer_i];
+    if layer.enabled == 0u {
+        return 0.0;
+    }
     let r = length(world_pos);
-    if r < cloud.inner_radius || r > cloud.outer_radius {
+    if r < layer.inner_radius || r > layer.outer_radius {
         return 0.0;
     }
 
-    let shell_h = (r - cloud.inner_radius) / max(cloud.outer_radius - cloud.inner_radius, 1.0);
-    // Smooth "mushroom" profile: zero at both shells, ~1 in the middle, with
-    // the peak shifted toward the lower third where stratocumulus typically
-    // densifies.
+    let shell_h = (r - layer.inner_radius) / max(layer.outer_radius - layer.inner_radius, 1.0);
     let v_profile = smoothstep(0.0, 0.2, shell_h) * (1.0 - smoothstep(0.6, 1.0, shell_h));
 
-    // Project world position onto a tile in the local tangent plane. Cheap
-    // approach: use world XYZ scaled, plus wind offset on XZ.
-    // Cloud noise tile in metres — controls the macro spacing. ~2 km tiles
-    // give enough structure that low-altitude observers can see cloud edges
-    // and clearings overhead.
-    let tile = 2000.0;
+    let tile = layer.noise_tile;
     var noise_uv = world_pos / tile;
-    noise_uv.x += cloud.wind_offset.x / tile;
-    noise_uv.z += cloud.wind_offset.y / tile;
+    noise_uv.x += layer.wind_offset.x / tile;
+    noise_uv.z += layer.wind_offset.y / tile;
 
     let n = textureSampleLevel(noise_3d, cloud_sampler, fract(noise_uv), 0.0);
-    // Combine: low-freq base (R), eroded by mid (G) and high (B) channels.
     let base = n.r;
     let erosion = (n.g * 0.625 + n.b * 0.25);
     let shape = saturate(remap(base, erosion - 1.0, 1.0, 0.0, 1.0));
 
-    // Smooth-step the coverage threshold rather than a hard saturate. This
-    // produces a softer transition between empty space and dense cloud, so
-    // the integrated opacity over the raymarch picks up structure instead
-    // of converging to a uniform mid-grey.
     let raw = shape * v_profile;
-    let cov_lo = max(cloud.coverage - 0.1, 0.0);
-    let cov_hi = min(cloud.coverage + 0.1, 1.0);
+    let cov_lo = max(layer.coverage - 0.1, 0.0);
+    let cov_hi = min(layer.coverage + 0.1, 1.0);
     let density = smoothstep(cov_lo, cov_hi, raw);
-    return density * cloud.density_scale;
+    return density * layer.density_scale;
+}
+
+// Total cloud density at a world-space sample, summed across every enabled
+// sub-layer. Layers don't normally overlap in altitude, so this usually
+// equals the contribution of a single layer; when they do (e.g. cumulus
+// reaching up into a cirrus deck), the sum is physically correct because
+// extinction is additive.
+fn sample_cloud_density(world_pos: vec3<f32>) -> f32 {
+    var total = 0.0;
+    for (var i: u32 = 0u; i < cloud.layer_count; i = i + 1u) {
+        total = total + sample_layer_density(i, world_pos);
+    }
+    return total;
 }
 
 // Helper: linear remap from [a, b] to [c, d].
@@ -219,48 +225,51 @@ fn sample_light_optical_depth(start_pos: vec3<f32>, light_dir_ws: vec3<f32>) -> 
 // covers the visible cloud cap from low altitude.
 const CLOUD_MARCH_MAX_DISTANCE: f32 = 80000.0;
 
-// Compute the cloud-march entry/exit `t` along a ray starting at world
-// position `pos` in direction `ray_dir_ws`. Returns vec2(t_start, t_end);
-// if t_end <= t_start the ray misses the shell.
+// Compute the cloud-march entry/exit `t` covering ALL enabled sub-layers'
+// shells. The march walks the union shell from the closest enabled inner
+// radius to the furthest enabled outer radius; the per-step density loop
+// in the raymarch shader naturally skips empty altitudes (e.g. between
+// cumulus and cirrus decks).
 //
-// Three camera regimes:
-//   - Above the outer shell: enter at outer near, leave at inner near or
-//     outer far (whichever comes first).
-//   - Inside the shell: starts at the camera, leaves at the next exit
-//     surface (inner near if descending into clear air, outer far otherwise).
-//   - Below the inner shell: re-enter at inner far, leave at outer far.
-//
-// Any ground hit clips `t_end`. The whole segment is clamped to
-// `CLOUD_MARCH_MAX_DISTANCE` so a horizon-grazing ray doesn't waste samples
-// on millions of metres of empty atmosphere.
+// Returns vec2(t_start, t_end). t_end <= t_start means no enabled layer
+// is hit by this ray.
 fn cloud_shell_segment(pos_world: vec3<f32>, ray_dir: vec3<f32>) -> vec2<f32> {
     let r = length(pos_world);
     let mu = dot(ray_dir, normalize(pos_world));
 
-    let outer = ray_sphere_intersect(r, mu, cloud.outer_radius);
-    let inner = ray_sphere_intersect(r, mu, cloud.inner_radius);
+    // Find the union extent across enabled layers.
+    var min_inner: f32 = 1e30;
+    var max_outer: f32 = -1e30;
+    for (var i: u32 = 0u; i < cloud.layer_count; i = i + 1u) {
+        let layer = cloud.layers[i];
+        if layer.enabled == 0u { continue; }
+        min_inner = min(min_inner, layer.inner_radius);
+        max_outer = max(max_outer, layer.outer_radius);
+    }
+    if max_outer <= 0.0 {
+        return vec2(0.0, -1.0);
+    }
+
+    let outer = ray_sphere_intersect(r, mu, max_outer);
+    let inner = ray_sphere_intersect(r, mu, min_inner);
     let ground = ray_sphere_intersect(r, mu, atmosphere.bottom_radius);
 
     var t_start: f32;
     var t_end: f32;
 
-    if r > cloud.outer_radius {
+    if r > max_outer {
         if outer.x < 0.0 {
             return vec2(0.0, -1.0);
         }
         t_start = outer.x;
-        if inner.x > 0.0 {
-            t_end = inner.x;
-        } else {
-            t_end = outer.y;
-        }
-    } else if r > cloud.inner_radius {
+        // Use the outer-far hit so the march covers everything (the inner
+        // shell may not be hit, in which case we'd march all the way
+        // through; if it IS hit, the per-step density loop just returns 0
+        // in the empty zone between max_outer and min_inner — cheap).
+        t_end = outer.y;
+    } else if r > min_inner {
         t_start = 0.0;
-        if inner.x > 0.0 {
-            t_end = min(inner.x, outer.y);
-        } else {
-            t_end = outer.y;
-        }
+        t_end = outer.y;
     } else {
         if inner.y < 0.0 {
             return vec2(0.0, -1.0);
@@ -269,14 +278,9 @@ fn cloud_shell_segment(pos_world: vec3<f32>, ray_dir: vec3<f32>) -> vec2<f32> {
         t_end = outer.y;
     }
 
-    // Clip to ground if the ray hits the planet first.
     if ground.x > 0.0 {
         t_end = min(t_end, ground.x);
     }
-    // Cap the *march length* (not absolute distance) so a near-horizontal
-    // ray that intersects the shell hundreds of km away still produces
-    // some cloud, just at coarser per-step resolution.
     t_end = min(t_end, t_start + CLOUD_MARCH_MAX_DISTANCE);
-
     return vec2(t_start, t_end);
 }

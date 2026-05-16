@@ -34,20 +34,16 @@ fn depth_to_camera_dist(uv: vec2<f32>, depth: f32) -> f32 {
 #import bevy_pbr_clouds_planet::functions::{
     uv_to_ray_direction_ws, direction_world_to_atmosphere,
     sample_transmittance, sample_aerial_inscattering, sample_sky_view,
-    dual_henyey_greenstein, dual_henyey_greenstein_eccentric,
-    sample_cloud_density, sample_light_optical_depth,
+    dual_henyey_greenstein_layer, dual_henyey_greenstein_layer_eccentric,
+    sample_cloud_density, sample_layer_density, sample_light_optical_depth,
     cloud_shell_segment,
 };
 
-// Number of Wrenninge multi-scatter octaves. Each successive octave
-// represents another simulated bounce: the optical depth toward the sun is
-// scaled by `attenuation^n` (less self-shadow), the contribution by
-// `contribution^n` (each bounce adds less light), and the phase function's
-// directionality by `eccentricity^n` (each bounce becomes more isotropic).
-//
-// 4 octaves is the typical default. Higher costs more per sample but the
-// returns flatten quickly because of the geometric falloff.
-const WRENNINGE_OCTAVES: u32 = 4u;
+// Wrenninge multi-scatter octave coefficients. Octave count comes from the
+// quality-tier-driven `cloud.octaves`. Each successive octave scales the
+// sun-direction optical depth, contribution, and HG eccentricity by these
+// factors, so by octave N the bounce is N×0.5 attenuated, N×0.5 contributed,
+// and N×0.5 eccentric.
 const WRENNINGE_ATTENUATION: f32 = 0.5;
 const WRENNINGE_CONTRIBUTION: f32 = 0.5;
 const WRENNINGE_ECCENTRICITY: f32 = 0.5;
@@ -116,15 +112,31 @@ fn main(@builtin(global_invocation_id) idx: vec3<u32>) {
         } else if hit {
             let mid_pos = cam_world + ray_dir_ws * mix(t_start, t_end, 0.5);
             if cloud.debug_mode == DBG_NOISE {
-                let tile = 2000.0;
-                let noise_uv = mid_pos / tile + vec3(cloud.wind_offset.x / tile, 0.0, cloud.wind_offset.y / tile);
+                // Sample noise at the FIRST enabled layer's tile size so the
+                // visualisation matches what that layer actually sees.
+                var tile = 2000.0;
+                var wind = vec2<f32>(0.0);
+                for (var li: u32 = 0u; li < cloud.layer_count; li = li + 1u) {
+                    if cloud.layers[li].enabled != 0u {
+                        tile = cloud.layers[li].noise_tile;
+                        wind = cloud.layers[li].wind_offset;
+                        break;
+                    }
+                }
+                let noise_uv = mid_pos / tile + vec3(wind.x / tile, 0.0, wind.y / tile);
                 let n = textureSampleLevel(noise_3d, cloud_sampler, fract(noise_uv), 0.0);
                 dbg = n.rgb;
             } else if cloud.debug_mode == DBG_DENSITY {
                 let d = sample_cloud_density(mid_pos);
-                // Normalise back from physical (1/m) to the 0..1 range by
-                // dividing out density_scale; clamp for display.
-                dbg = vec3(saturate(d / max(cloud.density_scale, 1e-6)));
+                // Total density from all layers, normalised by the largest
+                // enabled layer's density_scale for display.
+                var max_scale = 1e-6;
+                for (var li: u32 = 0u; li < cloud.layer_count; li = li + 1u) {
+                    if cloud.layers[li].enabled != 0u {
+                        max_scale = max(max_scale, cloud.layers[li].density_scale);
+                    }
+                }
+                dbg = vec3(saturate(d / max_scale));
             }
         }
         // For DBG_OPACITY we still need to run the loop. Handle below.
@@ -160,52 +172,55 @@ fn main(@builtin(global_invocation_id) idx: vec3<u32>) {
             continue;
         }
 
-        // Sun lighting via Wrenninge multi-scatter octaves, plus Earth-shine
-        // ambient sampled from the atmosphere's sky-view LUT.
+        // Multi-layer lighting: Earth-shine + per-layer Wrenninge octave
+        // loop, weighted by each layer's contribution to the total density
+        // at this sample. This lets cumulus and cirrus shade with their
+        // own phase functions even when both are visible.
         let local_r = length(sample_pos);
         let sample_up = sample_pos / max(local_r, 1.0);
         let up_as = direction_world_to_atmosphere(sample_up, atmosphere_transforms.local_up);
 
-        // Earth-shine: take the actual sky-view colour in the upward
-        // hemisphere as ambient illumination on the cloud sample. The
-        // sky-view LUT is parametrised at the camera, but for shells within
-        // a few km of the camera this is a good enough approximation and
-        // gives the right colour shifts (orange at sunset, blue at noon).
+        // Earth-shine: real sky colour in the upward hemisphere as ambient
+        // illumination on the cloud sample. Same for every layer.
         let earth_shine = sample_sky_view(local_r, up_as);
-
         var radiance = earth_shine;
+
+        // Cone-march toward each light is shared across layers (it
+        // integrates *total* density along the sun ray, not per-layer).
         for (var li: u32 = 0u; li < atmosphere_lights.count; li = li + 1u) {
             let light = atmosphere_lights.lights[li];
             let light_dir_ws = light.direction_to_light;
             let mu_light = dot(light_dir_ws, sample_up);
-            // Atmosphere transmittance from sample to sun. Zero if sun is
-            // below the local horizon.
             let atmo_t = sample_transmittance(local_r, mu_light) * f32(mu_light > 0.0);
-            // Optical depth toward the sun via cone-shadow march. We get
-            // the raw τ here (not transmittance) so the octave loop can
-            // scale by `attenuation^n` before exponentiating.
             let tau_light = sample_light_optical_depth(sample_pos, light_dir_ws);
             let cos_theta = dot(ray_dir_ws, light_dir_ws);
 
-            // Wrenninge octave loop: sum direct + simulated multi-scatter
-            // bounces. Each successive octave sees less self-shadow (lower
-            // attenuation), contributes less (lower contribution), and uses
-            // a flatter phase (lower eccentricity) — this captures the
-            // diffuse glow that real clouds get from light bouncing many
-            // times through the volume.
-            var octave_sum = vec3<f32>(0.0);
-            var attenuation = 1.0;
-            var contribution = 1.0;
-            var eccentricity = 1.0;
-            for (var oct: u32 = 0u; oct < WRENNINGE_OCTAVES; oct = oct + 1u) {
-                let cloud_t_n = exp(-tau_light * attenuation);
-                let phase_n = dual_henyey_greenstein_eccentric(cos_theta, eccentricity);
-                octave_sum = octave_sum + (cloud_t_n * phase_n * contribution);
-                attenuation = attenuation * WRENNINGE_ATTENUATION;
-                contribution = contribution * WRENNINGE_CONTRIBUTION;
-                eccentricity = eccentricity * WRENNINGE_ECCENTRICITY;
+            // Walk every active sub-layer and sum its phase-weighted
+            // contribution, weighted by the layer's share of the total
+            // density at this sample point.
+            var multi_layer_sum = vec3<f32>(0.0);
+            for (var li2: u32 = 0u; li2 < cloud.layer_count; li2 = li2 + 1u) {
+                let layer_d = sample_layer_density(li2, sample_pos);
+                if layer_d <= 1e-9 {
+                    continue;
+                }
+                let weight = layer_d / max(density, 1e-9);
+
+                var octave_sum = vec3<f32>(0.0);
+                var attenuation = 1.0;
+                var contribution = 1.0;
+                var eccentricity = 1.0;
+                for (var oct: u32 = 0u; oct < cloud.octaves; oct = oct + 1u) {
+                    let cloud_t_n = exp(-tau_light * attenuation);
+                    let phase_n = dual_henyey_greenstein_layer_eccentric(li2, cos_theta, eccentricity);
+                    octave_sum = octave_sum + (cloud_t_n * phase_n * contribution);
+                    attenuation = attenuation * WRENNINGE_ATTENUATION;
+                    contribution = contribution * WRENNINGE_CONTRIBUTION;
+                    eccentricity = eccentricity * WRENNINGE_ECCENTRICITY;
+                }
+                multi_layer_sum = multi_layer_sum + octave_sum * weight;
             }
-            radiance = radiance + light.color * atmo_t * octave_sum;
+            radiance = radiance + light.color * atmo_t * multi_layer_sum;
         }
 
         // Beer's law extinction across the segment.

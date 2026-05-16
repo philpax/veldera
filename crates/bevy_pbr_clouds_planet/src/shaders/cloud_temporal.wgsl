@@ -54,29 +54,40 @@ fn depth_to_camera_dist(uv: vec2<f32>, depth: f32) -> f32 {
     return length(view_pos.xyz / view_pos.w);
 }
 
-// Find the cloud-shell entry/exit distances along a ray from the camera.
-// Returns vec2(t_start, t_end); t_end <= t_start means the ray misses.
-//
-// Mirror of the version in functions.wgsl. We need it here so the temporal
-// pass can recover the same effective cloud distance the raymarch used,
-// without any cross-shader binding-coupling.
+// Find the cloud-shell entry/exit distances along a ray from the camera,
+// using the *union* of all enabled sub-layers' shells (so the temporal
+// reprojection picks a sensible cloud-mid depth even with multiple layers
+// active). Mirror of the multi-layer version in functions.wgsl, inlined
+// here to avoid cross-shader binding coupling.
 fn cloud_shell_segment(pos_world: vec3<f32>, ray_dir: vec3<f32>) -> vec2<f32> {
     let r = length(pos_world);
     let mu = dot(ray_dir, normalize(pos_world));
 
-    let outer = ray_sphere_intersect(r, mu, cloud.outer_radius);
-    let inner = ray_sphere_intersect(r, mu, cloud.inner_radius);
+    var min_inner: f32 = 1e30;
+    var max_outer: f32 = -1e30;
+    for (var i: u32 = 0u; i < cloud.layer_count; i = i + 1u) {
+        let layer = cloud.layers[i];
+        if layer.enabled == 0u { continue; }
+        min_inner = min(min_inner, layer.inner_radius);
+        max_outer = max(max_outer, layer.outer_radius);
+    }
+    if max_outer <= 0.0 {
+        return vec2(0.0, -1.0);
+    }
+
+    let outer = ray_sphere_intersect(r, mu, max_outer);
+    let inner = ray_sphere_intersect(r, mu, min_inner);
 
     var t_start: f32;
     var t_end: f32;
 
-    if r > cloud.outer_radius {
+    if r > max_outer {
         if outer.x < 0.0 { return vec2(0.0, -1.0); }
         t_start = outer.x;
-        if inner.x > 0.0 { t_end = inner.x; } else { t_end = outer.y; }
-    } else if r > cloud.inner_radius {
+        t_end = outer.y;
+    } else if r > min_inner {
         t_start = 0.0;
-        if inner.x > 0.0 { t_end = min(inner.x, outer.y); } else { t_end = outer.y; }
+        t_end = outer.y;
     } else {
         if inner.y < 0.0 { return vec2(0.0, -1.0); }
         t_start = inner.y;
