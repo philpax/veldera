@@ -25,3 +25,6 @@ build/
 
 # Physics telemetry debug output
 telemetry.csv
+
+# On-disk source assets that are too large to commit into Git.
+source_assets/
