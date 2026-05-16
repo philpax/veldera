@@ -24,6 +24,7 @@ use crate::{
 };
 
 static RAYMARCH_LOGGED: AtomicBool = AtomicBool::new(false);
+static TEMPORAL_LOGGED: AtomicBool = AtomicBool::new(false);
 static COMPOSITE_LOGGED: AtomicBool = AtomicBool::new(false);
 
 /// Render-graph labels for the cloud renderer.
@@ -33,6 +34,8 @@ pub enum CloudNode {
     NoiseBake,
     /// Half-resolution cloud raymarch (compute).
     Raymarch,
+    /// Reproject + blend into the ping-pong history buffer (compute).
+    Temporal,
     /// Bilinear upsample + over-blend into the HDR view target (fragment).
     Composite,
 }
@@ -104,6 +107,63 @@ impl ViewNode for CloudRaymarchNode {
                 "cloud raymarch first dispatch ({}x{} workgroups, {}x{} buffer)",
                 groups_x, groups_y, textures.raymarch_size.x, textures.raymarch_size.y
             );
+        }
+        Ok(())
+    }
+}
+
+#[derive(Default)]
+pub(super) struct CloudTemporalNode;
+
+impl ViewNode for CloudTemporalNode {
+    type ViewQuery = (
+        Read<CloudLayer>,
+        Read<CloudTextures>,
+        Read<CloudBindGroups>,
+        Read<DynamicUniformIndex<GpuCloudUniform>>,
+        Read<AtmosphereTransformsOffset>,
+        Read<ViewUniformOffset>,
+    );
+
+    fn run(
+        &self,
+        _graph: &mut RenderGraphContext,
+        render_context: &mut RenderContext,
+        (_layer, textures, bind_groups, cloud_offset, transforms_offset, view_offset): QueryItem<
+            Self::ViewQuery,
+        >,
+        world: &World,
+    ) -> Result<(), NodeRunError> {
+        let pipelines = world.resource::<CloudPipelines>();
+        let pipeline_cache = world.resource::<PipelineCache>();
+        let Some(temporal_pipeline) = pipeline_cache.get_compute_pipeline(pipelines.temporal)
+        else {
+            return Ok(());
+        };
+
+        let mut pass = render_context
+            .command_encoder()
+            .begin_compute_pass(&ComputePassDescriptor {
+                label: Some("cloud_temporal"),
+                timestamp_writes: None,
+            });
+        pass.set_pipeline(temporal_pipeline);
+        pass.set_bind_group(
+            0,
+            &bind_groups.temporal,
+            &[
+                cloud_offset.index(),
+                transforms_offset.index(),
+                view_offset.offset,
+            ],
+        );
+
+        const WORKGROUP_SIZE: u32 = 8;
+        let groups_x = textures.raymarch_size.x.div_ceil(WORKGROUP_SIZE);
+        let groups_y = textures.raymarch_size.y.div_ceil(WORKGROUP_SIZE);
+        pass.dispatch_workgroups(groups_x, groups_y, 1);
+        if !TEMPORAL_LOGGED.swap(true, Ordering::Relaxed) {
+            info!("cloud temporal first dispatch");
         }
         Ok(())
     }

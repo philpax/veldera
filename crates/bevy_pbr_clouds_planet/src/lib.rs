@@ -58,10 +58,10 @@ pub use node::CloudNode;
 pub use resources::{CloudBindGroupLayouts, CloudPipelines, CloudSampler, CloudTextures};
 
 use noise::{NoiseBakeState, NoiseBindGroupLayout, NoisePipeline, NoiseTextures};
-use node::{CloudCompositeNode, CloudRaymarchNode};
+use node::{CloudCompositeNode, CloudRaymarchNode, CloudTemporalNode};
 use resources::{
-    GpuCloudUniform, prepare_cloud_bind_groups, prepare_cloud_textures, prepare_cloud_uniforms,
-    queue_cloud_composite_pipelines,
+    GpuCloudUniform, prepare_cloud_bind_groups, prepare_cloud_history_textures,
+    prepare_cloud_textures, prepare_cloud_uniforms, queue_cloud_composite_pipelines,
 };
 
 /// Plugin that registers the volumetric-cloud render pipeline.
@@ -78,6 +78,7 @@ impl Plugin for CloudsPlanetPlugin {
 
         embedded_asset!(app, "shaders/noise_bake.wgsl");
         embedded_asset!(app, "shaders/cloud_raymarch.wgsl");
+        embedded_asset!(app, "shaders/cloud_temporal.wgsl");
         embedded_asset!(app, "shaders/cloud_composite.wgsl");
 
         app.add_plugins((
@@ -134,6 +135,7 @@ impl Plugin for CloudsPlanetPlugin {
                         .after(RenderSystems::PrepareAssets),
                     queue_cloud_composite_pipelines.in_set(RenderSystems::Queue),
                     prepare_cloud_textures.in_set(RenderSystems::PrepareResources),
+                    prepare_cloud_history_textures.in_set(RenderSystems::PrepareResources),
                     prepare_cloud_bind_groups.in_set(RenderSystems::PrepareBindGroups),
                 ),
             )
@@ -141,6 +143,10 @@ impl Plugin for CloudsPlanetPlugin {
             .add_render_graph_node::<ViewNodeRunner<CloudRaymarchNode>>(
                 Core3d,
                 CloudNode::Raymarch,
+            )
+            .add_render_graph_node::<ViewNodeRunner<CloudTemporalNode>>(
+                Core3d,
+                CloudNode::Temporal,
             )
             .add_render_graph_node::<ViewNodeRunner<CloudCompositeNode>>(
                 Core3d,
@@ -159,6 +165,7 @@ impl Plugin for CloudsPlanetPlugin {
                 (
                     AtmosphereNode::RenderSky,
                     CloudNode::Raymarch,
+                    CloudNode::Temporal,
                     CloudNode::Composite,
                     Node3d::MainTransparentPass,
                 ),

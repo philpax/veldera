@@ -13,7 +13,7 @@ use bevy::{
         world::{FromWorld, World},
     },
     image::ToExtents,
-    math::{UVec2, Vec2},
+    math::{Mat4, UVec2, Vec2, Vec3},
     pbr::{GpuLights, LightMeta},
     prelude::Camera,
     render::{
@@ -22,7 +22,7 @@ use bevy::{
         render_resource::{binding_types::*, *},
         renderer::RenderDevice,
         texture::{CachedTexture, TextureCache},
-        view::{Msaa, ViewDepthTexture, ViewUniform, ViewUniforms},
+        view::{ExtractedView, Msaa, ViewDepthTexture, ViewUniform, ViewUniforms},
     },
 };
 use bevy_pbr_atmosphere_planet::{
@@ -52,6 +52,30 @@ pub struct GpuCloudUniform {
     pub wind_offset: Vec2,
     pub buffer_size: UVec2,
     pub full_size: UVec2,
+    /// Previous frame's `clip_from_world` matrix. Used by the temporal
+    /// pass to reproject each pixel into the previous frame's screen
+    /// position so we can sample the history buffer there.
+    ///
+    /// Note: this is the PREV camera's clip-from-(view-relative-world).
+    /// To project a current-frame ECEF point through it, first subtract
+    /// `prev_camera_ecef` to bring the point into the prev camera's
+    /// render-world frame (which is what Bevy's view matrices expect).
+    pub prev_clip_from_world: Mat4,
+    /// Previous frame's ECEF camera position. Used to convert a current
+    /// frame's absolute world point into the prev frame's render-world
+    /// (camera-relative) coordinate system before reprojecting.
+    pub prev_camera_ecef: Vec3,
+    /// Frame index, modulo a small power of two. Bit 0 selects which of
+    /// the two ping-pong history textures is "previous" vs "current"
+    /// for this frame.
+    pub frame_index: u32,
+    /// 0 on the first frame after spawn or after a teleport; the
+    /// temporal blend uses this to ignore the (uninitialised or stale)
+    /// history and write the raw raymarch instead.
+    pub temporal_history_valid: u32,
+    pub _pad0: u32,
+    pub _pad1: u32,
+    pub _pad2: u32,
 }
 
 /// Per-view storage texture written by the raymarch pass and read by the
@@ -63,6 +87,35 @@ pub struct GpuCloudUniform {
 pub struct CloudTextures {
     pub raymarch: CachedTexture,
     pub raymarch_size: UVec2,
+}
+
+/// Persistent ping-pong history textures used by the temporal pass.
+///
+/// Two `Rgba16Float` textures at the raymarch resolution. The temporal
+/// shader reads "previous" (alternating each frame via `frame_index`) and
+/// writes "current"; the composite then reads "current". These textures
+/// must persist across frames, so they're allocated by hand rather than
+/// going through `TextureCache` (whose entries are scoped to a single
+/// frame).
+#[derive(Component)]
+pub struct CloudHistoryTextures {
+    // Held to keep the underlying textures alive — only the views are
+    // bound, but dropping the textures would invalidate them.
+    #[allow(dead_code)]
+    pub textures: [Texture; 2],
+    pub views: [TextureView; 2],
+    pub size: UVec2,
+}
+
+impl CloudHistoryTextures {
+    /// `frame_index` parity selects which slot is the previous frame's
+    /// data and which slot we write into this frame.
+    pub fn read_view(&self, frame_index: u32) -> &TextureView {
+        &self.views[(frame_index & 1) as usize]
+    }
+    pub fn write_view(&self, frame_index: u32) -> &TextureView {
+        &self.views[((frame_index + 1) & 1) as usize]
+    }
 }
 
 /// Sampler set used by the cloud shaders.
@@ -109,10 +162,11 @@ impl FromWorld for CloudSampler {
     }
 }
 
-/// Bind-group layouts for the two cloud passes.
+/// Bind-group layouts for the three cloud passes.
 #[derive(Resource)]
 pub struct CloudBindGroupLayouts {
     pub raymarch: BindGroupLayoutDescriptor,
+    pub temporal: BindGroupLayoutDescriptor,
     pub composite: BindGroupLayoutDescriptor,
     pub fullscreen_shader: FullscreenShader,
     pub composite_fragment: bevy::asset::Handle<bevy::shader::Shader>,
@@ -166,13 +220,41 @@ impl FromWorld for CloudBindGroupLayouts {
             ),
         );
 
+        let temporal = BindGroupLayoutDescriptor::new(
+            "cloud_temporal_bind_group_layout",
+            &BindGroupLayoutEntries::with_indices(
+                ShaderStages::COMPUTE,
+                (
+                    (0, uniform_buffer::<GpuCloudUniform>(true)),
+                    (1, uniform_buffer::<AtmosphereTransform>(true)),
+                    (2, uniform_buffer::<ViewUniform>(true)),
+                    // Current frame's raw raymarch (input).
+                    (3, texture_2d(TextureSampleType::default())),
+                    // Previous frame's blended history (input).
+                    (4, texture_2d(TextureSampleType::default())),
+                    // Camera depth for cloud-distance reprojection.
+                    (5, texture_depth_2d_multisampled()),
+                    // Clamp-to-edge sampler for the history sample.
+                    (6, sampler(SamplerBindingType::Filtering)),
+                    // Output: this frame's blended history.
+                    (
+                        7,
+                        texture_storage_2d(
+                            TextureFormat::Rgba16Float,
+                            StorageTextureAccess::WriteOnly,
+                        ),
+                    ),
+                ),
+            ),
+        );
+
         let composite = BindGroupLayoutDescriptor::new(
             "cloud_composite_bind_group_layout",
             &BindGroupLayoutEntries::with_indices(
                 ShaderStages::FRAGMENT,
                 (
                     (0, uniform_buffer::<GpuCloudUniform>(true)),
-                    // Cloud raymarch buffer (half-res).
+                    // Cloud history buffer (this frame's blended output).
                     (1, texture_2d(TextureSampleType::default())),
                     // Clamp-to-edge sampler — repeating the half-res buffer
                     // would be wrong at the edges.
@@ -183,6 +265,7 @@ impl FromWorld for CloudBindGroupLayouts {
 
         Self {
             raymarch,
+            temporal,
             composite,
             fullscreen_shader: world.resource::<FullscreenShader>().clone(),
             composite_fragment: load_embedded_asset!(world, "shaders/cloud_composite.wgsl"),
@@ -190,11 +273,13 @@ impl FromWorld for CloudBindGroupLayouts {
     }
 }
 
-/// Cached compute pipeline ID for the raymarch pass. The composite pipeline
-/// is MSAA-specialized per-camera in [`queue_cloud_composite_pipelines`].
+/// Cached compute pipeline IDs for the raymarch and temporal passes. The
+/// composite pipeline is MSAA-specialised per-camera in
+/// [`queue_cloud_composite_pipelines`].
 #[derive(Resource)]
 pub struct CloudPipelines {
     pub raymarch: CachedComputePipelineId,
+    pub temporal: CachedComputePipelineId,
 }
 
 impl FromWorld for CloudPipelines {
@@ -202,6 +287,7 @@ impl FromWorld for CloudPipelines {
         let pipeline_cache = world.resource::<PipelineCache>();
         let layouts = world.resource::<CloudBindGroupLayouts>();
         let raymarch_shader = load_embedded_asset!(world, "shaders/cloud_raymarch.wgsl");
+        let temporal_shader = load_embedded_asset!(world, "shaders/cloud_temporal.wgsl");
 
         let raymarch = pipeline_cache.queue_compute_pipeline(ComputePipelineDescriptor {
             label: Some("cloud_raymarch_pipeline".into()),
@@ -210,7 +296,14 @@ impl FromWorld for CloudPipelines {
             ..Default::default()
         });
 
-        Self { raymarch }
+        let temporal = pipeline_cache.queue_compute_pipeline(ComputePipelineDescriptor {
+            label: Some("cloud_temporal_pipeline".into()),
+            layout: vec![layouts.temporal.clone()],
+            shader: temporal_shader,
+            ..Default::default()
+        });
+
+        Self { raymarch, temporal }
     }
 }
 
@@ -272,6 +365,7 @@ pub struct CloudCompositePipelineId(pub CachedRenderPipelineId);
 
 /// Specialises (or fetches from cache) the composite pipeline matching the
 /// camera's MSAA configuration.
+#[allow(clippy::type_complexity)]
 pub(super) fn queue_cloud_composite_pipelines(
     views: Query<(Entity, &Msaa), (With<Camera>, With<CloudLayer>)>,
     pipeline_cache: Res<PipelineCache>,
@@ -291,31 +385,78 @@ pub(super) fn queue_cloud_composite_pipelines(
     }
 }
 
-/// Per-view bind groups: one for the raymarch compute, one for the composite
-/// fragment.
+/// Per-view bind groups: one for the raymarch compute, one for the temporal
+/// compute, one for the composite fragment.
 #[derive(Component)]
 pub(crate) struct CloudBindGroups {
     pub raymarch: BindGroup,
+    pub temporal: BindGroup,
     pub composite: BindGroup,
 }
 
+/// Per-camera, render-world component holding the previous frame's
+/// reprojection matrix + ECEF camera position + frame counter.
+///
+/// Updated each frame by [`prepare_cloud_uniforms`] (which reads the prev
+/// values into the uniform, then overwrites them with the current values
+/// for the next frame's pickup).
+#[derive(Component, Default, Clone, Copy)]
+pub struct CloudPrevFrame {
+    pub clip_from_world: Mat4,
+    pub camera_ecef: Vec3,
+    pub frame_index: u32,
+    pub initialised: bool,
+}
+
+/// Threshold (m) for the camera-position delta above which we treat the
+/// frame as a teleport and discard the temporal history. ~5 km / frame
+/// would be a hard transition that reprojection couldn't follow anyway.
+const TELEPORT_THRESHOLD_M: f32 = 5_000.0;
+
 /// Builds the per-view `GpuCloudUniform`. Runs once per frame per camera.
+///
+/// Also drives the temporal pipeline by reading the prev-frame state from
+/// [`CloudPrevFrame`], stashing it into the uniform's `prev_*` fields, and
+/// then writing the current frame's matrix + ECEF position back into the
+/// component for next frame's pickup.
+#[allow(clippy::type_complexity)]
 pub(super) fn prepare_cloud_uniforms(
     mut commands: Commands,
     layers: Query<(
         Entity,
         &CloudLayer,
         &ExtractedAtmosphere,
+        &ExtractedView,
+        &SphericalAtmosphereCamera,
+        Option<&CloudPrevFrame>,
         Option<&ExtractedCamera>,
     )>,
 ) {
-    for (entity, layer, atmosphere, camera) in &layers {
+    for (entity, layer, atmosphere, view, sph_cam, prev_state, camera) in &layers {
         let full_size = camera
             .and_then(|c| c.physical_target_size)
             .unwrap_or(UVec2::splat(1));
         let buffer_size = (full_size.as_vec2() * layer.resolution_scale)
             .max(Vec2::splat(1.0))
             .as_uvec2();
+
+        // Current frame state.
+        let current_clip_from_world = view.clip_from_world.unwrap_or_else(|| {
+            // Bevy 0.18 should always have this set on extracted views;
+            // the fallback avoids a panic if the assumption breaks.
+            view.clip_from_view * view.world_from_view.to_matrix().inverse()
+        });
+        let current_camera_ecef = sph_cam.local_up * sph_cam.camera_radius;
+
+        // Pick up prev state, defaulting to "no history yet" for fresh
+        // entities. On the very first frame we keep `temporal_history_valid
+        // = 0` so the temporal pass writes the raw raymarch into history
+        // without trying to reproject from an uninitialised buffer.
+        let prev = prev_state.copied().unwrap_or_default();
+        let teleported = prev.initialised
+            && current_camera_ecef.distance(prev.camera_ecef) > TELEPORT_THRESHOLD_M;
+        let history_valid = prev.initialised && !teleported;
+
         commands.entity(entity).insert(GpuCloudUniform {
             inner_radius: atmosphere.bottom_radius + layer.inner_altitude,
             outer_radius: atmosphere.bottom_radius + layer.outer_altitude,
@@ -330,6 +471,21 @@ pub(super) fn prepare_cloud_uniforms(
             wind_offset: layer.wind_velocity,
             buffer_size,
             full_size,
+            prev_clip_from_world: prev.clip_from_world,
+            prev_camera_ecef: prev.camera_ecef,
+            frame_index: prev.frame_index.wrapping_add(1),
+            temporal_history_valid: u32::from(history_valid),
+            _pad0: 0,
+            _pad1: 0,
+            _pad2: 0,
+        });
+
+        // Stash this frame's state so next frame can read it as `prev`.
+        commands.entity(entity).insert(CloudPrevFrame {
+            clip_from_world: current_clip_from_world,
+            camera_ecef: current_camera_ecef,
+            frame_index: prev.frame_index.wrapping_add(1),
+            initialised: true,
         });
     }
 }
@@ -363,6 +519,48 @@ pub(super) fn prepare_cloud_textures(
     }
 }
 
+/// Allocates the persistent ping-pong history textures the temporal pass
+/// reads from and writes into. Allocated on first frame and reallocated
+/// only when the buffer size changes (e.g. a window resize); otherwise
+/// reused frame-to-frame so the data carries over.
+pub(super) fn prepare_cloud_history_textures(
+    mut commands: Commands,
+    layers: Query<(Entity, &GpuCloudUniform, Option<&CloudHistoryTextures>), With<CloudLayer>>,
+    render_device: Res<RenderDevice>,
+) {
+    for (entity, uniform, existing) in &layers {
+        if let Some(history) = existing
+            && history.size == uniform.buffer_size
+        {
+            continue;
+        }
+        let make = |label: &'static str| {
+            let texture = render_device.create_texture(&TextureDescriptor {
+                label: Some(label),
+                size: uniform.buffer_size.to_extents(),
+                mip_level_count: 1,
+                sample_count: 1,
+                dimension: TextureDimension::D2,
+                format: TextureFormat::Rgba16Float,
+                usage: TextureUsages::STORAGE_BINDING | TextureUsages::TEXTURE_BINDING,
+                view_formats: &[],
+            });
+            let view = texture.create_view(&TextureViewDescriptor {
+                label: Some(label),
+                ..Default::default()
+            });
+            (texture, view)
+        };
+        let (tex0, view0) = make("cloud_history_0");
+        let (tex1, view1) = make("cloud_history_1");
+        commands.entity(entity).insert(CloudHistoryTextures {
+            textures: [tex0, tex1],
+            views: [view0, view1],
+            size: uniform.buffer_size,
+        });
+    }
+}
+
 #[derive(Copy, Clone, Debug)]
 enum CloudBindGroupError {
     Atmosphere,
@@ -389,7 +587,7 @@ impl std::fmt::Display for CloudBindGroupError {
 
 impl std::error::Error for CloudBindGroupError {}
 
-/// Constructs the per-view raymarch and composite bind groups.
+/// Constructs the per-view raymarch, temporal, and composite bind groups.
 #[allow(clippy::too_many_arguments, clippy::type_complexity)]
 pub(super) fn prepare_cloud_bind_groups(
     mut commands: Commands,
@@ -397,6 +595,8 @@ pub(super) fn prepare_cloud_bind_groups(
         (
             Entity,
             &CloudTextures,
+            &CloudHistoryTextures,
+            &GpuCloudUniform,
             &AtmosphereTextures,
             &SphericalAtmosphereCamera,
             &ViewDepthTexture,
@@ -448,7 +648,9 @@ pub(super) fn prepare_cloud_bind_groups(
         return Ok(());
     };
 
-    for (entity, cloud_tex, atmo_tex, _spherical_camera, depth_texture) in &layers {
+    for (entity, cloud_tex, history_tex, uniform, atmo_tex, _spherical_camera, depth_texture) in
+        &layers
+    {
         let raymarch = render_device.create_bind_group(
             "cloud_raymarch_bind_group",
             &pipeline_cache.get_bind_group_layout(&layouts.raymarch),
@@ -470,18 +672,37 @@ pub(super) fn prepare_cloud_bind_groups(
             )),
         );
 
+        let history_read = history_tex.read_view(uniform.frame_index);
+        let history_write = history_tex.write_view(uniform.frame_index);
+        let temporal = render_device.create_bind_group(
+            "cloud_temporal_bind_group",
+            &pipeline_cache.get_bind_group_layout(&layouts.temporal),
+            &BindGroupEntries::with_indices((
+                (0, cloud_binding.clone()),
+                (1, transforms_binding.clone()),
+                (2, view_binding.clone()),
+                (3, &cloud_tex.raymarch.default_view),
+                (4, history_read),
+                (5, depth_texture.view()),
+                (6, &sampler.clamp),
+                (7, history_write),
+            )),
+        );
+
         let composite = render_device.create_bind_group(
             "cloud_composite_bind_group",
             &pipeline_cache.get_bind_group_layout(&layouts.composite),
             &BindGroupEntries::with_indices((
                 (0, cloud_binding.clone()),
-                (1, &cloud_tex.raymarch.default_view),
+                // Composite samples this frame's blended history.
+                (1, history_write),
                 (2, &sampler.clamp),
             )),
         );
 
         commands.entity(entity).insert(CloudBindGroups {
             raymarch,
+            temporal,
             composite,
         });
     }
