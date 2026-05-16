@@ -347,6 +347,10 @@ impl FromWorld for CloudBindGroupLayouts {
                     // Clamp-to-edge sampler — repeating the half-res buffer
                     // would be wrong at the edges.
                     (2, sampler(SamplerBindingType::Filtering)),
+                    // Camera depth — used by the bilateral upsample to
+                    // weight half-res neighbours by depth-class match,
+                    // avoiding cloud-bleed halos at terrain silhouettes.
+                    (3, texture_depth_2d_multisampled()),
                 ),
             ),
         );
@@ -1041,6 +1045,7 @@ pub(super) fn prepare_cloud_bind_groups(
                 // Composite samples this frame's blended history.
                 (1, history_write),
                 (2, &sampler.clamp),
+                (3, depth_texture.view()),
             )),
         );
 
