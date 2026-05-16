@@ -145,17 +145,23 @@ fn sample_layer_density(layer_i: u32, world_pos: vec3<f32>) -> f32 {
     let warp_n = textureSampleLevel(noise_3d, cloud_sampler, fract(warp_uv), 0.0);
     let warp = (warp_n.gb - 0.5) * 0.4; // ±20 % of tile
 
-    // Main noise lookup — wind offset is CPU-accumulated metres, so we
-    // just add it directly.
+    // Main noise lookup. Two-octave FBM-like sample (low frequency for
+    // macro shape, slightly-shifted higher frequency to break up the
+    // visible cell grid).
     //
-    // Two-octave sample (poor-man's FBM): the base lookup gives the macro
-    // cloud cells; a half-frequency lookup (offset to a different region
-    // of the noise volume) breaks up the visible 1-cell-per-tile pattern
-    // that's obvious when looking straight down at low altitude.
+    // The vertical noise axis uses `shell_h * vertical_cycles` instead of
+    // `world_pos.y / tile` so we get multiple noise cycles WITHIN the
+    // shell regardless of layer thickness — without this, a 3.5 km shell
+    // sampled at a 4 km tile sees ~1 vertical noise cycle and the
+    // shape-noise × v_profile interaction produces visible horizontal
+    // "decks" when the camera is inside the shell looking out.
     let tile = layer.noise_tile;
-    var noise_uv = world_pos / tile;
-    noise_uv.x += layer.wind_offset.x / tile + warp.x;
-    noise_uv.z += layer.wind_offset.y / tile + warp.y;
+    let vertical_cycles = 2.5;
+    var noise_uv = vec3<f32>(
+        world_pos.x / tile + layer.wind_offset.x / tile + warp.x,
+        shell_h * vertical_cycles,
+        world_pos.z / tile + layer.wind_offset.y / tile + warp.y,
+    );
     let n_lo = textureSampleLevel(noise_3d, cloud_sampler, fract(noise_uv), 0.0);
     // Higher-frequency octave at different position so it doesn't align.
     let n_hi = textureSampleLevel(noise_3d, cloud_sampler, fract(noise_uv * 2.13 + vec3(0.37, 0.19, 0.71)), 0.0);
