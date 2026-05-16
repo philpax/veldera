@@ -90,6 +90,30 @@ pub(super) fn render_clouds_tab(ui: &mut egui::Ui, clouds: &mut CloudParams) {
                         .integer()
                         .logarithmic(true),
                 );
+                ui.label("Weather (regional coverage modulation):");
+                ui.add(
+                    egui::Slider::new(&mut layer.weather_tile, 0.0..=500_000.0)
+                        .text("weather tile (m)")
+                        .integer()
+                        .logarithmic(true),
+                );
+                ui.add(
+                    egui::Slider::new(&mut layer.weather_strength, 0.0..=1.0)
+                        .text("weather strength"),
+                );
+                ui.label("Animation:");
+                ui.add(
+                    egui::Slider::new(&mut layer.wind_velocity.x, -50.0..=50.0)
+                        .text("wind east (m/s)"),
+                );
+                ui.add(
+                    egui::Slider::new(&mut layer.wind_velocity.y, -50.0..=50.0)
+                        .text("wind north (m/s)"),
+                );
+                ui.add(
+                    egui::Slider::new(&mut layer.evolution_rate, 0.0..=0.05)
+                        .text("evolution rate"),
+                );
                 ui.label("Phase:");
                 ui.add(egui::Slider::new(&mut layer.hg_forward, 0.0..=0.99).text("g forward"));
                 ui.add(egui::Slider::new(&mut layer.hg_backward, -0.99..=0.0).text("g backward"));

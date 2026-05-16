@@ -119,8 +119,9 @@ fn dual_henyey_greenstein_layer_eccentric(layer_i: u32, cos_theta: f32, eccentri
 // Cloud density at a world-space sample position for ONE specific sub-layer.
 //
 // Each layer has its own altitude range, coverage threshold, density scale,
-// and noise tile size. Returns 0 when the position is outside the layer's
-// shell or when the layer is disabled.
+// noise tile size, weather-map (regional coverage modulation), and
+// time-driven domain warp for cloud-shape evolution. Returns 0 when the
+// position is outside the layer's shell or when the layer is disabled.
 fn sample_layer_density(layer_i: u32, world_pos: vec3<f32>) -> f32 {
     let layer = cloud.layers[layer_i];
     if layer.enabled == 0u {
@@ -134,19 +135,47 @@ fn sample_layer_density(layer_i: u32, world_pos: vec3<f32>) -> f32 {
     let shell_h = (r - layer.inner_radius) / max(layer.outer_radius - layer.inner_radius, 1.0);
     let v_profile = smoothstep(0.0, 0.2, shell_h) * (1.0 - smoothstep(0.6, 1.0, shell_h));
 
+    // Domain warp — sample low-frequency noise at a quarter of the tile
+    // size and use its xy offset to perturb the main noise lookup. The
+    // amplitude is a fraction of the tile so warps stay subtle. Time
+    // modulates the warp slowly per the layer's evolution_rate.
+    let warp_tile = layer.noise_tile * 4.0;
+    var warp_uv = world_pos / warp_tile;
+    warp_uv += vec3<f32>(0.0, cloud.time_seconds * layer.evolution_rate, 0.0);
+    let warp_n = textureSampleLevel(noise_3d, cloud_sampler, fract(warp_uv), 0.0);
+    let warp = (warp_n.gb - 0.5) * 0.4; // ±20 % of tile
+
+    // Main noise lookup — wind offset is CPU-accumulated metres, so we
+    // just add it directly.
     let tile = layer.noise_tile;
     var noise_uv = world_pos / tile;
-    noise_uv.x += layer.wind_offset.x / tile;
-    noise_uv.z += layer.wind_offset.y / tile;
+    noise_uv.x += layer.wind_offset.x / tile + warp.x;
+    noise_uv.z += layer.wind_offset.y / tile + warp.y;
 
     let n = textureSampleLevel(noise_3d, cloud_sampler, fract(noise_uv), 0.0);
     let base = n.r;
     let erosion = (n.g * 0.625 + n.b * 0.25);
     let shape = saturate(remap(base, erosion - 1.0, 1.0, 0.0, 1.0));
 
+    // Weather map — sample noise at a much larger scale, project to the
+    // local tangent plane. The result modulates the coverage threshold
+    // *per region* so different parts of the planet have different cloud
+    // cover (cloudy here, clear there). Without this, the cloud cap is
+    // uniform across the entire visible globe at orbital altitude.
+    var regional_coverage = layer.coverage;
+    if layer.weather_tile > 0.0 && layer.weather_strength > 0.0 {
+        let weather_uv = world_pos / layer.weather_tile;
+        let weather_n = textureSampleLevel(noise_3d, cloud_sampler, fract(weather_uv), 0.0);
+        // Re-centre weather noise around 0 so positive values lower the
+        // coverage threshold (more cloud) and negative values raise it
+        // (less cloud). `weather_strength` scales the swing.
+        let weather = (weather_n.r - 0.5) * 2.0;
+        regional_coverage = saturate(layer.coverage - weather * layer.weather_strength);
+    }
+
     let raw = shape * v_profile;
-    let cov_lo = max(layer.coverage - 0.1, 0.0);
-    let cov_hi = min(layer.coverage + 0.1, 1.0);
+    let cov_lo = max(regional_coverage - 0.1, 0.0);
+    let cov_hi = min(regional_coverage + 0.1, 1.0);
     let density = smoothstep(cov_lo, cov_hi, raw);
     return density * layer.density_scale;
 }

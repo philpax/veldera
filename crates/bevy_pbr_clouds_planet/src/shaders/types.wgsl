@@ -15,9 +15,14 @@ struct CloudSubLayer {
     hg_blend: f32,
     noise_tile: f32,
 
-    wind_offset: vec2<f32>,
+    weather_tile: f32,
+    weather_strength: f32,
+    evolution_rate: f32,
     enabled: u32,
+
+    wind_offset: vec2<f32>,
     _pad0: u32,
+    _pad1: u32,
 }
 
 struct CloudUniform {
@@ -30,7 +35,7 @@ struct CloudUniform {
     full_size: vec2<u32>,
 
     layer_count: u32,
-    _pad_top0: u32,
+    time_seconds: f32,
     _pad_top1: u32,
     _pad_top2: u32,
 

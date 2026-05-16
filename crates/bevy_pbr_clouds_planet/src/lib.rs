@@ -301,6 +301,15 @@ pub struct CloudSubLayer {
     pub density_scale: f32,
     /// Noise tile size in metres. Larger values = larger cloud features.
     pub noise_tile: f32,
+    /// Weather-map tile size in metres. The noise is sampled at this
+    /// (much larger) scale to modulate coverage per region — a fluffy
+    /// stratocumulus shell at noon should be patchy across the planet,
+    /// not uniform. Set to 0 to disable per-region modulation.
+    pub weather_tile: f32,
+    /// How aggressively the weather map varies coverage. 0 = no
+    /// modulation; 1 = full swing from "much clearer than `coverage`" to
+    /// "much cloudier than `coverage`".
+    pub weather_strength: f32,
     /// Asymmetry parameter for the forward Henyey-Greenstein lobe.
     pub hg_forward: f32,
     /// Asymmetry parameter for the backward Henyey-Greenstein lobe.
@@ -308,9 +317,14 @@ pub struct CloudSubLayer {
     /// Blend weight between the forward and backward HG lobes.
     pub hg_blend: f32,
     /// Wind velocity in m/s in the local tangent plane (east, north).
-    /// Phase 5 wires animated UV scrolling against this; v1 is a static
-    /// offset.
+    /// CPU-accumulated into `wind_offset` (in `GpuCloudSubLayer`) each
+    /// frame, not multiplied by time in the shader — keeps the noise
+    /// lookup free of long-session float drift.
     pub wind_velocity: Vec2,
+    /// Rate at which the layer's noise is domain-warped over time. 0 =
+    /// static (only translates with wind); larger values = faster
+    /// morphing of cloud shape. Typical values: 0.001-0.01 cycles/sec.
+    pub evolution_rate: f32,
 }
 
 impl CloudSubLayer {
@@ -324,10 +338,16 @@ impl CloudSubLayer {
             coverage: 0.65,
             density_scale: 0.005,
             noise_tile: 2000.0,
+            // ~80 km regional patches — clouds vary from cloudy to clear
+            // over a few hundred km, breaking up orbital-scale uniformity
+            // without being too obvious from low altitude.
+            weather_tile: 80_000.0,
+            weather_strength: 0.5,
             hg_forward: 0.8,
             hg_backward: -0.3,
             hg_blend: 0.7,
-            wind_velocity: Vec2::ZERO,
+            wind_velocity: Vec2::new(8.0, 0.0),
+            evolution_rate: 0.003,
         }
     }
 
@@ -341,12 +361,17 @@ impl CloudSubLayer {
             coverage: 0.78,
             density_scale: 0.0008,
             noise_tile: 6000.0,
+            // Cirrus organisation is on a continental scale.
+            weather_tile: 250_000.0,
+            weather_strength: 0.4,
             // Ice-crystal cirrus is strongly forward-scattering, with a
             // narrow forward lobe and minimal back-lobe.
             hg_forward: 0.92,
             hg_backward: -0.1,
             hg_blend: 0.85,
-            wind_velocity: Vec2::ZERO,
+            // Cirrus winds aloft are stronger than surface winds.
+            wind_velocity: Vec2::new(25.0, 0.0),
+            evolution_rate: 0.001,
         }
     }
 
@@ -361,10 +386,13 @@ impl CloudSubLayer {
             coverage: 0.4,
             density_scale: 0.003,
             noise_tile: 1500.0,
+            weather_tile: 40_000.0,
+            weather_strength: 0.6,
             hg_forward: 0.6,
             hg_backward: -0.2,
             hg_blend: 0.6,
             wind_velocity: Vec2::ZERO,
+            evolution_rate: 0.0,
         }
     }
 }

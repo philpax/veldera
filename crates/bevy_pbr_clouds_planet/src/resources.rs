@@ -24,6 +24,7 @@ use bevy::{
         texture::{CachedTexture, TextureCache},
         view::{ExtractedView, Msaa, ViewDepthTexture, ViewUniform, ViewUniforms},
     },
+    time::Time,
 };
 use bevy_pbr_atmosphere_planet::{
     AtmosphereLightsBuffer, AtmosphereTextures, AtmosphereTransform, AtmosphereTransforms,
@@ -37,9 +38,7 @@ use crate::{CloudLayers, MAX_CLOUD_LAYERS, noise::NoiseTextures};
 /// All fields are explicit so the WGSL `struct CloudUniform` stays trivially
 /// in sync. Padding fields keep the struct aligned to 16 bytes per member, as
 /// required by the `uniform` address space.
-/// Per-layer GPU data — must mirror `CloudSubLayerGpu` in WGSL `types.wgsl`.
-/// 16-byte aligned via the trailing pad fields (each `vec3` field is
-/// followed by `f32` padding so the struct lays out as 4×vec4 rows).
+/// Per-layer GPU data — must mirror `CloudSubLayer` in WGSL `types.wgsl`.
 #[derive(ShaderType, Clone, Copy, Default)]
 pub struct GpuCloudSubLayer {
     /// Inner shell radius from planet centre, m.
@@ -54,11 +53,21 @@ pub struct GpuCloudSubLayer {
     pub hg_blend: f32,
     pub noise_tile: f32,
 
-    pub wind_offset: Vec2,
-    /// 0 = disabled, 1 = enabled. Disabled layers contribute no density
-    /// and the shader skips the per-step inner loop branch.
+    /// Tile size for the regional weather modulation, m. 0 disables it.
+    pub weather_tile: f32,
+    pub weather_strength: f32,
+    /// Domain-warp speed (cycles/sec).
+    pub evolution_rate: f32,
+    /// 0 = disabled, 1 = enabled. Disabled layers contribute no density.
     pub enabled: u32,
+
+    /// CPU-accumulated wind translation in metres. Wraps modulo
+    /// `noise_tile` so float precision stays bounded even after long play
+    /// sessions. The shader just adds this directly to the noise lookup
+    /// position.
+    pub wind_offset: Vec2,
     pub _pad0: u32,
+    pub _pad1: u32,
 }
 
 #[derive(Component, ShaderType, Clone)]
@@ -73,7 +82,11 @@ pub struct GpuCloudUniform {
 
     /// Number of valid entries in `layers`. Always ≤ `MAX_CLOUD_LAYERS`.
     pub layer_count: u32,
-    pub _pad_top0: u32,
+    /// Time in seconds since the cloud system started. Used by the
+    /// shader's domain-warp evolution; NOT used for wind translation
+    /// (that's CPU-accumulated into `wind_offset` to keep precision
+    /// bounded over long sessions).
+    pub time_seconds: f32,
     pub _pad_top1: u32,
     pub _pad_top2: u32,
 
@@ -421,17 +434,40 @@ pub(crate) struct CloudBindGroups {
 }
 
 /// Per-camera, render-world component holding the previous frame's
-/// reprojection matrix + ECEF camera position + frame counter.
+/// reprojection matrix + ECEF camera position + frame counter, plus the
+/// CPU-accumulated wind offsets per cloud layer (so wind doesn't have to
+/// be re-derived from time-multiplied-by-velocity in the shader, where
+/// float precision drifts after a few minutes).
 ///
 /// Updated each frame by [`prepare_cloud_uniforms`] (which reads the prev
 /// values into the uniform, then overwrites them with the current values
 /// for the next frame's pickup).
-#[derive(Component, Default, Clone, Copy)]
+#[derive(Component, Clone, Copy)]
 pub struct CloudPrevFrame {
     pub clip_from_world: Mat4,
     pub camera_ecef: Vec3,
     pub frame_index: u32,
     pub initialised: bool,
+    /// Accumulated wind offset per layer, in metres. Wrapped modulo a
+    /// large multiple of the noise tile so the float doesn't drift to
+    /// useless precision after long play sessions.
+    pub wind_offsets: [Vec2; crate::MAX_CLOUD_LAYERS],
+    /// Time the cloud system has been running, in seconds. Drives the
+    /// shader-side domain-warp evolution.
+    pub time_seconds: f32,
+}
+
+impl Default for CloudPrevFrame {
+    fn default() -> Self {
+        Self {
+            clip_from_world: Mat4::IDENTITY,
+            camera_ecef: Vec3::ZERO,
+            frame_index: 0,
+            initialised: false,
+            wind_offsets: [Vec2::ZERO; crate::MAX_CLOUD_LAYERS],
+            time_seconds: 0.0,
+        }
+    }
 }
 
 /// Threshold (m) for the camera-position delta above which we treat the
@@ -448,6 +484,7 @@ const TELEPORT_THRESHOLD_M: f32 = 5_000.0;
 #[allow(clippy::type_complexity)]
 pub(super) fn prepare_cloud_uniforms(
     mut commands: Commands,
+    time: Res<Time>,
     layers: Query<(
         Entity,
         &CloudLayers,
@@ -458,6 +495,8 @@ pub(super) fn prepare_cloud_uniforms(
         Option<&ExtractedCamera>,
     )>,
 ) {
+    let dt = time.delta_secs();
+
     for (entity, cloud, atmosphere, view, sph_cam, prev_state, camera) in &layers {
         let quality = cloud.quality;
         let full_size = camera
@@ -467,8 +506,20 @@ pub(super) fn prepare_cloud_uniforms(
             .max(Vec2::splat(1.0))
             .as_uvec2();
 
+        let prev = prev_state.copied().unwrap_or_default();
+
+        // Advance the per-layer wind offset by `velocity * dt`. Wrap modulo
+        // a large multiple of the noise tile (32×) so the float never grows
+        // unbounded — `fract()` in the shader makes the wrap invisible.
+        let mut wind_offsets = prev.wind_offsets;
+        for (i, sub) in cloud.layers.iter().take(MAX_CLOUD_LAYERS).enumerate() {
+            let wrap = (sub.noise_tile * 32.0).max(1.0);
+            let next = wind_offsets[i] + sub.wind_velocity * dt;
+            wind_offsets[i] = Vec2::new(next.x.rem_euclid(wrap), next.y.rem_euclid(wrap));
+        }
+        let next_time_seconds = prev.time_seconds + dt;
+
         // Pack up to MAX_CLOUD_LAYERS sub-layers into the uniform array.
-        // Extras beyond the limit are silently dropped.
         let mut gpu_layers = [GpuCloudSubLayer::default(); MAX_CLOUD_LAYERS];
         let layer_count = cloud.layers.len().min(MAX_CLOUD_LAYERS);
         for (i, sub) in cloud.layers.iter().take(MAX_CLOUD_LAYERS).enumerate() {
@@ -481,9 +532,13 @@ pub(super) fn prepare_cloud_uniforms(
                 hg_backward: sub.hg_backward,
                 hg_blend: sub.hg_blend,
                 noise_tile: sub.noise_tile.max(1.0),
-                wind_offset: sub.wind_velocity,
+                weather_tile: sub.weather_tile.max(0.0),
+                weather_strength: sub.weather_strength.clamp(0.0, 1.0),
+                evolution_rate: sub.evolution_rate,
+                wind_offset: wind_offsets[i],
                 enabled: u32::from(sub.enabled),
                 _pad0: 0,
+                _pad1: 0,
             };
         }
 
@@ -493,7 +548,6 @@ pub(super) fn prepare_cloud_uniforms(
         });
         let current_camera_ecef = sph_cam.local_up * sph_cam.camera_radius;
 
-        let prev = prev_state.copied().unwrap_or_default();
         let teleported = prev.initialised
             && current_camera_ecef.distance(prev.camera_ecef) > TELEPORT_THRESHOLD_M;
         let history_valid = prev.initialised && !teleported;
@@ -506,7 +560,7 @@ pub(super) fn prepare_cloud_uniforms(
             buffer_size,
             full_size,
             layer_count: layer_count as u32,
-            _pad_top0: 0,
+            time_seconds: next_time_seconds,
             _pad_top1: 0,
             _pad_top2: 0,
             prev_clip_from_world: prev.clip_from_world,
@@ -524,6 +578,8 @@ pub(super) fn prepare_cloud_uniforms(
             camera_ecef: current_camera_ecef,
             frame_index: prev.frame_index.wrapping_add(1),
             initialised: true,
+            wind_offsets,
+            time_seconds: next_time_seconds,
         });
     }
 }
