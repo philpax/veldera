@@ -33,11 +33,24 @@ fn depth_to_camera_dist(uv: vec2<f32>, depth: f32) -> f32 {
 }
 #import bevy_pbr_clouds_planet::functions::{
     uv_to_ray_direction_ws, direction_world_to_atmosphere,
-    sample_transmittance, sample_aerial_inscattering,
-    dual_henyey_greenstein,
-    sample_cloud_density, sample_light_transmittance,
+    sample_transmittance, sample_aerial_inscattering, sample_sky_view,
+    dual_henyey_greenstein, dual_henyey_greenstein_eccentric,
+    sample_cloud_density, sample_light_optical_depth,
     cloud_shell_segment,
 };
+
+// Number of Wrenninge multi-scatter octaves. Each successive octave
+// represents another simulated bounce: the optical depth toward the sun is
+// scaled by `attenuation^n` (less self-shadow), the contribution by
+// `contribution^n` (each bounce adds less light), and the phase function's
+// directionality by `eccentricity^n` (each bounce becomes more isotropic).
+//
+// 4 octaves is the typical default. Higher costs more per sample but the
+// returns flatten quickly because of the geometric falloff.
+const WRENNINGE_OCTAVES: u32 = 4u;
+const WRENNINGE_ATTENUATION: f32 = 0.5;
+const WRENNINGE_CONTRIBUTION: f32 = 0.5;
+const WRENNINGE_ECCENTRICITY: f32 = 0.5;
 
 // Debug-mode constants matching CloudDebugMode in lib.rs.
 const DBG_OFF: u32 = 0u;
@@ -147,31 +160,52 @@ fn main(@builtin(global_invocation_id) idx: vec3<u32>) {
             continue;
         }
 
-        // Sun lighting: integrate over each atmospheric light.
+        // Sun lighting via Wrenninge multi-scatter octaves, plus Earth-shine
+        // ambient sampled from the atmosphere's sky-view LUT.
         let local_r = length(sample_pos);
         let sample_up = sample_pos / max(local_r, 1.0);
-        var radiance = vec3<f32>(0.0);
+        let up_as = direction_world_to_atmosphere(sample_up, atmosphere_transforms.local_up);
+
+        // Earth-shine: take the actual sky-view colour in the upward
+        // hemisphere as ambient illumination on the cloud sample. The
+        // sky-view LUT is parametrised at the camera, but for shells within
+        // a few km of the camera this is a good enough approximation and
+        // gives the right colour shifts (orange at sunset, blue at noon).
+        let earth_shine = sample_sky_view(local_r, up_as);
+
+        var radiance = earth_shine;
         for (var li: u32 = 0u; li < atmosphere_lights.count; li = li + 1u) {
             let light = atmosphere_lights.lights[li];
             let light_dir_ws = light.direction_to_light;
             let mu_light = dot(light_dir_ws, sample_up);
-            // Atmosphere transmittance from the sample point along the ray
-            // toward the sun. Ignored when sun is below local horizon.
+            // Atmosphere transmittance from sample to sun. Zero if sun is
+            // below the local horizon.
             let atmo_t = sample_transmittance(local_r, mu_light) * f32(mu_light > 0.0);
-            let cloud_t = sample_light_transmittance(sample_pos, light_dir_ws);
+            // Optical depth toward the sun via cone-shadow march. We get
+            // the raw τ here (not transmittance) so the octave loop can
+            // scale by `attenuation^n` before exponentiating.
+            let tau_light = sample_light_optical_depth(sample_pos, light_dir_ws);
             let cos_theta = dot(ray_dir_ws, light_dir_ws);
-            let phase = dual_henyey_greenstein(cos_theta);
-            // Direct single-scattering term.
-            let direct = light.color * atmo_t * cloud_t * phase;
-            // Ambient: stand-in for the multi-scatter + sky-fill contribution
-            // that would otherwise come from Phase 2's Wrenninge octaves +
-            // sky-view LUT sample. Without it, perpendicular-to-sun cloud
-            // pixels (phase ≈ 0.06) reflect less light than the sky inscatters
-            // in the same direction, so the cloud appears as a *darker* band
-            // against the sky. A flat fraction of `light.color` lifts the
-            // floor so the cloud never goes darker than the surrounding sky.
-            let ambient = light.color * atmo_t * 0.15;
-            radiance = radiance + direct + ambient;
+
+            // Wrenninge octave loop: sum direct + simulated multi-scatter
+            // bounces. Each successive octave sees less self-shadow (lower
+            // attenuation), contributes less (lower contribution), and uses
+            // a flatter phase (lower eccentricity) — this captures the
+            // diffuse glow that real clouds get from light bouncing many
+            // times through the volume.
+            var octave_sum = vec3<f32>(0.0);
+            var attenuation = 1.0;
+            var contribution = 1.0;
+            var eccentricity = 1.0;
+            for (var oct: u32 = 0u; oct < WRENNINGE_OCTAVES; oct = oct + 1u) {
+                let cloud_t_n = exp(-tau_light * attenuation);
+                let phase_n = dual_henyey_greenstein_eccentric(cos_theta, eccentricity);
+                octave_sum = octave_sum + (cloud_t_n * phase_n * contribution);
+                attenuation = attenuation * WRENNINGE_ATTENUATION;
+                contribution = contribution * WRENNINGE_CONTRIBUTION;
+                eccentricity = eccentricity * WRENNINGE_ECCENTRICITY;
+            }
+            radiance = radiance + light.color * atmo_t * octave_sum;
         }
 
         // Beer's law extinction across the segment.

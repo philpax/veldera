@@ -65,16 +65,28 @@ pub struct CloudTextures {
     pub raymarch_size: UVec2,
 }
 
-/// Linear, clamp-to-edge sampler shared by every cloud shader for both the
-/// noise textures and the raymarch buffer.
+/// Sampler set used by the cloud shaders.
+///
+/// We need two samplers because the cloud noise textures want `Repeat` (so
+/// they tile seamlessly), while the atmosphere LUTs require `ClampToEdge`
+/// (the sky-view LUT in particular packs zenith at v=0 and nadir at v=1; a
+/// repeat sampler would wrap a tiny `v=-0.005` zenith lookup to `v=0.995`,
+/// which is the bright nadir/ground region — clouds end up lit by the
+/// ground at night).
 #[derive(Resource)]
-pub struct CloudSampler(pub Sampler);
+pub struct CloudSampler {
+    /// Repeat sampler for the tiled 3D noise.
+    pub noise: Sampler,
+    /// Clamp-to-edge sampler for the atmosphere LUTs and the half-res
+    /// raymarch buffer.
+    pub clamp: Sampler,
+}
 
 impl FromWorld for CloudSampler {
     fn from_world(world: &mut World) -> Self {
         let render_device = world.resource::<RenderDevice>();
-        let sampler = render_device.create_sampler(&SamplerDescriptor {
-            label: Some("cloud_sampler"),
+        let noise = render_device.create_sampler(&SamplerDescriptor {
+            label: Some("cloud_noise_sampler"),
             address_mode_u: AddressMode::Repeat,
             address_mode_v: AddressMode::Repeat,
             address_mode_w: AddressMode::Repeat,
@@ -83,7 +95,17 @@ impl FromWorld for CloudSampler {
             mipmap_filter: FilterMode::Linear,
             ..Default::default()
         });
-        Self(sampler)
+        let clamp = render_device.create_sampler(&SamplerDescriptor {
+            label: Some("cloud_lut_sampler"),
+            address_mode_u: AddressMode::ClampToEdge,
+            address_mode_v: AddressMode::ClampToEdge,
+            address_mode_w: AddressMode::ClampToEdge,
+            mag_filter: FilterMode::Linear,
+            min_filter: FilterMode::Linear,
+            mipmap_filter: FilterMode::Nearest,
+            ..Default::default()
+        });
+        Self { noise, clamp }
     }
 }
 
@@ -118,10 +140,15 @@ impl FromWorld for CloudBindGroupLayouts {
                     // Atmosphere LUTs (sampled).
                     (6, texture_2d(TextureSampleType::default())), // Transmittance.
                     (7, texture_3d(TextureSampleType::default())), // Aerial view.
+                    // Sky-view LUT — sampled in the upward hemisphere at
+                    // each cloud sample for Earth-shine ambient illumination.
+                    (12, texture_2d(TextureSampleType::default())),
                     // Cloud noise (single packed 3D texture).
                     (8, texture_3d(TextureSampleType::default())),
-                    // Shared linear sampler.
+                    // Linear, repeat sampler for the noise.
                     (9, sampler(SamplerBindingType::Filtering)),
+                    // Linear, clamp-to-edge sampler for the atmosphere LUTs.
+                    (13, sampler(SamplerBindingType::Filtering)),
                     // Output: half-res raymarch buffer.
                     (
                         10,
@@ -147,6 +174,8 @@ impl FromWorld for CloudBindGroupLayouts {
                     (0, uniform_buffer::<GpuCloudUniform>(true)),
                     // Cloud raymarch buffer (half-res).
                     (1, texture_2d(TextureSampleType::default())),
+                    // Clamp-to-edge sampler — repeating the half-res buffer
+                    // would be wrong at the edges.
                     (2, sampler(SamplerBindingType::Filtering)),
                 ),
             ),
@@ -432,8 +461,10 @@ pub(super) fn prepare_cloud_bind_groups(
                 (5, atmosphere_lights_binding.clone()),
                 (6, &atmo_tex.transmittance_lut.default_view),
                 (7, &atmo_tex.aerial_view_lut.default_view),
+                (12, &atmo_tex.sky_view_lut.default_view),
                 (8, noise_view),
-                (9, &sampler.0),
+                (9, &sampler.noise),
+                (13, &sampler.clamp),
                 (10, &cloud_tex.raymarch.default_view),
                 (11, depth_texture.view()),
             )),
@@ -445,7 +476,7 @@ pub(super) fn prepare_cloud_bind_groups(
             &BindGroupEntries::with_indices((
                 (0, cloud_binding.clone()),
                 (1, &cloud_tex.raymarch.default_view),
-                (2, &sampler.0),
+                (2, &sampler.clamp),
             )),
         );
 

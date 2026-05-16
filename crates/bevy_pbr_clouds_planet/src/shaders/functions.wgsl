@@ -1,10 +1,11 @@
 #define_import_path bevy_pbr_clouds_planet::functions
 
-#import bevy_render::maths::{PI, ray_sphere_intersect};
+#import bevy_render::maths::{PI, HALF_PI, fast_acos_4, fast_atan2, ray_sphere_intersect};
 #import bevy_pbr_atmosphere_planet::bruneton_functions::transmittance_lut_r_mu_to_uv;
 #import bevy_pbr_clouds_planet::bindings::{
     cloud, atmosphere, atmosphere_transforms, view,
-    transmittance_lut, aerial_view_lut, noise_3d, cloud_sampler,
+    transmittance_lut, aerial_view_lut, sky_view_lut,
+    noise_3d, cloud_sampler, lut_sampler,
 };
 
 // World-space ray direction for a screen UV. Mirrors the atmosphere's
@@ -31,7 +32,42 @@ fn direction_world_to_atmosphere(dir_ws: vec3<f32>, up: vec3<f32>) -> vec3<f32> 
 // of the atmosphere along a ray with cosine `mu`.
 fn sample_transmittance(r: f32, mu: f32) -> vec3<f32> {
     let uv = transmittance_lut_r_mu_to_uv(atmosphere, r, mu);
-    return textureSampleLevel(transmittance_lut, cloud_sampler, uv, 0.0).rgb;
+    return textureSampleLevel(transmittance_lut, lut_sampler, uv, 0.0).rgb;
+}
+
+// Sample the atmosphere's sky-view LUT for the radiance arriving at the
+// camera from a direction in atmosphere space (Y is local up).
+//
+// This is parametrised by the *camera's* radius implicitly (the LUT was
+// computed for the camera's altitude), but we can use it as a good
+// approximation for cloud sample points that are within a few km of the
+// camera — Earth-shine on a cloud bottom 3 km above a 1 km camera looks
+// essentially the same as the sky color the camera itself sees in the same
+// direction. Avoids needing a separate per-sample sky LUT.
+//
+// Mirrors `bevy_pbr_atmosphere_planet::functions::sample_sky_view_lut` /
+// `sky_view_lut_r_mu_azimuth_to_uv` but inlined so we don't have to import
+// the atmosphere's `settings` binding.
+fn sample_sky_view(local_r: f32, dir_as: vec3<f32>) -> vec3<f32> {
+    let mu = clamp(dir_as.y, -1.0, 1.0);
+    let azimuth = fast_atan2(dir_as.x, -dir_as.z);
+
+    let v_horizon_sqr = max(local_r * local_r - atmosphere.bottom_radius * atmosphere.bottom_radius, 0.0);
+    let v_horizon = sqrt(v_horizon_sqr);
+    let cos_beta = v_horizon / max(local_r, 1.0);
+    let beta = fast_acos_4(cos_beta);
+    let horizon_zenith = PI - beta;
+    let view_zenith = fast_acos_4(mu);
+
+    let l = view_zenith - horizon_zenith;
+    let abs_l = abs(l);
+    let v_raw = 0.5 + 0.5 * sign(l) * sqrt(abs_l / HALF_PI);
+    let u_raw = (azimuth / (2.0 * PI)) + 0.5;
+
+    let size = vec2<f32>(textureDimensions(sky_view_lut));
+    let uv = (vec2(u_raw, v_raw) + 0.5 / size) * (size / (size + 1.0));
+
+    return textureSampleLevel(sky_view_lut, lut_sampler, uv, 0.0).rgb;
 }
 
 // RGB = inscattered radiance integrated to distance `t`.
@@ -45,7 +81,7 @@ fn sample_aerial_inscattering(uv: vec2<f32>, t: f32) -> vec3<f32> {
     let num_slices = f32(textureDimensions(aerial_view_lut).z);
     let max_distance = 32000.0; // matches atmosphere default
     let depth = saturate(t / max_distance - 0.5 / num_slices);
-    let sample = textureSampleLevel(aerial_view_lut, cloud_sampler, vec3(uv, depth), 0.0);
+    let sample = textureSampleLevel(aerial_view_lut, lut_sampler, vec3(uv, depth), 0.0);
     let t_slice = max_distance / num_slices;
     let fade = saturate(t / t_slice);
     return exp(sample.rgb) * fade;
@@ -63,6 +99,17 @@ fn henyey_greenstein(cos_theta: f32, g: f32) -> f32 {
 fn dual_henyey_greenstein(cos_theta: f32) -> f32 {
     let f = henyey_greenstein(cos_theta, cloud.hg_forward);
     let b = henyey_greenstein(cos_theta, cloud.hg_backward);
+    return mix(b, f, cloud.hg_blend);
+}
+
+// Dual-lobe HG with both g values softened by `eccentricity` (≤ 1). Used by
+// the Wrenninge multi-scatter octave loop: each successive octave passes a
+// progressively smaller eccentricity, gradually flattening the phase
+// function toward isotropic to model the diffusion of light over multiple
+// scattering events.
+fn dual_henyey_greenstein_eccentric(cos_theta: f32, eccentricity: f32) -> f32 {
+    let f = henyey_greenstein(cos_theta, cloud.hg_forward * eccentricity);
+    let b = henyey_greenstein(cos_theta, cloud.hg_backward * eccentricity);
     return mix(b, f, cloud.hg_blend);
 }
 
@@ -116,30 +163,55 @@ fn remap(x: f32, a: f32, b: f32, c: f32, d: f32) -> f32 {
     return c + (x - a) * (d - c) / max(b - a, 1e-6);
 }
 
-// Estimate transmittance to the sun by marching `cloud.light_steps` steps
-// toward the light, integrating density along the way. No phase here —
-// this is the optical-depth integrator only.
+// Cone-jitter offsets, in tangent-frame coordinates, used by the cone-shadow
+// march. Each sample is offset perpendicular to the sun direction by a
+// vector whose length grows with distance, so the march samples a soft cone
+// rather than a strict line. Offsets are deterministic (no per-pixel noise)
+// to keep the result temporally stable.
+const CONE_OFFSETS: array<vec3<f32>, 6> = array<vec3<f32>, 6>(
+    vec3<f32>( 0.155,  0.490,  0.000),
+    vec3<f32>( 0.255, -0.290,  0.190),
+    vec3<f32>(-0.220, -0.215,  0.380),
+    vec3<f32>( 0.000,  0.155, -0.420),
+    vec3<f32>(-0.310,  0.080,  0.150),
+    vec3<f32>( 0.430, -0.080, -0.100),
+);
+
+// Optical depth toward the sun via a 6-tap cone march.
 //
-// Steps grow geometrically: the first step is short (samples close to the
-// shading point where shadowing matters most), later steps are longer so
-// the march reaches a few km without burning samples on far-away cloud.
-// Without this, `light_steps=6` over a fixed 1 km only sees the immediate
-// neighbourhood and most clouds end up with cloud_t ≈ 0.85-0.95, hiding
-// any actual self-shadow contrast.
-fn sample_light_transmittance(start_pos: vec3<f32>, light_dir_ws: vec3<f32>) -> f32 {
+// At each step, the sample position is offset perpendicular to the sun
+// direction by a vector whose magnitude grows linearly with `t`. The growing
+// cone radius gives a soft self-shadow that blurs the further-away cloud
+// detail, matching how clouds actually self-shade in real life and avoiding
+// the harsh banding a strict line march produces.
+//
+// Returns optical depth (not transmittance) so the Wrenninge octave loop
+// can scale it by per-octave attenuation factors.
+fn sample_light_optical_depth(start_pos: vec3<f32>, light_dir_ws: vec3<f32>) -> f32 {
     let base_step = 80.0;
     let growth = 1.6;
+    let cone_ratio = 0.05; // tan(half-angle) ~ 5°
+
+    // Tangent frame around the light ray.
+    let n = light_dir_ws;
+    let up_guess = select(vec3<f32>(0.0, 1.0, 0.0), vec3<f32>(1.0, 0.0, 0.0), abs(n.y) > 0.9);
+    let t_dir = normalize(cross(up_guess, n));
+    let b_dir = cross(n, t_dir);
+
     var optical_depth = 0.0;
     var t = 0.0;
     var step = base_step;
     for (var i: u32 = 0u; i < cloud.light_steps; i = i + 1u) {
-        let p = start_pos + light_dir_ws * (t + step * 0.5);
+        let center = start_pos + light_dir_ws * (t + step * 0.5);
+        let cone_r = (t + step * 0.5) * cone_ratio;
+        let off = CONE_OFFSETS[i % 6u];
+        let p = center + (t_dir * off.x + b_dir * off.y + n * off.z) * cone_r;
         let d = sample_cloud_density(p);
         optical_depth = optical_depth + d * step;
         t = t + step;
         step = step * growth;
     }
-    return exp(-optical_depth);
+    return optical_depth;
 }
 
 // Maximum cloud-march distance. Beyond this the curvature effects dominate

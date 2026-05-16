@@ -243,12 +243,12 @@ impl CloudLayer {
         Self {
             inner_altitude: 1500.0,
             outer_altitude: 5000.0,
-            // Density tuned so the loop's accumulated opacity sits in the
-            // 0.3–0.9 range across typical noise variation. Going higher
-            // makes every pixel saturate to fully opaque white and hides
-            // both the noise structure and the per-sample phase shading.
-            coverage: 0.45,
-            density_scale: 0.0003,
+            // Higher coverage threshold + denser per-pixel extinction
+            // produces discrete cloud puffs instead of a uniform haze.
+            // Roughly the parameters that visually look most like real
+            // stratocumulus once Earth-shine + Wrenninge octaves are on.
+            coverage: 0.65,
+            density_scale: 0.005,
             resolution_scale: 0.5,
             max_primary_steps: 96,
             light_steps: 6,
