@@ -63,10 +63,14 @@ pub use node::CloudNode;
 pub use resources::{CloudBindGroupLayouts, CloudPipelines, CloudSampler, CloudTextures};
 
 use noise::{NoiseBakeState, NoiseBindGroupLayout, NoisePipeline, NoiseTextures};
-use node::{CloudCompositeNode, CloudRaymarchNode, CloudTemporalNode};
+use node::{
+    CloudCompositeNode, CloudRaymarchNode, CloudShadowApplyNode, CloudShadowBakeNode,
+    CloudTemporalNode,
+};
 use resources::{
     GpuCloudUniform, prepare_cloud_bind_groups, prepare_cloud_history_textures,
-    prepare_cloud_textures, prepare_cloud_uniforms, queue_cloud_composite_pipelines,
+    prepare_cloud_shadow_textures, prepare_cloud_textures, prepare_cloud_uniforms,
+    queue_cloud_render_pipelines,
 };
 
 /// Maximum number of cloud sub-layers in a single [`CloudLayers`] container.
@@ -88,6 +92,8 @@ impl Plugin for CloudsPlanetPlugin {
         embedded_asset!(app, "shaders/noise_bake.wgsl");
         embedded_asset!(app, "shaders/cloud_raymarch.wgsl");
         embedded_asset!(app, "shaders/cloud_temporal.wgsl");
+        embedded_asset!(app, "shaders/cloud_shadow_bake.wgsl");
+        embedded_asset!(app, "shaders/cloud_shadow_apply.wgsl");
         embedded_asset!(app, "shaders/cloud_composite.wgsl");
 
         app.add_plugins((
@@ -139,13 +145,18 @@ impl Plugin for CloudsPlanetPlugin {
                     prepare_cloud_uniforms
                         .before(RenderSystems::PrepareResources)
                         .after(RenderSystems::PrepareAssets),
-                    queue_cloud_composite_pipelines.in_set(RenderSystems::Queue),
+                    queue_cloud_render_pipelines.in_set(RenderSystems::Queue),
                     prepare_cloud_textures.in_set(RenderSystems::PrepareResources),
                     prepare_cloud_history_textures.in_set(RenderSystems::PrepareResources),
+                    prepare_cloud_shadow_textures.in_set(RenderSystems::PrepareResources),
                     prepare_cloud_bind_groups.in_set(RenderSystems::PrepareBindGroups),
                 ),
             )
             .add_render_graph_node::<noise::NoiseBakeNode>(Core3d, CloudNode::NoiseBake)
+            .add_render_graph_node::<ViewNodeRunner<CloudShadowBakeNode>>(
+                Core3d,
+                CloudNode::ShadowBake,
+            )
             .add_render_graph_node::<ViewNodeRunner<CloudRaymarchNode>>(
                 Core3d,
                 CloudNode::Raymarch,
@@ -153,6 +164,10 @@ impl Plugin for CloudsPlanetPlugin {
             .add_render_graph_node::<ViewNodeRunner<CloudTemporalNode>>(
                 Core3d,
                 CloudNode::Temporal,
+            )
+            .add_render_graph_node::<ViewNodeRunner<CloudShadowApplyNode>>(
+                Core3d,
+                CloudNode::ShadowApply,
             )
             .add_render_graph_node::<ViewNodeRunner<CloudCompositeNode>>(
                 Core3d,
@@ -163,6 +178,9 @@ impl Plugin for CloudsPlanetPlugin {
                 (
                     Node3d::EndPrepasses,
                     CloudNode::NoiseBake,
+                    // Shadow bake runs before the main opaque pass so its
+                    // result is ready when shadow apply samples it later.
+                    CloudNode::ShadowBake,
                     Node3d::StartMainPass,
                 ),
             )
@@ -170,6 +188,11 @@ impl Plugin for CloudsPlanetPlugin {
                 Core3d,
                 (
                     AtmosphereNode::RenderSky,
+                    // Shadow apply dims cloud-shadowed terrain BEFORE the
+                    // cloud raymarch / composite, so cloud volumes
+                    // themselves render on top of the (now shadow-dimmed)
+                    // scene without being dimmed by their own shadow.
+                    CloudNode::ShadowApply,
                     CloudNode::Raymarch,
                     CloudNode::Temporal,
                     CloudNode::Composite,

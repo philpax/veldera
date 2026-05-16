@@ -19,23 +19,31 @@ use tracing::info;
 use crate::{
     CloudLayers,
     resources::{
-        CloudBindGroups, CloudCompositePipelineId, CloudPipelines, CloudTextures, GpuCloudUniform,
+        CloudBindGroups, CloudPipelines, CloudRenderPipelineIds, CloudTextures, GpuCloudUniform,
+        SHADOW_MAP_SIZE,
     },
 };
 
 static RAYMARCH_LOGGED: AtomicBool = AtomicBool::new(false);
 static TEMPORAL_LOGGED: AtomicBool = AtomicBool::new(false);
 static COMPOSITE_LOGGED: AtomicBool = AtomicBool::new(false);
+static SHADOW_BAKE_LOGGED: AtomicBool = AtomicBool::new(false);
+static SHADOW_APPLY_LOGGED: AtomicBool = AtomicBool::new(false);
 
 /// Render-graph labels for the cloud renderer.
 #[derive(PartialEq, Eq, Debug, Copy, Clone, Hash, RenderLabel)]
 pub enum CloudNode {
     /// One-shot 3D noise bake. Becomes a no-op after the first frame.
     NoiseBake,
+    /// Per-frame cloud-shadow map bake (compute, writes 1024² R16Float).
+    ShadowBake,
     /// Half-resolution cloud raymarch (compute).
     Raymarch,
     /// Reproject + blend into the ping-pong history buffer (compute).
     Temporal,
+    /// Modulate-blend the cloud shadow map into the HDR view target so
+    /// terrain in cloud shadow gets dimmed (fragment).
+    ShadowApply,
     /// Bilinear upsample + over-blend into the HDR view target (fragment).
     Composite,
 }
@@ -176,7 +184,7 @@ impl ViewNode for CloudCompositeNode {
     type ViewQuery = (
         Read<ExtractedCamera>,
         Read<CloudBindGroups>,
-        Read<CloudCompositePipelineId>,
+        Read<CloudRenderPipelineIds>,
         Read<ViewTarget>,
         Read<DynamicUniformIndex<GpuCloudUniform>>,
     );
@@ -185,13 +193,11 @@ impl ViewNode for CloudCompositeNode {
         &self,
         _graph: &mut RenderGraphContext,
         render_context: &mut RenderContext,
-        (camera, bind_groups, composite_pipeline_id, view_target, cloud_offset): QueryItem<
-            Self::ViewQuery,
-        >,
+        (camera, bind_groups, pipeline_ids, view_target, cloud_offset): QueryItem<Self::ViewQuery>,
         world: &World,
     ) -> Result<(), NodeRunError> {
         let pipeline_cache = world.resource::<PipelineCache>();
-        let Some(composite_pipeline) = pipeline_cache.get_render_pipeline(composite_pipeline_id.0)
+        let Some(composite_pipeline) = pipeline_cache.get_render_pipeline(pipeline_ids.composite)
         else {
             return Ok(());
         };
@@ -213,6 +219,114 @@ impl ViewNode for CloudCompositeNode {
         pass.draw(0..3, 0..1);
         if !COMPOSITE_LOGGED.swap(true, Ordering::Relaxed) {
             info!("cloud composite first draw");
+        }
+        Ok(())
+    }
+}
+
+#[derive(Default)]
+pub(super) struct CloudShadowBakeNode;
+
+impl ViewNode for CloudShadowBakeNode {
+    type ViewQuery = (
+        Read<CloudLayers>,
+        Read<CloudBindGroups>,
+        Read<DynamicUniformIndex<GpuCloudUniform>>,
+        Read<DynamicUniformIndex<bevy_pbr_atmosphere_planet::GpuAtmosphere>>,
+        Read<AtmosphereTransformsOffset>,
+    );
+
+    fn run(
+        &self,
+        _graph: &mut RenderGraphContext,
+        render_context: &mut RenderContext,
+        (_layer, bind_groups, cloud_offset, atmosphere_offset, transforms_offset): QueryItem<
+            Self::ViewQuery,
+        >,
+        world: &World,
+    ) -> Result<(), NodeRunError> {
+        let pipelines = world.resource::<CloudPipelines>();
+        let pipeline_cache = world.resource::<PipelineCache>();
+        let Some(bake_pipeline) = pipeline_cache.get_compute_pipeline(pipelines.shadow_bake) else {
+            return Ok(());
+        };
+
+        let mut pass = render_context
+            .command_encoder()
+            .begin_compute_pass(&ComputePassDescriptor {
+                label: Some("cloud_shadow_bake"),
+                timestamp_writes: None,
+            });
+        pass.set_pipeline(bake_pipeline);
+        pass.set_bind_group(
+            0,
+            &bind_groups.shadow_bake,
+            &[
+                cloud_offset.index(),
+                atmosphere_offset.index(),
+                transforms_offset.index(),
+            ],
+        );
+
+        const WORKGROUP_SIZE: u32 = 8;
+        let groups = SHADOW_MAP_SIZE.div_ceil(WORKGROUP_SIZE);
+        pass.dispatch_workgroups(groups, groups, 1);
+        if !SHADOW_BAKE_LOGGED.swap(true, Ordering::Relaxed) {
+            info!("cloud shadow bake first dispatch ({}² workgroups)", groups);
+        }
+        Ok(())
+    }
+}
+
+#[derive(Default)]
+pub(super) struct CloudShadowApplyNode;
+
+impl ViewNode for CloudShadowApplyNode {
+    type ViewQuery = (
+        Read<ExtractedCamera>,
+        Read<CloudBindGroups>,
+        Read<CloudRenderPipelineIds>,
+        Read<ViewTarget>,
+        Read<DynamicUniformIndex<GpuCloudUniform>>,
+        Read<ViewUniformOffset>,
+    );
+
+    fn run(
+        &self,
+        _graph: &mut RenderGraphContext,
+        render_context: &mut RenderContext,
+        (camera, bind_groups, pipeline_ids, view_target, cloud_offset, view_offset): QueryItem<
+            Self::ViewQuery,
+        >,
+        world: &World,
+    ) -> Result<(), NodeRunError> {
+        let pipeline_cache = world.resource::<PipelineCache>();
+        let Some(apply_pipeline) = pipeline_cache.get_render_pipeline(pipeline_ids.shadow_apply)
+        else {
+            return Ok(());
+        };
+
+        let mut pass = render_context.begin_tracked_render_pass(RenderPassDescriptor {
+            label: Some("cloud_shadow_apply"),
+            color_attachments: &[Some(view_target.get_color_attachment())],
+            depth_stencil_attachment: None,
+            timestamp_writes: None,
+            occlusion_query_set: None,
+        });
+
+        if let Some(viewport) = camera.viewport.as_ref() {
+            pass.set_camera_viewport(viewport);
+        }
+
+        pass.set_render_pipeline(apply_pipeline);
+        pass.set_bind_group(
+            0,
+            &bind_groups.shadow_apply,
+            &[cloud_offset.index(), view_offset.offset],
+        );
+        pass.draw(0..3, 0..1);
+        if !SHADOW_APPLY_LOGGED.swap(true, Ordering::Relaxed) {
+            info!("cloud shadow apply first draw");
         }
         Ok(())
     }

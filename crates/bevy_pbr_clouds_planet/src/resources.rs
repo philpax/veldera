@@ -25,9 +25,11 @@ use bevy::{
         view::{ExtractedView, Msaa, ViewDepthTexture, ViewUniform, ViewUniforms},
     },
 };
+use bevy::math::Vec4;
 use bevy_pbr_atmosphere_planet::{
     AtmosphereLightsBuffer, AtmosphereTextures, AtmosphereTransform, AtmosphereTransforms,
-    ExtractedAtmosphere, GpuAtmosphere, GpuAtmosphereLights, SphericalAtmosphereCamera,
+    ExtractedAtmosphere, ExtractedAtmosphereLights, GpuAtmosphere, GpuAtmosphereLights,
+    SphericalAtmosphereCamera,
 };
 
 use crate::{CloudLayers, MAX_CLOUD_LAYERS, noise::NoiseTextures};
@@ -114,6 +116,20 @@ pub struct GpuCloudUniform {
     pub _pad_bot2: u32,
 
     pub layers: [GpuCloudSubLayer; MAX_CLOUD_LAYERS],
+
+    /// World-to-shadow-UV matrix for the cloud-shadow map. Transforms an
+    /// ECEF world position into shadow-map (u, v) — the shadow texel at
+    /// that UV gives the cloud-volume transmittance toward the sun
+    /// integrated above that ground point.
+    pub shadow_from_world: Mat4,
+    /// Half-side of the square footprint the shadow map covers, in
+    /// metres. Texels outside `[-footprint, +footprint]` from the
+    /// camera centre fall outside the shadow map and the apply pass
+    /// treats them as fully unshadowed (transmittance = 1).
+    pub shadow_footprint: f32,
+    pub _pad_shadow0: u32,
+    pub _pad_shadow1: u32,
+    pub _pad_shadow2: u32,
 }
 
 /// Per-view storage texture written by the raymarch pass and read by the
@@ -126,6 +142,32 @@ pub struct CloudTextures {
     pub raymarch: CachedTexture,
     pub raymarch_size: UVec2,
 }
+
+/// Persistent cloud-shadow map (sun-direction transmittance per ground
+/// point). Allocated once per camera, reused across frames; the bake pass
+/// rewrites it each frame.
+///
+/// Format is `R16Float`: a single channel storing transmittance in [0, 1].
+#[derive(Component)]
+pub struct CloudShadowTexture {
+    #[allow(dead_code)]
+    pub texture: Texture,
+    pub view: TextureView,
+    #[allow(dead_code)]
+    pub size: u32,
+}
+
+/// Side-length of the cloud-shadow texture, in pixels. ~1k square strikes
+/// a good balance between detail and bake cost — at the default 200 km
+/// footprint this gives ~200 m per texel.
+pub const SHADOW_MAP_SIZE: u32 = 1024;
+
+/// Half the world-space side length of the shadow map's footprint, in
+/// metres. The map covers a 2× this square in the local tangent plane,
+/// centred on the camera. 100 km half-side = 200 km × 200 km square,
+/// comfortably bigger than what the user can see at any reasonable
+/// camera altitude.
+pub const SHADOW_FOOTPRINT_M: f32 = 100_000.0;
 
 /// Persistent ping-pong history textures used by the temporal pass.
 ///
@@ -200,14 +242,17 @@ impl FromWorld for CloudSampler {
     }
 }
 
-/// Bind-group layouts for the three cloud passes.
+/// Bind-group layouts for every cloud pass.
 #[derive(Resource)]
 pub struct CloudBindGroupLayouts {
     pub raymarch: BindGroupLayoutDescriptor,
     pub temporal: BindGroupLayoutDescriptor,
     pub composite: BindGroupLayoutDescriptor,
+    pub shadow_bake: BindGroupLayoutDescriptor,
+    pub shadow_apply: BindGroupLayoutDescriptor,
     pub fullscreen_shader: FullscreenShader,
     pub composite_fragment: bevy::asset::Handle<bevy::shader::Shader>,
+    pub shadow_apply_fragment: bevy::asset::Handle<bevy::shader::Shader>,
 }
 
 impl FromWorld for CloudBindGroupLayouts {
@@ -301,23 +346,71 @@ impl FromWorld for CloudBindGroupLayouts {
             ),
         );
 
+        let shadow_bake = BindGroupLayoutDescriptor::new(
+            "cloud_shadow_bake_bind_group_layout",
+            &BindGroupLayoutEntries::with_indices(
+                ShaderStages::COMPUTE,
+                (
+                    (0, uniform_buffer::<GpuCloudUniform>(true)),
+                    (1, uniform_buffer::<GpuAtmosphere>(true)),
+                    (2, uniform_buffer::<AtmosphereTransform>(true)),
+                    (3, uniform_buffer::<GpuAtmosphereLights>(false)),
+                    // Cloud noise (read).
+                    (4, texture_3d(TextureSampleType::default())),
+                    (5, sampler(SamplerBindingType::Filtering)),
+                    // Output: cloud shadow map (write-only R16Float).
+                    (
+                        6,
+                        texture_storage_2d(
+                            TextureFormat::R16Float,
+                            StorageTextureAccess::WriteOnly,
+                        ),
+                    ),
+                ),
+            ),
+        );
+
+        let shadow_apply = BindGroupLayoutDescriptor::new(
+            "cloud_shadow_apply_bind_group_layout",
+            &BindGroupLayoutEntries::with_indices(
+                ShaderStages::FRAGMENT,
+                (
+                    (0, uniform_buffer::<GpuCloudUniform>(true)),
+                    (1, uniform_buffer::<ViewUniform>(true)),
+                    // Cloud shadow map (read).
+                    (2, texture_2d(TextureSampleType::default())),
+                    // Camera depth, multisampled (matches the rest of the
+                    // cloud pipeline's depth assumption).
+                    (3, texture_depth_2d_multisampled()),
+                    // Clamp-to-edge sampler.
+                    (4, sampler(SamplerBindingType::Filtering)),
+                ),
+            ),
+        );
+
         Self {
             raymarch,
             temporal,
             composite,
+            shadow_bake,
+            shadow_apply,
             fullscreen_shader: world.resource::<FullscreenShader>().clone(),
             composite_fragment: load_embedded_asset!(world, "shaders/cloud_composite.wgsl"),
+            shadow_apply_fragment: load_embedded_asset!(
+                world,
+                "shaders/cloud_shadow_apply.wgsl"
+            ),
         }
     }
 }
 
-/// Cached compute pipeline IDs for the raymarch and temporal passes. The
-/// composite pipeline is MSAA-specialised per-camera in
-/// [`queue_cloud_composite_pipelines`].
+/// Cached compute pipeline IDs. The composite + shadow-apply pipelines are
+/// MSAA-specialised per-camera in [`queue_cloud_render_pipelines`].
 #[derive(Resource)]
 pub struct CloudPipelines {
     pub raymarch: CachedComputePipelineId,
     pub temporal: CachedComputePipelineId,
+    pub shadow_bake: CachedComputePipelineId,
 }
 
 impl FromWorld for CloudPipelines {
@@ -326,6 +419,7 @@ impl FromWorld for CloudPipelines {
         let layouts = world.resource::<CloudBindGroupLayouts>();
         let raymarch_shader = load_embedded_asset!(world, "shaders/cloud_raymarch.wgsl");
         let temporal_shader = load_embedded_asset!(world, "shaders/cloud_temporal.wgsl");
+        let shadow_bake_shader = load_embedded_asset!(world, "shaders/cloud_shadow_bake.wgsl");
 
         let raymarch = pipeline_cache.queue_compute_pipeline(ComputePipelineDescriptor {
             label: Some("cloud_raymarch_pipeline".into()),
@@ -341,49 +435,98 @@ impl FromWorld for CloudPipelines {
             ..Default::default()
         });
 
-        Self { raymarch, temporal }
+        let shadow_bake = pipeline_cache.queue_compute_pipeline(ComputePipelineDescriptor {
+            label: Some("cloud_shadow_bake_pipeline".into()),
+            layout: vec![layouts.shadow_bake.clone()],
+            shader: shadow_bake_shader,
+            ..Default::default()
+        });
+
+        Self {
+            raymarch,
+            temporal,
+            shadow_bake,
+        }
     }
 }
 
-/// Per-MSAA-config cache key for the composite render pipeline.
-///
-/// The view target's sample count must match the pipeline's
-/// `multisample.count`, so we specialise on that value and pick the right
-/// pipeline at draw time based on the camera's [`Msaa`] component.
+/// Which MSAA-specialised render pipeline to fetch.
+#[derive(Copy, Clone, Hash, PartialEq, Eq, Debug)]
+pub enum CloudRenderPipelineKind {
+    /// Composite the cloud history buffer over the HDR scene.
+    Composite,
+    /// Fullscreen modulate-blend that dims the scene by the cloud-shadow
+    /// transmittance for each pixel.
+    ShadowApply,
+}
+
+/// Per-MSAA-config cache key. The view target's sample count must match
+/// the pipeline's `multisample.count`, so we specialise on that value.
 #[derive(Copy, Clone, Hash, PartialEq, Eq)]
-pub struct CompositePipelineKey {
+pub struct CloudRenderPipelineKey {
     pub msaa_samples: u32,
+    pub kind: CloudRenderPipelineKind,
 }
 
 impl SpecializedRenderPipeline for CloudBindGroupLayouts {
-    type Key = CompositePipelineKey;
+    type Key = CloudRenderPipelineKey;
 
     fn specialize(&self, key: Self::Key) -> RenderPipelineDescriptor {
+        let (label, layout, fragment, blend) = match key.kind {
+            CloudRenderPipelineKind::Composite => (
+                format!("cloud_composite_pipeline_msaa_{}", key.msaa_samples),
+                self.composite.clone(),
+                self.composite_fragment.clone(),
+                // Blend: dst = src.rgb * 1 + dst.rgb * src.a, where
+                // src.a is the cloud transmittance to the camera. So
+                // the existing scene is dimmed by cloud opacity and
+                // the cloud's inscattering is added on top.
+                BlendState {
+                    color: BlendComponent {
+                        src_factor: BlendFactor::One,
+                        dst_factor: BlendFactor::SrcAlpha,
+                        operation: BlendOperation::Add,
+                    },
+                    alpha: BlendComponent {
+                        src_factor: BlendFactor::One,
+                        dst_factor: BlendFactor::SrcAlpha,
+                        operation: BlendOperation::Add,
+                    },
+                },
+            ),
+            CloudRenderPipelineKind::ShadowApply => (
+                format!("cloud_shadow_apply_pipeline_msaa_{}", key.msaa_samples),
+                self.shadow_apply.clone(),
+                self.shadow_apply_fragment.clone(),
+                // Modulate blend: dst.rgb = dst.rgb * src.rgb, alpha
+                // unchanged. The shader emits a per-channel scene
+                // multiplier in [shadow_dim, 1.0]; this multiplies the
+                // existing scene colour to dim cloud-shadowed regions.
+                BlendState {
+                    color: BlendComponent {
+                        src_factor: BlendFactor::Dst,
+                        dst_factor: BlendFactor::Zero,
+                        operation: BlendOperation::Add,
+                    },
+                    alpha: BlendComponent {
+                        src_factor: BlendFactor::Zero,
+                        dst_factor: BlendFactor::One,
+                        operation: BlendOperation::Add,
+                    },
+                },
+            ),
+        };
+
         RenderPipelineDescriptor {
-            label: Some(format!("cloud_composite_pipeline_msaa_{}", key.msaa_samples).into()),
-            layout: vec![self.composite.clone()],
+            label: Some(label.into()),
+            layout: vec![layout],
             vertex: self.fullscreen_shader.to_vertex_state(),
             fragment: Some(FragmentState {
-                shader: self.composite_fragment.clone(),
+                shader: fragment,
                 shader_defs: Vec::new(),
                 targets: vec![Some(ColorTargetState {
                     format: TextureFormat::Rgba16Float,
-                    // Blend: dst = src.rgb * 1 + dst.rgb * src.a, where
-                    // src.a is the cloud transmittance to the camera. So
-                    // the existing scene is dimmed by cloud opacity and
-                    // the cloud's inscattering is added on top.
-                    blend: Some(BlendState {
-                        color: BlendComponent {
-                            src_factor: BlendFactor::One,
-                            dst_factor: BlendFactor::SrcAlpha,
-                            operation: BlendOperation::Add,
-                        },
-                        alpha: BlendComponent {
-                            src_factor: BlendFactor::One,
-                            dst_factor: BlendFactor::SrcAlpha,
-                            operation: BlendOperation::Add,
-                        },
-                    }),
+                    blend: Some(blend),
                     write_mask: ColorWrites::ALL,
                 })],
                 ..Default::default()
@@ -397,14 +540,18 @@ impl SpecializedRenderPipeline for CloudBindGroupLayouts {
     }
 }
 
-/// Per-view component carrying the specialised composite pipeline ID.
+/// Per-view component carrying the specialised composite + shadow-apply
+/// pipeline IDs.
 #[derive(Component, Copy, Clone)]
-pub struct CloudCompositePipelineId(pub CachedRenderPipelineId);
+pub struct CloudRenderPipelineIds {
+    pub composite: CachedRenderPipelineId,
+    pub shadow_apply: CachedRenderPipelineId,
+}
 
-/// Specialises (or fetches from cache) the composite pipeline matching the
-/// camera's MSAA configuration.
+/// Specialises (or fetches from cache) both render pipelines for the
+/// camera's MSAA config.
 #[allow(clippy::type_complexity)]
-pub(super) fn queue_cloud_composite_pipelines(
+pub(super) fn queue_cloud_render_pipelines(
     views: Query<(Entity, &Msaa), (With<Camera>, With<CloudLayers>)>,
     pipeline_cache: Res<PipelineCache>,
     layouts: Res<CloudBindGroupLayouts>,
@@ -412,24 +559,38 @@ pub(super) fn queue_cloud_composite_pipelines(
     mut commands: Commands,
 ) {
     for (entity, msaa) in &views {
-        let id = specializer.specialize(
+        let composite = specializer.specialize(
             &pipeline_cache,
             &layouts,
-            CompositePipelineKey {
+            CloudRenderPipelineKey {
                 msaa_samples: msaa.samples(),
+                kind: CloudRenderPipelineKind::Composite,
             },
         );
-        commands.entity(entity).insert(CloudCompositePipelineId(id));
+        let shadow_apply = specializer.specialize(
+            &pipeline_cache,
+            &layouts,
+            CloudRenderPipelineKey {
+                msaa_samples: msaa.samples(),
+                kind: CloudRenderPipelineKind::ShadowApply,
+            },
+        );
+        commands.entity(entity).insert(CloudRenderPipelineIds {
+            composite,
+            shadow_apply,
+        });
     }
 }
 
-/// Per-view bind groups: one for the raymarch compute, one for the temporal
-/// compute, one for the composite fragment.
+/// Per-view bind groups: one for each cloud pass (raymarch, temporal,
+/// composite, shadow_bake, shadow_apply).
 #[derive(Component)]
 pub(crate) struct CloudBindGroups {
     pub raymarch: BindGroup,
     pub temporal: BindGroup,
     pub composite: BindGroup,
+    pub shadow_bake: BindGroup,
+    pub shadow_apply: BindGroup,
 }
 
 /// Per-camera, render-world component holding the previous frame's
@@ -464,6 +625,7 @@ const TELEPORT_THRESHOLD_M: f32 = 5_000.0;
 #[allow(clippy::type_complexity)]
 pub(super) fn prepare_cloud_uniforms(
     mut commands: Commands,
+    atmosphere_lights: Res<ExtractedAtmosphereLights>,
     layers: Query<(
         Entity,
         &CloudLayers,
@@ -474,6 +636,16 @@ pub(super) fn prepare_cloud_uniforms(
         Option<&ExtractedCamera>,
     )>,
 ) {
+    // Sun direction: take the first atmosphere light if present (the
+    // crate's convention is that the sun is light 0). If there's no
+    // atmosphere light, fall back to local up so the shadow matrix is
+    // still well-defined (shadows just degenerate to "no clouds").
+    let sun_dir_ws: Vec3 = if atmosphere_lights.0.count > 0 {
+        atmosphere_lights.0.lights[0].direction_to_light
+    } else {
+        Vec3::Y
+    };
+
     for (entity, cloud, atmosphere, view, sph_cam, prev_state, camera) in &layers {
         let quality = cloud.quality;
         let world_time = cloud.world_time_seconds;
@@ -521,6 +693,53 @@ pub(super) fn prepare_cloud_uniforms(
         });
         let current_camera_ecef = sph_cam.local_up * sph_cam.camera_radius;
 
+        // Cloud shadow map: tangent-plane basis at the camera's local
+        // up. Texel (u, v) in the shadow map maps to the world point:
+        //   centre + right * (u-0.5) * 2*footprint + forward * (v-0.5) * 2*footprint
+        // The bake shader then traces UP along the sun direction from
+        // each texel's world point and integrates cloud density above
+        // it. We construct the inverse matrix here (world → uv) for
+        // both the bake (so it knows the texel-to-world mapping) and
+        // the apply pass (so it can sample at terrain world positions).
+        let center = current_camera_ecef;
+        let up = sph_cam.local_up.normalize_or_zero();
+        // Pick a tangent-plane basis. Use world North (Z) projected onto
+        // the tangent plane as `forward`; degenerate at the poles, fall
+        // back to world East.
+        let world_north = Vec3::Z;
+        let mut forward = (world_north - up * world_north.dot(up)).normalize_or_zero();
+        if forward.length_squared() < 0.5 {
+            let world_east = Vec3::X;
+            forward = (world_east - up * world_east.dot(up)).normalize_or_zero();
+        }
+        let right = up.cross(forward).normalize_or_zero();
+        let footprint = SHADOW_FOOTPRINT_M;
+        let scale = 0.5 / footprint;
+        // M * vec4(world, 1) = vec4(u, v, _, 1) where:
+        //   u = dot(right, world - centre) * scale + 0.5
+        //   v = dot(forward, world - centre) * scale + 0.5
+        // This matrix takes ABSOLUTE ECEF positions. The apply shader
+        // reconstructs RENDER-world positions from depth (camera-relative
+        // in floating-origin), so we pre-multiply by a translation
+        // matrix that adds `camera_ecef` first — the resulting matrix
+        // accepts render-world coords directly.
+        let shadow_from_ecef = Mat4::from_cols(
+            Vec4::new(right.x * scale, forward.x * scale, 0.0, 0.0),
+            Vec4::new(right.y * scale, forward.y * scale, 0.0, 0.0),
+            Vec4::new(right.z * scale, forward.z * scale, 0.0, 0.0),
+            Vec4::new(
+                -right.dot(center) * scale + 0.5,
+                -forward.dot(center) * scale + 0.5,
+                0.0,
+                1.0,
+            ),
+        );
+        let shadow_from_world = shadow_from_ecef * Mat4::from_translation(center);
+        // Mute the matrix entirely if there's no sun (sun below local
+        // horizon already zeros out shadows in the apply pass; the
+        // matrix is only "wrong" if both axes degenerated — guard).
+        let _ = sun_dir_ws;
+
         let teleported = prev.initialised
             && current_camera_ecef.distance(prev.camera_ecef) > TELEPORT_THRESHOLD_M;
         let history_valid = prev.initialised && !teleported;
@@ -544,6 +763,11 @@ pub(super) fn prepare_cloud_uniforms(
             _pad_bot1: 0,
             _pad_bot2: 0,
             layers: gpu_layers,
+            shadow_from_world,
+            shadow_footprint: footprint,
+            _pad_shadow0: 0,
+            _pad_shadow1: 0,
+            _pad_shadow2: 0,
         });
 
         commands.entity(entity).insert(CloudPrevFrame {
@@ -580,6 +804,39 @@ pub(super) fn prepare_cloud_textures(
         commands.entity(entity).insert(CloudTextures {
             raymarch,
             raymarch_size: uniform.buffer_size,
+        });
+    }
+}
+
+/// Allocates the persistent cloud shadow map. One R16Float texture at
+/// `SHADOW_MAP_SIZE × SHADOW_MAP_SIZE` per camera; reused frame-to-frame.
+pub(super) fn prepare_cloud_shadow_textures(
+    mut commands: Commands,
+    layers: Query<(Entity, Option<&CloudShadowTexture>), With<CloudLayers>>,
+    render_device: Res<RenderDevice>,
+) {
+    for (entity, existing) in &layers {
+        if existing.is_some() {
+            continue;
+        }
+        let texture = render_device.create_texture(&TextureDescriptor {
+            label: Some("cloud_shadow_map"),
+            size: UVec2::splat(SHADOW_MAP_SIZE).to_extents(),
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: TextureDimension::D2,
+            format: TextureFormat::R16Float,
+            usage: TextureUsages::STORAGE_BINDING | TextureUsages::TEXTURE_BINDING,
+            view_formats: &[],
+        });
+        let view = texture.create_view(&TextureViewDescriptor {
+            label: Some("cloud_shadow_map"),
+            ..Default::default()
+        });
+        commands.entity(entity).insert(CloudShadowTexture {
+            texture,
+            view,
+            size: SHADOW_MAP_SIZE,
         });
     }
 }
@@ -661,6 +918,7 @@ pub(super) fn prepare_cloud_bind_groups(
             Entity,
             &CloudTextures,
             &CloudHistoryTextures,
+            &CloudShadowTexture,
             &GpuCloudUniform,
             &AtmosphereTextures,
             &SphericalAtmosphereCamera,
@@ -713,8 +971,16 @@ pub(super) fn prepare_cloud_bind_groups(
         return Ok(());
     };
 
-    for (entity, cloud_tex, history_tex, uniform, atmo_tex, _spherical_camera, depth_texture) in
-        &layers
+    for (
+        entity,
+        cloud_tex,
+        history_tex,
+        shadow_tex,
+        uniform,
+        atmo_tex,
+        _spherical_camera,
+        depth_texture,
+    ) in &layers
     {
         let raymarch = render_device.create_bind_group(
             "cloud_raymarch_bind_group",
@@ -765,10 +1031,38 @@ pub(super) fn prepare_cloud_bind_groups(
             )),
         );
 
+        let shadow_bake = render_device.create_bind_group(
+            "cloud_shadow_bake_bind_group",
+            &pipeline_cache.get_bind_group_layout(&layouts.shadow_bake),
+            &BindGroupEntries::with_indices((
+                (0, cloud_binding.clone()),
+                (1, atmosphere_binding.clone()),
+                (2, transforms_binding.clone()),
+                (3, atmosphere_lights_binding.clone()),
+                (4, noise_view),
+                (5, &sampler.noise),
+                (6, &shadow_tex.view),
+            )),
+        );
+
+        let shadow_apply = render_device.create_bind_group(
+            "cloud_shadow_apply_bind_group",
+            &pipeline_cache.get_bind_group_layout(&layouts.shadow_apply),
+            &BindGroupEntries::with_indices((
+                (0, cloud_binding.clone()),
+                (1, view_binding.clone()),
+                (2, &shadow_tex.view),
+                (3, depth_texture.view()),
+                (4, &sampler.clamp),
+            )),
+        );
+
         commands.entity(entity).insert(CloudBindGroups {
             raymarch,
             temporal,
             composite,
+            shadow_bake,
+            shadow_apply,
         });
     }
     Ok(())

@@ -49,4 +49,13 @@ struct CloudUniform {
     _pad_bot2: u32,
 
     layers: array<CloudSubLayer, MAX_CLOUD_LAYERS>,
+
+    // World-to-shadow-UV matrix. Accepts RENDER-world (camera-relative)
+    // positions and outputs (u, v, _, 1); xy are the shadow-map UVs.
+    shadow_from_world: mat4x4<f32>,
+    // Half-side of the shadow map's square footprint, in metres.
+    shadow_footprint: f32,
+    _pad_shadow0: u32,
+    _pad_shadow1: u32,
+    _pad_shadow2: u32,
 }
