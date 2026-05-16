@@ -147,29 +147,53 @@ fn sample_layer_density(layer_i: u32, world_pos: vec3<f32>) -> f32 {
 
     // Main noise lookup — wind offset is CPU-accumulated metres, so we
     // just add it directly.
+    //
+    // Two-octave sample (poor-man's FBM): the base lookup gives the macro
+    // cloud cells; a half-frequency lookup (offset to a different region
+    // of the noise volume) breaks up the visible 1-cell-per-tile pattern
+    // that's obvious when looking straight down at low altitude.
     let tile = layer.noise_tile;
     var noise_uv = world_pos / tile;
     noise_uv.x += layer.wind_offset.x / tile + warp.x;
     noise_uv.z += layer.wind_offset.y / tile + warp.y;
+    let n_lo = textureSampleLevel(noise_3d, cloud_sampler, fract(noise_uv), 0.0);
+    // Higher-frequency octave at different position so it doesn't align.
+    let n_hi = textureSampleLevel(noise_3d, cloud_sampler, fract(noise_uv * 2.13 + vec3(0.37, 0.19, 0.71)), 0.0);
+    let n = mix(n_lo, n_hi, 0.35);
 
-    let n = textureSampleLevel(noise_3d, cloud_sampler, fract(noise_uv), 0.0);
     let base = n.r;
     let erosion = (n.g * 0.625 + n.b * 0.25);
     let shape = saturate(remap(base, erosion - 1.0, 1.0, 0.0, 1.0));
 
-    // Weather map — sample noise at a much larger scale, project to the
-    // local tangent plane. The result modulates the coverage threshold
-    // *per region* so different parts of the planet have different cloud
-    // cover (cloudy here, clear there). Without this, the cloud cap is
-    // uniform across the entire visible globe at orbital altitude.
+    // Weather map — three-octave noise at very large scales:
+    //   - regional (~weather_tile) — low-altitude break-up
+    //   - continental (10× tile) — country-sized weather systems
+    //   - planetary (40× tile) — visible cloud-vs-clear bands at orbit
+    //
+    // Each octave scrolls along world X over time at its own rate, so
+    // weather systems visibly migrate at all scales (much slower than
+    // the per-cell wind). Numbers are picked so a 1× game-time second is
+    // a few metres of drift; cranking time speed in the UI makes the
+    // orbital-scale patterns visibly translate. The combined value is
+    // then biased through smoothstep so genuinely clear and genuinely
+    // overcast regions both occur, rather than the raw average
+    // converging to mid-range everywhere.
     var regional_coverage = layer.coverage;
     if layer.weather_tile > 0.0 && layer.weather_strength > 0.0 {
-        let weather_uv = world_pos / layer.weather_tile;
-        let weather_n = textureSampleLevel(noise_3d, cloud_sampler, fract(weather_uv), 0.0);
-        // Re-centre weather noise around 0 so positive values lower the
-        // coverage threshold (more cloud) and negative values raise it
-        // (less cloud). `weather_strength` scales the swing.
-        let weather = (weather_n.r - 0.5) * 2.0;
+        let t = cloud.time_seconds;
+        let r_drift = vec3<f32>(t * 2.0, 0.0, 0.0);
+        let c_drift = vec3<f32>(t * 8.0, 0.0, 0.0);
+        let p_drift = vec3<f32>(t * 25.0, 0.0, 0.0);
+        let r_uv = (world_pos + r_drift) / layer.weather_tile;
+        let c_uv = (world_pos + c_drift) / (layer.weather_tile * 10.0);
+        let p_uv = (world_pos + p_drift) / (layer.weather_tile * 40.0);
+        let r_n = textureSampleLevel(noise_3d, cloud_sampler, fract(r_uv), 0.0).r;
+        let c_n = textureSampleLevel(noise_3d, cloud_sampler, fract(c_uv), 0.0).r;
+        let p_n = textureSampleLevel(noise_3d, cloud_sampler, fract(p_uv), 0.0).r;
+
+        let mixed = r_n * 0.20 + c_n * 0.30 + p_n * 0.50;
+        let pushed = smoothstep(0.3, 0.7, mixed);
+        let weather = (pushed - 0.5) * 2.0;
         regional_coverage = saturate(layer.coverage - weather * layer.weather_strength);
     }
 

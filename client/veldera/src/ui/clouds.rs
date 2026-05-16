@@ -39,6 +39,13 @@ pub(super) fn render_clouds_tab(ui: &mut egui::Ui, clouds: &mut CloudParams) {
 
     ui.separator();
 
+    ui.label(format!(
+        "World time: {:.1} s (wind / weather derive from this; set the world clock to move clouds)",
+        cloud.world_time_seconds,
+    ));
+
+    ui.separator();
+
     ui.label("Debug visualization:");
     egui::ComboBox::from_id_salt("cloud_debug_mode")
         .selected_text(label_for(cloud.debug_mode))

@@ -337,12 +337,16 @@ impl CloudSubLayer {
             outer_altitude: 5000.0,
             coverage: 0.65,
             density_scale: 0.005,
-            noise_tile: 2000.0,
-            // ~80 km regional patches — clouds vary from cloudy to clear
-            // over a few hundred km, breaking up orbital-scale uniformity
-            // without being too obvious from low altitude.
+            // 4 km cells make individual cloud puffs more cumulus-shaped
+            // and reduce the visible "cell-per-tile" pattern when looking
+            // straight down from above.
+            noise_tile: 4000.0,
+            // 80 km regional / 800 km continental / 3200 km planetary
+            // weather scales (the shader fans this out into 3 octaves).
             weather_tile: 80_000.0,
-            weather_strength: 0.5,
+            // Strong enough that weather actually creates clear gaps even
+            // when the local coverage threshold is high.
+            weather_strength: 0.85,
             hg_forward: 0.8,
             hg_backward: -0.3,
             hg_blend: 0.7,
@@ -360,10 +364,10 @@ impl CloudSubLayer {
             outer_altitude: 12_000.0,
             coverage: 0.78,
             density_scale: 0.0008,
-            noise_tile: 6000.0,
+            noise_tile: 8000.0,
             // Cirrus organisation is on a continental scale.
             weather_tile: 250_000.0,
-            weather_strength: 0.4,
+            weather_strength: 0.7,
             // Ice-crystal cirrus is strongly forward-scattering, with a
             // narrow forward lobe and minimal back-lobe.
             hg_forward: 0.92,
@@ -410,6 +414,15 @@ pub struct CloudLayers {
     pub layers: Vec<CloudSubLayer>,
     /// Quality tier; controls sample counts and resolution scale.
     pub quality: CloudQuality,
+    /// Absolute world time the cloud state is derived from, in seconds.
+    /// Wind offsets, domain warp, and weather drift are pure functions
+    /// of this value, so jumping it (e.g. moving a time-of-day slider)
+    /// jumps the cloud state too — there's no hidden accumulator.
+    ///
+    /// Set this every frame from your world clock. The recommended
+    /// value is `day_of_year * 86400 + utc_seconds`, optionally wrapped
+    /// modulo a safe number (e.g. 1e6) to keep f32 precision.
+    pub world_time_seconds: f32,
     /// Debug visualisation mode. See [`CloudDebugMode`].
     pub debug_mode: CloudDebugMode,
 }
@@ -426,6 +439,7 @@ impl CloudLayers {
         Self {
             layers: vec![CloudSubLayer::stratocumulus()],
             quality: CloudQuality::default(),
+            world_time_seconds: 0.0,
             debug_mode: CloudDebugMode::Off,
         }
     }
@@ -435,6 +449,7 @@ impl CloudLayers {
         Self {
             layers: vec![CloudSubLayer::stratocumulus(), CloudSubLayer::cirrus()],
             quality: CloudQuality::default(),
+            world_time_seconds: 0.0,
             debug_mode: CloudDebugMode::Off,
         }
     }
@@ -450,6 +465,7 @@ impl CloudLayers {
                 CloudSubLayer::ground_fog(),
             ],
             quality: CloudQuality::default(),
+            world_time_seconds: 0.0,
             debug_mode: CloudDebugMode::Off,
         }
     }

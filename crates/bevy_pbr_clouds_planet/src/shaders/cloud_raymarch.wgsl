@@ -42,11 +42,15 @@ fn depth_to_camera_dist(uv: vec2<f32>, depth: f32) -> f32 {
 // Wrenninge multi-scatter octave coefficients. Octave count comes from the
 // quality-tier-driven `cloud.octaves`. Each successive octave scales the
 // sun-direction optical depth, contribution, and HG eccentricity by these
-// factors, so by octave N the bounce is N×0.5 attenuated, N×0.5 contributed,
-// and N×0.5 eccentric.
-const WRENNINGE_ATTENUATION: f32 = 0.5;
-const WRENNINGE_CONTRIBUTION: f32 = 0.5;
-const WRENNINGE_ECCENTRICITY: f32 = 0.5;
+// factors. Tuned with `contribution > attenuation` and a slower
+// eccentricity decay so the highest octaves contribute meaningfully and
+// flatten quickly toward isotropic — this is what makes cloud tops appear
+// bright white from sub-solar viewing rather than washed-out grey, where
+// the directional phase function would otherwise produce only a small
+// per-pixel contribution.
+const WRENNINGE_ATTENUATION: f32 = 0.4;
+const WRENNINGE_CONTRIBUTION: f32 = 0.75;
+const WRENNINGE_ECCENTRICITY: f32 = 0.6;
 
 // Debug-mode constants matching CloudDebugMode in lib.rs.
 const DBG_OFF: u32 = 0u;
@@ -191,7 +195,13 @@ fn main(@builtin(global_invocation_id) idx: vec3<u32>) {
             let light = atmosphere_lights.lights[li];
             let light_dir_ws = light.direction_to_light;
             let mu_light = dot(light_dir_ws, sample_up);
-            let atmo_t = sample_transmittance(local_r, mu_light) * f32(mu_light > 0.0);
+            // Smooth twilight transition rather than a hard cutoff at
+            // local horizon. Real clouds get dimmer continuously as the
+            // sun dips below — the abrupt step from 1×transmittance to 0
+            // produces a knife-edge terminator on the cloud cap visible
+            // from orbit. Fade over ~3° below the horizon.
+            let twilight = smoothstep(-0.05, 0.0, mu_light);
+            let atmo_t = sample_transmittance(local_r, mu_light) * twilight;
             let tau_light = sample_light_optical_depth(sample_pos, light_dir_ws);
             let cos_theta = dot(ray_dir_ws, light_dir_ws);
 
@@ -249,11 +259,21 @@ fn main(@builtin(global_invocation_id) idx: vec3<u32>) {
         return;
     }
 
-    // Apply aerial perspective at the cloud's mid-distance: the cloud is
-    // dimmed and tinted by atmospheric haze along the camera ray.
+    // Apply aerial perspective at the cloud's mid-distance.
+    //
+    // The atmosphere's aerial-view LUT only covers the first ~32 km;
+    // sampling past that range clamps to the LUT's far edge, which is
+    // the saturated orange/red of light scattered through 32 km of
+    // atmosphere. From orbital altitudes (200+ km) every cloud sample is
+    // way beyond the LUT range, so without a fade the entire cloud cap
+    // gets tinted with that orange. Fade the AP contribution out as the
+    // sample moves past the LUT range — past ~50 km the cloud is so far
+    // away that AP from the *atmosphere* (which is 100 km thick) doesn't
+    // really apply anyway.
     let t_mid = mix(t_start, t_end, 0.5);
+    let ap_fade = saturate(1.0 - (t_mid - 32000.0) / 18000.0);
     let aerial = sample_aerial_inscattering(uv, t_mid);
-    inscattering = inscattering + aerial * (1.0 - transmittance);
+    inscattering = inscattering + aerial * (1.0 - transmittance) * ap_fade;
 
     // Apply view exposure so the output sits in the same range as the rest
     // of the HDR scene. Without this, raw sun-scaled radiance saturates
