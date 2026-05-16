@@ -293,10 +293,14 @@ fn sample_light_optical_depth(
     return optical_depth;
 }
 
-// Maximum cloud-march distance. Beyond this the curvature effects dominate
-// and the per-step density resolution becomes useless. 80 km comfortably
-// covers the visible cloud cap from low altitude.
-const CLOUD_MARCH_MAX_DISTANCE: f32 = 80000.0;
+// Maximum cloud-march distance. From a low-altitude observer the cloud-
+// shell horizon sits at roughly sqrt(2·R·h) — ~150 km from 2 km altitude,
+// ~290 km from 6 km altitude — so an 80 km cap reads as a hard wall of
+// "clouds end here" at any forward-looking angle. 200 km comfortably
+// covers the visible cap for camera altitudes up to ~3 km without
+// becoming meaningless (per-step `dt` at 128 primary steps grows to
+// 1.5 km, still smaller than the 4 km noise tile).
+const CLOUD_MARCH_MAX_DISTANCE: f32 = 200000.0;
 
 // Compute the cloud-march entry/exit `t` covering ALL enabled sub-layers'
 // shells. The march walks the union shell from the closest enabled inner

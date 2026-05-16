@@ -35,7 +35,7 @@
 
 // Maximum cloud-march distance — must match `CLOUD_MARCH_MAX_DISTANCE` in
 // functions.wgsl. Used to clamp the reprojection depth for distant rays.
-const CLOUD_MARCH_MAX_DISTANCE: f32 = 80000.0;
+const CLOUD_MARCH_MAX_DISTANCE: f32 = 200000.0;
 // Temporal blend factor: weight given to the current frame each step. Lower
 // = smoother but slower to converge / more ghosting.
 const BLEND_ALPHA: f32 = 0.1;
