@@ -95,6 +95,7 @@ impl Plugin for CloudsPlanetPlugin {
         embedded_asset!(app, "shaders/cloud_shadow_bake.wgsl");
         embedded_asset!(app, "shaders/cloud_shadow_apply.wgsl");
         embedded_asset!(app, "shaders/cloud_composite.wgsl");
+        embedded_asset!(app, "shaders/cloud_god_rays.wgsl");
 
         app.add_plugins((
             ExtractComponentPlugin::<CloudLayers>::default(),
@@ -174,6 +175,10 @@ impl Plugin for CloudsPlanetPlugin {
                 Core3d,
                 CloudNode::Composite,
             )
+            .add_render_graph_node::<ViewNodeRunner<node::CloudGodRaysNode>>(
+                Core3d,
+                CloudNode::GodRays,
+            )
             .add_render_graph_edges(
                 Core3d,
                 (
@@ -197,6 +202,9 @@ impl Plugin for CloudsPlanetPlugin {
                     CloudNode::Raymarch,
                     CloudNode::Temporal,
                     CloudNode::Composite,
+                    // God rays add their additive HDR inscatter on top
+                    // of the cloud-composited scene, before transparency.
+                    CloudNode::GodRays,
                     Node3d::MainTransparentPass,
                 ),
             );
@@ -449,6 +457,53 @@ pub struct CloudLayers {
     pub world_time_seconds: f32,
     /// Debug visualisation mode. See [`CloudDebugMode`].
     pub debug_mode: CloudDebugMode,
+    /// Volumetric god-ray / light-shaft settings. See [`GodRaysSettings`].
+    pub god_rays: GodRaysSettings,
+}
+
+/// Tunable knobs for the additive volumetric god-rays pass.
+///
+/// The pass runs after the cloud composite, ray-marching from the camera
+/// toward each pixel's surface and accumulating sun radiance modulated
+/// by the cloud-shadow map at every step. Set `enabled = false` to skip
+/// the dispatch entirely.
+#[derive(Clone, Copy, Debug)]
+pub struct GodRaysSettings {
+    /// Master on/off. When `false`, the pass writes nothing.
+    pub enabled: bool,
+    /// Number of raymarch steps per pixel. More steps = sharper shaft
+    /// edges and less banding at the cost of fill rate. Typical range
+    /// 16-48.
+    pub num_steps: u32,
+    /// Per-pixel raymarch cap in metres. Sky pixels (and very distant
+    /// terrain) get marched out to this distance — past it the
+    /// shadow-map footprint runs out anyway.
+    pub max_distance: f32,
+    /// Air-scatter coefficient at sea level, per metre. Visual tuning
+    /// rather than physical: 2e-5 lands shafts visible-at-sunset,
+    /// subtle-at-noon without overpowering the rest of the scene.
+    pub scatter_rate: f32,
+    /// Exponential atmosphere scale height in metres. Higher = density
+    /// falls off slower with altitude → shafts visible at higher
+    /// altitudes. Earth's atmosphere is ~8 km.
+    pub atmo_scale_height: f32,
+    /// Henyey-Greenstein anisotropy `g`. Forward peak — 0 is isotropic
+    /// (shafts visible from every angle), 1.0 is pure forward (only
+    /// when looking *at* the sun). 0.7 is a moderate peak.
+    pub hg_g: f32,
+}
+
+impl Default for GodRaysSettings {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            num_steps: 24,
+            max_distance: 100_000.0,
+            scatter_rate: 2.0e-5,
+            atmo_scale_height: 8_000.0,
+            hg_g: 0.7,
+        }
+    }
 }
 
 impl Default for CloudLayers {
@@ -465,6 +520,7 @@ impl CloudLayers {
             quality: CloudQuality::default(),
             world_time_seconds: 0.0,
             debug_mode: CloudDebugMode::Off,
+            god_rays: GodRaysSettings::default(),
         }
     }
 
@@ -475,6 +531,7 @@ impl CloudLayers {
             quality: CloudQuality::default(),
             world_time_seconds: 0.0,
             debug_mode: CloudDebugMode::Off,
+            god_rays: GodRaysSettings::default(),
         }
     }
 
@@ -491,6 +548,7 @@ impl CloudLayers {
             quality: CloudQuality::default(),
             world_time_seconds: 0.0,
             debug_mode: CloudDebugMode::Off,
+            god_rays: GodRaysSettings::default(),
         }
     }
 }

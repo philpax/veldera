@@ -158,6 +158,23 @@ pub struct GpuCloudUniform {
     /// night.
     pub fog_color: Vec3,
     pub _pad_fog: u32,
+
+    // ---- Volumetric god-rays settings (consumed by cloud_god_rays.wgsl).
+    /// 1 if the god-rays pass should render, 0 to skip its blend
+    /// contribution (the dispatch itself still runs but writes zeros).
+    pub god_rays_enabled: u32,
+    /// Per-pixel raymarch step count.
+    pub god_rays_num_steps: u32,
+    /// Per-pixel raymarch cap in metres.
+    pub god_rays_max_distance: f32,
+    /// Air-scatter coefficient at sea level (per metre).
+    pub god_rays_scatter_rate: f32,
+    /// Exponential atmosphere scale height in metres.
+    pub god_rays_atmo_scale_height: f32,
+    /// Henyey-Greenstein anisotropy parameter.
+    pub god_rays_hg_g: f32,
+    pub _pad_god_rays0: u32,
+    pub _pad_god_rays1: u32,
 }
 
 /// Per-view storage texture written by the raymarch pass and read by the
@@ -278,9 +295,11 @@ pub struct CloudBindGroupLayouts {
     pub composite: BindGroupLayoutDescriptor,
     pub shadow_bake: BindGroupLayoutDescriptor,
     pub shadow_apply: BindGroupLayoutDescriptor,
+    pub god_rays: BindGroupLayoutDescriptor,
     pub fullscreen_shader: FullscreenShader,
     pub composite_fragment: bevy::asset::Handle<bevy::shader::Shader>,
     pub shadow_apply_fragment: bevy::asset::Handle<bevy::shader::Shader>,
+    pub god_rays_fragment: bevy::asset::Handle<bevy::shader::Shader>,
 }
 
 impl FromWorld for CloudBindGroupLayouts {
@@ -435,18 +454,45 @@ impl FromWorld for CloudBindGroupLayouts {
             ),
         );
 
+        let god_rays = BindGroupLayoutDescriptor::new(
+            "cloud_god_rays_bind_group_layout",
+            &BindGroupLayoutEntries::with_indices(
+                ShaderStages::FRAGMENT,
+                (
+                    (0, uniform_buffer::<GpuCloudUniform>(true)),
+                    (1, uniform_buffer::<ViewUniform>(true)),
+                    // Atmosphere uniform (for `bottom_radius`).
+                    (2, uniform_buffer::<GpuAtmosphere>(true)),
+                    // Atmosphere transforms (local_up, camera_radius).
+                    (3, uniform_buffer::<AtmosphereTransform>(true)),
+                    // Atmosphere lights (sun direction + colour).
+                    (4, uniform_buffer::<GpuAtmosphereLights>(false)),
+                    // Cloud shadow map.
+                    (5, texture_2d(TextureSampleType::default())),
+                    // Atmosphere transmittance LUT.
+                    (6, texture_2d(TextureSampleType::default())),
+                    // Camera depth, multisampled.
+                    (7, texture_depth_2d_multisampled()),
+                    // Clamp-to-edge sampler.
+                    (8, sampler(SamplerBindingType::Filtering)),
+                ),
+            ),
+        );
+
         Self {
             raymarch,
             temporal,
             composite,
             shadow_bake,
             shadow_apply,
+            god_rays,
             fullscreen_shader: world.resource::<FullscreenShader>().clone(),
             composite_fragment: load_embedded_asset!(world, "shaders/cloud_composite.wgsl"),
             shadow_apply_fragment: load_embedded_asset!(
                 world,
                 "shaders/cloud_shadow_apply.wgsl"
             ),
+            god_rays_fragment: load_embedded_asset!(world, "shaders/cloud_god_rays.wgsl"),
         }
     }
 }
@@ -505,6 +551,9 @@ pub enum CloudRenderPipelineKind {
     /// Fullscreen modulate-blend that dims the scene by the cloud-shadow
     /// transmittance for each pixel.
     ShadowApply,
+    /// Fullscreen additive volumetric-god-rays inscatter on top of the
+    /// composited scene.
+    GodRays,
 }
 
 /// Per-MSAA-config cache key. The view target's sample count must match
@@ -562,6 +611,26 @@ impl SpecializedRenderPipeline for CloudBindGroupLayouts {
                     },
                 },
             ),
+            CloudRenderPipelineKind::GodRays => (
+                format!("cloud_god_rays_pipeline_msaa_{}", key.msaa_samples),
+                self.god_rays.clone(),
+                self.god_rays_fragment.clone(),
+                // Additive blend: dst.rgb = src.rgb + dst.rgb, alpha
+                // untouched. The shader's per-pixel god-ray inscatter
+                // gets added on top of the already-composited HDR scene.
+                BlendState {
+                    color: BlendComponent {
+                        src_factor: BlendFactor::One,
+                        dst_factor: BlendFactor::One,
+                        operation: BlendOperation::Add,
+                    },
+                    alpha: BlendComponent {
+                        src_factor: BlendFactor::Zero,
+                        dst_factor: BlendFactor::One,
+                        operation: BlendOperation::Add,
+                    },
+                },
+            ),
         };
 
         RenderPipelineDescriptor {
@@ -587,16 +656,17 @@ impl SpecializedRenderPipeline for CloudBindGroupLayouts {
     }
 }
 
-/// Per-view component carrying the specialised composite + shadow-apply
-/// pipeline IDs.
+/// Per-view component carrying the specialised composite, shadow-apply,
+/// and god-rays pipeline IDs.
 #[derive(Component, Copy, Clone)]
 pub struct CloudRenderPipelineIds {
     pub composite: CachedRenderPipelineId,
     pub shadow_apply: CachedRenderPipelineId,
+    pub god_rays: CachedRenderPipelineId,
 }
 
-/// Specialises (or fetches from cache) both render pipelines for the
-/// camera's MSAA config.
+/// Specialises (or fetches from cache) all three render pipelines for
+/// the camera's MSAA config.
 #[allow(clippy::type_complexity)]
 pub(super) fn queue_cloud_render_pipelines(
     views: Query<(Entity, &Msaa), (With<Camera>, With<CloudLayers>)>,
@@ -622,15 +692,24 @@ pub(super) fn queue_cloud_render_pipelines(
                 kind: CloudRenderPipelineKind::ShadowApply,
             },
         );
+        let god_rays = specializer.specialize(
+            &pipeline_cache,
+            &layouts,
+            CloudRenderPipelineKey {
+                msaa_samples: msaa.samples(),
+                kind: CloudRenderPipelineKind::GodRays,
+            },
+        );
         commands.entity(entity).insert(CloudRenderPipelineIds {
             composite,
             shadow_apply,
+            god_rays,
         });
     }
 }
 
 /// Per-view bind groups: one for each cloud pass (raymarch, temporal,
-/// composite, shadow_bake, shadow_apply).
+/// composite, shadow_bake, shadow_apply, god_rays).
 #[derive(Component)]
 pub(crate) struct CloudBindGroups {
     pub raymarch: BindGroup,
@@ -638,6 +717,7 @@ pub(crate) struct CloudBindGroups {
     pub composite: BindGroup,
     pub shadow_bake: BindGroup,
     pub shadow_apply: BindGroup,
+    pub god_rays: BindGroup,
 }
 
 /// Per-camera, render-world component holding the previous frame's
@@ -955,6 +1035,14 @@ pub(super) fn prepare_cloud_uniforms(
             _pad_shadow1: 0,
             fog_color,
             _pad_fog: 0,
+            god_rays_enabled: u32::from(cloud.god_rays.enabled),
+            god_rays_num_steps: cloud.god_rays.num_steps.max(1),
+            god_rays_max_distance: cloud.god_rays.max_distance.max(1.0),
+            god_rays_scatter_rate: cloud.god_rays.scatter_rate.max(0.0),
+            god_rays_atmo_scale_height: cloud.god_rays.atmo_scale_height.max(1.0),
+            god_rays_hg_g: cloud.god_rays.hg_g.clamp(-0.99, 0.99),
+            _pad_god_rays0: 0,
+            _pad_god_rays1: 0,
         });
 
         commands.entity(entity).insert(CloudPrevFrame {
@@ -1249,12 +1337,29 @@ pub(super) fn prepare_cloud_bind_groups(
             )),
         );
 
+        let god_rays = render_device.create_bind_group(
+            "cloud_god_rays_bind_group",
+            &pipeline_cache.get_bind_group_layout(&layouts.god_rays),
+            &BindGroupEntries::with_indices((
+                (0, cloud_binding.clone()),
+                (1, view_binding.clone()),
+                (2, atmosphere_binding.clone()),
+                (3, transforms_binding.clone()),
+                (4, atmosphere_lights_binding.clone()),
+                (5, &shadow_tex.view),
+                (6, &atmo_tex.transmittance_lut.default_view),
+                (7, depth_texture.view()),
+                (8, &sampler.clamp),
+            )),
+        );
+
         commands.entity(entity).insert(CloudBindGroups {
             raymarch,
             temporal,
             composite,
             shadow_bake,
             shadow_apply,
+            god_rays,
         });
     }
     Ok(())

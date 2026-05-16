@@ -79,4 +79,14 @@ struct CloudUniform {
     // Pre-exposure-multiplied colour the in-cloud fog blends toward.
     fog_color: vec3<f32>,
     _pad_fog: u32,
+
+    // Volumetric god-rays knobs. See `GodRaysSettings` in lib.rs.
+    god_rays_enabled: u32,
+    god_rays_num_steps: u32,
+    god_rays_max_distance: f32,
+    god_rays_scatter_rate: f32,
+    god_rays_atmo_scale_height: f32,
+    god_rays_hg_g: f32,
+    _pad_god_rays0: u32,
+    _pad_god_rays1: u32,
 }

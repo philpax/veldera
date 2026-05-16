@@ -72,6 +72,66 @@ pub(super) fn render_clouds_tab(ui: &mut egui::Ui, clouds: &mut CloudParams) {
 
     ui.separator();
 
+    egui::CollapsingHeader::new("God rays")
+        .default_open(true)
+        .show(ui, |ui| {
+            ui.checkbox(&mut cloud.god_rays.enabled, "Enabled");
+            let gr = &mut cloud.god_rays;
+            ui.add_enabled_ui(gr.enabled, |ui| {
+                let mut steps_signed = gr.num_steps as i32;
+                if ui
+                    .add(
+                        egui::Slider::new(&mut steps_signed, 4..=64)
+                            .text("primary steps")
+                            .integer(),
+                    )
+                    .on_hover_text(
+                        "Raymarch sample count per pixel. \
+                         Higher = sharper shaft edges + less banding, but more fill cost.",
+                    )
+                    .changed()
+                {
+                    gr.num_steps = steps_signed.max(1) as u32;
+                }
+                ui.add(
+                    egui::Slider::new(&mut gr.max_distance, 10_000.0..=400_000.0)
+                        .text("max distance (m)")
+                        .logarithmic(true)
+                        .integer(),
+                )
+                .on_hover_text(
+                    "Per-pixel raymarch cap. Sky pixels get marched all the way to this; \
+                     past the shadow-map footprint it doesn't matter anyway.",
+                );
+                ui.add(
+                    egui::Slider::new(&mut gr.scatter_rate, 1.0e-6..=2.0e-4)
+                        .text("scatter rate (1/m)")
+                        .logarithmic(true),
+                )
+                .on_hover_text(
+                    "Per-metre air-scatter coefficient. Controls overall shaft brightness.",
+                );
+                ui.add(
+                    egui::Slider::new(&mut gr.atmo_scale_height, 1_000.0..=20_000.0)
+                        .text("scale height (m)")
+                        .integer(),
+                )
+                .on_hover_text(
+                    "Exponential atmosphere falloff. Higher = shafts visible at higher altitudes.",
+                );
+                ui.add(
+                    egui::Slider::new(&mut gr.hg_g, 0.0..=0.95).text("phase g"),
+                )
+                .on_hover_text(
+                    "Henyey-Greenstein anisotropy. \
+                     0 = isotropic (visible everywhere), \
+                     near 1 = tight forward peak (only when looking at the sun).",
+                );
+            });
+        });
+
+    ui.separator();
+
     // Per-sub-layer panels.
     for (i, layer) in cloud.layers.iter_mut().enumerate() {
         egui::CollapsingHeader::new(format!("Layer {}: {}", i, layer.kind.name()))
