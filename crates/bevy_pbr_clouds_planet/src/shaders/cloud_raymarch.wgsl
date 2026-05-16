@@ -254,6 +254,19 @@ fn main(@builtin(global_invocation_id) idx: vec3<u32>) {
                 multi_layer_sum = multi_layer_sum + octave_sum * weight;
             }
             radiance = radiance + light.color * atmo_t * multi_layer_sum;
+
+            // Shadow-weighted ambient bounce: cone-march measures direct
+            // sun blocked by surrounding cloud mass, but doesn't account
+            // for the diffuse multi-scattered light that fills those
+            // shadowed interiors. Without this, dark valleys between
+            // cells read as near-black grey from mid-altitude views.
+            // Lift the sample radiance toward the local sky colour
+            // proportional to cone-shadow heaviness so sunlit tops are
+            // untouched but heavily-shadowed interiors get a soft fill.
+            // Gated by `twilight` so lights below horizon don't
+            // contribute fake bounce at night.
+            let shadow_term = (1.0 - exp(-tau_light * 0.5)) * twilight;
+            radiance = radiance + earth_shine * shadow_term * 0.5;
         }
 
         // Beer's law extinction across the segment.
