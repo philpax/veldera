@@ -71,6 +71,12 @@ struct CloudUniform {
     // shadow doesn't nonsensically dim pure ambient illumination at
     // night.
     shadow_strength: f32,
+    // Padding kept where the CPU-side `fog_extinction` field used to
+    // live (the composite now derives in-cloud extinction GPU-side by
+    // sampling the cloud noise at the camera position).
+    _pad_fog_ext: u32,
     _pad_shadow1: u32,
-    _pad_shadow2: u32,
+    // Pre-exposure-multiplied colour the in-cloud fog blends toward.
+    fog_color: vec3<f32>,
+    _pad_fog: u32,
 }

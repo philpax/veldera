@@ -148,8 +148,16 @@ pub struct GpuCloudUniform {
     /// well above horizon). The apply pass uses this to fade the shadow
     /// effect across twilight rather than letting it apply at night.
     pub shadow_strength: f32,
+    pub _pad_fog_ext: u32,
     pub _pad_shadow1: u32,
-    pub _pad_shadow2: u32,
+    /// Inscattered colour the fog blends toward, in the already-
+    /// exposed HDR scale the composite operates in. CPU picks the
+    /// brightest above-horizon atmosphere light, takes its chroma
+    /// (preserves sunset-orange / clear-blue tint), and scales to a
+    /// fixed HDR target. Fades through twilight to near-zero at
+    /// night.
+    pub fog_color: Vec3,
+    pub _pad_fog: u32,
 }
 
 /// Per-view storage texture written by the raymarch pass and read by the
@@ -366,6 +374,21 @@ impl FromWorld for CloudBindGroupLayouts {
                     // weight half-res neighbours by depth-class match,
                     // avoiding cloud-bleed halos at terrain silhouettes.
                     (3, texture_depth_2d_multisampled()),
+                    // View uniform — composite needs `view_from_clip` to
+                    // convert depth-buffer values into camera distance
+                    // for the in-cloud fog.
+                    (4, uniform_buffer::<ViewUniform>(true)),
+                    // Atmosphere transforms — `local_up` and
+                    // `camera_radius` for the density-at-camera
+                    // evaluation that drives the fog extinction.
+                    (5, uniform_buffer::<AtmosphereTransform>(true)),
+                    // Cloud noise (the same 3D texture the raymarch
+                    // samples) — composite evaluates cloud density at
+                    // the camera position to derive the local in-cloud
+                    // fog extinction.
+                    (6, texture_3d(TextureSampleType::default())),
+                    // Repeat sampler for the noise tile.
+                    (7, sampler(SamplerBindingType::Filtering)),
                 ),
             ),
         );
@@ -671,6 +694,35 @@ pub(super) fn prepare_cloud_uniforms(
         Vec3::Y
     };
 
+    // One-shot diagnostic: dump every atmosphere light the first time
+    // we see a populated extracted resource. The previous one-liner
+    // only showed `lights[0]` and made us assume that was the sun —
+    // turned out the moon can land at index 0 if it was spawned
+    // first, which broke the fog-colour derivation.
+    {
+        use std::sync::OnceLock;
+        static LOGGED: OnceLock<()> = OnceLock::new();
+        if atmosphere_lights.0.count > 0 && LOGGED.get().is_none() {
+            let _ = LOGGED.set(());
+            tracing::info!(
+                "cloud diag: atmosphere_lights.count={}",
+                atmosphere_lights.0.count,
+            );
+            for i in 0..(atmosphere_lights.0.count as usize) {
+                let l = &atmosphere_lights.0.lights[i];
+                let lum = l.color.dot(Vec3::new(0.2126, 0.7152, 0.0722));
+                tracing::info!(
+                    "cloud diag:   lights[{}] color={:?} luminance={:.4} \
+                     direction_to_light={:?}",
+                    i,
+                    l.color,
+                    lum,
+                    l.direction_to_light,
+                );
+            }
+        }
+    }
+
     for (entity, cloud, atmosphere, view, sph_cam, cam_ecef, prev_state, camera) in &layers {
         let quality = cloud.quality;
         let world_time = cloud.world_time_seconds;
@@ -716,6 +768,49 @@ pub(super) fn prepare_cloud_uniforms(
         const STEP_FLOOR: u32 = 16;
         let base_steps = quality.primary_steps();
         let max_primary_steps = ((base_steps as f32 * lod) as u32).max(STEP_FLOOR);
+
+        // Fog colour, in the already-exposed HDR scale the composite
+        // operates in (no `view.exposure` multiply in the shader). We
+        // *don't* couple to `light.color`'s raw radiance — that's
+        // 130000-ish for the sun and ~0.008 for the moon, plus we
+        // don't have `view.exposure` on the CPU to bring those to
+        // displayable range. Instead: pick the brightest above-horizon
+        // light, take only its *chroma* (color normalised by
+        // luminance), and scale to a fixed HDR target that matches
+        // typical sunlit cloud output. The result is per-light
+        // chromaticity (so sunset orange still bleeds in once the
+        // atmosphere extinction system tints `light.color`) at a
+        // sensible brightness, with sun-elevation twilight fade.
+        let fog_color = {
+            let up = sph_cam.local_up.normalize_or_zero();
+            const LUMA: Vec3 = Vec3::new(0.2126, 0.7152, 0.0722);
+            let mut best_chroma = Vec3::ZERO;
+            let mut best_elevation = -1.0f32;
+            let mut best_lum: f32 = 0.0;
+            for i in 0..(atmosphere_lights.0.count as usize) {
+                let light = &atmosphere_lights.0.lights[i];
+                let elevation = light.direction_to_light.dot(up);
+                if elevation < -0.1 {
+                    continue;
+                }
+                let lum = light.color.dot(LUMA);
+                if lum > best_lum {
+                    best_lum = lum;
+                    best_elevation = elevation;
+                    best_chroma = if lum > 1.0e-6 {
+                        light.color / lum
+                    } else {
+                        Vec3::ONE
+                    };
+                }
+            }
+            // Twilight fade from -5.7° to +5.7° sun elevation.
+            let t = ((best_elevation + 0.1) / 0.2).clamp(0.0, 1.0);
+            let twilight = t * t * (3.0 - 2.0 * t);
+            // HDR target: ~1.5 lands "bright sunlit cloud" without
+            // saturating bloom into a white wall.
+            best_chroma * 1.5 * twilight
+        };
 
         // Pack up to MAX_CLOUD_LAYERS sub-layers into the uniform array.
         // Wind offset is `velocity * world_time` (wrapped to bound f32
@@ -849,8 +944,10 @@ pub(super) fn prepare_cloud_uniforms(
                 let t = ((sun_mu - -0.1) / (0.2 - -0.1)).clamp(0.0, 1.0);
                 t * t * (3.0 - 2.0 * t)
             },
+            _pad_fog_ext: 0,
             _pad_shadow1: 0,
-            _pad_shadow2: 0,
+            fog_color,
+            _pad_fog: 0,
         });
 
         commands.entity(entity).insert(CloudPrevFrame {
@@ -1112,6 +1209,10 @@ pub(super) fn prepare_cloud_bind_groups(
                 (1, history_write),
                 (2, &sampler.clamp),
                 (3, depth_texture.view()),
+                (4, view_binding.clone()),
+                (5, transforms_binding.clone()),
+                (6, noise_view),
+                (7, &sampler.noise),
             )),
         );
 

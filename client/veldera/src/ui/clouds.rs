@@ -56,6 +56,9 @@ pub(super) fn render_clouds_tab(ui: &mut egui::Ui, clouds: &mut CloudParams) {
                 CloudDebugMode::Noise,
                 CloudDebugMode::Density,
                 CloudDebugMode::Opacity,
+                CloudDebugMode::FogColor,
+                CloudDebugMode::FogExtinction,
+                CloudDebugMode::ViewExposure,
             ] {
                 if ui
                     .selectable_label(matches_mode(cloud.debug_mode, mode), label_for(mode))
@@ -136,6 +139,9 @@ fn label_for(mode: CloudDebugMode) -> &'static str {
         CloudDebugMode::Noise => "Noise",
         CloudDebugMode::Density => "Density",
         CloudDebugMode::Opacity => "Opacity",
+        CloudDebugMode::FogColor => "Fog colour (raw)",
+        CloudDebugMode::FogExtinction => "Fog extinction × 10⁴",
+        CloudDebugMode::ViewExposure => "view.exposure × 10⁵",
     }
 }
 
@@ -146,6 +152,9 @@ fn help_for(mode: CloudDebugMode) -> &'static str {
         CloudDebugMode::Noise => "RGB = noise sampled at first-enabled-layer's tile size at shell midpoint.",
         CloudDebugMode::Density => "Greyscale = total density across all layers at the shell midpoint.",
         CloudDebugMode::Opacity => "Greyscale = 1 − transmittance from the full raymarch loop.",
+        CloudDebugMode::FogColor => "Full-screen `cloud.fog_color` value — diagnoses CPU→GPU pipe.",
+        CloudDebugMode::FogExtinction => "Full-screen `density_at_camera × 10⁴` — GPU-sampled cloud density at the camera position, the actual fog extinction.",
+        CloudDebugMode::ViewExposure => "Full-screen `view.exposure × 10⁵` — diagnoses composite view-uniform binding.",
     }
 }
 

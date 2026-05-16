@@ -187,13 +187,23 @@ impl ViewNode for CloudCompositeNode {
         Read<CloudRenderPipelineIds>,
         Read<ViewTarget>,
         Read<DynamicUniformIndex<GpuCloudUniform>>,
+        Read<ViewUniformOffset>,
+        Read<AtmosphereTransformsOffset>,
     );
 
     fn run(
         &self,
         _graph: &mut RenderGraphContext,
         render_context: &mut RenderContext,
-        (camera, bind_groups, pipeline_ids, view_target, cloud_offset): QueryItem<Self::ViewQuery>,
+        (
+            camera,
+            bind_groups,
+            pipeline_ids,
+            view_target,
+            cloud_offset,
+            view_offset,
+            transforms_offset,
+        ): QueryItem<Self::ViewQuery>,
         world: &World,
     ) -> Result<(), NodeRunError> {
         let pipeline_cache = world.resource::<PipelineCache>();
@@ -215,7 +225,15 @@ impl ViewNode for CloudCompositeNode {
         }
 
         pass.set_render_pipeline(composite_pipeline);
-        pass.set_bind_group(0, &bind_groups.composite, &[cloud_offset.index()]);
+        pass.set_bind_group(
+            0,
+            &bind_groups.composite,
+            &[
+                cloud_offset.index(),
+                view_offset.offset,
+                transforms_offset.index(),
+            ],
+        );
         pass.draw(0..3, 0..1);
         if !COMPOSITE_LOGGED.swap(true, Ordering::Relaxed) {
             info!("cloud composite first draw");

@@ -19,12 +19,27 @@
 // pipeline blend state — dst gets dimmed by src.a, src.rgb is added).
 
 #import bevy_core_pipeline::fullscreen_vertex_shader::FullscreenVertexOutput;
-#import bevy_pbr_clouds_planet::types::CloudUniform;
+#import bevy_render::view::View;
+#import bevy_pbr_atmosphere_planet::types::AtmosphereTransforms;
+#import bevy_pbr_clouds_planet::types::{CloudUniform, CloudSubLayer};
 
 @group(0) @binding(0) var<uniform> cloud: CloudUniform;
 @group(0) @binding(1) var cloud_raymarch_in: texture_2d<f32>;
 @group(0) @binding(2) var cloud_sampler: sampler;
 @group(0) @binding(3) var depth_texture: texture_depth_multisampled_2d;
+@group(0) @binding(4) var<uniform> view: View;
+@group(0) @binding(5) var<uniform> atmosphere_transforms: AtmosphereTransforms;
+@group(0) @binding(6) var noise_3d: texture_3d<f32>;
+@group(0) @binding(7) var noise_sampler: sampler;
+
+// Convert a UV + reverse-Z depth value to camera-to-pixel distance, in
+// metres. `depth == 0` (sky) returns 0; callers should treat that as
+// "infinitely far" if they need fog-to-sky.
+fn depth_to_camera_dist(uv: vec2<f32>, depth: f32) -> f32 {
+    let ndc_xy = uv * vec2(2.0, -2.0) + vec2(-1.0, 1.0);
+    let view_pos = view.view_from_clip * vec4(ndc_xy, depth, 1.0);
+    return length(view_pos.xyz / view_pos.w);
+}
 
 // Soft depth-similarity weight. Two depths in the same "class" (both
 // sky or both terrain) get a weight from a Gaussian-ish decay over
@@ -55,8 +70,130 @@ fn depth_weight(d_self: f32, d_neighbor: f32) -> f32 {
     return exp(-(diff * diff) / (sigma * sigma));
 }
 
+// Debug modes — mirror of `CloudDebugMode` in lib.rs. Only the
+// composite-side modes (5, 6, 7) are handled here; the rest are
+// raymarch-side and were already painted into the half-res buffer.
+const DBG_FOG_COLOR: u32 = 5u;
+const DBG_FOG_EXTINCTION: u32 = 6u;
+const DBG_VIEW_EXPOSURE: u32 = 7u;
+
+// Linear remap of `x` from `[a, b]` to `[c, d]`. Mirror of the raymarch
+// helper.
+fn remap(x: f32, a: f32, b: f32, c: f32, d: f32) -> f32 {
+    return c + (x - a) * (d - c) / max(b - a, 1e-6);
+}
+
+// Density (1/m extinction) at the camera position for one sub-layer.
+// Inlined from `sample_layer_density` in functions.wgsl with
+// `sample_pos_local = vec3(0)` collapsed through, so the heavy bits
+// disappear:
+//   - altitude is just `camera_radius − inner_radius` (no Taylor
+//     expansion; we never call `length()` on a large vec).
+//   - main / warp noise UV are the precomputed per-axis offsets.
+//   - weather still needs the raw camera ECEF.
+fn density_at_camera_for_layer(layer_i: u32) -> f32 {
+    let layer: CloudSubLayer = cloud.layers[layer_i];
+    if layer.enabled == 0u {
+        return 0.0;
+    }
+    let r_cam = atmosphere_transforms.camera_radius;
+    let altitude_above_inner = r_cam - layer.inner_radius;
+    let shell_thickness = layer.outer_radius - layer.inner_radius;
+    if altitude_above_inner < 0.0 || altitude_above_inner > shell_thickness {
+        return 0.0;
+    }
+    let shell_h = altitude_above_inner / max(shell_thickness, 1.0);
+    let v_profile = smoothstep(0.0, 0.2, shell_h) * (1.0 - smoothstep(0.6, 1.0, shell_h));
+
+    // Warp lookup — at sample_pos_local = 0, only the precomputed
+    // `warp_uv_offset` contributes (plus the time-driven evolution).
+    var warp_uv = layer.warp_uv_offset
+        + vec3<f32>(0.0, cloud.time_seconds * layer.evolution_rate, 0.0);
+    let warp_n = textureSampleLevel(noise_3d, noise_sampler, fract(warp_uv), 0.0);
+    let warp = (warp_n.gb - 0.5) * 0.4;
+
+    // Main lookup — same collapse: just the precomputed offsets plus
+    // wind and the warp perturbation.
+    let tile = layer.noise_tile;
+    let vertical_cycles = 2.5;
+    var noise_uv = vec3<f32>(
+        layer.noise_uv_offset.x + layer.wind_offset.x / tile + warp.x,
+        shell_h * vertical_cycles,
+        layer.noise_uv_offset.z + layer.wind_offset.y / tile + warp.y,
+    );
+    let n_lo = textureSampleLevel(noise_3d, noise_sampler, fract(noise_uv), 0.0);
+    let n_hi = textureSampleLevel(
+        noise_3d, noise_sampler,
+        fract(noise_uv * 2.13 + vec3(0.37, 0.19, 0.71)), 0.0,
+    );
+    let n = mix(n_lo, n_hi, 0.35);
+    let base = n.r;
+    let erosion = (n.g * 0.625 + n.b * 0.25);
+    let shape = saturate(remap(base, erosion - 1.0, 1.0, 0.0, 1.0));
+
+    // Weather. At the camera, world_pos = camera ECEF — reconstruct
+    // from atmosphere transforms (f32-quantised but fine for the
+    // coarse weather scales — millions of metres tiles, sub-metre
+    // jitter is invisible).
+    let camera_world = atmosphere_transforms.local_up * r_cam;
+    var regional_coverage = layer.coverage;
+    if layer.weather_tile > 0.0 && layer.weather_strength > 0.0 {
+        let t = cloud.time_seconds;
+        let r_drift = vec3<f32>(t * 2.0, 0.0, 0.0);
+        let c_drift = vec3<f32>(t * 8.0, 0.0, 0.0);
+        let p_drift = vec3<f32>(t * 25.0, 0.0, 0.0);
+        let r_uv = (camera_world + r_drift) / layer.weather_tile;
+        let c_uv = (camera_world + c_drift) / (layer.weather_tile * 10.0);
+        let p_uv = (camera_world + p_drift) / (layer.weather_tile * 40.0);
+        let r_n = textureSampleLevel(noise_3d, noise_sampler, fract(r_uv), 0.0).r;
+        let c_n = textureSampleLevel(noise_3d, noise_sampler, fract(c_uv), 0.0).r;
+        let p_n = textureSampleLevel(noise_3d, noise_sampler, fract(p_uv), 0.0).r;
+        let mixed = r_n * 0.20 + c_n * 0.30 + p_n * 0.50;
+        let pushed = smoothstep(0.3, 0.7, mixed);
+        let weather = (pushed - 0.5) * 2.0;
+        regional_coverage = saturate(layer.coverage - weather * layer.weather_strength);
+    }
+
+    let raw = shape * v_profile;
+    let cov_lo = max(regional_coverage - 0.1, 0.0);
+    let cov_hi = min(regional_coverage + 0.1, 1.0);
+    let density = smoothstep(cov_lo, cov_hi, raw);
+    return density * layer.density_scale;
+}
+
+// Total density at the camera, summed across enabled layers. This is the
+// 1/m extinction we feed to the `exp(-σ·d)` fog along the view ray —
+// zero when the camera is in clear air, positive only when actually
+// inside a cloud cell.
+fn density_at_camera() -> f32 {
+    var total = 0.0;
+    for (var i: u32 = 0u; i < cloud.layer_count; i = i + 1u) {
+        total = total + density_at_camera_for_layer(i);
+    }
+    return total;
+}
+
 @fragment
 fn main(in: FullscreenVertexOutput) -> @location(0) vec4<f32> {
+    // Composite-side debug modes: short-circuit before the bilateral
+    // upsample so the debug fill covers the whole screen. `src.a = 0`
+    // means "fully replace dst with src.rgb" given the pipeline's
+    // `dst = src.rgb + dst.rgb * src.a` blend.
+    if cloud.debug_mode == DBG_FOG_COLOR {
+        return vec4<f32>(cloud.fog_color, 0.0);
+    }
+    if cloud.debug_mode == DBG_FOG_EXTINCTION {
+        // Now evaluated GPU-side from the actual noise field at the
+        // camera position, so the debug viz reflects what the fog math
+        // is really using.
+        let g = density_at_camera() * 1.0e4;
+        return vec4<f32>(g, g, g, 0.0);
+    }
+    if cloud.debug_mode == DBG_VIEW_EXPOSURE {
+        let g = view.exposure * 1.0e5;
+        return vec4<f32>(g, g, g, 0.0);
+    }
+
     let half_size = vec2<f32>(cloud.buffer_size);
     let full_size = vec2<f32>(cloud.full_size);
 
@@ -107,8 +244,32 @@ fn main(in: FullscreenVertexOutput) -> @location(0) vec4<f32> {
     // Fallback: if no neighbour matched (rare edge case, e.g. extreme
     // silhouette), just take the closest one. Keeps us from outputting
     // garbage (NaN from divide-by-zero).
+    var cloud_val: vec4<f32>;
     if total_w < 1e-5 {
-        return textureSampleLevel(cloud_raymarch_in, cloud_sampler, in.uv, 0.0);
+        cloud_val = textureSampleLevel(cloud_raymarch_in, cloud_sampler, in.uv, 0.0);
+    } else {
+        cloud_val = sum / total_w;
     }
-    return sum / total_w;
+
+    // In-cloud fog is intentionally NOT applied here. We previously
+    // ran `exp(-density_at_camera · depth)` to dim distant pixels when
+    // the camera was inside a cell — but a single point sample of the
+    // noise produces a near-binary transition: as the camera crosses a
+    // cell boundary, density flips between 0 and density_scale and the
+    // whole screen pops from clear to opaque-white. It also fogs out
+    // distant in-shadow clouds in the half-res buffer once it engages.
+    //
+    // The proper "you're inside a cloud" feel comes from the cloud
+    // raymarch itself: `cloud_shell_segment` sets `t_start = 0` when
+    // the camera is inside the shell, so the existing per-ray Beer's
+    // law integration already produces the soft-white near-field
+    // inscatter when you're in dense cloud. The composite shouldn't
+    // be second-guessing it.
+    //
+    // `density_at_camera()` and `cloud.fog_color` remain available
+    // (and `FogColor` / `FogExtinction` debug modes still work) for
+    // when we revisit this with a softer model — e.g. averaging
+    // density over a small sphere around the camera, or coupling to
+    // the raymarch's near-field sample chain.
+    return cloud_val;
 }

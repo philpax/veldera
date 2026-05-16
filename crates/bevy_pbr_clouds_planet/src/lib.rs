@@ -516,6 +516,18 @@ pub enum CloudDebugMode {
     /// Accumulated cloud opacity (1 − transmittance) from the full raymarch,
     /// gray-scaled. Validates the integration loop actually accumulates.
     Opacity = 4,
+    /// Full-screen flat fill with `cloud.fog_color`. Shows the actual
+    /// value the composite is reading from the uniform — diagnoses
+    /// CPU→GPU pipe issues for the in-cloud fog.
+    FogColor = 5,
+    /// Full-screen grayscale of `cloud.fog_extinction × 10⁴` (scaled so
+    /// typical values land in the visible 0–1 range). Diagnoses the
+    /// CPU's altitude/coverage estimate.
+    FogExtinction = 6,
+    /// Full-screen grayscale of `view.exposure × 10⁵` (scaled so typical
+    /// outdoor values land near 1). Diagnoses the view-uniform binding
+    /// in the composite pass.
+    ViewExposure = 7,
 }
 
 impl ExtractComponent for CloudLayers {
