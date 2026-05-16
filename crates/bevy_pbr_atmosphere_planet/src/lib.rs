@@ -54,8 +54,9 @@ use bevy::{
 
 pub use environment::{AtmosphereEnvironmentMap, SphericalAtmosphereEnvironmentMapLight};
 pub use resources::{
-    AtmosphereLightsBuffer, AtmosphereTransforms, ExtractedAtmosphereLights, GpuAtmosphere,
-    GpuAtmosphereLight, GpuAtmosphereLights, MAX_ATMOSPHERE_LIGHTS, RenderSkyBindGroupLayouts,
+    AtmosphereLightsBuffer, AtmosphereTextures, AtmosphereTransform, AtmosphereTransforms,
+    AtmosphereTransformsOffset, ExtractedAtmosphereLights, GpuAtmosphere, GpuAtmosphereLight,
+    GpuAtmosphereLights, MAX_ATMOSPHERE_LIGHTS, RenderSkyBindGroupLayouts,
 };
 pub use sun_transmittance::compute_sun_transmittance;
 
@@ -64,7 +65,8 @@ use environment::{
     prepare_atmosphere_probe_bind_groups, prepare_atmosphere_probe_components,
     prepare_probe_textures,
 };
-use node::{AtmosphereLutsNode, AtmosphereNode, RenderSkyNode};
+use node::{AtmosphereLutsNode, RenderSkyNode};
+pub use node::AtmosphereNode;
 use resources::{
     AtmosphereBindGroupLayouts, AtmosphereLutPipelines, AtmosphereSampler,
     prepare_atmosphere_bind_groups, prepare_atmosphere_lights_buffer, prepare_atmosphere_textures,

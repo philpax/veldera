@@ -3,6 +3,7 @@
 //! Shows FPS, camera position, altitude, and loaded node count.
 
 mod camera;
+mod clouds;
 mod diagnostics;
 mod gameplay;
 mod location;
@@ -66,6 +67,7 @@ enum DebugTab {
     LocationAndTime,
     Camera,
     Gameplay,
+    Clouds,
     Diagnostics,
 }
 
@@ -123,6 +125,7 @@ fn debug_ui_system(
     mut location_params: location::LocationParams,
     mut camera_params: camera::CameraParams,
     mut gameplay_params: gameplay::GameplayParams,
+    mut clouds_params: clouds::CloudParams,
     mut diag_params: diagnostics::DiagnosticsParams,
 ) -> Result {
     let ctx = contexts.ctx_mut()?;
@@ -146,6 +149,7 @@ fn debug_ui_system(
                     (DebugTab::LocationAndTime, "Location & time"),
                     (DebugTab::Camera, "Camera"),
                     (DebugTab::Gameplay, "Gameplay"),
+                    (DebugTab::Clouds, "Clouds"),
                     (DebugTab::Diagnostics, "Diagnostics"),
                 ] {
                     if ui
@@ -170,6 +174,9 @@ fn debug_ui_system(
                 }
                 DebugTab::Gameplay => {
                     gameplay::render_gameplay_tab(ui, &mut gameplay_params);
+                }
+                DebugTab::Clouds => {
+                    clouds::render_clouds_tab(ui, &mut clouds_params);
                 }
                 DebugTab::Diagnostics => {
                     diagnostics::render_diagnostics_tab(ui, &mut diag_params, position);

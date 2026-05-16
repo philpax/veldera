@@ -1,0 +1,22 @@
+#define_import_path bevy_pbr_clouds_planet::bindings
+
+#import bevy_render::view::View;
+#import bevy_pbr::mesh_view_types::Lights;
+#import bevy_pbr_atmosphere_planet::types::{
+    Atmosphere, AtmosphereTransforms, AtmosphereLights,
+};
+#import bevy_pbr_clouds_planet::types::CloudUniform;
+
+// Group 0 — cloud raymarch compute pass.
+@group(0) @binding(0) var<uniform> cloud: CloudUniform;
+@group(0) @binding(1) var<uniform> atmosphere: Atmosphere;
+@group(0) @binding(2) var<uniform> atmosphere_transforms: AtmosphereTransforms;
+@group(0) @binding(3) var<uniform> view: View;
+@group(0) @binding(4) var<uniform> lights: Lights;
+@group(0) @binding(5) var<uniform> atmosphere_lights: AtmosphereLights;
+@group(0) @binding(6) var transmittance_lut: texture_2d<f32>;
+@group(0) @binding(7) var aerial_view_lut: texture_3d<f32>;
+@group(0) @binding(8) var noise_3d: texture_3d<f32>;
+@group(0) @binding(9) var cloud_sampler: sampler;
+@group(0) @binding(10) var cloud_raymarch_out: texture_storage_2d<rgba16float, write>;
+@group(0) @binding(11) var depth_texture: texture_depth_multisampled_2d;

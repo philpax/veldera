@@ -31,6 +31,7 @@ use input::InputPlugin;
 use launch_params::LaunchParams;
 use rendering::{
     atmosphere::{AtmosphereBundle, AtmosphereIntegrationPlugin, AtmosphericLight},
+    clouds::{CloudIntegrationPlugin, earth_stratocumulus},
     terrain_material::TerrainMaterialPlugin,
 };
 use ui::DebugUiPlugin;
@@ -62,6 +63,7 @@ impl Plugin for AppPlugin {
             DebugUiPlugin,
             TerrainMaterialPlugin,
             AtmosphereIntegrationPlugin,
+            CloudIntegrationPlugin,
             vehicle::VehiclePlugin,
         ))
         .add_systems(Startup, (setup_scene, apply_datetime_override))
@@ -141,6 +143,8 @@ fn setup_scene(
         SpatialListener::default(),
         // Spherical atmosphere for Earth.
         AtmosphereBundle::earth(earth_medium, start_position),
+        // Default stratocumulus cloud layer (Phase 1: single shell).
+        earth_stratocumulus(),
         // Input map for camera actions.
         input::default_camera_input_map(),
     ));
