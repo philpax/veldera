@@ -67,8 +67,23 @@ pub struct GpuCloudSubLayer {
     /// sessions. The shader just adds this directly to the noise lookup
     /// position.
     pub wind_offset: Vec2,
-    pub _pad0: u32,
-    pub _pad1: u32,
+    pub _pad_wind: u32,
+
+    /// Pre-computed `(camera_ecef / noise_tile).fract()`, done on the CPU
+    /// in f64. The shader adds this to the camera-relative sample offset
+    /// before sampling noise, which keeps the noise pattern aligned to
+    /// world space without ever needing to divide a 6.4×10⁶ m ECEF
+    /// coordinate by a 4000 m tile in f32 (where the resulting f32 step
+    /// of ~10⁻⁴ corresponds to ~0.8 m of world position — visibly
+    /// shifting the noise as the camera moves smoothly).
+    pub noise_uv_offset: Vec3,
+    /// Pre-computed `(camera_radius − inner_radius)` in f64, cast to
+    /// f32. The shader uses this to compute a sample point's altitude
+    /// inside the shell without ever calling `length()` on the huge
+    /// ECEF sample position — `length()` of a ~6.4×10⁶ m vec has f32
+    /// precision ≈ 0.6 m, which jitters the `shell_h` term in the
+    /// noise lookup's vertical axis by ~5 % of a noise cell.
+    pub altitude_at_camera_above_inner: f32,
 }
 
 #[derive(Component, ShaderType, Clone)]
@@ -667,6 +682,12 @@ pub(super) fn prepare_cloud_uniforms(
 
         let prev = prev_state.copied().unwrap_or_default();
 
+        // Camera position in f64 (reconstructed from the spherical-cam
+        // up + radius). Used to pre-compute per-layer noise UV anchors
+        // in f64 precision before quantising to f32 for the GPU.
+        let camera_ecef_f64 =
+            sph_cam.local_up.normalize_or_zero().as_dvec3() * f64::from(sph_cam.camera_radius);
+
         // Pack up to MAX_CLOUD_LAYERS sub-layers into the uniform array.
         // Wind offset is `velocity * world_time` (wrapped to bound f32
         // precision), so cloud state is a pure function of world time —
@@ -677,6 +698,21 @@ pub(super) fn prepare_cloud_uniforms(
             let wrap = (sub.noise_tile * 32.0).max(1.0);
             let raw = sub.wind_velocity * world_time;
             let wind_offset = Vec2::new(raw.x.rem_euclid(wrap), raw.y.rem_euclid(wrap));
+            let tile = f64::from(sub.noise_tile.max(1.0));
+            // Per-axis `(cam / tile).fract()`, in f64 to retain the
+            // precision before the result gets used as a small f32 add
+            // in the shader.
+            let cam_uv = (camera_ecef_f64 / tile).map(|v| v.rem_euclid(1.0));
+            let noise_uv_offset = cam_uv.as_vec3();
+            // `(camera_radius - inner_radius)` in f64. Shader uses this
+            // as the f32-precise base value for shell altitude, avoiding
+            // a `length(world_pos)` of a ~6.4×10⁶ m vector (which has
+            // f32 precision ≈ 0.6 m → jitters `shell_h * vertical_cycles`
+            // visibly).
+            let inner_radius_f64 =
+                f64::from(atmosphere.bottom_radius) + f64::from(sub.inner_altitude);
+            let altitude_at_camera_above_inner =
+                (f64::from(sph_cam.camera_radius) - inner_radius_f64) as f32;
             gpu_layers[i] = GpuCloudSubLayer {
                 inner_radius: atmosphere.bottom_radius + sub.inner_altitude,
                 outer_radius: atmosphere.bottom_radius + sub.outer_altitude,
@@ -690,9 +726,10 @@ pub(super) fn prepare_cloud_uniforms(
                 weather_strength: sub.weather_strength.clamp(0.0, 1.0),
                 evolution_rate: sub.evolution_rate,
                 wind_offset,
+                _pad_wind: 0,
+                noise_uv_offset,
+                altitude_at_camera_above_inner,
                 enabled: u32::from(sub.enabled),
-                _pad0: 0,
-                _pad1: 0,
             };
         }
 

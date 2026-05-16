@@ -35,25 +35,35 @@ fn remap(x: f32, a: f32, b: f32, c: f32, d: f32) -> f32 {
     return c + (x - a) * (d - c) / max(b - a, 1e-6);
 }
 
-fn sample_layer_density(layer_i: u32, world_pos: vec3<f32>) -> f32 {
+// Mirror of the main raymarch's per-layer density. Takes both absolute
+// `world_pos` (for radius/shell tests) and `sample_pos_local` (relative
+// to some local anchor — here the shadow texel's ground position — for
+// precise main-noise lookup via the CPU-precomputed `noise_uv_offset`).
+fn sample_layer_density(layer_i: u32, world_pos: vec3<f32>, sample_pos_local: vec3<f32>) -> f32 {
     let layer = cloud.layers[layer_i];
     if layer.enabled == 0u {
         return 0.0;
     }
-    let r = length(world_pos);
-    if r < layer.inner_radius || r > layer.outer_radius {
+    // Same f32-precise altitude formula as the main raymarch — avoids
+    // `length(world_pos)` of a ~6.4×10⁶ m vec.
+    let dot_up = dot(atmosphere_transforms.local_up, sample_pos_local);
+    let perp_sqr = dot(sample_pos_local, sample_pos_local) - dot_up * dot_up;
+    let altitude_above_inner = layer.altitude_at_camera_above_inner
+                             + dot_up
+                             + perp_sqr / (2.0 * atmosphere_transforms.camera_radius);
+    let shell_thickness = layer.outer_radius - layer.inner_radius;
+    if altitude_above_inner < 0.0 || altitude_above_inner > shell_thickness {
         return 0.0;
     }
-
-    let shell_h = (r - layer.inner_radius) / max(layer.outer_radius - layer.inner_radius, 1.0);
+    let shell_h = altitude_above_inner / max(shell_thickness, 1.0);
     let v_profile = smoothstep(0.0, 0.2, shell_h) * (1.0 - smoothstep(0.6, 1.0, shell_h));
 
     let tile = layer.noise_tile;
     let vertical_cycles = 2.5;
     var noise_uv = vec3<f32>(
-        world_pos.x / tile + layer.wind_offset.x / tile,
+        layer.noise_uv_offset.x + sample_pos_local.x / tile + layer.wind_offset.x / tile,
         shell_h * vertical_cycles,
-        world_pos.z / tile + layer.wind_offset.y / tile,
+        layer.noise_uv_offset.z + sample_pos_local.z / tile + layer.wind_offset.y / tile,
     );
     let n_lo = textureSampleLevel(noise_3d, cloud_sampler, fract(noise_uv), 0.0);
     let n_hi = textureSampleLevel(noise_3d, cloud_sampler, fract(noise_uv * 2.13 + vec3(0.37, 0.19, 0.71)), 0.0);
@@ -87,10 +97,10 @@ fn sample_layer_density(layer_i: u32, world_pos: vec3<f32>) -> f32 {
     return density * layer.density_scale;
 }
 
-fn sample_total_density(world_pos: vec3<f32>) -> f32 {
+fn sample_total_density(world_pos: vec3<f32>, sample_pos_local: vec3<f32>) -> f32 {
     var total = 0.0;
     for (var i: u32 = 0u; i < cloud.layer_count; i = i + 1u) {
-        total = total + sample_layer_density(i, world_pos);
+        total = total + sample_layer_density(i, world_pos, sample_pos_local);
     }
     return total;
 }
@@ -139,7 +149,11 @@ fn main(@builtin(global_invocation_id) idx: vec3<u32>) {
     let uv = (vec2<f32>(idx.xy) + 0.5) / vec2<f32>(size);
     let local_x = (uv.x - 0.5) * 2.0 * footprint;
     let local_y = (uv.y - 0.5) * 2.0 * footprint;
-    let ground_pos = center + right * local_x + forward * local_y;
+    // Camera-relative position of this texel's ground point. Small
+    // (≤ shadow footprint ≈ 100 km). The corresponding absolute ECEF
+    // ground_pos is `centre + ground_pos_local`.
+    let ground_pos_local = right * local_x + forward * local_y;
+    let ground_pos = center + ground_pos_local;
 
     // Find where the sun ray from `ground_pos` enters and exits the cloud
     // shell (union over all layers). We march that segment integrating
@@ -191,8 +205,14 @@ fn main(@builtin(global_invocation_id) idx: vec3<u32>) {
     var optical_depth = 0.0;
     for (var i: u32 = 0u; i < SHADOW_STEPS; i = i + 1u) {
         let t = t_start + (f32(i) + 0.5) * dt;
-        let p = ground_pos + sun_dir * t;
-        optical_depth = optical_depth + sample_total_density(p) * dt;
+        let displacement = sun_dir * t;
+        let p = ground_pos + displacement;
+        // `noise_uv_offset` was baked from the CAMERA's ECEF on the
+        // CPU, so the noise lookup expects positions relative to the
+        // camera, not relative to the texel's ground point. Include
+        // the texel-to-camera offset here.
+        let p_local = ground_pos_local + displacement;
+        optical_depth = optical_depth + sample_total_density(p, p_local) * dt;
     }
     let transmittance = exp(-optical_depth);
     textureStore(shadow_out, vec2<i32>(idx.xy), vec4(transmittance));

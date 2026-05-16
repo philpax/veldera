@@ -26,13 +26,16 @@
 @group(0) @binding(2) var cloud_sampler: sampler;
 @group(0) @binding(3) var depth_texture: texture_depth_multisampled_2d;
 
-// Returns 1 when both depths represent the same "class" (both sky or
-// both terrain) AND are close enough in value to be considered the
-// same surface; 0 otherwise. The sigma is in clip-space depth units
-// (reverse-Z infinite-far: 1 ≈ near plane, ~0 = far). A tolerance of
-// 0.0005 catches most "same wall" cases without bleeding into
-// noticeably-different-depth pixels.
-fn depth_match(d_self: f32, d_neighbor: f32) -> f32 {
+// Soft depth-similarity weight. Two depths in the same "class" (both
+// sky or both terrain) get a weight from a Gaussian-ish decay over
+// their difference; mixed-class neighbours (one sky, one terrain) get
+// zero so the silhouette stays clean.
+//
+// A hard `select` threshold here causes per-frame on/off flips on
+// silhouette pixels as the camera moves sub-pixel amounts, which
+// manifests as edge "warble". The soft decay smears the transition
+// across multiple frames, removing the boil.
+fn depth_weight(d_self: f32, d_neighbor: f32) -> f32 {
     let self_is_sky = d_self == 0.0;
     let nbr_is_sky = d_neighbor == 0.0;
     if self_is_sky != nbr_is_sky {
@@ -41,8 +44,15 @@ fn depth_match(d_self: f32, d_neighbor: f32) -> f32 {
     if self_is_sky {
         return 1.0;
     }
+    // `sigma` is in clip-space depth units (reverse-Z infinite-far).
+    // Wide enough that "same surface, slightly different distance" pixels
+    // (e.g. neighbouring rooftop pixels) blend smoothly, narrow enough
+    // that genuinely different surfaces still get suppressed. 0.005 ≈ a
+    // ~10 % depth ratio for terrain at typical distances; tuned to
+    // eliminate per-frame on/off flips on tree-edge silhouettes.
     let diff = abs(d_self - d_neighbor);
-    return select(0.0, 1.0, diff < 0.0005);
+    let sigma = 0.005;
+    return exp(-(diff * diff) / (sigma * sigma));
 }
 
 @fragment
@@ -89,7 +99,7 @@ fn main(in: FullscreenVertexOutput) -> @location(0) vec4<f32> {
         let full_px_c = clamp(full_px, vec2(0), full_dims - vec2(1));
         let nbr_depth = textureLoad(depth_texture, full_px_c, 0);
 
-        let w = bilin[i] * depth_match(self_depth, nbr_depth);
+        let w = bilin[i] * depth_weight(self_depth, nbr_depth);
         sum = sum + cloud_val * w;
         total_w = total_w + w;
     }

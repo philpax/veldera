@@ -118,49 +118,65 @@ fn dual_henyey_greenstein_layer_eccentric(layer_i: u32, cos_theta: f32, eccentri
 
 // Cloud density at a world-space sample position for ONE specific sub-layer.
 //
-// Each layer has its own altitude range, coverage threshold, density scale,
-// noise tile size, weather-map (regional coverage modulation), and
-// time-driven domain warp for cloud-shape evolution. Returns 0 when the
-// position is outside the layer's shell or when the layer is disabled.
-fn sample_layer_density(layer_i: u32, world_pos: vec3<f32>) -> f32 {
+// `world_pos` is absolute ECEF — used for radius / shell tests.
+// `sample_pos_local` is the SAME position expressed relative to the camera
+// (i.e. `ray_dir * t`, magnitude ≤ view distance). The main noise lookup
+// uses this small-magnitude value plus the CPU-precomputed
+// `layer.noise_uv_offset` (= `(camera_ecef / tile).fract()` in f64) so the
+// final noise UV is world-aligned with full precision — no 6.4×10⁶ m / 4 km
+// f32 division in the shader.
+fn sample_layer_density(layer_i: u32, world_pos: vec3<f32>, sample_pos_local: vec3<f32>) -> f32 {
     let layer = cloud.layers[layer_i];
     if layer.enabled == 0u {
         return 0.0;
     }
-    let r = length(world_pos);
-    if r < layer.inner_radius || r > layer.outer_radius {
+    // Altitude above the layer's inner shell. Derived as a sum of small
+    // values (precise) rather than `length(world_pos) - inner_radius`
+    // (lossy, ~0.6 m f32 noise per frame on the giant ECEF length).
+    //
+    //   altitude_above_inner ≈ (camera_r - inner_r)         (CPU-baked)
+    //                        + dot(local_up, sp_local)       (radial Δ)
+    //                        + perp²/(2·camera_r)           (curvature)
+    //
+    // The Taylor curvature correction matters for samples far from the
+    // camera (≈ 500 m correction at 80 km horizontal distance).
+    let dot_up = dot(atmosphere_transforms.local_up, sample_pos_local);
+    let perp_sqr = dot(sample_pos_local, sample_pos_local) - dot_up * dot_up;
+    let altitude_above_inner = layer.altitude_at_camera_above_inner
+                             + dot_up
+                             + perp_sqr / (2.0 * atmosphere_transforms.camera_radius);
+    let shell_thickness = layer.outer_radius - layer.inner_radius;
+    if altitude_above_inner < 0.0 || altitude_above_inner > shell_thickness {
         return 0.0;
     }
-
-    let shell_h = (r - layer.inner_radius) / max(layer.outer_radius - layer.inner_radius, 1.0);
+    let shell_h = altitude_above_inner / max(shell_thickness, 1.0);
     let v_profile = smoothstep(0.0, 0.2, shell_h) * (1.0 - smoothstep(0.6, 1.0, shell_h));
 
-    // Domain warp — sample low-frequency noise at a quarter of the tile
-    // size and use its xy offset to perturb the main noise lookup. The
-    // amplitude is a fraction of the tile so warps stay subtle. Time
-    // modulates the warp slowly per the layer's evolution_rate.
+    // Domain warp — low-frequency noise at 4× the tile, perturbs the main
+    // noise lookup. Tile is ~16 km here so precision drift is mild
+    // relative to the ±20 % warp amplitude, but we still use the
+    // camera-relative form for consistency. Time modulates the warp
+    // slowly per the layer's evolution_rate.
     let warp_tile = layer.noise_tile * 4.0;
-    var warp_uv = world_pos / warp_tile;
+    var warp_uv = sample_pos_local / warp_tile + layer.noise_uv_offset * 0.25;
     warp_uv += vec3<f32>(0.0, cloud.time_seconds * layer.evolution_rate, 0.0);
     let warp_n = textureSampleLevel(noise_3d, cloud_sampler, fract(warp_uv), 0.0);
     let warp = (warp_n.gb - 0.5) * 0.4; // ±20 % of tile
 
-    // Main noise lookup. Two-octave FBM-like sample (low frequency for
-    // macro shape, slightly-shifted higher frequency to break up the
-    // visible cell grid).
+    // Main noise lookup. Two-octave FBM-like sample.
     //
     // The vertical noise axis uses `shell_h * vertical_cycles` instead of
-    // `world_pos.y / tile` so we get multiple noise cycles WITHIN the
-    // shell regardless of layer thickness — without this, a 3.5 km shell
-    // sampled at a 4 km tile sees ~1 vertical noise cycle and the
-    // shape-noise × v_profile interaction produces visible horizontal
+    // a world-position-derived value so we get multiple noise cycles
+    // WITHIN the shell regardless of layer thickness — without this, a
+    // 3.5 km shell sampled at a 4 km tile sees ~1 vertical noise cycle
+    // and the shape × v_profile interaction produces visible horizontal
     // "decks" when the camera is inside the shell looking out.
     let tile = layer.noise_tile;
     let vertical_cycles = 2.5;
     var noise_uv = vec3<f32>(
-        world_pos.x / tile + layer.wind_offset.x / tile + warp.x,
+        layer.noise_uv_offset.x + sample_pos_local.x / tile + layer.wind_offset.x / tile + warp.x,
         shell_h * vertical_cycles,
-        world_pos.z / tile + layer.wind_offset.y / tile + warp.y,
+        layer.noise_uv_offset.z + sample_pos_local.z / tile + layer.wind_offset.y / tile + warp.y,
     );
     let n_lo = textureSampleLevel(noise_3d, cloud_sampler, fract(noise_uv), 0.0);
     // Higher-frequency octave at different position so it doesn't align.
@@ -210,15 +226,13 @@ fn sample_layer_density(layer_i: u32, world_pos: vec3<f32>) -> f32 {
     return density * layer.density_scale;
 }
 
-// Total cloud density at a world-space sample, summed across every enabled
-// sub-layer. Layers don't normally overlap in altitude, so this usually
-// equals the contribution of a single layer; when they do (e.g. cumulus
-// reaching up into a cirrus deck), the sum is physically correct because
-// extinction is additive.
-fn sample_cloud_density(world_pos: vec3<f32>) -> f32 {
+// Total cloud density, summed across every enabled sub-layer. Takes both
+// the absolute `world_pos` (for radius/shell) and `sample_pos_local`
+// (camera-relative, for high-precision noise lookups).
+fn sample_cloud_density(world_pos: vec3<f32>, sample_pos_local: vec3<f32>) -> f32 {
     var total = 0.0;
     for (var i: u32 = 0u; i < cloud.layer_count; i = i + 1u) {
-        total = total + sample_layer_density(i, world_pos);
+        total = total + sample_layer_density(i, world_pos, sample_pos_local);
     }
     return total;
 }
@@ -244,15 +258,15 @@ const CONE_OFFSETS: array<vec3<f32>, 6> = array<vec3<f32>, 6>(
 
 // Optical depth toward the sun via a 6-tap cone march.
 //
-// At each step, the sample position is offset perpendicular to the sun
-// direction by a vector whose magnitude grows linearly with `t`. The growing
-// cone radius gives a soft self-shadow that blurs the further-away cloud
-// detail, matching how clouds actually self-shade in real life and avoiding
-// the harsh banding a strict line march produces.
-//
-// Returns optical depth (not transmittance) so the Wrenninge octave loop
-// can scale it by per-octave attenuation factors.
-fn sample_light_optical_depth(start_pos: vec3<f32>, light_dir_ws: vec3<f32>) -> f32 {
+// Takes both the absolute `start_pos` (for ray-sphere math) and
+// `start_pos_local` (camera-relative, for the noise lookups inside
+// `sample_cloud_density`). The per-step displacement is identical in
+// both frames so we advance them in lock-step.
+fn sample_light_optical_depth(
+    start_pos: vec3<f32>,
+    start_pos_local: vec3<f32>,
+    light_dir_ws: vec3<f32>,
+) -> f32 {
     let base_step = 80.0;
     let growth = 1.6;
     let cone_ratio = 0.05; // tan(half-angle) ~ 5°
@@ -267,11 +281,14 @@ fn sample_light_optical_depth(start_pos: vec3<f32>, light_dir_ws: vec3<f32>) -> 
     var t = 0.0;
     var step = base_step;
     for (var i: u32 = 0u; i < cloud.light_steps; i = i + 1u) {
-        let center = start_pos + light_dir_ws * (t + step * 0.5);
+        let centre_off = light_dir_ws * (t + step * 0.5);
         let cone_r = (t + step * 0.5) * cone_ratio;
         let off = CONE_OFFSETS[i % 6u];
-        let p = center + (t_dir * off.x + b_dir * off.y + n * off.z) * cone_r;
-        let d = sample_cloud_density(p);
+        let cone_off = (t_dir * off.x + b_dir * off.y + n * off.z) * cone_r;
+        let displacement = centre_off + cone_off;
+        let p = start_pos + displacement;
+        let p_local = start_pos_local + displacement;
+        let d = sample_cloud_density(p, p_local);
         optical_depth = optical_depth + d * step;
         t = t + step;
         step = step * growth;

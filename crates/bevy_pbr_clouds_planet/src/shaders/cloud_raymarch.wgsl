@@ -114,24 +114,35 @@ fn main(@builtin(global_invocation_id) idx: vec3<u32>) {
                 dbg = vec3(0.5, 0.0, 0.0);
             }
         } else if hit {
-            let mid_pos = cam_world + ray_dir_ws * mix(t_start, t_end, 0.5);
+            let mid_t = mix(t_start, t_end, 0.5);
+            let mid_pos = cam_world + ray_dir_ws * mid_t;
+            let mid_pos_local = ray_dir_ws * mid_t;
             if cloud.debug_mode == DBG_NOISE {
-                // Sample noise at the FIRST enabled layer's tile size so the
-                // visualisation matches what that layer actually sees.
+                // Sample noise at the FIRST enabled layer's tile size, using
+                // the same f32-precise camera-relative formula as the main
+                // lookup so the debug viz accurately reflects what density
+                // sees (rather than the old `mid_pos / tile` which has the
+                // precision drift we fixed).
                 var tile = 2000.0;
                 var wind = vec2<f32>(0.0);
+                var uv_off = vec3<f32>(0.0);
                 for (var li: u32 = 0u; li < cloud.layer_count; li = li + 1u) {
                     if cloud.layers[li].enabled != 0u {
                         tile = cloud.layers[li].noise_tile;
                         wind = cloud.layers[li].wind_offset;
+                        uv_off = cloud.layers[li].noise_uv_offset;
                         break;
                     }
                 }
-                let noise_uv = mid_pos / tile + vec3(wind.x / tile, 0.0, wind.y / tile);
+                let noise_uv = vec3<f32>(
+                    uv_off.x + mid_pos_local.x / tile + wind.x / tile,
+                    uv_off.y + mid_pos_local.y / tile,
+                    uv_off.z + mid_pos_local.z / tile + wind.y / tile,
+                );
                 let n = textureSampleLevel(noise_3d, cloud_sampler, fract(noise_uv), 0.0);
                 dbg = n.rgb;
             } else if cloud.debug_mode == DBG_DENSITY {
-                let d = sample_cloud_density(mid_pos);
+                let d = sample_cloud_density(mid_pos, mid_pos_local);
                 // Total density from all layers, normalised by the largest
                 // enabled layer's density_scale for display.
                 var max_scale = 1e-6;
@@ -165,8 +176,9 @@ fn main(@builtin(global_invocation_id) idx: vec3<u32>) {
 
     for (var i: u32 = 0u; i < max_steps; i = i + 1u) {
         let t = t_start + (f32(i) + 0.3) * dt;
-        let sample_pos = cam_world + ray_dir_ws * t;
-        let density = sample_cloud_density(sample_pos);
+        let sample_pos_local = ray_dir_ws * t;
+        let sample_pos = cam_world + sample_pos_local;
+        let density = sample_cloud_density(sample_pos, sample_pos_local);
         // Skip empty space. Threshold is in absolute extinction units (1/m);
         // 1e-7 is safely below any realistic density_scale × normalised
         // density so we don't accidentally drop visible clouds. Higher
@@ -202,7 +214,7 @@ fn main(@builtin(global_invocation_id) idx: vec3<u32>) {
             // from orbit. Fade over ~3° below the horizon.
             let twilight = smoothstep(-0.05, 0.0, mu_light);
             let atmo_t = sample_transmittance(local_r, mu_light) * twilight;
-            let tau_light = sample_light_optical_depth(sample_pos, light_dir_ws);
+            let tau_light = sample_light_optical_depth(sample_pos, sample_pos_local, light_dir_ws);
             let cos_theta = dot(ray_dir_ws, light_dir_ws);
 
             // Walk every active sub-layer and sum its phase-weighted
@@ -210,7 +222,7 @@ fn main(@builtin(global_invocation_id) idx: vec3<u32>) {
             // density at this sample point.
             var multi_layer_sum = vec3<f32>(0.0);
             for (var li2: u32 = 0u; li2 < cloud.layer_count; li2 = li2 + 1u) {
-                let layer_d = sample_layer_density(li2, sample_pos);
+                let layer_d = sample_layer_density(li2, sample_pos, sample_pos_local);
                 if layer_d <= 1e-9 {
                     continue;
                 }
