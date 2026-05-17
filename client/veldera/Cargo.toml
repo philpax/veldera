@@ -39,7 +39,11 @@ bevy = { version = "0.18.0", default-features = false, features = [
 bevy_egui = "0.39"
 bevy_pbr_atmosphere_planet = { path = "../../crates/bevy_pbr_atmosphere_planet" }
 bevy_pbr_clouds_planet = { path = "../../crates/bevy_pbr_clouds_planet" }
-egui_extras = "0.33.3"
+egui_extras = { version = "0.33.3", features = ["datepicker"] }
+# Pulled in transitively via egui_extras's datepicker feature; declared
+# directly so we can convert between `SimpleDate` and `NaiveDate` in the
+# location UI.
+chrono = { version = "0.4", default-features = false }
 egui_plot = "0.34.0"
 glam = "0.30"
 leafwing-input-manager = "0.20"

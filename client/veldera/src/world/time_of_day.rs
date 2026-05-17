@@ -45,6 +45,24 @@ pub struct SimpleDate {
 }
 
 impl SimpleDate {
+    /// Construct a [`chrono::NaiveDate`] for interop with widgets that
+    /// expect one (e.g. egui_extras' `DatePickerButton`).
+    pub fn to_naive(self) -> Option<chrono::NaiveDate> {
+        chrono::NaiveDate::from_ymd_opt(self.year, self.month, self.day)
+    }
+
+    /// Convert from a [`chrono::NaiveDate`].
+    pub fn from_naive(d: chrono::NaiveDate) -> Self {
+        use chrono::Datelike;
+        Self {
+            year: d.year(),
+            month: d.month(),
+            day: d.day(),
+        }
+    }
+}
+
+impl SimpleDate {
     /// Returns the day of year (1-366).
     pub fn day_of_year(&self) -> u32 {
         let is_leap = self.is_leap_year();
@@ -232,18 +250,6 @@ impl TimeOfDayState {
         self.reference_instant = Instant::now();
         self.reference_sim_time = current_time;
         self.speed_multiplier = speed;
-    }
-
-    /// Sets the date in override mode.
-    pub fn set_override_date(&mut self, date: SimpleDate) {
-        if self.mode != TimeMode::Override {
-            self.mode = TimeMode::Override;
-        }
-        let current_time = self.current_utc_seconds();
-        self.reference_instant = Instant::now();
-        self.reference_sim_time = current_time;
-        self.reference_date = date;
-        self.day_offset = 0;
     }
 
     /// Sets an absolute UTC date and time in override mode.

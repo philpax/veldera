@@ -278,27 +278,29 @@ pub(super) fn render_location_tab(
 
     // Time and date controls (only in override mode).
     if is_override {
-        // Date controls — operate on local date at the camera's
-        // longitude. `set_override_date` takes a UTC date, but
-        // advancing/retreating by one day is the same operation in
-        // either reference frame (the offset between UTC and local
-        // stays constant).
-        let current_utc_date = location.time_of_day.current_date();
+        // Local-date picker. Setting a new date preserves the local
+        // hour at this longitude — the date change goes through
+        // `local_to_utc` so cross-midnight cases are handled (UTC
+        // may need to be the day before/after the picked local
+        // date).
         ui.horizontal(|ui| {
             ui.label("Date:");
-            if ui.button("\u{25c0}").clicked() {
-                let mut new_date = current_utc_date;
-                new_date.retreat_day();
-                location.time_of_day.set_override_date(new_date);
-            }
-            ui.label(format!(
-                "{}-{:02}-{:02}",
-                local_date.year, local_date.month, local_date.day
-            ));
-            if ui.button("\u{25b6}").clicked() {
-                let mut new_date = current_utc_date;
-                new_date.advance_day();
-                location.time_of_day.set_override_date(new_date);
+            if let Some(mut picked) = local_date.to_naive() {
+                let before = picked;
+                ui.add(egui_extras::DatePickerButton::new(&mut picked).id_salt("local_date"));
+                if picked != before {
+                    let new_local_date =
+                        crate::world::time_of_day::SimpleDate::from_naive(picked);
+                    let (utc_seconds, utc_date) =
+                        crate::world::time_of_day::local_to_utc(
+                            local_hours * SECONDS_PER_HOUR,
+                            new_local_date,
+                            lon_deg,
+                        );
+                    location.time_of_day.set_override_utc(utc_date, utc_seconds);
+                }
+            } else {
+                ui.label("(invalid date)");
             }
         });
 
