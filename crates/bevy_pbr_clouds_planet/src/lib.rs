@@ -370,6 +370,13 @@ pub struct CloudSubLayer {
     /// static (only translates with wind); larger values = faster
     /// morphing of cloud shape. Typical values: 0.001-0.01 cycles/sec.
     pub evolution_rate: f32,
+    /// Per-layer multiplier on the climate model's influence over
+    /// this layer's coverage. Scales [`ClimateSettings::latitude_strength`]
+    /// further per layer, so cirrus (which is more globally
+    /// uniform on Earth) can fall back closer to its base
+    /// `coverage` while stratocumulus follows the climate bands
+    /// tightly. 0 = ignore climate, 1 = full climate effect.
+    pub climate_strength: f32,
 }
 
 impl CloudSubLayer {
@@ -397,6 +404,9 @@ impl CloudSubLayer {
             hg_blend: 0.7,
             wind_velocity: Vec2::new(8.0, 0.0),
             evolution_rate: 0.003,
+            // Stratocumulus is the layer the climate model is really
+            // tuned for — full climate strength.
+            climate_strength: 1.0,
         }
     }
 
@@ -421,6 +431,13 @@ impl CloudSubLayer {
             // Cirrus winds aloft are stronger than surface winds.
             wind_velocity: Vec2::new(25.0, 0.0),
             evolution_rate: 0.001,
+            // Cirrus is much more uniformly distributed globally than
+            // stratocumulus — it doesn't track the ITCZ / subtropical
+            // bands nearly as tightly. A light influence (0.3) so the
+            // climate model nudges it but doesn't dominate; most of
+            // the cirrus coverage comes from the layer's own base
+            // `coverage` field.
+            climate_strength: 0.3,
         }
     }
 
@@ -442,6 +459,11 @@ impl CloudSubLayer {
             hg_blend: 0.6,
             wind_velocity: Vec2::ZERO,
             evolution_rate: 0.0,
+            // Ground fog is essentially independent of large-scale
+            // climate — it forms in valleys / basins based on local
+            // temperature inversions. Default to "ignore climate"
+            // until we have a separate orographic fog model.
+            climate_strength: 0.0,
         }
     }
 }

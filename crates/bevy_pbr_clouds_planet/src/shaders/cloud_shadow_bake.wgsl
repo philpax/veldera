@@ -60,14 +60,14 @@ fn remap(x: f32, a: f32, b: f32, c: f32, d: f32) -> f32 {
 // Climate coverage at this world position. Just samples the baked
 // climate map — see `climate.wgsl`. The bake runs before this pass
 // in the render graph, so the texture is always current.
-fn climate_coverage(world_pos: vec3<f32>, base_coverage: f32) -> f32 {
+fn climate_coverage(world_pos: vec3<f32>, base_coverage: f32, layer_strength: f32) -> f32 {
     return climate_coverage_at(
         climate_map,
         cloud_sampler,
         world_pos,
         base_coverage,
         cloud.climate_enabled,
-        cloud.climate_latitude_strength,
+        cloud.climate_latitude_strength * layer_strength,
     );
 }
 
@@ -106,7 +106,7 @@ fn sample_layer_density(layer_i: u32, world_pos: vec3<f32>, sample_pos_local: ve
     let erosion = (n.g * 0.625 + n.b * 0.25);
     let shape = saturate(remap(base, erosion - 1.0, 1.0, 0.0, 1.0));
 
-    let climate_base = climate_coverage(world_pos, layer.coverage);
+    let climate_base = climate_coverage(world_pos, layer.coverage, layer.climate_strength);
     var regional_coverage = climate_base;
     if layer.weather_tile > 0.0 && layer.weather_strength > 0.0 {
         let t = cloud.time_seconds;

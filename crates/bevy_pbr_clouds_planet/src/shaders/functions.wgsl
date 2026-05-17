@@ -119,18 +119,19 @@ fn dual_henyey_greenstein_layer_eccentric(layer_i: u32, cos_theta: f32, eccentri
 
 // Climate coverage at a world position. Single bilinear sample of the
 // baked climate map (R channel = coverage threshold), blended into the
-// layer's `base_coverage` by `climate_latitude_strength`. All the
-// physics — latitude bands, ocean bonus, monsoon enhancement,
-// stratocumulus decks — happens in `climate_bake.wgsl`; the runtime
-// just samples the result.
-fn climate_coverage(world_pos: vec3<f32>, base_coverage: f32) -> f32 {
+// layer's `base_coverage` by the effective strength
+// (`cloud.climate_latitude_strength` × `layer.climate_strength`).
+// All the physics — latitude bands, ocean bonus, monsoon
+// enhancement, stratocumulus decks — happens in `climate_bake.wgsl`;
+// the runtime just samples the result.
+fn climate_coverage(world_pos: vec3<f32>, base_coverage: f32, layer_strength: f32) -> f32 {
     return climate_coverage_at(
         climate_map,
         lut_sampler,
         world_pos,
         base_coverage,
         cloud.climate_enabled,
-        cloud.climate_latitude_strength,
+        cloud.climate_latitude_strength * layer_strength,
     );
 }
 
@@ -218,7 +219,7 @@ fn sample_layer_density(layer_i: u32, world_pos: vec3<f32>, sample_pos_local: ve
     // Per-layer base coverage, with the Earth-aware climate model
     // applied first so weather noise modulates a climatologically
     // sensible baseline rather than a flat global value.
-    let climate_base = climate_coverage(world_pos, layer.coverage);
+    let climate_base = climate_coverage(world_pos, layer.coverage, layer.climate_strength);
     var regional_coverage = climate_base;
     if layer.weather_tile > 0.0 && layer.weather_strength > 0.0 {
         let t = cloud.time_seconds;

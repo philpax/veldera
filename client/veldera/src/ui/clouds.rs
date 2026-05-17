@@ -308,6 +308,16 @@ fn render_layers(ui: &mut egui::Ui, cloud: &mut CloudLayers) {
                     egui::Slider::new(&mut layer.weather_strength, 0.0..=1.0)
                         .text("weather strength"),
                 );
+                ui.add(
+                    egui::Slider::new(&mut layer.climate_strength, 0.0..=1.0)
+                        .text("climate strength"),
+                )
+                .on_hover_text(
+                    "Per-layer multiplier on the global climate \
+                     model's influence. Cirrus defaults low (mostly \
+                     uniform global cirrus); stratocumulus defaults \
+                     to full (follows latitude bands tightly).",
+                );
                 ui.label("Animation:");
                 ui.add(
                     egui::Slider::new(&mut layer.wind_velocity.x, -50.0..=50.0)

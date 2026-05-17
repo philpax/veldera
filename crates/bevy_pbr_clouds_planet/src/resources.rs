@@ -83,7 +83,11 @@ pub struct GpuCloudSubLayer {
     /// wraps at warp-tile boundaries (16 km) cleanly instead of popping
     /// by 0.25 cycles every noise-tile boundary (4 km).
     pub warp_uv_offset: Vec3,
-    pub pad_warp: u32,
+    /// Per-layer climate-strength multiplier (0..1) — see
+    /// [`crate::CloudSubLayer::climate_strength`]. Placed in this
+    /// 4-byte slot (which would otherwise be `vec3` alignment padding)
+    /// so the struct size stays compact.
+    pub climate_strength: f32,
 }
 
 #[derive(Component, ShaderType, Clone)]
@@ -997,7 +1001,7 @@ pub(super) fn prepare_cloud_uniforms(
                 noise_uv_offset,
                 pad_noise: 0,
                 warp_uv_offset,
-                pad_warp: 0,
+                climate_strength: sub.climate_strength.clamp(0.0, 1.0),
                 enabled: u32::from(sub.enabled),
             };
         }

@@ -99,14 +99,14 @@ fn remap(x: f32, a: f32, b: f32, c: f32, d: f32) -> f32 {
 
 // Climate coverage at this world position. Single texel fetch from
 // the baked climate map; physics lives in `climate_bake.wgsl`.
-fn climate_coverage(world_pos: vec3<f32>, base_coverage: f32) -> f32 {
+fn climate_coverage(world_pos: vec3<f32>, base_coverage: f32, layer_strength: f32) -> f32 {
     return climate_coverage_at(
         climate_map,
         cloud_sampler,
         world_pos,
         base_coverage,
         cloud.climate_enabled,
-        cloud.climate_latitude_strength,
+        cloud.climate_latitude_strength * layer_strength,
     );
 }
 
@@ -163,7 +163,7 @@ fn density_at_camera_for_layer(layer_i: u32) -> f32 {
     // coarse weather scales — millions of metres tiles, sub-metre
     // jitter is invisible).
     let camera_world = atmosphere_transforms.local_up * r_cam;
-    let climate_base = climate_coverage(camera_world, layer.coverage);
+    let climate_base = climate_coverage(camera_world, layer.coverage, layer.climate_strength);
     var regional_coverage = climate_base;
     if layer.weather_tile > 0.0 && layer.weather_strength > 0.0 {
         let t = cloud.time_seconds;

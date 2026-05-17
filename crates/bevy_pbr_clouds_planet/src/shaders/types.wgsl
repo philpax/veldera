@@ -33,7 +33,9 @@ struct CloudSubLayer {
     // noise_tile). The warp lookup uses this so it wraps cleanly at
     // 16 km boundaries instead of popping 0.25 cycles every 4 km.
     warp_uv_offset: vec3<f32>,
-    pad_warp: u32,
+    // Per-layer climate-strength multiplier in [0, 1]. Lives in
+    // what would otherwise be vec3 alignment padding.
+    climate_strength: f32,
 }
 
 struct CloudUniform {
