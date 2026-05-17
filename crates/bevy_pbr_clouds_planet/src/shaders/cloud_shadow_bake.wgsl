@@ -110,13 +110,36 @@ fn main(@builtin(global_invocation_id) idx: vec3<u32>) {
         return;
     }
 
-    // Sun direction. Atmosphere lights[0] is the sun by convention; if no
-    // sun, treat as no shadow (write transmittance = 1).
+    // Shadow caster: pick the brightest above-horizon atmosphere light.
+    // We can't assume `lights[0]` is the sun — extraction order is the
+    // entity-iteration order, so the moon can land at index 0. Picking
+    // by luminance makes the shadow caster follow whichever light is
+    // dominantly illuminating the scene, which means moonlit cloud
+    // shadows during the night when the moon is up and the sun isn't.
     if atmosphere_lights.count == 0u {
         textureStore(shadow_out, vec2<i32>(idx.xy), vec4(1.0));
         return;
     }
-    let sun_dir = atmosphere_lights.lights[0].direction_to_light;
+    let luma = vec3<f32>(0.2126, 0.7152, 0.0722);
+    var best_idx: u32 = 0u;
+    var best_lum: f32 = 0.0;
+    for (var i: u32 = 0u; i < atmosphere_lights.count; i = i + 1u) {
+        let l = atmosphere_lights.lights[i];
+        let elev = dot(l.direction_to_light, atmosphere_transforms.local_up);
+        if elev < -0.05 {
+            continue;
+        }
+        let lum = dot(l.color, luma);
+        if lum > best_lum {
+            best_lum = lum;
+            best_idx = i;
+        }
+    }
+    if best_lum <= 0.0 {
+        textureStore(shadow_out, vec2<i32>(idx.xy), vec4(1.0));
+        return;
+    }
+    let sun_dir = atmosphere_lights.lights[best_idx].direction_to_light;
 
     // Reconstruct the world position on the camera's tangent plane that
     // this texel represents. The CPU side built `shadow_from_world` such

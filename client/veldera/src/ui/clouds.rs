@@ -59,6 +59,7 @@ pub(super) fn render_clouds_tab(ui: &mut egui::Ui, clouds: &mut CloudParams) {
                 CloudDebugMode::FogColor,
                 CloudDebugMode::FogExtinction,
                 CloudDebugMode::ViewExposure,
+                CloudDebugMode::ShadowMap,
             ] {
                 if ui
                     .selectable_label(matches_mode(cloud.debug_mode, mode), label_for(mode))
@@ -69,6 +70,18 @@ pub(super) fn render_clouds_tab(ui: &mut egui::Ui, clouds: &mut CloudParams) {
             }
         });
     ui.label(help_for(cloud.debug_mode));
+
+    ui.separator();
+
+    ui.add(
+        egui::Slider::new(&mut cloud.shadow_intensity, 0.0..=5.0)
+            .text("shadow intensity"),
+    )
+    .on_hover_text(
+        "Multiplier on the cloud-shadow apply pass. 1.0 = default \
+         (~45 % darkening under full shadow). Crank up for tuning, \
+         especially handy for moonlit-shadow visibility tests.",
+    );
 
     ui.separator();
 
@@ -202,6 +215,7 @@ fn label_for(mode: CloudDebugMode) -> &'static str {
         CloudDebugMode::FogColor => "Fog colour (raw)",
         CloudDebugMode::FogExtinction => "Fog extinction × 10⁴",
         CloudDebugMode::ViewExposure => "view.exposure × 10⁵",
+        CloudDebugMode::ShadowMap => "Shadow map (raw)",
     }
 }
 
@@ -215,6 +229,7 @@ fn help_for(mode: CloudDebugMode) -> &'static str {
         CloudDebugMode::FogColor => "Full-screen `cloud.fog_color` value — diagnoses CPU→GPU pipe.",
         CloudDebugMode::FogExtinction => "Full-screen `density_at_camera × 10⁴` — GPU-sampled cloud density at the camera position, the actual fog extinction.",
         CloudDebugMode::ViewExposure => "Full-screen `view.exposure × 10⁵` — diagnoses composite view-uniform binding.",
+        CloudDebugMode::ShadowMap => "Scene modulated by raw cloud-shadow transmittance (bypasses strength fade). Red = outside footprint.",
     }
 }
 

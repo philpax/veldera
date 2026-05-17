@@ -87,6 +87,8 @@ struct CloudUniform {
     god_rays_scatter_rate: f32,
     god_rays_atmo_scale_height: f32,
     god_rays_hg_g: f32,
-    _pad_god_rays0: u32,
-    _pad_god_rays1: u32,
+    // Multiplier applied to the apply pass's dimming. See
+    // `CloudLayers::shadow_intensity` in lib.rs.
+    shadow_intensity: f32,
+    _pad_shadow_intensity: u32,
 }

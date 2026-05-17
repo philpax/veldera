@@ -29,6 +29,9 @@
 // here without separating direct sun from ambient.
 const SHADOW_FLOOR: f32 = 0.45;
 
+// Mirrors `CloudDebugMode::ShadowMap` in lib.rs.
+const DBG_SHADOW_MAP: u32 = 8u;
+
 fn reconstruct_world_pos(uv: vec2<f32>, depth: f32) -> vec3<f32> {
     let ndc = vec3(uv * vec2(2.0, -2.0) + vec2(-1.0, 1.0), depth);
     let world_h = view.world_from_clip * vec4(ndc, 1.0);
@@ -39,6 +42,14 @@ fn reconstruct_world_pos(uv: vec2<f32>, depth: f32) -> vec3<f32> {
 fn main(in: FullscreenVertexOutput) -> @location(0) vec4<f32> {
     let full_pixel = vec2<i32>(in.position.xy);
     let depth = textureLoad(depth_texture, full_pixel, 0);
+
+    // In DBG_SHADOW_MAP mode the composite pass paints the raw shadow
+    // map full-screen (it has a replace-blend, so it can show the
+    // values directly without the dim-night scene swallowing them).
+    // The apply pass here just no-ops so it doesn't double-modulate.
+    if cloud.debug_mode == DBG_SHADOW_MAP {
+        return vec4<f32>(1.0);
+    }
 
     // No geometry — sky pixel. Emit a multiplier of 1 so the blend is a
     // no-op (scene colour passes through unchanged).
@@ -54,11 +65,16 @@ fn main(in: FullscreenVertexOutput) -> @location(0) vec4<f32> {
     }
 
     let transmittance = textureSampleLevel(shadow_map, lut_sampler, shadow_uv, 0.0).r;
-    // Map transmittance ∈ [0, 1] to brightness ∈ [SHADOW_FLOOR, 1], then
-    // fade the dimming itself by `shadow_strength` so when the sun is
-    // below the horizon the apply pass becomes a no-op (no direct sun ⇒
-    // no directional occlusion of pure ambient light).
+    // Map transmittance ∈ [0, 1] to brightness ∈ [SHADOW_FLOOR, 1],
+    // then fade the dimming by both `shadow_strength` (twilight gate,
+    // 0 when the active light is below horizon) and the user-tunable
+    // `shadow_intensity` (lets you push shadows past the default 45 %
+    // floor — useful especially for moonlit shadows where the absolute
+    // light level is already dim and the default intensity is hard to
+    // perceive). Clamped to [0, 1] so an intensity > 1 can't produce
+    // negative output.
     let base_dim = mix(SHADOW_FLOOR, 1.0, transmittance);
-    let dim = mix(1.0, base_dim, cloud.shadow_strength);
+    let dim_raw = mix(1.0, base_dim, cloud.shadow_strength * cloud.shadow_intensity);
+    let dim = clamp(dim_raw, 0.0, 1.0);
     return vec4<f32>(dim, dim, dim, 1.0);
 }

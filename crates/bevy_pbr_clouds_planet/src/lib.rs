@@ -459,6 +459,12 @@ pub struct CloudLayers {
     pub debug_mode: CloudDebugMode,
     /// Volumetric god-ray / light-shaft settings. See [`GodRaysSettings`].
     pub god_rays: GodRaysSettings,
+    /// Multiplier on the cloud-shadow apply pass. 1.0 = default
+    /// (cloud-shadowed terrain dims to ~45 % brightness). Bump to make
+    /// shadows more visible (e.g., for tuning moonlit-shadow tests
+    /// where the absolute light level is already dim); drop to fade
+    /// the effect out entirely (0.0 = no dimming).
+    pub shadow_intensity: f32,
 }
 
 /// Tunable knobs for the additive volumetric god-rays pass.
@@ -521,6 +527,7 @@ impl CloudLayers {
             world_time_seconds: 0.0,
             debug_mode: CloudDebugMode::Off,
             god_rays: GodRaysSettings::default(),
+            shadow_intensity: 1.0,
         }
     }
 
@@ -532,6 +539,7 @@ impl CloudLayers {
             world_time_seconds: 0.0,
             debug_mode: CloudDebugMode::Off,
             god_rays: GodRaysSettings::default(),
+            shadow_intensity: 1.0,
         }
     }
 
@@ -549,6 +557,7 @@ impl CloudLayers {
             world_time_seconds: 0.0,
             debug_mode: CloudDebugMode::Off,
             god_rays: GodRaysSettings::default(),
+            shadow_intensity: 1.0,
         }
     }
 }
@@ -586,6 +595,14 @@ pub enum CloudDebugMode {
     /// outdoor values land near 1). Diagnoses the view-uniform binding
     /// in the composite pass.
     ViewExposure = 7,
+    /// Modulates the scene by the raw cloud-shadow-map transmittance —
+    /// bypasses both the dominant-light strength fade and the
+    /// depth-skip for sky. Diagnoses whether the bake actually
+    /// produced shadow content for the currently-active caster
+    /// (useful for moonlit-shadow tests where the active light's
+    /// luminance is low enough that the apply gate might be killing
+    /// the effect even when the map is fine).
+    ShadowMap = 8,
 }
 
 impl ExtractComponent for CloudLayers {

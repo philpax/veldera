@@ -173,8 +173,10 @@ pub struct GpuCloudUniform {
     pub god_rays_atmo_scale_height: f32,
     /// Henyey-Greenstein anisotropy parameter.
     pub god_rays_hg_g: f32,
-    pub _pad_god_rays0: u32,
-    pub _pad_god_rays1: u32,
+    /// Multiplier on the shadow-apply pass's dimming. See
+    /// [`CloudLayers::shadow_intensity`].
+    pub shadow_intensity: f32,
+    pub _pad_shadow_intensity: u32,
 }
 
 /// Per-view storage texture written by the raymarch pass and read by the
@@ -408,6 +410,12 @@ impl FromWorld for CloudBindGroupLayouts {
                     (6, texture_3d(TextureSampleType::default())),
                     // Repeat sampler for the noise tile.
                     (7, sampler(SamplerBindingType::Filtering)),
+                    // Cloud shadow map — used by the
+                    // `DBG_SHADOW_MAP` debug mode to paint the raw
+                    // shadow values full-screen (the apply pass's
+                    // modulate blend can't show this at night because
+                    // the scene is dim).
+                    (8, texture_2d(TextureSampleType::default())),
                 ),
             ),
         );
@@ -764,44 +772,13 @@ pub(super) fn prepare_cloud_uniforms(
         Option<&ExtractedCamera>,
     )>,
 ) {
-    // Sun direction: take the first atmosphere light if present (the
-    // crate's convention is that the sun is light 0). If there's no
-    // atmosphere light, fall back to local up so the shadow matrix is
-    // still well-defined (shadows just degenerate to "no clouds").
-    let sun_dir_ws: Vec3 = if atmosphere_lights.0.count > 0 {
-        atmosphere_lights.0.lights[0].direction_to_light
-    } else {
-        Vec3::Y
-    };
-
-    // One-shot diagnostic: dump every atmosphere light the first time
-    // we see a populated extracted resource. The previous one-liner
-    // only showed `lights[0]` and made us assume that was the sun —
-    // turned out the moon can land at index 0 if it was spawned
-    // first, which broke the fog-colour derivation.
-    {
-        use std::sync::OnceLock;
-        static LOGGED: OnceLock<()> = OnceLock::new();
-        if atmosphere_lights.0.count > 0 && LOGGED.get().is_none() {
-            let _ = LOGGED.set(());
-            tracing::info!(
-                "cloud diag: atmosphere_lights.count={}",
-                atmosphere_lights.0.count,
-            );
-            for i in 0..(atmosphere_lights.0.count as usize) {
-                let l = &atmosphere_lights.0.lights[i];
-                let lum = l.color.dot(Vec3::new(0.2126, 0.7152, 0.0722));
-                tracing::info!(
-                    "cloud diag:   lights[{}] color={:?} luminance={:.4} \
-                     direction_to_light={:?}",
-                    i,
-                    l.color,
-                    lum,
-                    l.direction_to_light,
-                );
-            }
-        }
-    }
+    // Dominant-light direction: deferred to per-camera scope below
+    // since we need the camera's local_up to test "above horizon".
+    // We don't index `lights[0]` directly because extraction order is
+    // the entity-iteration order — the moon can land at index 0, and
+    // we want shadows to track the *actually-illuminating* light so
+    // that night-time cloud shadows follow the moon instead of
+    // degenerating because the (below-horizon) sun was picked.
 
     for (entity, cloud, atmosphere, view, sph_cam, cam_ecef, prev_state, camera) in &layers {
         let quality = cloud.quality;
@@ -992,10 +969,30 @@ pub(super) fn prepare_cloud_uniforms(
             ),
         );
         let shadow_from_world = shadow_from_ecef * Mat4::from_translation(center);
-        // Mute the matrix entirely if there's no sun (sun below local
-        // horizon already zeros out shadows in the apply pass; the
-        // matrix is only "wrong" if both axes degenerated — guard).
-        let _ = sun_dir_ws;
+
+        // Dominant-light elevation for the shadow-strength fade. Pick
+        // the brightest above-horizon atmosphere light (same logic the
+        // bake shader uses), and fade the apply pass off as it dips
+        // toward the horizon. This is what gives us moonlit cloud
+        // shadows: at night the sun is below the horizon (so its
+        // contribution is rejected), the moon is above, and shadows
+        // track *its* direction. No light above horizon ⇒ elevation
+        // stays at the floor and the apply pass becomes a no-op.
+        const LUMA: Vec3 = Vec3::new(0.2126, 0.7152, 0.0722);
+        let mut best_lum: f32 = 0.0;
+        let mut dominant_elev: f32 = -1.0;
+        for i in 0..(atmosphere_lights.0.count as usize) {
+            let l = &atmosphere_lights.0.lights[i];
+            let elev = l.direction_to_light.dot(up);
+            if elev < -0.05 {
+                continue;
+            }
+            let lum = l.color.dot(LUMA);
+            if lum > best_lum {
+                best_lum = lum;
+                dominant_elev = elev;
+            }
+        }
 
         let teleported = prev.initialised
             && current_camera_ecef.distance(prev.camera_ecef) > TELEPORT_THRESHOLD_M;
@@ -1022,13 +1019,11 @@ pub(super) fn prepare_cloud_uniforms(
             layers: gpu_layers,
             shadow_from_world,
             shadow_footprint: footprint,
-            // Sun elevation at the camera, smoothstepped through twilight
-            // so the apply pass fades the shadow effect out once the sun
-            // sets (no direct sun ⇒ no directional occlusion).
-            // -0.1 .. 0.2 in mu = -5.7° .. +11.5° elevation.
+            // Dominant-light elevation, smoothstepped through twilight
+            // so the apply pass fades off as the active light dips
+            // below the horizon. -0.1..0.2 in elevation = -5.7°..+11.5°.
             shadow_strength: {
-                let sun_mu = sun_dir_ws.dot(up);
-                let t = ((sun_mu - -0.1) / (0.2 - -0.1)).clamp(0.0, 1.0);
+                let t = ((dominant_elev + 0.1) / 0.3).clamp(0.0, 1.0);
                 t * t * (3.0 - 2.0 * t)
             },
             _pad_fog_ext: 0,
@@ -1041,8 +1036,8 @@ pub(super) fn prepare_cloud_uniforms(
             god_rays_scatter_rate: cloud.god_rays.scatter_rate.max(0.0),
             god_rays_atmo_scale_height: cloud.god_rays.atmo_scale_height.max(1.0),
             god_rays_hg_g: cloud.god_rays.hg_g.clamp(-0.99, 0.99),
-            _pad_god_rays0: 0,
-            _pad_god_rays1: 0,
+            shadow_intensity: cloud.shadow_intensity.max(0.0),
+            _pad_shadow_intensity: 0,
         });
 
         commands.entity(entity).insert(CloudPrevFrame {
@@ -1308,6 +1303,7 @@ pub(super) fn prepare_cloud_bind_groups(
                 (5, transforms_binding.clone()),
                 (6, noise_view),
                 (7, &sampler.noise),
+                (8, &shadow_tex.view),
             )),
         );
 

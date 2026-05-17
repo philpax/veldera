@@ -31,6 +31,7 @@
 @group(0) @binding(5) var<uniform> atmosphere_transforms: AtmosphereTransforms;
 @group(0) @binding(6) var noise_3d: texture_3d<f32>;
 @group(0) @binding(7) var noise_sampler: sampler;
+@group(0) @binding(8) var shadow_map: texture_2d<f32>;
 
 // Convert a UV + reverse-Z depth value to camera-to-pixel distance, in
 // metres. `depth == 0` (sky) returns 0; callers should treat that as
@@ -71,11 +72,12 @@ fn depth_weight(d_self: f32, d_neighbor: f32) -> f32 {
 }
 
 // Debug modes — mirror of `CloudDebugMode` in lib.rs. Only the
-// composite-side modes (5, 6, 7) are handled here; the rest are
+// composite-side modes (5, 6, 7, 8) are handled here; the rest are
 // raymarch-side and were already painted into the half-res buffer.
 const DBG_FOG_COLOR: u32 = 5u;
 const DBG_FOG_EXTINCTION: u32 = 6u;
 const DBG_VIEW_EXPOSURE: u32 = 7u;
+const DBG_SHADOW_MAP: u32 = 8u;
 
 // Linear remap of `x` from `[a, b]` to `[c, d]`. Mirror of the raymarch
 // helper.
@@ -192,6 +194,35 @@ fn main(in: FullscreenVertexOutput) -> @location(0) vec4<f32> {
     if cloud.debug_mode == DBG_VIEW_EXPOSURE {
         let g = view.exposure * 1.0e5;
         return vec4<f32>(g, g, g, 0.0);
+    }
+    if cloud.debug_mode == DBG_SHADOW_MAP {
+        // Replace the scene with the raw shadow-map value so it's
+        // visible regardless of how dim the underlying scene is (the
+        // apply pass's modulate blend can't show this at night).
+        // Reconstruct a world position from depth (terrain) or pick a
+        // mid-depth ray point for sky pixels so the shadow_from_world
+        // projection covers the entire frame, not just terrain.
+        let full_pixel = vec2<i32>(in.position.xy);
+        let depth = textureLoad(depth_texture, full_pixel, 0);
+        var world_pos: vec3<f32>;
+        if depth > 0.0 {
+            let ndc = vec3(in.uv * vec2(2.0, -2.0) + vec2(-1.0, 1.0), depth);
+            let world_h = view.world_from_clip * vec4(ndc, 1.0);
+            world_pos = world_h.xyz / world_h.w;
+        } else {
+            let ndc = vec3(in.uv * vec2(2.0, -2.0) + vec2(-1.0, 1.0), 0.5);
+            let world_h = view.world_from_clip * vec4(ndc, 1.0);
+            world_pos = world_h.xyz / world_h.w;
+        }
+        let shadow_uv = (cloud.shadow_from_world * vec4(world_pos, 1.0)).xy;
+        if any(shadow_uv < vec2(0.0)) || any(shadow_uv > vec2(1.0)) {
+            // Outside the shadow footprint — red marker.
+            return vec4<f32>(1.0, 0.0, 0.0, 0.0);
+        }
+        let t = textureSampleLevel(shadow_map, cloud_sampler, shadow_uv, 0.0).r;
+        // src.a = 0 makes the composite blend replace the destination:
+        // `dst = src.rgb + dst.rgb * 0 = src.rgb`.
+        return vec4<f32>(t, t, t, 0.0);
     }
 
     let half_size = vec2<f32>(cloud.buffer_size);
