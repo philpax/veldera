@@ -2,12 +2,23 @@
 
 #import bevy_render::maths::PI;
 
-// Earth-aware climate model constants. The runtime per-camera knobs
-// (`climate_enabled`, `latitude_strength`, `ocean_strength`,
-// `climate_itcz_center_deg`) live on the cloud uniform; the values
-// here are the structural shape of the model — band centres, widths,
-// amplitudes, sea-level threshold. Tuning these is a global design
-// decision rather than a per-camera setting.
+// Earth-aware climate model. The runtime, the shadow bake, and the
+// composite all consume climate data by *sampling the climate-map
+// texture* — the structural physics is evaluated once per frame in
+// `climate_bake.wgsl` and packed into the texture's channels:
+//
+//   R = coverage threshold      (1.0 - cloud propensity), runtime input
+//   G = precipitation propensity (reserved — bake fills it for future
+//                                 rain-rendering / audio-trigger code)
+//   B = convection propensity    (reserved — cumulonimbus / lightning)
+//   A = 1.0                      (reserved)
+//
+// This means the runtime never recomputes climate per density tap;
+// each raymarch step is one bilinear texel fetch. The bake itself
+// runs once per frame at the map resolution (1024×512), which
+// amortises the per-texel physics across an entire frame's pixels.
+
+// ---------- Bake-side physics (called only by climate_bake.wgsl) ----------
 
 // Latitude (offset from the seasonally-shifted ITCZ centre, in
 // degrees) at which the subtropical "high pressure" dry band peaks.
@@ -53,10 +64,8 @@ const OCEAN_SEA_LEVEL_HI: f32 = 0.06;
 
 // Latitude-only "cloud propensity" (intuitive semantics: 1 = lots of
 // cloud, 0 = clear) as a function of offset (in degrees) from the
-// active ITCZ centre. The runtime's density formula uses a
-// *threshold* (lower threshold = more cloud), so wrappers that feed
-// the runtime invert this — they call `1.0 - propensity` to get the
-// coverage threshold.
+// active ITCZ centre. The bake inverts this to a threshold for the R
+// channel; consumers downstream just sample the threshold.
 //
 // Use `lat_deg - itcz_center_deg` as input.
 fn climate_lat_propensity(offset_from_itcz_deg: f32) -> f32 {
@@ -79,8 +88,11 @@ fn climate_ocean_propensity(height: f32, ocean_strength: f32) -> f32 {
     return ocean * OCEAN_BONUS_MAX * ocean_strength;
 }
 
-// Equirectangular topography UV for an absolute ECEF world position.
-fn climate_topography_uv(world_pos: vec3<f32>) -> vec2<f32> {
+// Equirectangular UV for an absolute ECEF world position — used by
+// both the bake (to look up topography) and the runtime (to look up
+// the baked climate map). u in [0, 1] = longitude [-180°, +180°], v
+// in [0, 1] = latitude [+90°, -90°] (north at top).
+fn climate_equirectangular_uv(world_pos: vec3<f32>) -> vec2<f32> {
     let pos_norm = normalize(world_pos);
     let lat_rad = asin(clamp(pos_norm.z, -1.0, 1.0));
     let lon_rad = atan2(pos_norm.y, pos_norm.x);
@@ -97,4 +109,39 @@ fn climate_latitude_offset_deg(world_pos: vec3<f32>, itcz_center_deg: f32) -> f3
     let lat_rad = asin(clamp(pos_norm.z, -1.0, 1.0));
     let lat_deg = lat_rad * (180.0 / PI);
     return lat_deg - itcz_center_deg;
+}
+
+// ---------- Runtime-side sampling (called by raymarch / shadow / composite) ----------
+
+// Sample the baked climate map at a world position. Returns the full
+// texel: R = coverage threshold, G = precipitation propensity,
+// B = convection propensity, A = reserved. Callers usually want the
+// R channel via `climate_coverage_at`.
+fn climate_sample(
+    climate_map: texture_2d<f32>,
+    climate_sampler: sampler,
+    world_pos: vec3<f32>,
+) -> vec4<f32> {
+    let uv = climate_equirectangular_uv(world_pos);
+    return textureSampleLevel(climate_map, climate_sampler, uv, 0.0);
+}
+
+// Looks up the climate coverage threshold at `world_pos` and blends
+// it into the layer's `base_coverage` by `latitude_strength` (the
+// per-camera "how much should the model override the layer's flat
+// coverage" knob). When `climate_enabled == 0` the threshold is
+// ignored and `base_coverage` passes through.
+fn climate_coverage_at(
+    climate_map: texture_2d<f32>,
+    climate_sampler: sampler,
+    world_pos: vec3<f32>,
+    base_coverage: f32,
+    climate_enabled: u32,
+    latitude_strength: f32,
+) -> f32 {
+    if climate_enabled == 0u {
+        return base_coverage;
+    }
+    let threshold = climate_sample(climate_map, climate_sampler, world_pos).r;
+    return saturate(mix(base_coverage, threshold, latitude_strength));
 }

@@ -21,19 +21,19 @@ struct CloudSubLayer {
     enabled: u32,
 
     wind_offset: vec2<f32>,
-    _pad_wind: u32,
+    pad_wind: u32,
 
     // CPU-computed `(camera_ecef / noise_tile).fract()` in f64; added to
     // the small camera-relative sample offset before noise lookup so the
     // noise pattern aligns to absolute world space without ever dividing
     // a 6.4×10⁶ m ECEF coord by a 4 km tile in shader-side f32.
     noise_uv_offset: vec3<f32>,
-    _pad_noise: u32,
+    pad_noise: u32,
     // CPU-computed `(camera_ecef / warp_tile).fract()` (warp_tile = 4×
     // noise_tile). The warp lookup uses this so it wraps cleanly at
     // 16 km boundaries instead of popping 0.25 cycles every 4 km.
     warp_uv_offset: vec3<f32>,
-    _pad_warp: u32,
+    pad_warp: u32,
 }
 
 struct CloudUniform {
@@ -47,17 +47,17 @@ struct CloudUniform {
 
     layer_count: u32,
     time_seconds: f32,
-    _pad_top1: u32,
-    _pad_top2: u32,
+    pad_top1: u32,
+    pad_top2: u32,
 
     prev_clip_from_world: mat4x4<f32>,
 
     prev_camera_ecef: vec3<f32>,
     frame_index: u32,
     temporal_history_valid: u32,
-    _pad_bot0: u32,
-    _pad_bot1: u32,
-    _pad_bot2: u32,
+    pad_bot0: u32,
+    pad_bot1: u32,
+    pad_bot2: u32,
 
     layers: array<CloudSubLayer, MAX_CLOUD_LAYERS>,
 
@@ -74,11 +74,11 @@ struct CloudUniform {
     // Padding kept where the CPU-side `fog_extinction` field used to
     // live (the composite now derives in-cloud extinction GPU-side by
     // sampling the cloud noise at the camera position).
-    _pad_fog_ext: u32,
-    _pad_shadow1: u32,
+    pad_fog_ext: u32,
+    pad_shadow1: u32,
     // Pre-exposure-multiplied colour the in-cloud fog blends toward.
     fog_color: vec3<f32>,
-    _pad_fog: u32,
+    pad_fog: u32,
 
     // Volumetric god-rays knobs. See `GodRaysSettings` in lib.rs.
     god_rays_enabled: u32,
@@ -90,7 +90,7 @@ struct CloudUniform {
     // Multiplier applied to the apply pass's dimming. See
     // `CloudLayers::shadow_intensity` in lib.rs.
     shadow_intensity: f32,
-    _pad_shadow_intensity: u32,
+    pad_shadow_intensity: u32,
 
     // Earth-aware climate model. See `ClimateSettings` in lib.rs.
     climate_enabled: u32,

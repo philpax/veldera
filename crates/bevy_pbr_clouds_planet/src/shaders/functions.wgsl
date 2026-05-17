@@ -5,12 +5,9 @@
 #import bevy_pbr_clouds_planet::bindings::{
     cloud, atmosphere, atmosphere_transforms, view,
     transmittance_lut, aerial_view_lut, sky_view_lut,
-    noise_3d, cloud_sampler, lut_sampler, topography,
+    noise_3d, cloud_sampler, lut_sampler, climate_map,
 };
-#import bevy_pbr_clouds_planet::climate::{
-    climate_lat_propensity, climate_ocean_propensity,
-    climate_latitude_offset_deg, climate_topography_uv,
-};
+#import bevy_pbr_clouds_planet::climate::climate_coverage_at;
 
 // World-space ray direction for a screen UV. Mirrors the atmosphere's
 // `uv_to_ray_direction`: build the homogeneous near-plane position, divide
@@ -120,32 +117,21 @@ fn dual_henyey_greenstein_layer_eccentric(layer_i: u32, cos_theta: f32, eccentri
     return mix(b, f, layer.hg_blend);
 }
 
-// Earth-aware climate model. Given an absolute ECEF position, returns
-// a multiplicative coverage modifier in [0, 1]: high where the
-// latitude bands say "cloudy" (ITCZ, storm tracks), low where they
-// say "clear" (subtropical highs), with an additive ocean bonus
-// where the topography texture says we're over water.
-//
-// All structural constants (band centres, widths, amplitudes, ocean
-// threshold) live in `climate.wgsl` so the four call sites stay in
-// sync — `shadow_bake`, `composite`, and `climate_bake` import the
-// same helpers.
+// Climate coverage at a world position. Single bilinear sample of the
+// baked climate map (R channel = coverage threshold), blended into the
+// layer's `base_coverage` by `climate_latitude_strength`. All the
+// physics — latitude bands, ocean bonus, monsoon enhancement,
+// stratocumulus decks — happens in `climate_bake.wgsl`; the runtime
+// just samples the result.
 fn climate_coverage(world_pos: vec3<f32>, base_coverage: f32) -> f32 {
-    if cloud.climate_enabled == 0u {
-        return base_coverage;
-    }
-    let lat_off_deg = climate_latitude_offset_deg(world_pos, cloud.climate_itcz_center_deg);
-    let lat_prop = climate_lat_propensity(lat_off_deg);
-    let topo_uv = climate_topography_uv(world_pos);
-    let height = textureSampleLevel(topography, lut_sampler, topo_uv, 0.0).r;
-    let ocean_prop = climate_ocean_propensity(height, cloud.climate_ocean_strength);
-    // Convert "propensity to cloud" (intuitive: high = cloudy) to
-    // "coverage threshold" (runtime semantics: low = cloudy) by
-    // inverting. Then mix with the layer's base coverage by the
-    // configured strength — at strength 0 we use the layer's flat
-    // coverage; at 1 we use the pure climate threshold.
-    let climate_threshold = 1.0 - saturate(lat_prop + ocean_prop);
-    return saturate(mix(base_coverage, climate_threshold, cloud.climate_latitude_strength));
+    return climate_coverage_at(
+        climate_map,
+        lut_sampler,
+        world_pos,
+        base_coverage,
+        cloud.climate_enabled,
+        cloud.climate_latitude_strength,
+    );
 }
 
 // Cloud density at a world-space sample position for ONE specific sub-layer.

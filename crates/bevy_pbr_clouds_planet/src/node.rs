@@ -466,7 +466,7 @@ impl ViewNode for CloudClimateBakeNode {
         pass.set_pipeline(bake_pipeline);
         pass.set_bind_group(0, bind_group, &[cloud_offset.index()]);
 
-        // 512×256 climate map at 8×8 workgroup → 64×32 groups.
+        // Climate map at 8×8 workgroup → CLIMATE_MAP_{WIDTH,HEIGHT}/8 groups.
         const WORKGROUP_SIZE: u32 = 8;
         let groups_x = crate::CLIMATE_MAP_WIDTH.div_ceil(WORKGROUP_SIZE);
         let groups_y = crate::CLIMATE_MAP_HEIGHT.div_ceil(WORKGROUP_SIZE);

@@ -1,17 +1,20 @@
-// Climate coverage map bake.
+// Climate map bake.
 //
-// Compute pass that writes the latitude+ocean climate coverage model
-// into a 2D equirectangular texture (longitude × latitude). Used by
-// the debug UI to display the climate map inline as an egui image —
-// far less disruptive than the full-screen overlay debug mode.
+// Once per frame, computes the Earth-aware climate physics for every
+// texel of a 1024×512 equirectangular map covering the globe, packing
+// the result into an Rgba8Unorm texture that the runtime cloud passes
+// (raymarch / shadow / composite) sample directly:
 //
-// One invocation per texel: convert texel UV to (lon, lat), evaluate
-// the same climate bands the runtime cloud raymarch uses (centred on
-// the CPU-baked `climate_itcz_center_deg`), and stir in the ocean
-// bonus by sampling the topography texture. The output is a "pure"
-// climate view — we deliberately ignore `latitude_strength` so the
-// preview shows the model itself, not the (possibly tiny) per-layer
-// blend the runtime applies.
+//   R = coverage threshold     (1.0 - cloud propensity) — runtime input
+//   G = precipitation propensity  (0..1) — reserved for rain renderer
+//   B = convection propensity     (0..1) — reserved for cumulonimbus
+//   A = 1.0                      (reserved)
+//
+// This is the single source of truth for climate. The runtime never
+// recomputes propensity per density tap; each raymarch step is one
+// bilinear texel fetch, freeing the bake to carry arbitrarily expensive
+// physics (multi-octave noise, monsoon enhancement, coast-distance
+// stratocumulus, …) without per-pixel cost.
 
 #import bevy_pbr_clouds_planet::types::CloudUniform;
 #import bevy_pbr_clouds_planet::climate::{climate_lat_propensity, climate_ocean_propensity};
@@ -38,10 +41,20 @@ fn main(@builtin(global_invocation_id) idx: vec3<u32>) {
     let lat_prop = climate_lat_propensity(lat_deg - cloud.climate_itcz_center_deg);
     let height = textureSampleLevel(topography, topo_sampler, uv, 0.0).r;
     let ocean_prop = climate_ocean_propensity(height, cloud.climate_ocean_strength);
-    // Show propensity directly — bright = cloudy. The runtime
-    // inverts this to a coverage threshold; for the preview we keep
-    // the intuitive sense.
     let propensity = saturate(lat_prop + ocean_prop);
 
-    textureStore(output, vec2<i32>(idx.xy), vec4(propensity, propensity, propensity, 1.0));
+    // R: threshold for the runtime smoothstep — lower = more cloud.
+    // The raymarch evaluates `smoothstep(threshold - 0.1, threshold +
+    // 0.1, raw_noise)` so storing `1 - propensity` here means high
+    // propensity ⇒ low threshold ⇒ more cloud.
+    let threshold = 1.0 - propensity;
+
+    // G: precipitation propensity (reserved). Future precip renderer
+    // will sample this channel directly. Computing it here is free
+    // because the bake amortises across the full frame.
+    let precip = 0.0;
+    // B: convection propensity (reserved — cumulonimbus / lightning).
+    let convection = 0.0;
+
+    textureStore(output, vec2<i32>(idx.xy), vec4(threshold, precip, convection, 1.0));
 }

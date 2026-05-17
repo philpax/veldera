@@ -192,13 +192,14 @@ impl Plugin for CloudsPlanetPlugin {
                 (
                     Node3d::EndPrepasses,
                     CloudNode::NoiseBake,
-                    // Shadow bake runs before the main opaque pass so its
-                    // result is ready when shadow apply samples it later.
-                    CloudNode::ShadowBake,
-                    // Climate bake (debug viz) — cheap, can run
-                    // anywhere; bundle with ShadowBake for graph
-                    // simplicity.
+                    // Climate bake first — its texture is the source
+                    // of truth for the climate model; shadow bake and
+                    // the main raymarch both sample it.
                     CloudNode::ClimateBake,
+                    // Shadow bake runs before the main opaque pass so
+                    // its result is ready when shadow apply samples
+                    // it later.
+                    CloudNode::ShadowBake,
                     Node3d::StartMainPass,
                 ),
             )
@@ -739,11 +740,14 @@ impl ExtractComponent for CloudEarthTopography {
     }
 }
 
-/// Recommended dimensions for the [`CloudClimateMap`] image. The bake
-/// dispatches at 8×8 workgroups, so the client should size the
-/// underlying `Image` asset to these exact values for a clean fit.
-pub const CLIMATE_MAP_WIDTH: u32 = 512;
-pub const CLIMATE_MAP_HEIGHT: u32 = 256;
+/// Dimensions of the [`CloudClimateMap`] bake target. 1024×512 gives
+/// ~39 km per texel at the equator, which is comfortable headroom for
+/// the climate model's spatial scales (latitude bands, monsoon
+/// boundaries, stratocumulus deck edges) and bilinear-samples cleanly
+/// from the runtime cloud passes. The bake dispatches at 8×8
+/// workgroups, so the dimensions must be 8-aligned.
+pub const CLIMATE_MAP_WIDTH: u32 = 1024;
+pub const CLIMATE_MAP_HEIGHT: u32 = 512;
 
 /// Per-camera bake target for the climate-coverage debug map.
 ///

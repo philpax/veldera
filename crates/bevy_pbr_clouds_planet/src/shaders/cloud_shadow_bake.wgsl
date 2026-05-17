@@ -17,10 +17,7 @@
     Atmosphere, AtmosphereTransforms, AtmosphereLight, AtmosphereLights,
 };
 #import bevy_pbr_clouds_planet::types::CloudUniform;
-#import bevy_pbr_clouds_planet::climate::{
-    climate_lat_propensity, climate_ocean_propensity,
-    climate_latitude_offset_deg, climate_topography_uv,
-};
+#import bevy_pbr_clouds_planet::climate::climate_coverage_at;
 
 @group(0) @binding(0) var<uniform> cloud: CloudUniform;
 @group(0) @binding(1) var<uniform> atmosphere: Atmosphere;
@@ -29,7 +26,10 @@
 @group(0) @binding(4) var noise_3d: texture_3d<f32>;
 @group(0) @binding(5) var cloud_sampler: sampler;
 @group(0) @binding(6) var shadow_out: texture_storage_2d<r16float, write>;
-@group(0) @binding(7) var topography: texture_2d<f32>;
+// Baked climate map (filled by `climate_bake.wgsl` before this pass
+// runs). R = coverage threshold; the shadow bake samples it so its
+// climate-modulated shadows match what the main raymarch renders.
+@group(0) @binding(7) var climate_map: texture_2d<f32>;
 
 const SHADOW_STEPS: u32 = 32u;
 
@@ -57,19 +57,18 @@ fn remap(x: f32, a: f32, b: f32, c: f32, d: f32) -> f32 {
     return c + (x - a) * (d - c) / max(b - a, 1e-6);
 }
 
-// Climate coverage at this world position. Mirrors the wrapper in
-// functions.wgsl — the structural math lives in `climate.wgsl`.
+// Climate coverage at this world position. Just samples the baked
+// climate map — see `climate.wgsl`. The bake runs before this pass
+// in the render graph, so the texture is always current.
 fn climate_coverage(world_pos: vec3<f32>, base_coverage: f32) -> f32 {
-    if cloud.climate_enabled == 0u {
-        return base_coverage;
-    }
-    let lat_off_deg = climate_latitude_offset_deg(world_pos, cloud.climate_itcz_center_deg);
-    let lat_prop = climate_lat_propensity(lat_off_deg);
-    let topo_uv = climate_topography_uv(world_pos);
-    let height = textureSampleLevel(topography, cloud_sampler, topo_uv, 0.0).r;
-    let ocean_prop = climate_ocean_propensity(height, cloud.climate_ocean_strength);
-    let climate_threshold = 1.0 - saturate(lat_prop + ocean_prop);
-    return saturate(mix(base_coverage, climate_threshold, cloud.climate_latitude_strength));
+    return climate_coverage_at(
+        climate_map,
+        cloud_sampler,
+        world_pos,
+        base_coverage,
+        cloud.climate_enabled,
+        cloud.climate_latitude_strength,
+    );
 }
 
 // Mirror of the main raymarch's per-layer density. Takes both absolute

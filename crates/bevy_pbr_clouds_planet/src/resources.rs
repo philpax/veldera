@@ -67,7 +67,7 @@ pub struct GpuCloudSubLayer {
     /// sessions. The shader just adds this directly to the noise lookup
     /// position.
     pub wind_offset: Vec2,
-    pub _pad_wind: u32,
+    pub pad_wind: u32,
 
     /// Pre-computed `(camera_ecef / noise_tile).fract()`, done on the CPU
     /// in f64. The shader adds this to the camera-relative sample offset
@@ -77,13 +77,13 @@ pub struct GpuCloudSubLayer {
     /// of ~10⁻⁴ corresponds to ~0.8 m of world position — visibly
     /// shifting the noise as the camera moves smoothly).
     pub noise_uv_offset: Vec3,
-    pub _pad_noise: u32,
+    pub pad_noise: u32,
     /// Pre-computed `(camera_ecef / warp_tile).fract()` (warp_tile = 4×
     /// noise_tile). Used by the warp noise lookup so the warp pattern
     /// wraps at warp-tile boundaries (16 km) cleanly instead of popping
     /// by 0.25 cycles every noise-tile boundary (4 km).
     pub warp_uv_offset: Vec3,
-    pub _pad_warp: u32,
+    pub pad_warp: u32,
 }
 
 #[derive(Component, ShaderType, Clone)]
@@ -103,8 +103,8 @@ pub struct GpuCloudUniform {
     /// (that's CPU-accumulated into `wind_offset` to keep precision
     /// bounded over long sessions).
     pub time_seconds: f32,
-    pub _pad_top1: u32,
-    pub _pad_top2: u32,
+    pub pad_top1: u32,
+    pub pad_top2: u32,
 
     /// Previous frame's `clip_from_world` matrix. Used by the temporal
     /// pass to reproject each pixel into the previous frame's screen
@@ -126,9 +126,9 @@ pub struct GpuCloudUniform {
     /// temporal blend uses this to ignore the (uninitialised or stale)
     /// history and write the raw raymarch instead.
     pub temporal_history_valid: u32,
-    pub _pad_bot0: u32,
-    pub _pad_bot1: u32,
-    pub _pad_bot2: u32,
+    pub pad_bot0: u32,
+    pub pad_bot1: u32,
+    pub pad_bot2: u32,
 
     pub layers: [GpuCloudSubLayer; MAX_CLOUD_LAYERS],
 
@@ -148,8 +148,8 @@ pub struct GpuCloudUniform {
     /// well above horizon). The apply pass uses this to fade the shadow
     /// effect across twilight rather than letting it apply at night.
     pub shadow_strength: f32,
-    pub _pad_fog_ext: u32,
-    pub _pad_shadow1: u32,
+    pub pad_fog_ext: u32,
+    pub pad_shadow1: u32,
     /// Inscattered colour the fog blends toward, in the already-
     /// exposed HDR scale the composite operates in. CPU picks the
     /// brightest above-horizon atmosphere light, takes its chroma
@@ -157,7 +157,7 @@ pub struct GpuCloudUniform {
     /// fixed HDR target. Fades through twilight to near-zero at
     /// night.
     pub fog_color: Vec3,
-    pub _pad_fog: u32,
+    pub pad_fog: u32,
 
     // ---- Volumetric god-rays settings (consumed by cloud_god_rays.wgsl).
     /// 1 if the god-rays pass should render, 0 to skip its blend
@@ -176,7 +176,7 @@ pub struct GpuCloudUniform {
     /// Multiplier on the shadow-apply pass's dimming. See
     /// [`CloudLayers::shadow_intensity`].
     pub shadow_intensity: f32,
-    pub _pad_shadow_intensity: u32,
+    pub pad_shadow_intensity: u32,
 
     // ---- Earth-aware climate model (consumed by sample_layer_density).
     /// 1 = climate model active; 0 = legacy uniform-coverage path.
@@ -349,9 +349,11 @@ impl FromWorld for CloudBindGroupLayouts {
                     (9, sampler(SamplerBindingType::Filtering)),
                     // Linear, clamp-to-edge sampler for the atmosphere LUTs.
                     (13, sampler(SamplerBindingType::Filtering)),
-                    // Earth topography texture (equirectangular,
-                    // R8Unorm) — sampled by the climate model to
-                    // differentiate ocean from land.
+                    // Baked climate map (Rgba8Unorm equirectangular).
+                    // R = coverage threshold consumed by the runtime
+                    // raymarch; G/B reserved for precipitation /
+                    // convection. Filled by `climate_bake.wgsl`
+                    // before this pass runs.
                     (14, texture_2d(TextureSampleType::default())),
                     // Output: half-res raymarch buffer.
                     (
@@ -434,8 +436,13 @@ impl FromWorld for CloudBindGroupLayouts {
                     // modulate blend can't show this at night because
                     // the scene is dim).
                     (8, texture_2d(TextureSampleType::default())),
-                    // Earth topography (climate model + debug viz).
+                    // Earth topography — composite only uses it for
+                    // the `DBG_TOPOGRAPHY` debug viz; the runtime
+                    // climate path goes through `climate_map`.
                     (9, texture_2d(TextureSampleType::default())),
+                    // Baked climate map (R=threshold, G=precip,
+                    // B=convection — see `climate_bake.wgsl`).
+                    (10, texture_2d(TextureSampleType::default())),
                 ),
             ),
         );
@@ -460,9 +467,9 @@ impl FromWorld for CloudBindGroupLayouts {
                             StorageTextureAccess::WriteOnly,
                         ),
                     ),
-                    // Earth topography (climate model — shadows of
-                    // climate-modulated clouds need to match what
-                    // the main pass renders).
+                    // Baked climate map — shadow bake samples it so
+                    // climate-modulated shadows match the runtime
+                    // raymarch's cloud field.
                     (7, texture_2d(TextureSampleType::default())),
                 ),
             ),
@@ -833,6 +840,7 @@ pub(super) fn prepare_cloud_uniforms(
         Option<&CloudCameraEcef>,
         Option<&CloudPrevFrame>,
         Option<&ExtractedCamera>,
+        Option<&crate::CloudClimateMap>,
     )>,
 ) {
     // Dominant-light direction: deferred to per-camera scope below
@@ -843,7 +851,10 @@ pub(super) fn prepare_cloud_uniforms(
     // that night-time cloud shadows follow the moon instead of
     // degenerating because the (below-horizon) sun was picked.
 
-    for (entity, cloud, atmosphere, view, sph_cam, cam_ecef, prev_state, camera) in &layers {
+    for (
+        entity, cloud, atmosphere, view, sph_cam, cam_ecef, prev_state, camera, climate_map,
+    ) in &layers
+    {
         let quality = cloud.quality;
         let world_time = cloud.world_time_seconds;
         let full_size = camera
@@ -975,11 +986,11 @@ pub(super) fn prepare_cloud_uniforms(
                 weather_strength: sub.weather_strength.clamp(0.0, 1.0),
                 evolution_rate: sub.evolution_rate,
                 wind_offset,
-                _pad_wind: 0,
+                pad_wind: 0,
                 noise_uv_offset,
-                _pad_noise: 0,
+                pad_noise: 0,
                 warp_uv_offset,
-                _pad_warp: 0,
+                pad_warp: 0,
                 enabled: u32::from(sub.enabled),
             };
         }
@@ -1070,15 +1081,15 @@ pub(super) fn prepare_cloud_uniforms(
             full_size,
             layer_count: layer_count as u32,
             time_seconds: world_time,
-            _pad_top1: 0,
-            _pad_top2: 0,
+            pad_top1: 0,
+            pad_top2: 0,
             prev_clip_from_world: prev.clip_from_world,
             prev_camera_ecef: prev.camera_ecef,
             frame_index: prev.frame_index.wrapping_add(1),
             temporal_history_valid: u32::from(history_valid),
-            _pad_bot0: 0,
-            _pad_bot1: 0,
-            _pad_bot2: 0,
+            pad_bot0: 0,
+            pad_bot1: 0,
+            pad_bot2: 0,
             layers: gpu_layers,
             shadow_from_world,
             shadow_footprint: footprint,
@@ -1089,10 +1100,10 @@ pub(super) fn prepare_cloud_uniforms(
                 let t = ((dominant_elev + 0.1) / 0.3).clamp(0.0, 1.0);
                 t * t * (3.0 - 2.0 * t)
             },
-            _pad_fog_ext: 0,
-            _pad_shadow1: 0,
+            pad_fog_ext: 0,
+            pad_shadow1: 0,
             fog_color,
-            _pad_fog: 0,
+            pad_fog: 0,
             god_rays_enabled: u32::from(cloud.god_rays.enabled),
             god_rays_num_steps: cloud.god_rays.num_steps.max(1),
             god_rays_max_distance: cloud.god_rays.max_distance.max(1.0),
@@ -1100,8 +1111,12 @@ pub(super) fn prepare_cloud_uniforms(
             god_rays_atmo_scale_height: cloud.god_rays.atmo_scale_height.max(1.0),
             god_rays_hg_g: cloud.god_rays.hg_g.clamp(-0.99, 0.99),
             shadow_intensity: cloud.shadow_intensity.max(0.0),
-            _pad_shadow_intensity: 0,
-            climate_enabled: u32::from(cloud.climate.enabled),
+            pad_shadow_intensity: 0,
+            // Climate sampling is only safe once a `CloudClimateMap`
+            // is bound — without it the runtime would sample the
+            // fallback white texture and read R=1 (max threshold = no
+            // clouds), washing the planet clear.
+            climate_enabled: u32::from(cloud.climate.enabled && climate_map.is_some()),
             climate_latitude_strength: cloud.climate.latitude_strength.clamp(0.0, 1.0),
             climate_ocean_strength: cloud.climate.ocean_strength.clamp(0.0, 1.0),
             // ITCZ centre tracks sun declination — northern summer
@@ -1349,11 +1364,19 @@ pub(super) fn prepare_cloud_bind_groups(
         // Resolve topography texture view: if the camera has the
         // `CloudEarthTopography` component AND the underlying image
         // is finished loading, use it. Otherwise fall back to a 1×1
-        // white texture so the binding is always valid (the shader's
-        // climate code falls back gracefully when ocean_strength=0
-        // or the sample comes back as "all-land").
+        // white texture so the binding is always valid (the bake's
+        // ocean path returns "all-land" and the composite's
+        // `DBG_TOPOGRAPHY` viz shows uniform white).
         let topo_view = topography_handle
             .and_then(|t| gpu_images.get(&t.0))
+            .map(|gi| &gi.texture_view)
+            .unwrap_or(&fallback_image.d2.texture_view);
+        // Resolve climate-map view. When absent (no `CloudClimateMap`,
+        // or bake target not yet GPU-extracted) fall back to white —
+        // the runtime's `climate_enabled` gate suppresses sampling so
+        // the binding is only there to satisfy the layout.
+        let climate_view = climate_map_handle
+            .and_then(|m| gpu_images.get(&m.0))
             .map(|gi| &gi.texture_view)
             .unwrap_or(&fallback_image.d2.texture_view);
 
@@ -1375,7 +1398,7 @@ pub(super) fn prepare_cloud_bind_groups(
                 (13, &sampler.clamp),
                 (10, &cloud_tex.raymarch.default_view),
                 (11, depth_texture.view()),
-                (14, topo_view),
+                (14, climate_view),
             )),
         );
 
@@ -1411,6 +1434,7 @@ pub(super) fn prepare_cloud_bind_groups(
                 (7, &sampler.noise),
                 (8, &shadow_tex.view),
                 (9, topo_view),
+                (10, climate_view),
             )),
         );
 
@@ -1425,7 +1449,7 @@ pub(super) fn prepare_cloud_bind_groups(
                 (4, noise_view),
                 (5, &sampler.noise),
                 (6, &shadow_tex.view),
-                (7, topo_view),
+                (7, climate_view),
             )),
         );
 

@@ -23,8 +23,7 @@
 #import bevy_pbr_atmosphere_planet::types::AtmosphereTransforms;
 #import bevy_pbr_clouds_planet::types::{CloudUniform, CloudSubLayer};
 #import bevy_pbr_clouds_planet::climate::{
-    climate_lat_propensity, climate_ocean_propensity,
-    climate_latitude_offset_deg, climate_topography_uv,
+    climate_equirectangular_uv, climate_coverage_at,
 };
 
 @group(0) @binding(0) var<uniform> cloud: CloudUniform;
@@ -36,7 +35,13 @@
 @group(0) @binding(6) var noise_3d: texture_3d<f32>;
 @group(0) @binding(7) var noise_sampler: sampler;
 @group(0) @binding(8) var shadow_map: texture_2d<f32>;
+// Topography texture — composite only reads this for the
+// `DBG_TOPOGRAPHY` debug viz. The runtime climate path goes through
+// `climate_map`.
 @group(0) @binding(9) var topography: texture_2d<f32>;
+// Baked climate map (R=threshold, G=precip, B=convection — see
+// `climate_bake.wgsl`).
+@group(0) @binding(10) var climate_map: texture_2d<f32>;
 
 // Convert a UV + reverse-Z depth value to camera-to-pixel distance, in
 // metres. `depth == 0` (sky) returns 0; callers should treat that as
@@ -92,18 +97,17 @@ fn remap(x: f32, a: f32, b: f32, c: f32, d: f32) -> f32 {
     return c + (x - a) * (d - c) / max(b - a, 1e-6);
 }
 
-// Climate coverage at this world position. Math lives in `climate.wgsl`.
+// Climate coverage at this world position. Single texel fetch from
+// the baked climate map; physics lives in `climate_bake.wgsl`.
 fn climate_coverage(world_pos: vec3<f32>, base_coverage: f32) -> f32 {
-    if cloud.climate_enabled == 0u {
-        return base_coverage;
-    }
-    let lat_off_deg = climate_latitude_offset_deg(world_pos, cloud.climate_itcz_center_deg);
-    let lat_prop = climate_lat_propensity(lat_off_deg);
-    let topo_uv = climate_topography_uv(world_pos);
-    let height = textureSampleLevel(topography, cloud_sampler, topo_uv, 0.0).r;
-    let ocean_prop = climate_ocean_propensity(height, cloud.climate_ocean_strength);
-    let climate_threshold = 1.0 - saturate(lat_prop + ocean_prop);
-    return saturate(mix(base_coverage, climate_threshold, cloud.climate_latitude_strength));
+    return climate_coverage_at(
+        climate_map,
+        cloud_sampler,
+        world_pos,
+        base_coverage,
+        cloud.climate_enabled,
+        cloud.climate_latitude_strength,
+    );
 }
 
 // Density (1/m extinction) at the camera position for one sub-layer.
@@ -218,31 +222,39 @@ fn main(in: FullscreenVertexOutput) -> @location(0) vec4<f32> {
         return vec4<f32>(g, g, g, 0.0);
     }
     if cloud.debug_mode == DBG_CLIMATE_COVERAGE || cloud.debug_mode == DBG_TOPOGRAPHY {
-        // Reconstruct world position (terrain depth → world; sky uses
-        // a mid-depth point so the viz fills the whole frame).
+        // Paint the value onto the visible Earth surface only. The
+        // egui Climate sub-tab already shows the flat texture; this
+        // overlay's unique value is being able to correlate the model
+        // to the rendered planet (so you can see "ah, the ITCZ is
+        // *here* in the current camera view"). Sky pixels would
+        // produce a meaningless mid-depth projection, so we skip
+        // them and let the destination scene pass through.
         let full_pixel = vec2<i32>(in.position.xy);
         let depth = textureLoad(depth_texture, full_pixel, 0);
-        let ndc_z = select(0.5, depth, depth > 0.0);
-        let ndc = vec3(in.uv * vec2(2.0, -2.0) + vec2(-1.0, 1.0), ndc_z);
+        if depth <= 0.0 {
+            // src.rgb = 0, src.a = 1 → dst unchanged under the
+            // composite blend `dst = src.rgb + dst.rgb * src.a`.
+            return vec4<f32>(0.0, 0.0, 0.0, 1.0);
+        }
+        let ndc = vec3(in.uv * vec2(2.0, -2.0) + vec2(-1.0, 1.0), depth);
         let world_h = view.world_from_clip * vec4(ndc, 1.0);
         let world_pos = world_h.xyz / world_h.w;
 
-        let topo_uv = climate_topography_uv(world_pos);
-        let height = textureSampleLevel(topography, cloud_sampler, topo_uv, 0.0).r;
+        let map_uv = climate_equirectangular_uv(world_pos);
         if cloud.debug_mode == DBG_CLIMATE_COVERAGE {
-            // Show climate propensity directly (bright = cloudy) so
-            // it matches the user's intuition. Ignore the
-            // `latitude_strength` blend so the model itself is
-            // visible regardless of slider setting.
-            let lat_off = climate_latitude_offset_deg(
-                world_pos, cloud.climate_itcz_center_deg,
-            );
-            let g = saturate(
-                climate_lat_propensity(lat_off)
-                    + climate_ocean_propensity(height, cloud.climate_ocean_strength),
-            );
+            // Read the baked climate map directly so the viz matches
+            // exactly what the runtime samples. R holds the
+            // *threshold* (low = cloudy); invert here to show
+            // propensity (bright = cloudy) to match user intuition.
+            let threshold = textureSampleLevel(
+                climate_map, cloud_sampler, map_uv, 0.0,
+            ).r;
+            let g = 1.0 - threshold;
             return vec4<f32>(g, g, g, 0.0);
         } else {
+            let height = textureSampleLevel(
+                topography, cloud_sampler, map_uv, 0.0,
+            ).r;
             return vec4<f32>(height, height, height, 0.0);
         }
     }
