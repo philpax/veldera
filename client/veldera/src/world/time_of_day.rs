@@ -202,15 +202,26 @@ impl TimeOfDayState {
         -AXIAL_TILT_DEG * angle_rad.cos()
     }
 
+    /// Returns the current local time at the given longitude as
+    /// `(seconds_since_local_midnight, local_date)`. Single projection
+    /// of the canonical UTC state — both `local_hours_at_longitude`
+    /// and `current_date_at_longitude` are just views on this.
+    pub fn current_local(&self, lon_deg: f64) -> (f64, SimpleDate) {
+        utc_to_local(
+            self.current_utc_seconds(),
+            self.current_date(),
+            lon_deg,
+        )
+    }
+
     /// Returns the local time in hours (0-24) at the given longitude.
     pub fn local_hours_at_longitude(&self, lon_deg: f64) -> f64 {
-        let utc_seconds = self.current_utc_seconds();
-        let utc_hours = utc_seconds / SECONDS_PER_HOUR;
-        // Longitude-based offset: 15 degrees per hour.
-        let offset_hours = lon_deg / 15.0;
-        let local_hours = utc_hours + offset_hours;
-        // Wrap to 0-24 range.
-        local_hours.rem_euclid(24.0)
+        self.current_local(lon_deg).0 / SECONDS_PER_HOUR
+    }
+
+    /// Returns the calendar date as seen at the given longitude.
+    pub fn current_date_at_longitude(&self, lon_deg: f64) -> SimpleDate {
+        self.current_local(lon_deg).1
     }
 
     /// Sets the time speed without causing time jumps.
@@ -221,20 +232,6 @@ impl TimeOfDayState {
         self.reference_instant = Instant::now();
         self.reference_sim_time = current_time;
         self.speed_multiplier = speed;
-    }
-
-    /// Sets a manual override time (local hours at the given longitude).
-    pub fn set_override_time(&mut self, local_hours: f64, lon_deg: f64) {
-        self.mode = TimeMode::Override;
-        // Capture current date state.
-        let current_date = self.current_date();
-        // Convert local time to UTC.
-        let offset_hours = lon_deg / 15.0;
-        let utc_hours = (local_hours - offset_hours).rem_euclid(24.0);
-        self.reference_instant = Instant::now();
-        self.reference_sim_time = utc_hours * SECONDS_PER_HOUR;
-        self.reference_date = current_date;
-        self.day_offset = 0;
     }
 
     /// Sets the date in override mode.
@@ -253,7 +250,6 @@ impl TimeOfDayState {
     ///
     /// `utc_seconds` is seconds since midnight UTC (0..86400).
     /// Time continues to advance at the current speed multiplier.
-    #[allow(dead_code)]
     pub fn set_override_utc(&mut self, date: SimpleDate, utc_seconds: f64) {
         self.mode = TimeMode::Override;
         self.reference_instant = Instant::now();
@@ -274,10 +270,61 @@ impl TimeOfDayState {
 }
 
 /// Seconds in an hour.
-const SECONDS_PER_HOUR: f64 = 3600.0;
+pub const SECONDS_PER_HOUR: f64 = 3600.0;
 
 /// Seconds in a day.
-const SECONDS_PER_DAY: f64 = 86400.0;
+pub const SECONDS_PER_DAY: f64 = 86400.0;
+
+/// Project a UTC `(seconds, date)` pair to the corresponding local
+/// time at a longitude. `local_seconds` is wrapped into
+/// `[0, SECONDS_PER_DAY)` and the date is advanced or retreated by one
+/// day if the offset pushes us past midnight in either direction.
+///
+/// This is the only sanctioned UTC→local conversion — UI projections
+/// of the current time and any local-clock display should go through
+/// it (typically via [`TimeOfDayState::current_local`]). The UTC side
+/// is the canonical state; local is always a derived view.
+pub fn utc_to_local(
+    utc_seconds: f64,
+    utc_date: SimpleDate,
+    lon_deg: f64,
+) -> (f64, SimpleDate) {
+    let offset_seconds = lon_deg / 15.0 * SECONDS_PER_HOUR;
+    let local_total = utc_seconds + offset_seconds;
+    let mut date = utc_date;
+    if local_total >= SECONDS_PER_DAY {
+        date.advance_day();
+        (local_total - SECONDS_PER_DAY, date)
+    } else if local_total < 0.0 {
+        date.retreat_day();
+        (local_total + SECONDS_PER_DAY, date)
+    } else {
+        (local_total, date)
+    }
+}
+
+/// Inverse of [`utc_to_local`]. Use this when a UI control yields a
+/// local `(seconds, date)` and you need a UTC `(seconds, date)` to
+/// feed [`TimeOfDayState::set_override_utc`] (the single canonical
+/// setter). Round-trips with [`utc_to_local`] exactly.
+pub fn local_to_utc(
+    local_seconds: f64,
+    local_date: SimpleDate,
+    lon_deg: f64,
+) -> (f64, SimpleDate) {
+    let offset_seconds = lon_deg / 15.0 * SECONDS_PER_HOUR;
+    let utc_total = local_seconds - offset_seconds;
+    let mut date = local_date;
+    if utc_total >= SECONDS_PER_DAY {
+        date.advance_day();
+        (utc_total - SECONDS_PER_DAY, date)
+    } else if utc_total < 0.0 {
+        date.retreat_day();
+        (utc_total + SECONDS_PER_DAY, date)
+    } else {
+        (utc_total, date)
+    }
+}
 
 // Time period boundaries (in hours).
 const DAWN_START: f64 = 5.0;
@@ -495,4 +542,87 @@ fn update_sun_direction(
     // Set the sun transform so direction_to_light = sun_direction.
     // DirectionalLight shines in -Z direction, so we use looking_to with -sun_direction.
     *sun_transform = Transform::default().looking_to(-sun_direction, Vec3::Z);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn approx_eq(a: f64, b: f64) -> bool {
+        (a - b).abs() < 1e-6
+    }
+
+    #[test]
+    fn utc_local_roundtrip() {
+        // Cases that exercise both day-rollover directions across a
+        // range of longitudes.
+        let cases: &[(f64, i32, u32, u32, f64)] = &[
+            // (lon_deg, year, month, day, utc_seconds)
+            (-74.0, 2026, 5, 17, 1548.0),    // NYC, UTC 00:25:48 → local prev day
+            (150.0, 2026, 5, 16, 50_000.0),  // Sydney, UTC 13:53 → local next day
+            (0.0, 2026, 5, 16, 43_200.0),    // Greenwich, no shift
+            (-180.0, 2026, 1, 1, 0.0),       // antimeridian edge
+            (180.0, 2026, 12, 31, 86_300.0), // antimeridian edge other side
+        ];
+        for (lon, y, m, d, us) in cases.iter().copied() {
+            let utc_date = SimpleDate { year: y, month: m, day: d };
+            let (local_seconds, local_date) = utc_to_local(us, utc_date, lon);
+            let (us2, ud2) = local_to_utc(local_seconds, local_date, lon);
+            assert!(
+                approx_eq(us2, us),
+                "utc_seconds round-trip lon={lon} y={y} m={m} d={d} us={us}: got {us2}"
+            );
+            assert_eq!(
+                (ud2.year, ud2.month, ud2.day),
+                (utc_date.year, utc_date.month, utc_date.day),
+                "utc_date round-trip lon={lon}",
+            );
+        }
+    }
+
+    #[test]
+    fn local_date_preserved_through_scrub() {
+        // The motivating bug: at NYC at 19:30 local on 2026-05-16, UTC
+        // has already rolled to 2026-05-17 00:25. Scrubbing local to
+        // 09:00 should keep local_date at 2026-05-16, not jump to -17.
+        let mut state = TimeOfDayState {
+            mode: TimeMode::Override,
+            speed_multiplier: 0.0,
+            reference_instant: Instant::now(),
+            reference_sim_time: 25.0 * 60.0,
+            reference_date: SimpleDate {
+                year: 2026,
+                month: 5,
+                day: 17,
+            },
+            day_offset: 0,
+        };
+        let lon = -74.0;
+        let (_, before_date) = state.current_local(lon);
+        assert_eq!(
+            (before_date.year, before_date.month, before_date.day),
+            (2026, 5, 16),
+            "local date before scrub should be 2026-05-16"
+        );
+        // Mirror the UI flow: get local date, project to UTC, set
+        // canonical UTC. This exercises the same code path the UI
+        // uses, so the test will catch regressions to either the
+        // projection or the setter.
+        let (_, local_date_now) = state.current_local(lon);
+        let (utc_seconds, utc_date) =
+            local_to_utc(9.0 * SECONDS_PER_HOUR, local_date_now, lon);
+        state.set_override_utc(utc_date, utc_seconds);
+        let (after_seconds, after_date) = state.current_local(lon);
+        assert!(
+            approx_eq(after_seconds / SECONDS_PER_HOUR, 9.0),
+            "local hours after scrub should be 9.0, got {}",
+            after_seconds / SECONDS_PER_HOUR,
+        );
+        assert_eq!(
+            (after_date.year, after_date.month, after_date.day),
+            (2026, 5, 16),
+            "local date should still be 2026-05-16, got {}-{:02}-{:02}",
+            after_date.year, after_date.month, after_date.day,
+        );
+    }
 }

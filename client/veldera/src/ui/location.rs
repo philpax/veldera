@@ -15,7 +15,7 @@ use crate::{
             GEOCODING_THROTTLE_SECS, GeocodingState, HttpClient, TeleportAnimation, TeleportState,
         },
         moon::compute_moon_state,
-        time_of_day::{TimeMode, TimeOfDayState},
+        time_of_day::{local_to_utc, TimeMode, TimeOfDayState, SECONDS_PER_HOUR},
     },
 };
 
@@ -226,15 +226,17 @@ pub(super) fn render_location_tab(
         }
     });
 
-    // Display current UTC date and time.
-    let current_date = location.time_of_day.current_date();
+    // Date displayed alongside local time, so the calendar date matches
+    // what a clock at the camera's longitude would say (UTC and local
+    // disagree on the date for ~half of any given day).
+    let local_date = location.time_of_day.current_date_at_longitude(lon_deg);
     let utc_seconds = location.time_of_day.current_utc_seconds();
     let utc_h = (utc_seconds / 3600.0) as u32;
     let utc_m = ((utc_seconds % 3600.0) / 60.0) as u32;
     let utc_s = (utc_seconds % 60.0) as u32;
     ui.label(format!(
         "Date: {}-{:02}-{:02}",
-        current_date.year, current_date.month, current_date.day
+        local_date.year, local_date.month, local_date.day
     ));
     ui.label(format!("UTC: {utc_h:02}:{utc_m:02}:{utc_s:02}"));
 
@@ -260,29 +262,41 @@ pub(super) fn render_location_tab(
             );
             // Only update time if there was a significant change.
             if (slider_hours - local_hours).abs() > 0.01 {
-                location
-                    .time_of_day
-                    .set_override_time(slider_hours, lon_deg);
+                // Local-time input → UTC via the explicit inverse
+                // projection. Preserves the local date by going
+                // through (slider_hours, current local date) rather
+                // than (slider_hours, UTC date).
+                let (utc_seconds, utc_date) = local_to_utc(
+                    slider_hours * SECONDS_PER_HOUR,
+                    local_date,
+                    lon_deg,
+                );
+                location.time_of_day.set_override_utc(utc_date, utc_seconds);
             }
         }
     });
 
     // Time and date controls (only in override mode).
     if is_override {
-        // Date controls.
+        // Date controls — operate on local date at the camera's
+        // longitude. `set_override_date` takes a UTC date, but
+        // advancing/retreating by one day is the same operation in
+        // either reference frame (the offset between UTC and local
+        // stays constant).
+        let current_utc_date = location.time_of_day.current_date();
         ui.horizontal(|ui| {
             ui.label("Date:");
             if ui.button("\u{25c0}").clicked() {
-                let mut new_date = current_date;
+                let mut new_date = current_utc_date;
                 new_date.retreat_day();
                 location.time_of_day.set_override_date(new_date);
             }
             ui.label(format!(
                 "{}-{:02}-{:02}",
-                current_date.year, current_date.month, current_date.day
+                local_date.year, local_date.month, local_date.day
             ));
             if ui.button("\u{25b6}").clicked() {
-                let mut new_date = current_date;
+                let mut new_date = current_utc_date;
                 new_date.advance_day();
                 location.time_of_day.set_override_date(new_date);
             }
