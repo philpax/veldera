@@ -1,8 +1,10 @@
 - [ ] refactor into multiple crates, engine / game
 - [ ] figure out what's going on with scale
+- [ ] physics should use the target tile size, or the best available if no better is available
+- [ ] light pollution map?
 - [ ] deal with clouds moving when camera moves
 - [ ] shouldn't be able to shoot projectiles when in camera transition or after switching camera modes or when deselecting ui lock
-- [ ] actual water tiles: will need to bring in a shader and potentially find and mask out the world tiles that correspond to water
+- [ ] actual water tiles: will need to bring in a shader and potentially find and mask out the world tiles that correspond to water. use existing elevation map for this?
 - [ ] grappling: on-foot medium-scale traversal
 - [ ] landmarks: a list of landmarks around the world that the user can travel on, to be stored remotely at some point. initially extracted from Wikipedia, maybe?
 - [ ] webgpu on web if possible
