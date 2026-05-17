@@ -225,11 +225,7 @@ impl TimeOfDayState {
     /// of the canonical UTC state — both `local_hours_at_longitude`
     /// and `current_date_at_longitude` are just views on this.
     pub fn current_local(&self, lon_deg: f64) -> (f64, SimpleDate) {
-        utc_to_local(
-            self.current_utc_seconds(),
-            self.current_date(),
-            lon_deg,
-        )
+        utc_to_local(self.current_utc_seconds(), self.current_date(), lon_deg)
     }
 
     /// Returns the local time in hours (0-24) at the given longitude.
@@ -290,11 +286,7 @@ pub const SECONDS_PER_DAY: f64 = 86400.0;
 /// of the current time and any local-clock display should go through
 /// it (typically via [`TimeOfDayState::current_local`]). The UTC side
 /// is the canonical state; local is always a derived view.
-pub fn utc_to_local(
-    utc_seconds: f64,
-    utc_date: SimpleDate,
-    lon_deg: f64,
-) -> (f64, SimpleDate) {
+pub fn utc_to_local(utc_seconds: f64, utc_date: SimpleDate, lon_deg: f64) -> (f64, SimpleDate) {
     let offset_seconds = lon_deg / 15.0 * SECONDS_PER_HOUR;
     let local_total = utc_seconds + offset_seconds;
     let mut date = utc_date;
@@ -313,11 +305,7 @@ pub fn utc_to_local(
 /// local `(seconds, date)` and you need a UTC `(seconds, date)` to
 /// feed [`TimeOfDayState::set_override_utc`] (the single canonical
 /// setter). Round-trips with [`utc_to_local`] exactly.
-pub fn local_to_utc(
-    local_seconds: f64,
-    local_date: SimpleDate,
-    lon_deg: f64,
-) -> (f64, SimpleDate) {
+pub fn local_to_utc(local_seconds: f64, local_date: SimpleDate, lon_deg: f64) -> (f64, SimpleDate) {
     let offset_seconds = lon_deg / 15.0 * SECONDS_PER_HOUR;
     let utc_total = local_seconds - offset_seconds;
     let mut date = local_date;
@@ -564,14 +552,18 @@ mod tests {
         // range of longitudes.
         let cases: &[(f64, i32, u32, u32, f64)] = &[
             // (lon_deg, year, month, day, utc_seconds)
-            (-74.0, 2026, 5, 17, 1548.0),    // NYC, UTC 00:25:48 → local prev day
-            (150.0, 2026, 5, 16, 50_000.0),  // Sydney, UTC 13:53 → local next day
-            (0.0, 2026, 5, 16, 43_200.0),    // Greenwich, no shift
-            (-180.0, 2026, 1, 1, 0.0),       // antimeridian edge
+            (-74.0, 2026, 5, 17, 1548.0), // NYC, UTC 00:25:48 → local prev day
+            (150.0, 2026, 5, 16, 50_000.0), // Sydney, UTC 13:53 → local next day
+            (0.0, 2026, 5, 16, 43_200.0), // Greenwich, no shift
+            (-180.0, 2026, 1, 1, 0.0),    // antimeridian edge
             (180.0, 2026, 12, 31, 86_300.0), // antimeridian edge other side
         ];
         for (lon, y, m, d, us) in cases.iter().copied() {
-            let utc_date = SimpleDate { year: y, month: m, day: d };
+            let utc_date = SimpleDate {
+                year: y,
+                month: m,
+                day: d,
+            };
             let (local_seconds, local_date) = utc_to_local(us, utc_date, lon);
             let (us2, ud2) = local_to_utc(local_seconds, local_date, lon);
             assert!(
@@ -615,8 +607,7 @@ mod tests {
         // uses, so the test will catch regressions to either the
         // projection or the setter.
         let (_, local_date_now) = state.current_local(lon);
-        let (utc_seconds, utc_date) =
-            local_to_utc(9.0 * SECONDS_PER_HOUR, local_date_now, lon);
+        let (utc_seconds, utc_date) = local_to_utc(9.0 * SECONDS_PER_HOUR, local_date_now, lon);
         state.set_override_utc(utc_date, utc_seconds);
         let (after_seconds, after_date) = state.current_local(lon);
         assert!(
@@ -628,7 +619,9 @@ mod tests {
             (after_date.year, after_date.month, after_date.day),
             (2026, 5, 16),
             "local date should still be 2026-05-16, got {}-{:02}-{:02}",
-            after_date.year, after_date.month, after_date.day,
+            after_date.year,
+            after_date.month,
+            after_date.day,
         );
     }
 }

@@ -69,8 +69,7 @@ impl NoiseBakeState {
         self.done.load(std::sync::atomic::Ordering::Relaxed)
     }
     fn mark_done(&self) {
-        self.done
-            .store(true, std::sync::atomic::Ordering::Relaxed);
+        self.done.store(true, std::sync::atomic::Ordering::Relaxed);
     }
 }
 
@@ -182,12 +181,13 @@ impl Node for NoiseBakeNode {
             &BindGroupEntries::with_indices(((0, texture_view),)),
         );
 
-        let mut pass = render_context
-            .command_encoder()
-            .begin_compute_pass(&ComputePassDescriptor {
-                label: Some("cloud_noise_bake"),
-                timestamp_writes: None,
-            });
+        let mut pass =
+            render_context
+                .command_encoder()
+                .begin_compute_pass(&ComputePassDescriptor {
+                    label: Some("cloud_noise_bake"),
+                    timestamp_writes: None,
+                });
         pass.set_pipeline(compute_pipeline);
         pass.set_bind_group(0, &bind_group, &[]);
         let groups = NOISE_RES / NOISE_WORKGROUP_SIZE;

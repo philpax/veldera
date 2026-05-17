@@ -91,12 +91,13 @@ impl ViewNode for CloudRaymarchNode {
             return Ok(());
         };
 
-        let mut pass = render_context
-            .command_encoder()
-            .begin_compute_pass(&ComputePassDescriptor {
-                label: Some("cloud_raymarch"),
-                timestamp_writes: None,
-            });
+        let mut pass =
+            render_context
+                .command_encoder()
+                .begin_compute_pass(&ComputePassDescriptor {
+                    label: Some("cloud_raymarch"),
+                    timestamp_writes: None,
+                });
         pass.set_pipeline(raymarch_pipeline);
         pass.set_bind_group(
             0,
@@ -153,12 +154,13 @@ impl ViewNode for CloudTemporalNode {
             return Ok(());
         };
 
-        let mut pass = render_context
-            .command_encoder()
-            .begin_compute_pass(&ComputePassDescriptor {
-                label: Some("cloud_temporal"),
-                timestamp_writes: None,
-            });
+        let mut pass =
+            render_context
+                .command_encoder()
+                .begin_compute_pass(&ComputePassDescriptor {
+                    label: Some("cloud_temporal"),
+                    timestamp_writes: None,
+                });
         pass.set_pipeline(temporal_pipeline);
         pass.set_bind_group(
             0,
@@ -273,12 +275,13 @@ impl ViewNode for CloudShadowBakeNode {
             return Ok(());
         };
 
-        let mut pass = render_context
-            .command_encoder()
-            .begin_compute_pass(&ComputePassDescriptor {
-                label: Some("cloud_shadow_bake"),
-                timestamp_writes: None,
-            });
+        let mut pass =
+            render_context
+                .command_encoder()
+                .begin_compute_pass(&ComputePassDescriptor {
+                    label: Some("cloud_shadow_bake"),
+                    timestamp_writes: None,
+                });
         pass.set_pipeline(bake_pipeline);
         pass.set_bind_group(
             0,
@@ -388,8 +391,7 @@ impl ViewNode for CloudGodRaysNode {
         world: &World,
     ) -> Result<(), NodeRunError> {
         let pipeline_cache = world.resource::<PipelineCache>();
-        let Some(god_rays_pipeline) =
-            pipeline_cache.get_render_pipeline(pipeline_ids.god_rays)
+        let Some(god_rays_pipeline) = pipeline_cache.get_render_pipeline(pipeline_ids.god_rays)
         else {
             return Ok(());
         };
@@ -457,12 +459,13 @@ impl ViewNode for CloudClimateBakeNode {
             return Ok(());
         };
 
-        let mut pass = render_context
-            .command_encoder()
-            .begin_compute_pass(&ComputePassDescriptor {
-                label: Some("cloud_climate_bake"),
-                timestamp_writes: None,
-            });
+        let mut pass =
+            render_context
+                .command_encoder()
+                .begin_compute_pass(&ComputePassDescriptor {
+                    label: Some("cloud_climate_bake"),
+                    timestamp_writes: None,
+                });
         pass.set_pipeline(bake_pipeline);
         pass.set_bind_group(0, bind_group, &[cloud_offset.index()]);
 
@@ -472,7 +475,10 @@ impl ViewNode for CloudClimateBakeNode {
         let groups_y = crate::CLIMATE_MAP_HEIGHT.div_ceil(WORKGROUP_SIZE);
         pass.dispatch_workgroups(groups_x, groups_y, 1);
         if !CLIMATE_BAKE_LOGGED.swap(true, Ordering::Relaxed) {
-            info!("cloud climate bake first dispatch ({}×{} workgroups)", groups_x, groups_y);
+            info!(
+                "cloud climate bake first dispatch ({}×{} workgroups)",
+                groups_x, groups_y
+            );
         }
         Ok(())
     }

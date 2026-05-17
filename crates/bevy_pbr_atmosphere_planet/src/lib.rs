@@ -65,8 +65,8 @@ use environment::{
     prepare_atmosphere_probe_bind_groups, prepare_atmosphere_probe_components,
     prepare_probe_textures,
 };
-use node::{AtmosphereLutsNode, RenderSkyNode};
 pub use node::AtmosphereNode;
+use node::{AtmosphereLutsNode, RenderSkyNode};
 use resources::{
     AtmosphereBindGroupLayouts, AtmosphereLutPipelines, AtmosphereSampler,
     prepare_atmosphere_bind_groups, prepare_atmosphere_lights_buffer, prepare_atmosphere_textures,

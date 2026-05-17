@@ -17,8 +17,8 @@ use bevy_egui::{EguiTextureHandle, EguiUserTextures};
 #[allow(unused_imports)]
 pub use bevy_pbr_clouds_planet::CloudDebugMode;
 use bevy_pbr_clouds_planet::{
-    CloudCameraEcef, CloudClimateMap, CloudEarthTopography, CloudLayers, CloudsPlanetPlugin,
-    CLIMATE_MAP_HEIGHT, CLIMATE_MAP_WIDTH,
+    CLIMATE_MAP_HEIGHT, CLIMATE_MAP_WIDTH, CloudCameraEcef, CloudClimateMap, CloudEarthTopography,
+    CloudLayers, CloudsPlanetPlugin,
 };
 
 use crate::world::{floating_origin::FloatingOriginCamera, time_of_day::TimeOfDayState};
@@ -149,7 +149,9 @@ fn sync_cloud_camera_ecef(
     cameras: Query<(Entity, &FloatingOriginCamera), With<CloudLayers>>,
 ) {
     for (entity, cam) in &cameras {
-        commands.entity(entity).insert(CloudCameraEcef(cam.position));
+        commands
+            .entity(entity)
+            .insert(CloudCameraEcef(cam.position));
     }
 }
 

@@ -25,11 +25,13 @@
 //!
 //! Run: `cargo run --release -p bake-earth-topography`.
 
-use std::error::Error;
-use std::fs::{File, create_dir_all};
-use std::io::{BufReader, BufWriter, Write, copy};
-use std::path::{Path, PathBuf};
-use std::time::Instant;
+use std::{
+    error::Error,
+    fs::{File, create_dir_all},
+    io::{BufReader, BufWriter, Write, copy},
+    path::{Path, PathBuf},
+    time::Instant,
+};
 
 const SOURCE_URL: &str = "https://www.ngdc.noaa.gov/mgg/global/relief/ETOPO2022/data/60s/60s_surface_elev_gtif/ETOPO_2022_v1_60s_N90W180_surface.tif";
 const SOURCE_RELATIVE: &str = "source_assets/ETOPO_2022_v1_60s_N90W180_surface.tif";
@@ -72,9 +74,7 @@ fn main() -> Result<(), Box<dyn Error>> {
     let resampled = downsample_average(&src, src_w, src_h, OUTPUT_W, OUTPUT_H);
     println!("  done in {:.1}s", start.elapsed().as_secs_f32());
 
-    println!(
-        "Quantising to 8-bit, elevation range [{ELEVATION_MIN_M} m, {ELEVATION_MAX_M} m]..."
-    );
+    println!("Quantising to 8-bit, elevation range [{ELEVATION_MIN_M} m, {ELEVATION_MAX_M} m]...");
     let bytes: Vec<u8> = resampled
         .iter()
         .map(|&v| {
@@ -141,8 +141,8 @@ fn read_float_tiff(path: &Path) -> Result<(u32, u32, Vec<f32>), Box<dyn Error>> 
     // ETOPO 60s decodes to ~900 MB of float32 in one allocation; well
     // past the tiff crate's default decompression-bomb guard. We trust
     // the NOAA source, so opt out of the limits entirely.
-    let mut decoder = tiff::decoder::Decoder::new(file)?
-        .with_limits(tiff::decoder::Limits::unlimited());
+    let mut decoder =
+        tiff::decoder::Decoder::new(file)?.with_limits(tiff::decoder::Limits::unlimited());
     let (w, h) = decoder.dimensions()?;
     let image = decoder.read_image()?;
     use tiff::decoder::DecodingResult::*;
@@ -185,13 +185,7 @@ fn describe_decoding_result(d: &tiff::decoder::DecodingResult) -> &'static str {
 /// than a fixed N×N average because the ratio isn't an integer
 /// (21600 → 2048 is ×10.55), but cheap enough (~22M out × ~100 in samples
 /// = ~2 billion adds, a few seconds in release mode).
-fn downsample_average(
-    src: &[f32],
-    src_w: u32,
-    src_h: u32,
-    dst_w: u32,
-    dst_h: u32,
-) -> Vec<f32> {
+fn downsample_average(src: &[f32], src_w: u32, src_h: u32, dst_w: u32, dst_h: u32) -> Vec<f32> {
     let mut out = vec![0.0_f32; (dst_w as usize) * (dst_h as usize)];
     let sx = src_w as f32 / dst_w as f32;
     let sy = src_h as f32 / dst_h as f32;
@@ -220,12 +214,7 @@ fn downsample_average(
     out
 }
 
-fn write_grayscale_png(
-    path: &Path,
-    w: u32,
-    h: u32,
-    data: &[u8],
-) -> Result<(), Box<dyn Error>> {
+fn write_grayscale_png(path: &Path, w: u32, h: u32, data: &[u8]) -> Result<(), Box<dyn Error>> {
     let file = BufWriter::new(File::create(path)?);
     let mut encoder = png::Encoder::new(file, w, h);
     encoder.set_color(png::ColorType::Grayscale);

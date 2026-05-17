@@ -26,13 +26,14 @@
 //! noise tile size, wind) are configured per [`CloudSubLayer`] inside the
 //! [`CloudLayers`] component.
 
-mod noise;
 mod node;
+mod noise;
 mod resources;
 
 use bevy::{
     app::{App, Plugin},
     asset::embedded_asset,
+    core_pipeline::core_3d::graph::{Core3d, Node3d},
     ecs::{
         component::Component,
         query::{QueryItem, With},
@@ -40,6 +41,7 @@ use bevy::{
         system::lifetimeless::Read,
     },
     math::{DVec3, Vec2},
+    prelude::Camera3d,
     render::{
         Render, RenderApp, RenderStartup, RenderSystems,
         extract_component::{ExtractComponent, ExtractComponentPlugin, UniformComponentPlugin},
@@ -52,21 +54,17 @@ use bevy::{
     },
     shader::load_shader_library,
 };
-use bevy::{
-    core_pipeline::core_3d::graph::{Core3d, Node3d},
-    prelude::Camera3d,
-};
 use bevy_pbr_atmosphere_planet::{AtmosphereNode, SphericalAtmosphere};
 use tracing::warn;
 
 pub use node::CloudNode;
 pub use resources::{CloudBindGroupLayouts, CloudPipelines, CloudSampler, CloudTextures};
 
-use noise::{NoiseBakeState, NoiseBindGroupLayout, NoisePipeline, NoiseTextures};
 use node::{
     CloudCompositeNode, CloudRaymarchNode, CloudShadowApplyNode, CloudShadowBakeNode,
     CloudTemporalNode,
 };
+use noise::{NoiseBakeState, NoiseBindGroupLayout, NoisePipeline, NoiseTextures};
 use resources::{
     GpuCloudUniform, prepare_cloud_bind_groups, prepare_cloud_history_textures,
     prepare_cloud_shadow_textures, prepare_cloud_textures, prepare_cloud_uniforms,
@@ -163,14 +161,8 @@ impl Plugin for CloudsPlanetPlugin {
                 Core3d,
                 CloudNode::ShadowBake,
             )
-            .add_render_graph_node::<ViewNodeRunner<CloudRaymarchNode>>(
-                Core3d,
-                CloudNode::Raymarch,
-            )
-            .add_render_graph_node::<ViewNodeRunner<CloudTemporalNode>>(
-                Core3d,
-                CloudNode::Temporal,
-            )
+            .add_render_graph_node::<ViewNodeRunner<CloudRaymarchNode>>(Core3d, CloudNode::Raymarch)
+            .add_render_graph_node::<ViewNodeRunner<CloudTemporalNode>>(Core3d, CloudNode::Temporal)
             .add_render_graph_node::<ViewNodeRunner<CloudShadowApplyNode>>(
                 Core3d,
                 CloudNode::ShadowApply,

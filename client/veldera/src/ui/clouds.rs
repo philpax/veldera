@@ -140,32 +140,24 @@ fn render_overview(ui: &mut egui::Ui, cloud: &mut CloudLayers) {
 }
 
 fn render_shadows(ui: &mut egui::Ui, cloud: &mut CloudLayers) {
-    ui.add(
-        egui::Slider::new(&mut cloud.shadow_intensity, 0.0..=5.0).text("shadow intensity"),
-    )
-    .on_hover_text(
-        "Multiplier on the cloud-shadow apply pass. 1.0 = default \
+    ui.add(egui::Slider::new(&mut cloud.shadow_intensity, 0.0..=5.0).text("shadow intensity"))
+        .on_hover_text(
+            "Multiplier on the cloud-shadow apply pass. 1.0 = default \
          (~45 % darkening under full shadow). Crank up for tuning, \
          especially handy for moonlit-shadow visibility tests.",
-    );
+        );
 }
 
-fn render_climate(
-    ui: &mut egui::Ui,
-    cloud: &mut CloudLayers,
-    image_ids: &AtmosphereImageIds,
-) {
+fn render_climate(ui: &mut egui::Ui, cloud: &mut CloudLayers, image_ids: &AtmosphereImageIds) {
     ui.checkbox(&mut cloud.climate.enabled, "Enabled");
     let cl = &mut cloud.climate;
     ui.add_enabled_ui(cl.enabled, |ui| {
-        ui.add(
-            egui::Slider::new(&mut cl.latitude_strength, 0.0..=1.0).text("latitude strength"),
-        )
-        .on_hover_text(
-            "How strongly the latitude-band model replaces each \
+        ui.add(egui::Slider::new(&mut cl.latitude_strength, 0.0..=1.0).text("latitude strength"))
+            .on_hover_text(
+                "How strongly the latitude-band model replaces each \
              layer's base coverage. 0 = use layer.coverage everywhere \
              (legacy); 1 = pure ITCZ / subtropical / storm-track bands.",
-        );
+            );
         ui.add(egui::Slider::new(&mut cl.ocean_strength, 0.0..=1.0).text("ocean strength"))
             .on_hover_text(
                 "Additive coverage bonus over ocean tiles. 0 = land and \
@@ -180,17 +172,14 @@ fn render_climate(
             "Peak ITCZ latitude offset at solstice (scaled by sun \
              declination). 12° is roughly realistic.",
         );
-        ui.add(
-            egui::Slider::new(&mut cl.itcz_north_bias_deg, -10.0..=15.0)
-                .text("north bias (°)"),
-        )
-        .on_hover_text(
-            "Constant northward shift of the ITCZ centre. Earth's \
+        ui.add(egui::Slider::new(&mut cl.itcz_north_bias_deg, -10.0..=15.0).text("north bias (°)"))
+            .on_hover_text(
+                "Constant northward shift of the ITCZ centre. Earth's \
              annual-mean ITCZ sits ~5° N because the Northern \
              Hemisphere has more land mass; without this, equinox \
              dates would render a perfectly symmetric band on the \
              geographic equator.",
-        );
+            );
     });
 
     ui.separator();
@@ -259,7 +248,9 @@ fn render_god_rays(ui: &mut egui::Ui, cloud: &mut CloudLayers) {
                 .text("scale height (m)")
                 .integer(),
         )
-        .on_hover_text("Exponential atmosphere falloff. Higher = shafts visible at higher altitudes.");
+        .on_hover_text(
+            "Exponential atmosphere falloff. Higher = shafts visible at higher altitudes.",
+        );
         ui.add(egui::Slider::new(&mut gr.hg_g, 0.0..=0.95).text("phase g"))
             .on_hover_text(
                 "Henyey-Greenstein anisotropy. \
@@ -328,8 +319,7 @@ fn render_layers(ui: &mut egui::Ui, cloud: &mut CloudLayers) {
                         .text("wind north (m/s)"),
                 );
                 ui.add(
-                    egui::Slider::new(&mut layer.evolution_rate, 0.0..=0.05)
-                        .text("evolution rate"),
+                    egui::Slider::new(&mut layer.evolution_rate, 0.0..=0.05).text("evolution rate"),
                 );
                 ui.label("Phase:");
                 ui.add(egui::Slider::new(&mut layer.hg_forward, 0.0..=0.99).text("g forward"));
@@ -358,16 +348,32 @@ fn label_for(mode: CloudDebugMode) -> &'static str {
 fn help_for(mode: CloudDebugMode) -> &'static str {
     match mode {
         CloudDebugMode::Off => "Composite cloud inscattering + transmittance into the HDR scene.",
-        CloudDebugMode::ShellHit => "Green = ray hits cloud shell (brightness ∝ segment length); red = miss.",
-        CloudDebugMode::Noise => "RGB = noise sampled at first-enabled-layer's tile size at shell midpoint.",
-        CloudDebugMode::Density => "Greyscale = total density across all layers at the shell midpoint.",
+        CloudDebugMode::ShellHit => {
+            "Green = ray hits cloud shell (brightness ∝ segment length); red = miss."
+        }
+        CloudDebugMode::Noise => {
+            "RGB = noise sampled at first-enabled-layer's tile size at shell midpoint."
+        }
+        CloudDebugMode::Density => {
+            "Greyscale = total density across all layers at the shell midpoint."
+        }
         CloudDebugMode::Opacity => "Greyscale = 1 − transmittance from the full raymarch loop.",
         CloudDebugMode::FogColor => "Full-screen `cloud.fog_color` value — diagnoses CPU→GPU pipe.",
-        CloudDebugMode::FogExtinction => "Full-screen `density_at_camera × 10⁴` — GPU-sampled cloud density at the camera position, the actual fog extinction.",
-        CloudDebugMode::ViewExposure => "Full-screen `view.exposure × 10⁵` — diagnoses composite view-uniform binding.",
-        CloudDebugMode::ShadowMap => "Scene modulated by raw cloud-shadow transmittance (bypasses strength fade). Red = outside footprint.",
-        CloudDebugMode::ClimateCoverage => "Greyscale climate coverage map (latitude bands + ocean bonus) at each pixel's projected world position.",
-        CloudDebugMode::Topography => "Raw topography height value. Sea level ≈ mid-grey, ocean dark, mountains bright.",
+        CloudDebugMode::FogExtinction => {
+            "Full-screen `density_at_camera × 10⁴` — GPU-sampled cloud density at the camera position, the actual fog extinction."
+        }
+        CloudDebugMode::ViewExposure => {
+            "Full-screen `view.exposure × 10⁵` — diagnoses composite view-uniform binding."
+        }
+        CloudDebugMode::ShadowMap => {
+            "Scene modulated by raw cloud-shadow transmittance (bypasses strength fade). Red = outside footprint."
+        }
+        CloudDebugMode::ClimateCoverage => {
+            "Greyscale climate coverage map (latitude bands + ocean bonus) at each pixel's projected world position."
+        }
+        CloudDebugMode::Topography => {
+            "Raw topography height value. Sea level ≈ mid-grey, ocean dark, mountains bright."
+        }
     }
 }
 

@@ -15,7 +15,7 @@ use crate::{
             GEOCODING_THROTTLE_SECS, GeocodingState, HttpClient, TeleportAnimation, TeleportState,
         },
         moon::compute_moon_state,
-        time_of_day::{local_to_utc, TimeMode, TimeOfDayState, SECONDS_PER_HOUR},
+        time_of_day::{SECONDS_PER_HOUR, TimeMode, TimeOfDayState, local_to_utc},
     },
 };
 
@@ -266,11 +266,8 @@ pub(super) fn render_location_tab(
                 // projection. Preserves the local date by going
                 // through (slider_hours, current local date) rather
                 // than (slider_hours, UTC date).
-                let (utc_seconds, utc_date) = local_to_utc(
-                    slider_hours * SECONDS_PER_HOUR,
-                    local_date,
-                    lon_deg,
-                );
+                let (utc_seconds, utc_date) =
+                    local_to_utc(slider_hours * SECONDS_PER_HOUR, local_date, lon_deg);
                 location.time_of_day.set_override_utc(utc_date, utc_seconds);
             }
         }
@@ -289,14 +286,12 @@ pub(super) fn render_location_tab(
                 let before = picked;
                 ui.add(egui_extras::DatePickerButton::new(&mut picked).id_salt("local_date"));
                 if picked != before {
-                    let new_local_date =
-                        crate::world::time_of_day::SimpleDate::from_naive(picked);
-                    let (utc_seconds, utc_date) =
-                        crate::world::time_of_day::local_to_utc(
-                            local_hours * SECONDS_PER_HOUR,
-                            new_local_date,
-                            lon_deg,
-                        );
+                    let new_local_date = crate::world::time_of_day::SimpleDate::from_naive(picked);
+                    let (utc_seconds, utc_date) = crate::world::time_of_day::local_to_utc(
+                        local_hours * SECONDS_PER_HOUR,
+                        new_local_date,
+                        lon_deg,
+                    );
                     location.time_of_day.set_override_utc(utc_date, utc_seconds);
                 }
             } else {

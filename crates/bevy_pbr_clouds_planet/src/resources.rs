@@ -13,7 +13,7 @@ use bevy::{
         world::{FromWorld, World},
     },
     image::ToExtents,
-    math::{Mat4, UVec2, Vec2, Vec3},
+    math::{Mat4, UVec2, Vec2, Vec3, Vec4},
     pbr::{GpuLights, LightMeta},
     prelude::Camera,
     render::{
@@ -25,7 +25,6 @@ use bevy::{
         view::{ExtractedView, Msaa, ViewDepthTexture, ViewUniform, ViewUniforms},
     },
 };
-use bevy::math::Vec4;
 use bevy_pbr_atmosphere_planet::{
     AtmosphereLightsBuffer, AtmosphereTextures, AtmosphereTransform, AtmosphereTransforms,
     ExtractedAtmosphere, ExtractedAtmosphereLights, GpuAtmosphere, GpuAtmosphereLights,
@@ -564,10 +563,7 @@ impl FromWorld for CloudBindGroupLayouts {
             climate_bake,
             fullscreen_shader: world.resource::<FullscreenShader>().clone(),
             composite_fragment: load_embedded_asset!(world, "shaders/cloud_composite.wgsl"),
-            shadow_apply_fragment: load_embedded_asset!(
-                world,
-                "shaders/cloud_shadow_apply.wgsl"
-            ),
+            shadow_apply_fragment: load_embedded_asset!(world, "shaders/cloud_shadow_apply.wgsl"),
             god_rays_fragment: load_embedded_asset!(world, "shaders/cloud_god_rays.wgsl"),
         }
     }
@@ -862,9 +858,8 @@ pub(super) fn prepare_cloud_uniforms(
     // that night-time cloud shadows follow the moon instead of
     // degenerating because the (below-horizon) sun was picked.
 
-    for (
-        entity, cloud, atmosphere, view, sph_cam, cam_ecef, prev_state, camera, climate_map,
-    ) in &layers
+    for (entity, cloud, atmosphere, view, sph_cam, cam_ecef, prev_state, camera, climate_map) in
+        &layers
     {
         let quality = cloud.quality;
         let world_time = cloud.world_time_seconds;
@@ -885,8 +880,8 @@ pub(super) fn prepare_cloud_uniforms(
             || sph_cam.local_up.normalize_or_zero().as_dvec3() * f64::from(sph_cam.camera_radius),
             |c| c.0,
         );
-        let camera_altitude_m = (camera_ecef_f64.length()
-            - f64::from(atmosphere.bottom_radius)) as f32;
+        let camera_altitude_m =
+            (camera_ecef_f64.length() - f64::from(atmosphere.bottom_radius)) as f32;
 
         // Altitude-driven LOD on primary march steps. From ground level
         // a grazing ray can spend ~50 km inside the shell and benefits
@@ -908,9 +903,8 @@ pub(super) fn prepare_cloud_uniforms(
             const LOD_FULL_ALT: f32 = 10_000.0;
             const LOD_MIN_ALT: f32 = 200_000.0;
             const LOD_MIN: f32 = 0.6;
-            let t = ((camera_altitude_m - LOD_FULL_ALT)
-                / (LOD_MIN_ALT - LOD_FULL_ALT))
-                .clamp(0.0, 1.0);
+            let t =
+                ((camera_altitude_m - LOD_FULL_ALT) / (LOD_MIN_ALT - LOD_FULL_ALT)).clamp(0.0, 1.0);
             let s = t * t * (3.0 - 2.0 * t);
             1.0 - s * (1.0 - LOD_MIN)
         };
@@ -1007,9 +1001,9 @@ pub(super) fn prepare_cloud_uniforms(
         }
 
         // Current frame state for temporal reprojection.
-        let current_clip_from_world = view.clip_from_world.unwrap_or_else(|| {
-            view.clip_from_view * view.world_from_view.to_matrix().inverse()
-        });
+        let current_clip_from_world = view
+            .clip_from_world
+            .unwrap_or_else(|| view.clip_from_view * view.world_from_view.to_matrix().inverse());
         let current_camera_ecef = sph_cam.local_up * sph_cam.camera_radius;
 
         // Cloud shadow map: tangent-plane basis at the camera's local
