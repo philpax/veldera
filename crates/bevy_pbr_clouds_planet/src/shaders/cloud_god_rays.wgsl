@@ -127,6 +127,13 @@ fn main(in: FullscreenVertexOutput) -> @location(0) vec4<f32> {
     }
 
     let cam_world = up * atmosphere_transforms.camera_radius;
+    let cam_altitude = atmosphere_transforms.camera_radius - atmosphere.bottom_radius;
+    // Horizontal cosine of the sun w.r.t. local up. Clamped away from
+    // 0 so we don't divide by ~nothing when the sun is near the
+    // horizon (god rays go horizontal there, shadow-map sampling
+    // breaks down — the apply will just land outside the footprint
+    // anyway).
+    let sun_up_cos = max(dot(sun.direction_to_light, up), 0.05);
     let num_steps = cloud.god_rays_num_steps;
     let dt = march_dist / f32(num_steps);
 
@@ -135,10 +142,24 @@ fn main(in: FullscreenVertexOutput) -> @location(0) vec4<f32> {
         let t = (f32(i) + 0.5) * dt;
         let p = cam_world + ray_dir * t;
 
-        // Cloud-shadow occlusion at this point. Outside the shadow
-        // footprint we treat as unshadowed (the apply pass does the
-        // same).
-        let shadow_uv = (cloud.shadow_from_world * vec4(p, 1.0)).xy;
+        let local_r = length(p);
+
+        // Cloud-shadow occlusion at this point. The shadow map is
+        // indexed by tangent-plane position (vertical projection at
+        // the camera's altitude); naïvely sampling at P's projection
+        // makes shafts read as vertical columns since every march
+        // step along a vertical line lands at the same UV. Instead,
+        // project P back along the *negative* sun direction until it
+        // intersects the tangent plane — the ground point where the
+        // sun ray to P originally crossed it. By Beer's-law
+        // reciprocity the bake's "ground→sun" transmittance at that
+        // point equals the "sun→P" transmittance through clouds
+        // above the plane, so shafts now visually radiate from the
+        // sun direction.
+        let p_altitude = local_r - atmosphere.bottom_radius;
+        let g_offset = (p_altitude - cam_altitude) / sun_up_cos;
+        let g_prime = p - sun.direction_to_light * g_offset;
+        let shadow_uv = (cloud.shadow_from_world * vec4(g_prime, 1.0)).xy;
         var cloud_t: f32 = 1.0;
         if all(shadow_uv >= vec2(0.0)) && all(shadow_uv <= vec2(1.0)) {
             cloud_t = textureSampleLevel(shadow_map, lut_sampler, shadow_uv, 0.0).r;
@@ -146,14 +167,12 @@ fn main(in: FullscreenVertexOutput) -> @location(0) vec4<f32> {
 
         // Atmospheric extinction from this sample to the sun, via the
         // Bruneton transmittance LUT (parametrised by `r` and `mu`).
-        let local_r = length(p);
         let mu = dot(sun.direction_to_light, p / max(local_r, 1.0));
         let atmo_uv = transmittance_lut_r_mu_to_uv(atmosphere, local_r, mu);
         let atmo_t = textureSampleLevel(transmittance_lut, lut_sampler, atmo_uv, 0.0).rgb;
 
         // Air density falls off exponentially with altitude.
-        let altitude = local_r - atmosphere.bottom_radius;
-        let density = exp(-max(altitude, 0.0) / cloud.god_rays_atmo_scale_height);
+        let density = exp(-max(p_altitude, 0.0) / cloud.god_rays_atmo_scale_height);
 
         inscatter = inscatter
             + sun.color * atmo_t * cloud_t * phase
