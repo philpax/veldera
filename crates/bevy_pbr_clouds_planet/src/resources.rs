@@ -524,7 +524,7 @@ impl FromWorld for CloudBindGroupLayouts {
                 ShaderStages::COMPUTE,
                 (
                     (0, uniform_buffer::<GpuCloudUniform>(true)),
-                    // Topography (read).
+                    // Topography (read, clamp).
                     (1, texture_2d(TextureSampleType::default())),
                     // Clamp-to-edge sampler.
                     (2, sampler(SamplerBindingType::Filtering)),
@@ -539,6 +539,13 @@ impl FromWorld for CloudBindGroupLayouts {
                             StorageTextureAccess::WriteOnly,
                         ),
                     ),
+                    // Cloud 3D noise + repeat sampler — used at a
+                    // very low frequency to add a slow climate-scale
+                    // perturbation that breaks the perfect latitude
+                    // rings (planetary "today the trade winds are
+                    // pushing cloud further south than usual" effect).
+                    (4, texture_3d(TextureSampleType::default())),
+                    (5, sampler(SamplerBindingType::Filtering)),
                 ),
             ),
         );
@@ -1503,6 +1510,8 @@ pub(super) fn prepare_cloud_bind_groups(
                         (1, topo_view),
                         (2, &sampler.clamp),
                         (3, &gi.texture_view),
+                        (4, noise_view),
+                        (5, &sampler.noise),
                     )),
                 )
             });

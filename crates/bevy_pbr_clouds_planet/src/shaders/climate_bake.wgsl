@@ -26,6 +26,19 @@
 @group(0) @binding(1) var topography: texture_2d<f32>;
 @group(0) @binding(2) var topo_sampler: sampler;
 @group(0) @binding(3) var output: texture_storage_2d<rgba8unorm, write>;
+@group(0) @binding(4) var noise_3d: texture_3d<f32>;
+@group(0) @binding(5) var noise_sampler: sampler;
+
+// Climate-noise amplitude on the propensity output. ±0.10 is enough
+// to break the perfect-latitude rings into recognisable "today the
+// trade winds are doing X" blotches without overwhelming the
+// underlying band structure.
+const CLIMATE_NOISE_AMP: f32 = 0.10;
+// World time → climate evolution rate. Climate weather systems
+// evolve much slower than per-cell cumulus weather; ~0.0005
+// cycles/sec means a noticeable change over a few minutes of real
+// time but stable across a typical frame-to-frame view.
+const CLIMATE_NOISE_EVOLUTION: f32 = 0.0005;
 
 @compute @workgroup_size(8, 8, 1)
 fn main(@builtin(global_invocation_id) idx: vec3<u32>) {
@@ -52,10 +65,19 @@ fn main(@builtin(global_invocation_id) idx: vec3<u32>) {
     let ocean_prop = climate_ocean_propensity(
         height, cloud.climate_ocean_strength, ocean_factor,
     );
+    // Low-frequency climate noise. Single 3D-noise tap at a planet
+    // scale (uv * 3 ⇒ ~3 cycles across the globe horizontally) plus
+    // a slow time axis. Breaks the perfect latitude-ring look so
+    // the planet doesn't read as a stack of paint stripes from
+    // orbit. ±0.10 amplitude on the propensity.
+    let noise_uv = vec3<f32>(uv * 3.0, cloud.time_seconds * CLIMATE_NOISE_EVOLUTION);
+    let noise_n = textureSampleLevel(noise_3d, noise_sampler, noise_uv, 0.0).r;
+    let climate_noise = (noise_n - 0.5) * 2.0 * CLIMATE_NOISE_AMP;
+
     // `lat_prop + ocean_prop` can go negative when subtropical
     // suppression dominates over land's small ITCZ-flank bias — that
     // collapses to 0 propensity (clear) under saturate.
-    let propensity = saturate(lat_prop + ocean_prop);
+    let propensity = saturate(lat_prop + ocean_prop + climate_noise);
 
     // R: threshold for the runtime smoothstep — lower = more cloud.
     // The raymarch evaluates `smoothstep(threshold - 0.1, threshold +
