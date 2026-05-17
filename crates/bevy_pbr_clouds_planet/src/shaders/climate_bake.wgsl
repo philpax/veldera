@@ -40,6 +40,17 @@ const CLIMATE_NOISE_AMP: f32 = 0.10;
 // time but stable across a typical frame-to-frame view.
 const CLIMATE_NOISE_EVOLUTION: f32 = 0.0005;
 
+// Monsoon enhancement: when the seasonal ITCZ shifts onto land, the
+// associated convective cloud band is much more vigorous than over
+// neighbouring ocean (Indian monsoon, west African monsoon,
+// Australian wet season, Amazonian convection). MONSOON_AMP is the
+// peak extra propensity over land near the ITCZ; MONSOON_BAND_SIGMA
+// is wider than ITCZ_BAND_SIGMA (in `climate.wgsl`) because the
+// continental convection footprint extends further from the ITCZ
+// centre than the ocean ITCZ itself.
+const MONSOON_AMP: f32 = 0.20;
+const MONSOON_BAND_SIGMA: f32 = 0.003;
+
 @compute @workgroup_size(8, 8, 1)
 fn main(@builtin(global_invocation_id) idx: vec3<u32>) {
     let size = vec2<u32>(textureDimensions(output));
@@ -65,6 +76,19 @@ fn main(@builtin(global_invocation_id) idx: vec3<u32>) {
     let ocean_prop = climate_ocean_propensity(
         height, cloud.climate_ocean_strength, ocean_factor,
     );
+    // Continental monsoon enhancement. When the seasonal ITCZ has
+    // shifted onto land (NH summer over India/Sahel; SH summer over
+    // northern Australia), convection over the continental surface
+    // is much stronger than over neighbouring ocean at the same
+    // latitude. `land_factor` is 1 on land / 0 on ocean (smoothed at
+    // the coastline); the Gaussian peaks the boost on the active
+    // ITCZ centre — so the model produces a year-round equatorial
+    // continental wet zone (Amazon, Congo) AND seasonal monsoon
+    // bands that follow the ITCZ off the equator.
+    let land_factor = smoothstep(0.04, 0.06, height);
+    let monsoon_proximity = exp(-off * off * MONSOON_BAND_SIGMA);
+    let monsoon_prop = land_factor * monsoon_proximity * MONSOON_AMP;
+
     // Low-frequency climate noise. Single 3D-noise tap at a planet
     // scale (uv * 3 ⇒ ~3 cycles across the globe horizontally) plus
     // a slow time axis. Breaks the perfect latitude-ring look so
@@ -77,7 +101,7 @@ fn main(@builtin(global_invocation_id) idx: vec3<u32>) {
     // `lat_prop + ocean_prop` can go negative when subtropical
     // suppression dominates over land's small ITCZ-flank bias — that
     // collapses to 0 propensity (clear) under saturate.
-    let propensity = saturate(lat_prop + ocean_prop + climate_noise);
+    let propensity = saturate(lat_prop + ocean_prop + monsoon_prop + climate_noise);
 
     // R: threshold for the runtime smoothstep — lower = more cloud.
     // The raymarch evaluates `smoothstep(threshold - 0.1, threshold +
