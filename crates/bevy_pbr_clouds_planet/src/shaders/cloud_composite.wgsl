@@ -22,6 +22,10 @@
 #import bevy_render::view::View;
 #import bevy_pbr_atmosphere_planet::types::AtmosphereTransforms;
 #import bevy_pbr_clouds_planet::types::{CloudUniform, CloudSubLayer};
+#import bevy_pbr_clouds_planet::climate::{
+    climate_lat_propensity, climate_ocean_propensity,
+    climate_latitude_offset_deg, climate_topography_uv,
+};
 
 @group(0) @binding(0) var<uniform> cloud: CloudUniform;
 @group(0) @binding(1) var cloud_raymarch_in: texture_2d<f32>;
@@ -32,6 +36,7 @@
 @group(0) @binding(6) var noise_3d: texture_3d<f32>;
 @group(0) @binding(7) var noise_sampler: sampler;
 @group(0) @binding(8) var shadow_map: texture_2d<f32>;
+@group(0) @binding(9) var topography: texture_2d<f32>;
 
 // Convert a UV + reverse-Z depth value to camera-to-pixel distance, in
 // metres. `depth == 0` (sky) returns 0; callers should treat that as
@@ -78,11 +83,27 @@ const DBG_FOG_COLOR: u32 = 5u;
 const DBG_FOG_EXTINCTION: u32 = 6u;
 const DBG_VIEW_EXPOSURE: u32 = 7u;
 const DBG_SHADOW_MAP: u32 = 8u;
+const DBG_CLIMATE_COVERAGE: u32 = 9u;
+const DBG_TOPOGRAPHY: u32 = 10u;
 
 // Linear remap of `x` from `[a, b]` to `[c, d]`. Mirror of the raymarch
 // helper.
 fn remap(x: f32, a: f32, b: f32, c: f32, d: f32) -> f32 {
     return c + (x - a) * (d - c) / max(b - a, 1e-6);
+}
+
+// Climate coverage at this world position. Math lives in `climate.wgsl`.
+fn climate_coverage(world_pos: vec3<f32>, base_coverage: f32) -> f32 {
+    if cloud.climate_enabled == 0u {
+        return base_coverage;
+    }
+    let lat_off_deg = climate_latitude_offset_deg(world_pos, cloud.climate_itcz_center_deg);
+    let lat_prop = climate_lat_propensity(lat_off_deg);
+    let topo_uv = climate_topography_uv(world_pos);
+    let height = textureSampleLevel(topography, cloud_sampler, topo_uv, 0.0).r;
+    let ocean_prop = climate_ocean_propensity(height, cloud.climate_ocean_strength);
+    let climate_threshold = 1.0 - saturate(lat_prop + ocean_prop);
+    return saturate(mix(base_coverage, climate_threshold, cloud.climate_latitude_strength));
 }
 
 // Density (1/m extinction) at the camera position for one sub-layer.
@@ -138,7 +159,8 @@ fn density_at_camera_for_layer(layer_i: u32) -> f32 {
     // coarse weather scales — millions of metres tiles, sub-metre
     // jitter is invisible).
     let camera_world = atmosphere_transforms.local_up * r_cam;
-    var regional_coverage = layer.coverage;
+    let climate_base = climate_coverage(camera_world, layer.coverage);
+    var regional_coverage = climate_base;
     if layer.weather_tile > 0.0 && layer.weather_strength > 0.0 {
         let t = cloud.time_seconds;
         let r_drift = vec3<f32>(t * 2.0, 0.0, 0.0);
@@ -153,7 +175,7 @@ fn density_at_camera_for_layer(layer_i: u32) -> f32 {
         let mixed = r_n * 0.20 + c_n * 0.30 + p_n * 0.50;
         let pushed = smoothstep(0.3, 0.7, mixed);
         let weather = (pushed - 0.5) * 2.0;
-        regional_coverage = saturate(layer.coverage - weather * layer.weather_strength);
+        regional_coverage = saturate(climate_base - weather * layer.weather_strength);
     }
 
     let raw = shape * v_profile;
@@ -194,6 +216,35 @@ fn main(in: FullscreenVertexOutput) -> @location(0) vec4<f32> {
     if cloud.debug_mode == DBG_VIEW_EXPOSURE {
         let g = view.exposure * 1.0e5;
         return vec4<f32>(g, g, g, 0.0);
+    }
+    if cloud.debug_mode == DBG_CLIMATE_COVERAGE || cloud.debug_mode == DBG_TOPOGRAPHY {
+        // Reconstruct world position (terrain depth → world; sky uses
+        // a mid-depth point so the viz fills the whole frame).
+        let full_pixel = vec2<i32>(in.position.xy);
+        let depth = textureLoad(depth_texture, full_pixel, 0);
+        let ndc_z = select(0.5, depth, depth > 0.0);
+        let ndc = vec3(in.uv * vec2(2.0, -2.0) + vec2(-1.0, 1.0), ndc_z);
+        let world_h = view.world_from_clip * vec4(ndc, 1.0);
+        let world_pos = world_h.xyz / world_h.w;
+
+        let topo_uv = climate_topography_uv(world_pos);
+        let height = textureSampleLevel(topography, cloud_sampler, topo_uv, 0.0).r;
+        if cloud.debug_mode == DBG_CLIMATE_COVERAGE {
+            // Show climate propensity directly (bright = cloudy) so
+            // it matches the user's intuition. Ignore the
+            // `latitude_strength` blend so the model itself is
+            // visible regardless of slider setting.
+            let lat_off = climate_latitude_offset_deg(
+                world_pos, cloud.climate_itcz_center_deg,
+            );
+            let g = saturate(
+                climate_lat_propensity(lat_off)
+                    + climate_ocean_propensity(height, cloud.climate_ocean_strength),
+            );
+            return vec4<f32>(g, g, g, 0.0);
+        } else {
+            return vec4<f32>(height, height, height, 0.0);
+        }
     }
     if cloud.debug_mode == DBG_SHADOW_MAP {
         // Replace the scene with the raw shadow-map value so it's

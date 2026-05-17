@@ -48,6 +48,8 @@ pub enum CloudNode {
     Composite,
     /// Additive volumetric god-ray inscatter (fragment).
     GodRays,
+    /// Climate coverage debug map bake (compute, writes Rgba8Unorm).
+    ClimateBake,
 }
 
 #[derive(Default)]
@@ -418,6 +420,59 @@ impl ViewNode for CloudGodRaysNode {
         pass.draw(0..3, 0..1);
         if !GOD_RAYS_LOGGED.swap(true, Ordering::Relaxed) {
             info!("cloud god rays first draw");
+        }
+        Ok(())
+    }
+}
+
+static CLIMATE_BAKE_LOGGED: AtomicBool = AtomicBool::new(false);
+
+/// Climate-coverage debug-map bake. Skipped silently for cameras
+/// without a `CloudClimateMap` component (or where the image asset
+/// hasn't been extracted to a GPU view yet).
+#[derive(Default)]
+pub(super) struct CloudClimateBakeNode;
+
+impl ViewNode for CloudClimateBakeNode {
+    type ViewQuery = (
+        Read<CloudLayers>,
+        Read<CloudBindGroups>,
+        Read<DynamicUniformIndex<GpuCloudUniform>>,
+    );
+
+    fn run(
+        &self,
+        _graph: &mut RenderGraphContext,
+        render_context: &mut RenderContext,
+        (_layer, bind_groups, cloud_offset): QueryItem<Self::ViewQuery>,
+        world: &World,
+    ) -> Result<(), NodeRunError> {
+        let Some(bind_group) = bind_groups.climate_bake.as_ref() else {
+            return Ok(());
+        };
+        let pipelines = world.resource::<CloudPipelines>();
+        let pipeline_cache = world.resource::<PipelineCache>();
+        let Some(bake_pipeline) = pipeline_cache.get_compute_pipeline(pipelines.climate_bake)
+        else {
+            return Ok(());
+        };
+
+        let mut pass = render_context
+            .command_encoder()
+            .begin_compute_pass(&ComputePassDescriptor {
+                label: Some("cloud_climate_bake"),
+                timestamp_writes: None,
+            });
+        pass.set_pipeline(bake_pipeline);
+        pass.set_bind_group(0, bind_group, &[cloud_offset.index()]);
+
+        // 512×256 climate map at 8×8 workgroup → 64×32 groups.
+        const WORKGROUP_SIZE: u32 = 8;
+        let groups_x = crate::CLIMATE_MAP_WIDTH.div_ceil(WORKGROUP_SIZE);
+        let groups_y = crate::CLIMATE_MAP_HEIGHT.div_ceil(WORKGROUP_SIZE);
+        pass.dispatch_workgroups(groups_x, groups_y, 1);
+        if !CLIMATE_BAKE_LOGGED.swap(true, Ordering::Relaxed) {
+            info!("cloud climate bake first dispatch ({}×{} workgroups)", groups_x, groups_y);
         }
         Ok(())
     }

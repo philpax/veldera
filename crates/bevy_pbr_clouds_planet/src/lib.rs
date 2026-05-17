@@ -87,6 +87,7 @@ impl Plugin for CloudsPlanetPlugin {
     fn build(&self, app: &mut App) {
         load_shader_library!(app, "shaders/types.wgsl");
         load_shader_library!(app, "shaders/bindings.wgsl");
+        load_shader_library!(app, "shaders/climate.wgsl");
         load_shader_library!(app, "shaders/functions.wgsl");
 
         embedded_asset!(app, "shaders/noise_bake.wgsl");
@@ -96,10 +97,13 @@ impl Plugin for CloudsPlanetPlugin {
         embedded_asset!(app, "shaders/cloud_shadow_apply.wgsl");
         embedded_asset!(app, "shaders/cloud_composite.wgsl");
         embedded_asset!(app, "shaders/cloud_god_rays.wgsl");
+        embedded_asset!(app, "shaders/climate_bake.wgsl");
 
         app.add_plugins((
             ExtractComponentPlugin::<CloudLayers>::default(),
             ExtractComponentPlugin::<CloudCameraEcef>::default(),
+            ExtractComponentPlugin::<CloudEarthTopography>::default(),
+            ExtractComponentPlugin::<CloudClimateMap>::default(),
             UniformComponentPlugin::<GpuCloudUniform>::default(),
         ));
     }
@@ -179,6 +183,10 @@ impl Plugin for CloudsPlanetPlugin {
                 Core3d,
                 CloudNode::GodRays,
             )
+            .add_render_graph_node::<ViewNodeRunner<node::CloudClimateBakeNode>>(
+                Core3d,
+                CloudNode::ClimateBake,
+            )
             .add_render_graph_edges(
                 Core3d,
                 (
@@ -187,6 +195,10 @@ impl Plugin for CloudsPlanetPlugin {
                     // Shadow bake runs before the main opaque pass so its
                     // result is ready when shadow apply samples it later.
                     CloudNode::ShadowBake,
+                    // Climate bake (debug viz) — cheap, can run
+                    // anywhere; bundle with ShadowBake for graph
+                    // simplicity.
+                    CloudNode::ClimateBake,
                     Node3d::StartMainPass,
                 ),
             )
@@ -465,6 +477,60 @@ pub struct CloudLayers {
     /// where the absolute light level is already dim); drop to fade
     /// the effect out entirely (0.0 = no dimming).
     pub shadow_intensity: f32,
+    /// Earth-aware climate model. See [`ClimateSettings`].
+    pub climate: ClimateSettings,
+}
+
+/// Tunable knobs for the latitude/topography-driven cloud climate model.
+///
+/// When `enabled`, per-cloud-sample coverage is modulated by:
+/// - **Latitude bands** approximating ITCZ (high coverage at equator,
+///   seasonal shift via sun declination), subtropical highs (~30° → low
+///   coverage, where Earth's deserts and ocean highs sit), and storm
+///   tracks (~55° → high coverage).
+/// - **Ocean vs. land** via the [`CloudEarthTopography`] component, with
+///   ocean tiles getting a stratocumulus bonus.
+///
+/// The result blends with the per-layer base `coverage` according to
+/// `latitude_strength` and `ocean_strength`. Set `enabled = false` to
+/// keep the legacy uniform-coverage behaviour.
+#[derive(Clone, Copy, Debug)]
+pub struct ClimateSettings {
+    /// Master on/off. When `false`, neither latitude nor ocean
+    /// contributions are applied — every layer uses its base
+    /// `coverage` as before.
+    pub enabled: bool,
+    /// 0..1, how strongly the latitude-band model replaces the layer's
+    /// base coverage. 0 = pure layer.coverage; 1 = pure latitude band.
+    pub latitude_strength: f32,
+    /// 0..1, how strongly the ocean differentiation adds to coverage.
+    /// 0 = land and ocean treated identically; 1 = ocean gets up to
+    /// ~+0.25 coverage bonus over land (stratocumulus deck).
+    pub ocean_strength: f32,
+    /// Maximum ITCZ latitude offset in degrees, scaled by sun
+    /// declination. ~10-16° is realistic — at northern-summer solstice
+    /// the ITCZ sits around +10° N over the Pacific, ~+5° N over the
+    /// Atlantic; defaulting to 12° gives a visible seasonal shift over
+    /// long time-slider scrubs without being cartoonish.
+    pub itcz_seasonal_shift_deg: f32,
+}
+
+impl Default for ClimateSettings {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            // High default — the latitude bands are the *whole point*
+            // of the climate model; defaulting to a soft blend
+            // produces a planet that's almost as flat-cloudy as it
+            // would be without the model. 0.85 lets the bands
+            // dominate while leaving 15 % of the layer's own coverage
+            // bleeding through (so the band edges aren't perfect
+            // walls).
+            latitude_strength: 0.85,
+            ocean_strength: 0.5,
+            itcz_seasonal_shift_deg: 12.0,
+        }
+    }
 }
 
 /// Tunable knobs for the additive volumetric god-rays pass.
@@ -528,6 +594,7 @@ impl CloudLayers {
             debug_mode: CloudDebugMode::Off,
             god_rays: GodRaysSettings::default(),
             shadow_intensity: 1.0,
+            climate: ClimateSettings::default(),
         }
     }
 
@@ -540,6 +607,7 @@ impl CloudLayers {
             debug_mode: CloudDebugMode::Off,
             god_rays: GodRaysSettings::default(),
             shadow_intensity: 1.0,
+            climate: ClimateSettings::default(),
         }
     }
 
@@ -558,6 +626,7 @@ impl CloudLayers {
             debug_mode: CloudDebugMode::Off,
             god_rays: GodRaysSettings::default(),
             shadow_intensity: 1.0,
+            climate: ClimateSettings::default(),
         }
     }
 }
@@ -603,6 +672,17 @@ pub enum CloudDebugMode {
     /// luminance is low enough that the apply gate might be killing
     /// the effect even when the map is fine).
     ShadowMap = 8,
+    /// Replaces the scene with `climate_coverage()` evaluated at each
+    /// pixel's projected world position — grayscale 0–1, hotter
+    /// colours mean more climatically-favoured for clouds. Lets you
+    /// see the ITCZ band, subtropical dry zones, storm tracks, and
+    /// ocean bonus without any noise modulation on top.
+    ClimateCoverage = 9,
+    /// Replaces the scene with the raw topography height value at
+    /// each pixel's projected world position. Sea level shows around
+    /// mid-grey (~0.05); ocean dark; mountains bright. Useful for
+    /// confirming the topography asset is bound and aligned.
+    Topography = 10,
 }
 
 impl ExtractComponent for CloudLayers {
@@ -631,5 +711,57 @@ impl ExtractComponent for CloudCameraEcef {
 
     fn extract_component(item: QueryItem<'_, '_, Self::QueryData>) -> Option<Self::Out> {
         Some(*item)
+    }
+}
+
+/// Equirectangular topography of the planet, used by the climate model
+/// to differentiate ocean from land in coverage modulation.
+///
+/// The texture is expected to be an `R8Unorm` (or similar single-channel)
+/// equirectangular projection sized for the whole globe, with values
+/// remapped from elevation: ~0.05 is sea level, lower = ocean depth,
+/// higher = land elevation. The client owns the asset (`bake_earth_topography`
+/// produces it); this component is just the per-camera handle the cloud
+/// crate binds for sampling.
+///
+/// When this component is absent on a camera entity, the climate-ocean
+/// path falls back to "everywhere is land".
+#[derive(Component, Clone, Debug)]
+pub struct CloudEarthTopography(pub bevy::asset::Handle<bevy::image::Image>);
+
+impl ExtractComponent for CloudEarthTopography {
+    type QueryData = Read<CloudEarthTopography>;
+    type QueryFilter = With<Camera3d>;
+    type Out = CloudEarthTopography;
+
+    fn extract_component(item: QueryItem<'_, '_, Self::QueryData>) -> Option<Self::Out> {
+        Some(item.clone())
+    }
+}
+
+/// Recommended dimensions for the [`CloudClimateMap`] image. The bake
+/// dispatches at 8×8 workgroups, so the client should size the
+/// underlying `Image` asset to these exact values for a clean fit.
+pub const CLIMATE_MAP_WIDTH: u32 = 512;
+pub const CLIMATE_MAP_HEIGHT: u32 = 256;
+
+/// Per-camera bake target for the climate-coverage debug map.
+///
+/// The handle points at a 2D `Rgba8Unorm` image asset the client owns
+/// (recommended size [`CLIMATE_MAP_WIDTH`] × [`CLIMATE_MAP_HEIGHT`]);
+/// the cloud crate's climate-bake compute pass writes the climate
+/// model's per-texel coverage into it each frame so the debug UI can
+/// display it inline as an egui image. Optional — when this component
+/// is absent on a camera, no bake runs.
+#[derive(Component, Clone, Debug)]
+pub struct CloudClimateMap(pub bevy::asset::Handle<bevy::image::Image>);
+
+impl ExtractComponent for CloudClimateMap {
+    type QueryData = Read<CloudClimateMap>;
+    type QueryFilter = With<Camera3d>;
+    type Out = CloudClimateMap;
+
+    fn extract_component(item: QueryItem<'_, '_, Self::QueryData>) -> Option<Self::Out> {
+        Some(item.clone())
     }
 }

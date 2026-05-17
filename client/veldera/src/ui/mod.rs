@@ -67,15 +67,17 @@ enum DebugTab {
     LocationAndTime,
     Camera,
     Gameplay,
-    Clouds,
+    Atmosphere,
     Diagnostics,
 }
 
 /// State for the debug UI.
 #[derive(Resource, Default)]
-struct DebugUiState {
+pub struct DebugUiState {
     /// Currently selected tab.
     selected_tab: DebugTab,
+    /// Currently selected sub-tab inside the Atmosphere tab.
+    pub atmosphere_subtab: clouds::AtmosphereSubTab,
 }
 
 fn setup_fonts(mut contexts: EguiContexts, mut commands: Commands) {
@@ -127,7 +129,22 @@ fn debug_ui_system(
     mut gameplay_params: gameplay::GameplayParams,
     mut clouds_params: clouds::CloudParams,
     mut diag_params: diagnostics::DiagnosticsParams,
+    climate_assets: Res<crate::rendering::clouds::CloudClimateAssets>,
 ) -> Result {
+    // Resolve egui image ids BEFORE taking `ctx_mut` (same borrow on
+    // `contexts`). Once loading completes these stay stable, so
+    // querying every frame is cheap.
+    let atmosphere_image_ids = clouds::AtmosphereImageIds {
+        topography: climate_assets
+            .topography
+            .as_ref()
+            .and_then(|h| contexts.image_id(h)),
+        climate_map: climate_assets
+            .climate_map
+            .as_ref()
+            .and_then(|h| contexts.image_id(h)),
+    };
+
     let ctx = contexts.ctx_mut()?;
 
     // Compute camera position and altitude (needed for lat/lon and diagnostics).
@@ -149,7 +166,7 @@ fn debug_ui_system(
                     (DebugTab::LocationAndTime, "Location & time"),
                     (DebugTab::Camera, "Camera"),
                     (DebugTab::Gameplay, "Gameplay"),
-                    (DebugTab::Clouds, "Clouds"),
+                    (DebugTab::Atmosphere, "Atmosphere"),
                     (DebugTab::Diagnostics, "Diagnostics"),
                 ] {
                     if ui
@@ -175,8 +192,13 @@ fn debug_ui_system(
                 DebugTab::Gameplay => {
                     gameplay::render_gameplay_tab(ui, &mut gameplay_params);
                 }
-                DebugTab::Clouds => {
-                    clouds::render_clouds_tab(ui, &mut clouds_params);
+                DebugTab::Atmosphere => {
+                    clouds::render_atmosphere_tab(
+                        ui,
+                        &mut clouds_params,
+                        &mut ui_state,
+                        &atmosphere_image_ids,
+                    );
                 }
                 DebugTab::Diagnostics => {
                     diagnostics::render_diagnostics_tab(ui, &mut diag_params, position);

@@ -26,3 +26,6 @@
 // stores zenith at v=0 / nadir at v=1; a repeat sampler would wrap a
 // near-zenith lookup into the bright nadir region).
 @group(0) @binding(13) var lut_sampler: sampler;
+// Earth topography texture (equirectangular, R8Unorm) — sampled by the
+// climate model to differentiate ocean from land.
+@group(0) @binding(14) var topography: texture_2d<f32>;

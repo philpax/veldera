@@ -1,7 +1,8 @@
-//! Clouds tab for the debug UI.
+//! Atmosphere tab for the debug UI.
 //!
-//! Live-edits the camera's [`CloudLayers`] container — quality tier, debug
-//! visualisation, and per-sub-layer parameters.
+//! Live-edits the camera's [`CloudLayers`] container, split across
+//! sub-tabs (overview, layers, shadows, climate, god rays). Each
+//! sub-tab renders its own slice of the cloud state.
 
 use bevy::{ecs::system::SystemParam, prelude::*};
 use bevy_egui::egui;
@@ -12,13 +13,77 @@ pub(super) struct CloudParams<'w, 's> {
     pub cloud_query: Query<'w, 's, &'static mut CloudLayers>,
 }
 
-pub(super) fn render_clouds_tab(ui: &mut egui::Ui, clouds: &mut CloudParams) {
+/// Currently-selected sub-tab inside the Atmosphere panel.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum AtmosphereSubTab {
+    #[default]
+    Overview,
+    Layers,
+    Shadows,
+    GodRays,
+    Climate,
+}
+
+/// egui texture ids for images we want to preview inside the
+/// Atmosphere panel. Resolved by the parent UI system so we don't
+/// need to thread `EguiContexts` through every sub-tab.
+pub struct AtmosphereImageIds {
+    pub topography: Option<egui::TextureId>,
+    pub climate_map: Option<egui::TextureId>,
+}
+
+impl AtmosphereSubTab {
+    fn label(self) -> &'static str {
+        match self {
+            Self::Overview => "Overview",
+            Self::Layers => "Layers",
+            Self::Shadows => "Shadows",
+            Self::GodRays => "God rays",
+            Self::Climate => "Climate",
+        }
+    }
+}
+
+pub(super) fn render_atmosphere_tab(
+    ui: &mut egui::Ui,
+    clouds: &mut CloudParams,
+    ui_state: &mut crate::ui::DebugUiState,
+    image_ids: &AtmosphereImageIds,
+) {
     let Ok(mut cloud) = clouds.cloud_query.single_mut() else {
         ui.label("No CloudLayers found on any camera.");
         return;
     };
 
-    // Quality tier.
+    // Sub-tab bar.
+    ui.horizontal(|ui| {
+        for tab in [
+            AtmosphereSubTab::Overview,
+            AtmosphereSubTab::Layers,
+            AtmosphereSubTab::Shadows,
+            AtmosphereSubTab::GodRays,
+            AtmosphereSubTab::Climate,
+        ] {
+            if ui
+                .selectable_label(ui_state.atmosphere_subtab == tab, tab.label())
+                .clicked()
+            {
+                ui_state.atmosphere_subtab = tab;
+            }
+        }
+    });
+    ui.separator();
+
+    match ui_state.atmosphere_subtab {
+        AtmosphereSubTab::Overview => render_overview(ui, &mut cloud),
+        AtmosphereSubTab::Layers => render_layers(ui, &mut cloud),
+        AtmosphereSubTab::Shadows => render_shadows(ui, &mut cloud),
+        AtmosphereSubTab::GodRays => render_god_rays(ui, &mut cloud),
+        AtmosphereSubTab::Climate => render_climate(ui, &mut cloud, image_ids),
+    }
+}
+
+fn render_overview(ui: &mut egui::Ui, cloud: &mut CloudLayers) {
     ui.label("Quality:");
     ui.horizontal(|ui| {
         for tier in [CloudQuality::Low, CloudQuality::Medium, CloudQuality::High] {
@@ -60,6 +125,8 @@ pub(super) fn render_clouds_tab(ui: &mut egui::Ui, clouds: &mut CloudParams) {
                 CloudDebugMode::FogExtinction,
                 CloudDebugMode::ViewExposure,
                 CloudDebugMode::ShadowMap,
+                CloudDebugMode::ClimateCoverage,
+                CloudDebugMode::Topography,
             ] {
                 if ui
                     .selectable_label(matches_mode(cloud.debug_mode, mode), label_for(mode))
@@ -70,82 +137,128 @@ pub(super) fn render_clouds_tab(ui: &mut egui::Ui, clouds: &mut CloudParams) {
             }
         });
     ui.label(help_for(cloud.debug_mode));
+}
 
-    ui.separator();
-
+fn render_shadows(ui: &mut egui::Ui, cloud: &mut CloudLayers) {
     ui.add(
-        egui::Slider::new(&mut cloud.shadow_intensity, 0.0..=5.0)
-            .text("shadow intensity"),
+        egui::Slider::new(&mut cloud.shadow_intensity, 0.0..=5.0).text("shadow intensity"),
     )
     .on_hover_text(
         "Multiplier on the cloud-shadow apply pass. 1.0 = default \
          (~45 % darkening under full shadow). Crank up for tuning, \
          especially handy for moonlit-shadow visibility tests.",
     );
+}
+
+fn render_climate(
+    ui: &mut egui::Ui,
+    cloud: &mut CloudLayers,
+    image_ids: &AtmosphereImageIds,
+) {
+    ui.checkbox(&mut cloud.climate.enabled, "Enabled");
+    let cl = &mut cloud.climate;
+    ui.add_enabled_ui(cl.enabled, |ui| {
+        ui.add(
+            egui::Slider::new(&mut cl.latitude_strength, 0.0..=1.0).text("latitude strength"),
+        )
+        .on_hover_text(
+            "How strongly the latitude-band model replaces each \
+             layer's base coverage. 0 = use layer.coverage everywhere \
+             (legacy); 1 = pure ITCZ / subtropical / storm-track bands.",
+        );
+        ui.add(egui::Slider::new(&mut cl.ocean_strength, 0.0..=1.0).text("ocean strength"))
+            .on_hover_text(
+                "Additive coverage bonus over ocean tiles. 0 = land and \
+                 ocean identical; 1 = ocean gets up to +0.25 coverage \
+                 (stratocumulus deck).",
+            );
+        ui.add(
+            egui::Slider::new(&mut cl.itcz_seasonal_shift_deg, 0.0..=20.0)
+                .text("seasonal shift (°)"),
+        )
+        .on_hover_text(
+            "Peak ITCZ latitude offset at solstice (scaled by sun \
+             declination). 12° is roughly realistic.",
+        );
+    });
 
     ui.separator();
 
-    egui::CollapsingHeader::new("God rays")
-        .default_open(true)
-        .show(ui, |ui| {
-            ui.checkbox(&mut cloud.god_rays.enabled, "Enabled");
-            let gr = &mut cloud.god_rays;
-            ui.add_enabled_ui(gr.enabled, |ui| {
-                let mut steps_signed = gr.num_steps as i32;
-                if ui
-                    .add(
-                        egui::Slider::new(&mut steps_signed, 4..=64)
-                            .text("primary steps")
-                            .integer(),
-                    )
-                    .on_hover_text(
-                        "Raymarch sample count per pixel. \
-                         Higher = sharper shaft edges + less banding, but more fill cost.",
-                    )
-                    .changed()
-                {
-                    gr.num_steps = steps_signed.max(1) as u32;
-                }
-                ui.add(
-                    egui::Slider::new(&mut gr.max_distance, 10_000.0..=400_000.0)
-                        .text("max distance (m)")
-                        .logarithmic(true)
-                        .integer(),
-                )
-                .on_hover_text(
-                    "Per-pixel raymarch cap. Sky pixels get marched all the way to this; \
-                     past the shadow-map footprint it doesn't matter anyway.",
-                );
-                ui.add(
-                    egui::Slider::new(&mut gr.scatter_rate, 1.0e-6..=2.0e-4)
-                        .text("scatter rate (1/m)")
-                        .logarithmic(true),
-                )
-                .on_hover_text(
-                    "Per-metre air-scatter coefficient. Controls overall shaft brightness.",
-                );
-                ui.add(
-                    egui::Slider::new(&mut gr.atmo_scale_height, 1_000.0..=20_000.0)
-                        .text("scale height (m)")
-                        .integer(),
-                )
-                .on_hover_text(
-                    "Exponential atmosphere falloff. Higher = shafts visible at higher altitudes.",
-                );
-                ui.add(
-                    egui::Slider::new(&mut gr.hg_g, 0.0..=0.95).text("phase g"),
-                )
-                .on_hover_text(
-                    "Henyey-Greenstein anisotropy. \
-                     0 = isotropic (visible everywhere), \
-                     near 1 = tight forward peak (only when looking at the sun).",
-                );
-            });
-        });
+    let width = ui.available_width().min(512.0);
 
-    ui.separator();
+    ui.label("Climate coverage (live):");
+    if let Some(id) = image_ids.climate_map {
+        ui.image(egui::load::SizedTexture::new(
+            id,
+            egui::vec2(width, width * 0.5),
+        ));
+    } else {
+        ui.label("(climate map bake target not yet allocated…)");
+    }
 
-    // Per-sub-layer panels.
+    ui.add_space(4.0);
+    ui.label("Topography (sea-level reference for ocean bonus):");
+    if let Some(id) = image_ids.topography {
+        ui.image(egui::load::SizedTexture::new(
+            id,
+            egui::vec2(width, width * 0.5),
+        ));
+    } else {
+        ui.label("(topography asset still loading…)");
+    }
+}
+
+fn render_god_rays(ui: &mut egui::Ui, cloud: &mut CloudLayers) {
+    ui.checkbox(&mut cloud.god_rays.enabled, "Enabled");
+    let gr = &mut cloud.god_rays;
+    ui.add_enabled_ui(gr.enabled, |ui| {
+        let mut steps_signed = gr.num_steps as i32;
+        if ui
+            .add(
+                egui::Slider::new(&mut steps_signed, 4..=64)
+                    .text("primary steps")
+                    .integer(),
+            )
+            .on_hover_text(
+                "Raymarch sample count per pixel. \
+                 Higher = sharper shaft edges + less banding, but more fill cost.",
+            )
+            .changed()
+        {
+            gr.num_steps = steps_signed.max(1) as u32;
+        }
+        ui.add(
+            egui::Slider::new(&mut gr.max_distance, 10_000.0..=400_000.0)
+                .text("max distance (m)")
+                .logarithmic(true)
+                .integer(),
+        )
+        .on_hover_text(
+            "Per-pixel raymarch cap. Sky pixels get marched all the way to this; \
+             past the shadow-map footprint it doesn't matter anyway.",
+        );
+        ui.add(
+            egui::Slider::new(&mut gr.scatter_rate, 1.0e-6..=2.0e-4)
+                .text("scatter rate (1/m)")
+                .logarithmic(true),
+        )
+        .on_hover_text("Per-metre air-scatter coefficient. Controls overall shaft brightness.");
+        ui.add(
+            egui::Slider::new(&mut gr.atmo_scale_height, 1_000.0..=20_000.0)
+                .text("scale height (m)")
+                .integer(),
+        )
+        .on_hover_text("Exponential atmosphere falloff. Higher = shafts visible at higher altitudes.");
+        ui.add(egui::Slider::new(&mut gr.hg_g, 0.0..=0.95).text("phase g"))
+            .on_hover_text(
+                "Henyey-Greenstein anisotropy. \
+                 0 = isotropic (visible everywhere), \
+                 near 1 = tight forward peak (only when looking at the sun).",
+            );
+    });
+}
+
+fn render_layers(ui: &mut egui::Ui, cloud: &mut CloudLayers) {
     for (i, layer) in cloud.layers.iter_mut().enumerate() {
         egui::CollapsingHeader::new(format!("Layer {}: {}", i, layer.kind.name()))
             .default_open(i == 0)
@@ -216,6 +329,8 @@ fn label_for(mode: CloudDebugMode) -> &'static str {
         CloudDebugMode::FogExtinction => "Fog extinction × 10⁴",
         CloudDebugMode::ViewExposure => "view.exposure × 10⁵",
         CloudDebugMode::ShadowMap => "Shadow map (raw)",
+        CloudDebugMode::ClimateCoverage => "Climate coverage",
+        CloudDebugMode::Topography => "Topography",
     }
 }
 
@@ -230,6 +345,8 @@ fn help_for(mode: CloudDebugMode) -> &'static str {
         CloudDebugMode::FogExtinction => "Full-screen `density_at_camera × 10⁴` — GPU-sampled cloud density at the camera position, the actual fog extinction.",
         CloudDebugMode::ViewExposure => "Full-screen `view.exposure × 10⁵` — diagnoses composite view-uniform binding.",
         CloudDebugMode::ShadowMap => "Scene modulated by raw cloud-shadow transmittance (bypasses strength fade). Red = outside footprint.",
+        CloudDebugMode::ClimateCoverage => "Greyscale climate coverage map (latitude bands + ocean bonus) at each pixel's projected world position.",
+        CloudDebugMode::Topography => "Raw topography height value. Sea level ≈ mid-grey, ocean dark, mountains bright.",
     }
 }
 

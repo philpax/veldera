@@ -91,4 +91,10 @@ struct CloudUniform {
     // `CloudLayers::shadow_intensity` in lib.rs.
     shadow_intensity: f32,
     _pad_shadow_intensity: u32,
+
+    // Earth-aware climate model. See `ClimateSettings` in lib.rs.
+    climate_enabled: u32,
+    climate_latitude_strength: f32,
+    climate_ocean_strength: f32,
+    climate_itcz_center_deg: f32,
 }

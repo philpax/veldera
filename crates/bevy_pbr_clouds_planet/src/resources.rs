@@ -177,6 +177,19 @@ pub struct GpuCloudUniform {
     /// [`CloudLayers::shadow_intensity`].
     pub shadow_intensity: f32,
     pub _pad_shadow_intensity: u32,
+
+    // ---- Earth-aware climate model (consumed by sample_layer_density).
+    /// 1 = climate model active; 0 = legacy uniform-coverage path.
+    pub climate_enabled: u32,
+    /// 0..1, how strongly the latitude-band model replaces the layer's
+    /// base coverage.
+    pub climate_latitude_strength: f32,
+    /// 0..1, how strongly ocean tiles get a stratocumulus bonus.
+    pub climate_ocean_strength: f32,
+    /// Current ITCZ centre latitude in degrees, CPU-computed from sun
+    /// declination × seasonal-shift. Positive = northern hemisphere
+    /// summer.
+    pub climate_itcz_center_deg: f32,
 }
 
 /// Per-view storage texture written by the raymarch pass and read by the
@@ -296,6 +309,7 @@ pub struct CloudBindGroupLayouts {
     pub temporal: BindGroupLayoutDescriptor,
     pub composite: BindGroupLayoutDescriptor,
     pub shadow_bake: BindGroupLayoutDescriptor,
+    pub climate_bake: BindGroupLayoutDescriptor,
     pub shadow_apply: BindGroupLayoutDescriptor,
     pub god_rays: BindGroupLayoutDescriptor,
     pub fullscreen_shader: FullscreenShader,
@@ -335,6 +349,10 @@ impl FromWorld for CloudBindGroupLayouts {
                     (9, sampler(SamplerBindingType::Filtering)),
                     // Linear, clamp-to-edge sampler for the atmosphere LUTs.
                     (13, sampler(SamplerBindingType::Filtering)),
+                    // Earth topography texture (equirectangular,
+                    // R8Unorm) — sampled by the climate model to
+                    // differentiate ocean from land.
+                    (14, texture_2d(TextureSampleType::default())),
                     // Output: half-res raymarch buffer.
                     (
                         10,
@@ -416,6 +434,8 @@ impl FromWorld for CloudBindGroupLayouts {
                     // modulate blend can't show this at night because
                     // the scene is dim).
                     (8, texture_2d(TextureSampleType::default())),
+                    // Earth topography (climate model + debug viz).
+                    (9, texture_2d(TextureSampleType::default())),
                 ),
             ),
         );
@@ -440,6 +460,10 @@ impl FromWorld for CloudBindGroupLayouts {
                             StorageTextureAccess::WriteOnly,
                         ),
                     ),
+                    // Earth topography (climate model — shadows of
+                    // climate-modulated clouds need to match what
+                    // the main pass renders).
+                    (7, texture_2d(TextureSampleType::default())),
                 ),
             ),
         );
@@ -487,6 +511,31 @@ impl FromWorld for CloudBindGroupLayouts {
             ),
         );
 
+        let climate_bake = BindGroupLayoutDescriptor::new(
+            "cloud_climate_bake_bind_group_layout",
+            &BindGroupLayoutEntries::with_indices(
+                ShaderStages::COMPUTE,
+                (
+                    (0, uniform_buffer::<GpuCloudUniform>(true)),
+                    // Topography (read).
+                    (1, texture_2d(TextureSampleType::default())),
+                    // Clamp-to-edge sampler.
+                    (2, sampler(SamplerBindingType::Filtering)),
+                    // Output: climate map (write-only Rgba8Unorm —
+                    // single channel would be tidier but R8Unorm is
+                    // patchily supported as a storage format on
+                    // WebGPU).
+                    (
+                        3,
+                        texture_storage_2d(
+                            TextureFormat::Rgba8Unorm,
+                            StorageTextureAccess::WriteOnly,
+                        ),
+                    ),
+                ),
+            ),
+        );
+
         Self {
             raymarch,
             temporal,
@@ -494,6 +543,7 @@ impl FromWorld for CloudBindGroupLayouts {
             shadow_bake,
             shadow_apply,
             god_rays,
+            climate_bake,
             fullscreen_shader: world.resource::<FullscreenShader>().clone(),
             composite_fragment: load_embedded_asset!(world, "shaders/cloud_composite.wgsl"),
             shadow_apply_fragment: load_embedded_asset!(
@@ -512,6 +562,7 @@ pub struct CloudPipelines {
     pub raymarch: CachedComputePipelineId,
     pub temporal: CachedComputePipelineId,
     pub shadow_bake: CachedComputePipelineId,
+    pub climate_bake: CachedComputePipelineId,
 }
 
 impl FromWorld for CloudPipelines {
@@ -536,6 +587,14 @@ impl FromWorld for CloudPipelines {
             ..Default::default()
         });
 
+        let climate_bake_shader = load_embedded_asset!(world, "shaders/climate_bake.wgsl");
+        let climate_bake = pipeline_cache.queue_compute_pipeline(ComputePipelineDescriptor {
+            label: Some("cloud_climate_bake_pipeline".into()),
+            layout: vec![layouts.climate_bake.clone()],
+            shader: climate_bake_shader,
+            ..Default::default()
+        });
+
         let shadow_bake = pipeline_cache.queue_compute_pipeline(ComputePipelineDescriptor {
             label: Some("cloud_shadow_bake_pipeline".into()),
             layout: vec![layouts.shadow_bake.clone()],
@@ -547,6 +606,7 @@ impl FromWorld for CloudPipelines {
             raymarch,
             temporal,
             shadow_bake,
+            climate_bake,
         }
     }
 }
@@ -717,7 +777,9 @@ pub(super) fn queue_cloud_render_pipelines(
 }
 
 /// Per-view bind groups: one for each cloud pass (raymarch, temporal,
-/// composite, shadow_bake, shadow_apply, god_rays).
+/// composite, shadow_bake, shadow_apply, god_rays). `climate_bake` is
+/// optional — only present when the camera has a `CloudClimateMap`
+/// component for the bake target.
 #[derive(Component)]
 pub(crate) struct CloudBindGroups {
     pub raymarch: BindGroup,
@@ -726,6 +788,7 @@ pub(crate) struct CloudBindGroups {
     pub shadow_bake: BindGroup,
     pub shadow_apply: BindGroup,
     pub god_rays: BindGroup,
+    pub climate_bake: Option<BindGroup>,
 }
 
 /// Per-camera, render-world component holding the previous frame's
@@ -1038,6 +1101,31 @@ pub(super) fn prepare_cloud_uniforms(
             god_rays_hg_g: cloud.god_rays.hg_g.clamp(-0.99, 0.99),
             shadow_intensity: cloud.shadow_intensity.max(0.0),
             _pad_shadow_intensity: 0,
+            climate_enabled: u32::from(cloud.climate.enabled),
+            climate_latitude_strength: cloud.climate.latitude_strength.clamp(0.0, 1.0),
+            climate_ocean_strength: cloud.climate.ocean_strength.clamp(0.0, 1.0),
+            // ITCZ centre tracks sun declination — northern summer
+            // (positive declination) shifts the equatorial cloud band
+            // northward. We use the brightest atmosphere light
+            // (regardless of horizon) as the sun, since seasonal
+            // declination depends on the *date* not on whether the sun
+            // is currently above the camera's horizon.
+            climate_itcz_center_deg: {
+                const LUMA: Vec3 = Vec3::new(0.2126, 0.7152, 0.0722);
+                let mut sun_dir = Vec3::Z;
+                let mut best_lum: f32 = 0.0;
+                for i in 0..(atmosphere_lights.0.count as usize) {
+                    let l = &atmosphere_lights.0.lights[i];
+                    let lum = l.color.dot(LUMA);
+                    if lum > best_lum {
+                        best_lum = lum;
+                        sun_dir = l.direction_to_light;
+                    }
+                }
+                let sun_declination_deg = sun_dir.z.clamp(-1.0, 1.0).asin().to_degrees();
+                let scale = cloud.climate.itcz_seasonal_shift_deg / 23.4;
+                sun_declination_deg * scale
+            },
         });
 
         commands.entity(entity).insert(CloudPrevFrame {
@@ -1193,6 +1281,8 @@ pub(super) fn prepare_cloud_bind_groups(
             &AtmosphereTextures,
             &SphericalAtmosphereCamera,
             &ViewDepthTexture,
+            Option<&crate::CloudEarthTopography>,
+            Option<&crate::CloudClimateMap>,
         ),
         With<CloudLayers>,
     >,
@@ -1207,6 +1297,8 @@ pub(super) fn prepare_cloud_bind_groups(
     atmosphere_lights: Res<AtmosphereLightsBuffer>,
     view_uniforms: Res<ViewUniforms>,
     lights: Res<LightMeta>,
+    gpu_images: Res<bevy::render::render_asset::RenderAssets<bevy::render::texture::GpuImage>>,
+    fallback_image: Res<bevy::render::texture::FallbackImage>,
 ) -> Result<(), BevyError> {
     if layers.iter().next().is_none() {
         return Ok(());
@@ -1250,8 +1342,21 @@ pub(super) fn prepare_cloud_bind_groups(
         atmo_tex,
         _spherical_camera,
         depth_texture,
+        topography_handle,
+        climate_map_handle,
     ) in &layers
     {
+        // Resolve topography texture view: if the camera has the
+        // `CloudEarthTopography` component AND the underlying image
+        // is finished loading, use it. Otherwise fall back to a 1×1
+        // white texture so the binding is always valid (the shader's
+        // climate code falls back gracefully when ocean_strength=0
+        // or the sample comes back as "all-land").
+        let topo_view = topography_handle
+            .and_then(|t| gpu_images.get(&t.0))
+            .map(|gi| &gi.texture_view)
+            .unwrap_or(&fallback_image.d2.texture_view);
+
         let raymarch = render_device.create_bind_group(
             "cloud_raymarch_bind_group",
             &pipeline_cache.get_bind_group_layout(&layouts.raymarch),
@@ -1270,6 +1375,7 @@ pub(super) fn prepare_cloud_bind_groups(
                 (13, &sampler.clamp),
                 (10, &cloud_tex.raymarch.default_view),
                 (11, depth_texture.view()),
+                (14, topo_view),
             )),
         );
 
@@ -1304,6 +1410,7 @@ pub(super) fn prepare_cloud_bind_groups(
                 (6, noise_view),
                 (7, &sampler.noise),
                 (8, &shadow_tex.view),
+                (9, topo_view),
             )),
         );
 
@@ -1318,6 +1425,7 @@ pub(super) fn prepare_cloud_bind_groups(
                 (4, noise_view),
                 (5, &sampler.noise),
                 (6, &shadow_tex.view),
+                (7, topo_view),
             )),
         );
 
@@ -1349,6 +1457,26 @@ pub(super) fn prepare_cloud_bind_groups(
             )),
         );
 
+        // Optional climate-map bake. Only built when a CloudClimateMap
+        // is present *and* the underlying image has reached the GPU
+        // (an Image asset can be inserted in the same frame as its
+        // handle component but isn't ready for storage binding until
+        // the next `RenderAssets` extraction).
+        let climate_bake = climate_map_handle
+            .and_then(|m| gpu_images.get(&m.0))
+            .map(|gi| {
+                render_device.create_bind_group(
+                    "cloud_climate_bake_bind_group",
+                    &pipeline_cache.get_bind_group_layout(&layouts.climate_bake),
+                    &BindGroupEntries::with_indices((
+                        (0, cloud_binding.clone()),
+                        (1, topo_view),
+                        (2, &sampler.clamp),
+                        (3, &gi.texture_view),
+                    )),
+                )
+            });
+
         commands.entity(entity).insert(CloudBindGroups {
             raymarch,
             temporal,
@@ -1356,6 +1484,7 @@ pub(super) fn prepare_cloud_bind_groups(
             shadow_bake,
             shadow_apply,
             god_rays,
+            climate_bake,
         });
     }
     Ok(())
