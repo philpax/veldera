@@ -150,6 +150,30 @@ const STRATOCUMULUS_LAT_SIGMA: f32 = 0.010;
 // deck strength fades as the coast retreats.
 const STRATOCUMULUS_EAST_OFFSETS: array<f32, 3> = array<f32, 3>(0.003, 0.008, 0.015);
 
+// Continental-interior dryness. Land deep inside a continent (far
+// from any coast) is drier than land near a coast, especially in the
+// subtropics where descending Hadley air dominates — this is why the
+// Sahara, Arabian, Gobi, Atacama, and Australian Outback deserts
+// exist. We detect "interior" by sampling topography at 4 cardinal
+// directions ~1000 km out; if all 4 are land, we're surrounded by
+// continent. The latitude mask concentrates the effect in the
+// subtropics: Amazon and Congo are tropical interior land but stay
+// cloudy (lat mask is low there); Siberia is mid-latitude interior
+// but only mildly dry (lat mask is moderate); Sahara/Gobi peak.
+// Amplitude tuned to *visibly* clear the great deserts in the
+// rendered scene, not just nudge the climate map. The penalty
+// stacks with subtropical `lat_prop` suppression so total propensity
+// in deep interior subtropical land lands deep negative (saturates
+// to 0 = clear).
+const INTERIOR_AMP: f32 = 0.50;
+// Wider lat sigma than the subtropical band itself, so the dryness
+// reaches into mid-latitudes (Central Asia, Mongolia) — those
+// regions ARE much drier than coastal land at the same latitude
+// even though they're not under the subtropical high.
+const INTERIOR_LAT_SIGMA: f32 = 0.003;
+const INTERIOR_PROBE_U: f32 = 0.025;  // ~1000 km at equator.
+const INTERIOR_PROBE_V: f32 = 0.050;  // ~1000 km north-south.
+
 // Latitude-only "cloud propensity" (intuitive semantics: 1 = lots of
 // cloud, 0 = clear) as a function of offset (in degrees) from the
 // active ITCZ centre. The bake inverts this to a threshold for the R
@@ -246,6 +270,59 @@ fn climate_stratocumulus_bonus(
     }
 
     return is_ocean * subtropical * east_land * STRATOCUMULUS_AMP * ocean_strength;
+}
+
+// Interior-continent dryness penalty. Returns a NEGATIVE
+// propensity contribution for land pixels deep inside continents
+// at subtropical latitudes. Land pixels near a coast (or at
+// non-subtropical latitudes) get little to no penalty.
+//
+// Caller passes a pre-sampled `here_height`. The 4 cardinal probes
+// each take ~1000 km in a given direction; if they all hit land,
+// the pixel is "interior" (interior factor = 1).
+fn climate_interior_dryness(
+    topography: texture_2d<f32>,
+    topo_sampler: sampler,
+    uv: vec2<f32>,
+    here_height: f32,
+    off_from_itcz_deg: f32,
+) -> f32 {
+    let is_land = smoothstep(OCEAN_SEA_LEVEL_LO, OCEAN_SEA_LEVEL_HI, here_height);
+    if is_land < 0.01 {
+        return 0.0;
+    }
+    let off_abs = abs(off_from_itcz_deg);
+    let subtropical_mask = exp(
+        -(off_abs - SUBTROPICAL_OFFSET_DEG) * (off_abs - SUBTROPICAL_OFFSET_DEG)
+            * INTERIOR_LAT_SIGMA,
+    );
+    if subtropical_mask < 0.05 {
+        return 0.0;
+    }
+
+    // 4 cardinal probes ~1000 km out. `fract` handles longitude wrap
+    // for the east/west probes. North/south probes use clamped V
+    // (the topo sampler is clamp-to-edge, so out-of-range V sticks
+    // to the polar row — fine for this coarse interior test).
+    var land_count: f32 = 0.0;
+    let probes = array<vec2<f32>, 4>(
+        vec2<f32>( INTERIOR_PROBE_U, 0.0),
+        vec2<f32>(-INTERIOR_PROBE_U, 0.0),
+        vec2<f32>(0.0,  INTERIOR_PROBE_V),
+        vec2<f32>(0.0, -INTERIOR_PROBE_V),
+    );
+    for (var i: i32 = 0; i < 4; i = i + 1) {
+        let probe_uv = vec2<f32>(
+            fract(uv.x + probes[i].x),
+            clamp(uv.y + probes[i].y, 0.0, 1.0),
+        );
+        let h = textureSampleLevel(topography, topo_sampler, probe_uv, 0.0).r;
+        land_count = land_count + smoothstep(OCEAN_SEA_LEVEL_LO, OCEAN_SEA_LEVEL_HI, h);
+    }
+    let interior_factor = land_count * 0.25;  // 0..1.
+
+    // Negative: this is a SUBTRACTION from propensity.
+    return -is_land * interior_factor * subtropical_mask * INTERIOR_AMP;
 }
 
 // Equirectangular UV for an absolute ECEF world position — used by

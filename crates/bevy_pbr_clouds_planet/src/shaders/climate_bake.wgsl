@@ -34,7 +34,7 @@
 #import bevy_pbr_clouds_planet::types::CloudUniform;
 #import bevy_pbr_clouds_planet::climate::{
     climate_lat_propensity, climate_ocean_propensity, climate_ocean_lat_factor,
-    climate_stratocumulus_bonus,
+    climate_stratocumulus_bonus, climate_interior_dryness,
 };
 #import bevy_render::maths::PI;
 
@@ -117,6 +117,16 @@ fn main(@builtin(global_invocation_id) idx: vec3<u32>) {
         topography, topo_sampler, uv, height, off, cloud.climate_ocean_strength,
     );
 
+    // Interior-continent dryness (Sahara, Arabian, Gobi, Atacama,
+    // Australian Outback). Subtropical land far from any coast gets
+    // a propensity penalty — captures the descending-Hadley-dries-
+    // the-interior effect that creates the world's great deserts.
+    // Tropical interiors (Amazon, Congo) stay cloudy because the
+    // latitude mask attenuates the penalty away from the subtropics.
+    let interior_prop = climate_interior_dryness(
+        topography, topo_sampler, uv, height, off,
+    );
+
     // Low-frequency climate noise. Single 3D-noise tap at a planet
     // scale (uv * 3 ⇒ ~3 cycles across the globe horizontally) plus
     // a slow time axis. Breaks the perfect latitude-ring look so
@@ -129,7 +139,8 @@ fn main(@builtin(global_invocation_id) idx: vec3<u32>) {
     // `saturate` collapses negative totals (subtropical suppression
     // dominating) to 0 = clear sky.
     let propensity = saturate(
-        lat_prop + ocean_prop + monsoon_prop + stratocumulus_prop + climate_noise,
+        lat_prop + ocean_prop + monsoon_prop + stratocumulus_prop
+            + interior_prop + climate_noise,
     );
 
     // Mirror propensity into G and B so the egui preview displays as
