@@ -63,7 +63,7 @@ const CLIMATE_NOISE_EVOLUTION: f32 = 0.0005;
 // is wider than ITCZ_BAND_SIGMA (in `climate.wgsl`) because the
 // continental convection footprint extends further from the ITCZ
 // centre than the ocean ITCZ itself.
-const MONSOON_AMP: f32 = 0.20;
+const MONSOON_AMP: f32 = 0.12;
 const MONSOON_BAND_SIGMA: f32 = 0.003;
 
 @compute @workgroup_size(8, 8, 1)

@@ -24,6 +24,32 @@
 //
 // The bake runs once per frame at the map resolution (1024×512),
 // amortising the per-texel physics across an entire frame's pixels.
+//
+// ---------- Known limits of this model ----------
+//
+// The climate model gives recognisable latitude bands, hemispheric
+// asymmetry, and land/ocean differentiation — i.e. a planet that
+// reads as Earth-like in bulk distribution. It does NOT reproduce
+// several visible orbital-photo features:
+//
+//   - **No cyclonic dynamics.** Real Earth has visible swirls
+//     (hurricanes, mid-latitude lows, Saharan dust streaks). We have
+//     statistically-bandwise cloud, so the planet reads as "noise
+//     field on a sphere" rather than "weather system on a sphere".
+//     Fixing this needs advection / pseudo-fluid simulation, not
+//     more static-field tuning.
+//   - **All cloud layers apply the climate equally.** Cirrus and
+//     stratocumulus both follow the same bands, so a "clear"
+//     subtropical patch still has cirrus over it. Real Earth's
+//     cirrus is much more uniformly global. Per-layer climate
+//     strength would fix this (deferred — Climate #7).
+//   - **Climate noise can fill in dry zones.** ±0.10 propensity
+//     noise gives an occasional Saharan pixel enough to render a
+//     wisp of cloud. Real deserts are *persistently* clear.
+//   - **No coast-distance effects.** Eastern-margin stratocumulus
+//     decks (California, Peru, Namibia, W. Australia) and interior-
+//     continent dryness need a precomputed coast-distance texture
+//     (deferred — Climate #4, #8).
 
 // ---------- Bake-side physics (called only by climate_bake.wgsl) ----------
 
@@ -39,20 +65,25 @@ const STORM_TRACK_OFFSET_DEG: f32 = 55.0;
 // Gaussian widths (`exp(-off² · sigma)`). Bigger sigma = narrower
 // band. Tuned so the bands overlap smoothly rather than producing
 // visible "stripes".
-const ITCZ_BAND_SIGMA: f32 = 0.005;
+//
+// `ITCZ_BAND_SIGMA = 0.012` ⇒ FWHM ~14°, in the same range as
+// Earth's actual ITCZ (a band ~5-10° wide of dense convection
+// surrounded by a wider zone of elevated cloudiness).
+const ITCZ_BAND_SIGMA: f32 = 0.012;
 const SUBTROPICAL_BAND_SIGMA: f32 = 0.015;
 const STORM_TRACK_BAND_SIGMA: f32 = 0.008;
 
 // Latitude-band coverage = `BASELINE + ITCZ_AMP·itcz − SUBTROPICAL_AMP·sub
 //                          + STORM_TRACK_AMP·storm`, saturated.
 //
-// Tuned for a fairly dry global baseline so the *contrast* between
-// climate zones is clearly visible in the rendered cloud field, not
-// just in the debug map. Earth-average ~50–60 % cloud cover is
-// recovered once the per-layer base coverage and the ocean bonus
-// contribute on top.
-const BASELINE: f32 = 0.25;
-const ITCZ_AMP: f32 = 0.55;
+// Tuned to leave headroom — the previous values pushed the ITCZ
+// + ocean + monsoon stack to saturate at 1.0 across a wide band,
+// clipping the noise and ocean modulation into a uniform white
+// stripe. Lower amplitudes here mean the ITCZ peak typically lands
+// at 0.6-0.85 propensity, so noise and ocean factors read as
+// visible internal structure instead of being clipped away.
+const BASELINE: f32 = 0.20;
+const ITCZ_AMP: f32 = 0.45;
 const SUBTROPICAL_AMP: f32 = 0.30;
 const STORM_TRACK_AMP: f32 = 0.25;
 

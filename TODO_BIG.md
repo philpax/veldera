@@ -3,6 +3,7 @@
 - [ ] physics should use the target tile size, or the best available if no better is available
 - [ ] light pollution map?
 - [ ] deal with clouds moving when camera moves
+- [ ] basic climate sim layered on top of the static climate field. We have latitude bands + ocean/land + monsoon + noise (recognisable Earth in bulk), but no cyclones, hurricanes, dust streaks, or weather-system structure — the planet reads as "noise on a sphere" rather than "weather on a sphere". Needs advection / pseudo-fluid sim. Cheapest version: scroll a low-res velocity field per-frame; richer version: actual 2D shallow-water / barotropic sim on the climate-map texture.
 - [ ] shouldn't be able to shoot projectiles when in camera transition or after switching camera modes or when deselecting ui lock
 - [ ] actual water tiles: will need to bring in a shader and potentially find and mask out the world tiles that correspond to water. use existing elevation map for this?
 - [ ] grappling: on-foot medium-scale traversal
