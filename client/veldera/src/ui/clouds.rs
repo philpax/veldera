@@ -30,6 +30,7 @@ pub enum AtmosphereSubTab {
 pub struct AtmosphereImageIds {
     pub topography: Option<egui::TextureId>,
     pub climate_map: Option<egui::TextureId>,
+    pub sim_state_preview: Option<egui::TextureId>,
 }
 
 impl AtmosphereSubTab {
@@ -184,9 +185,77 @@ fn render_climate(ui: &mut egui::Ui, cloud: &mut CloudLayers, image_ids: &Atmosp
 
     ui.separator();
 
+    // ---- Climate sim controls ----
+    ui.label("Simulation:");
+    ui.checkbox(&mut cloud.sim.enabled, "Sim enabled")
+        .on_hover_text(
+            "When on, the runtime samples a per-frame-advected version \
+             of the climate map instead of the static bake. Clouds \
+             drift with the analytic wind cells (trades, westerlies, \
+             polar easterlies) and the planet evolves over hours of \
+             world time. Initialised from the bake; pulled gently back \
+             toward the denoised climate target (G channel of the \
+             bake) so it never drifts to garbage.",
+        );
+    let sim_state = &mut cloud.sim;
+    ui.add_enabled_ui(sim_state.enabled, |ui| {
+        // τ slider — log scale 1 hour to 30 days.
+        let mut tau_hours = sim_state.tau_seconds / 3600.0;
+        if ui
+            .add(
+                egui::Slider::new(&mut tau_hours, 1.0..=720.0)
+                    .logarithmic(true)
+                    .text("τ (hours)"),
+            )
+            .on_hover_text(
+                "Relaxation timescale toward the climate forcing \
+                 target. Short τ = sim hugs the climate (less weather \
+                 character, more 'as rendered'); long τ = sim drifts \
+                 freely (visible weather, may diverge from climate \
+                 details). Default 24 h. Real GCMs use 4-40 days.",
+            )
+            .changed()
+        {
+            sim_state.tau_seconds = tau_hours * 3600.0;
+        }
+        ui.add(egui::Slider::new(&mut sim_state.wind_speed, 0.0..=5.0).text("wind speed ×"))
+            .on_hover_text(
+                "Multiplier on the analytic Hadley/Ferrel zonal wind \
+                 speeds. 1.0 = Earth-realistic. Crank for faster \
+                 weather migration in timelapse.",
+            );
+        ui.add(egui::Slider::new(&mut sim_state.wind_meander, 0.0..=1.0).text("wind meander"))
+            .on_hover_text(
+                "Strength of the curl-noise perturbation on top of \
+                 the analytic Hadley/Ferrel zonal flow. 0 = pure \
+                 east-west wind (clouds drift in straight lines, \
+                 quickly converge to latitude bands); 1 = strong \
+                 meander (jet stream wobbles, fronts curl, weather \
+                 features develop genuine 2D structure rather than \
+                 being smeared into stripes by the zonal shear).",
+            );
+        ui.checkbox(&mut sim_state.coriolis, "Coriolis")
+            .on_hover_text(
+                "Apply Coriolis deflection in the wind field. Without \
+                 this, swirling structures would be handedness-\
+                 agnostic. Defaults on.",
+            );
+        ui.add(
+            egui::Slider::new(&mut sim_state.dt_seconds, 10.0..=300.0)
+                .text("dt (world seconds / step)"),
+        )
+        .on_hover_text(
+            "World-time duration of one sim integration step. Smaller \
+             = smoother evolution; larger = bigger jumps per step. \
+             60 s default.",
+        );
+    });
+
+    ui.separator();
+
     let width = ui.available_width().min(512.0);
 
-    ui.label("Climate coverage (live):");
+    ui.label("Climate forcing (static bake):");
     if let Some(id) = image_ids.climate_map {
         ui.image(egui::load::SizedTexture::new(
             id,
@@ -194,6 +263,17 @@ fn render_climate(ui: &mut egui::Ui, cloud: &mut CloudLayers, image_ids: &Atmosp
         ));
     } else {
         ui.label("(climate map bake target not yet allocated…)");
+    }
+
+    ui.add_space(4.0);
+    ui.label("Sim state (live, what the runtime samples when sim is on):");
+    if let Some(id) = image_ids.sim_state_preview {
+        ui.image(egui::load::SizedTexture::new(
+            id,
+            egui::vec2(width, width * 0.5),
+        ));
+    } else {
+        ui.label("(sim state preview not yet allocated…)");
     }
 
     ui.add_space(4.0);

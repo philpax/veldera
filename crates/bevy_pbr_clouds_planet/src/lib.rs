@@ -67,8 +67,8 @@ use node::{
 use noise::{NoiseBakeState, NoiseBindGroupLayout, NoisePipeline, NoiseTextures};
 use resources::{
     GpuCloudUniform, prepare_cloud_bind_groups, prepare_cloud_history_textures,
-    prepare_cloud_shadow_textures, prepare_cloud_textures, prepare_cloud_uniforms,
-    queue_cloud_render_pipelines,
+    prepare_cloud_shadow_textures, prepare_cloud_sim_textures, prepare_cloud_textures,
+    prepare_cloud_uniforms, queue_cloud_render_pipelines,
 };
 
 /// Maximum number of cloud sub-layers in a single [`CloudLayers`] container.
@@ -96,12 +96,14 @@ impl Plugin for CloudsPlanetPlugin {
         embedded_asset!(app, "shaders/cloud_composite.wgsl");
         embedded_asset!(app, "shaders/cloud_god_rays.wgsl");
         embedded_asset!(app, "shaders/climate_bake.wgsl");
+        embedded_asset!(app, "shaders/sim_step.wgsl");
 
         app.add_plugins((
             ExtractComponentPlugin::<CloudLayers>::default(),
             ExtractComponentPlugin::<CloudCameraEcef>::default(),
             ExtractComponentPlugin::<CloudEarthTopography>::default(),
             ExtractComponentPlugin::<CloudClimateMap>::default(),
+            ExtractComponentPlugin::<CloudSimStatePreview>::default(),
             UniformComponentPlugin::<GpuCloudUniform>::default(),
         ));
     }
@@ -153,6 +155,7 @@ impl Plugin for CloudsPlanetPlugin {
                     prepare_cloud_textures.in_set(RenderSystems::PrepareResources),
                     prepare_cloud_history_textures.in_set(RenderSystems::PrepareResources),
                     prepare_cloud_shadow_textures.in_set(RenderSystems::PrepareResources),
+                    prepare_cloud_sim_textures.in_set(RenderSystems::PrepareResources),
                     prepare_cloud_bind_groups.in_set(RenderSystems::PrepareBindGroups),
                 ),
             )
@@ -179,15 +182,27 @@ impl Plugin for CloudsPlanetPlugin {
                 Core3d,
                 CloudNode::ClimateBake,
             )
+            .add_render_graph_node::<ViewNodeRunner<node::CloudSimStepNode>>(
+                Core3d,
+                CloudNode::SimStep,
+            )
             .add_render_graph_edges(
                 Core3d,
                 (
                     Node3d::EndPrepasses,
                     CloudNode::NoiseBake,
                     // Climate bake first — its texture is the source
-                    // of truth for the climate model; shadow bake and
-                    // the main raymarch both sample it.
+                    // of truth for the climate model; everything
+                    // downstream (sim, shadow, raymarch) reads from
+                    // it (R = init/runtime fallback, G = sim forcing
+                    // target).
                     CloudNode::ClimateBake,
+                    // Sim step integrates one frame of weather
+                    // dynamics on top of the climate. Must run after
+                    // ClimateBake (reads its G channel) and before
+                    // ShadowBake / Raymarch (which sample the sim
+                    // state).
+                    CloudNode::SimStep,
                     // Shadow bake runs before the main opaque pass so
                     // its result is ready when shadow apply samples
                     // it later.
@@ -494,6 +509,8 @@ pub struct CloudLayers {
     pub shadow_intensity: f32,
     /// Earth-aware climate model. See [`ClimateSettings`].
     pub climate: ClimateSettings,
+    /// Stateful climate simulation. See [`ClimateSimSettings`].
+    pub sim: ClimateSimSettings,
 }
 
 /// Tunable knobs for the latitude/topography-driven cloud climate model.
@@ -555,6 +572,78 @@ impl Default for ClimateSettings {
             ocean_strength: 0.5,
             itcz_seasonal_shift_deg: 12.0,
             itcz_north_bias_deg: 5.0,
+        }
+    }
+}
+
+/// Tunable knobs for the stateful climate simulation that runs on top
+/// of [`ClimateSettings`].
+///
+/// The static climate gives us recognisable bands and continental
+/// patterns, but no macro-scale motion or weather-system structure.
+/// This sim layers semi-Lagrangian advection along an analytic
+/// Hadley/Ferrel wind field (plus Coriolis and a low-frequency
+/// curl-noise meander) on top of the climate, with a weak relaxation
+/// pulling the simulated state back toward the climate's structural
+/// (denoised) target. Result: cloud blobs visibly drift along the
+/// trade winds and westerlies, evolve over hours-to-days of world
+/// time, and never wander too far from a plausible climatological
+/// distribution.
+///
+/// Set `enabled = false` to revert the runtime to sampling the
+/// static climate directly.
+#[derive(Clone, Copy, Debug)]
+pub struct ClimateSimSettings {
+    /// Master on/off.
+    pub enabled: bool,
+    /// World-time duration of one integration step, in seconds. Smaller
+    /// values give smoother evolution at the cost of more compute per
+    /// real frame. 60 s (one game-minute per step) is a reasonable
+    /// default — at 1× world time the sim wakes up roughly once every
+    /// real second.
+    pub dt_seconds: f32,
+    /// Relaxation timescale toward the climate forcing target, in
+    /// seconds of world time. Larger τ ⇒ sim drifts more freely from
+    /// climate, weather develops more visible character; smaller τ ⇒
+    /// sim hugs the climate, less weather, more "climate as rendered".
+    /// 1 day (86 400 s) is the default — long enough that synoptic
+    /// structures form between resets, short enough that the
+    /// climatology still anchors the long-term mean. Real GCMs use
+    /// 4-40 days; we go shorter so the player sees motion within a
+    /// viewing session.
+    pub tau_seconds: f32,
+    /// Multiplier on the analytic Hadley/Ferrel/polar zonal wind
+    /// speeds. 1.0 = Earth-realistic (~10 m/s in trades, ~25 m/s in
+    /// upper westerlies). Crank for faster weather migration in
+    /// timelapse; lower for sluggish drift.
+    pub wind_speed: f32,
+    /// 0..1 strength of the low-frequency curl-noise perturbation
+    /// added to the analytic wind. 0 = pure zonal flow (cloud blobs
+    /// march east/west in straight lines); 1 = full meander (jet
+    /// stream wobbles, fronts dip and rise).
+    pub wind_meander: f32,
+    /// Apply Coriolis deflection in the wind field. Without this any
+    /// swirling structures would be handedness-agnostic (cyclones
+    /// could spin either way). Defaults true; only flip for debug
+    /// visualisation of "pure" zonal flow.
+    pub coriolis: bool,
+    /// Maximum number of sim integration steps per real frame. Caps
+    /// how aggressively the sim catches up after a forward time-jump
+    /// or under high time acceleration. Falling persistently behind
+    /// triggers a reinit; this knob trades latency for framerate.
+    pub max_steps_per_frame: u32,
+}
+
+impl Default for ClimateSimSettings {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            dt_seconds: 60.0,
+            tau_seconds: 86_400.0,
+            wind_speed: 1.0,
+            wind_meander: 0.5,
+            coriolis: true,
+            max_steps_per_frame: 4,
         }
     }
 }
@@ -621,6 +710,7 @@ impl CloudLayers {
             god_rays: GodRaysSettings::default(),
             shadow_intensity: 1.0,
             climate: ClimateSettings::default(),
+            sim: ClimateSimSettings::default(),
         }
     }
 
@@ -634,6 +724,7 @@ impl CloudLayers {
             god_rays: GodRaysSettings::default(),
             shadow_intensity: 1.0,
             climate: ClimateSettings::default(),
+            sim: ClimateSimSettings::default(),
         }
     }
 
@@ -653,6 +744,7 @@ impl CloudLayers {
             god_rays: GodRaysSettings::default(),
             shadow_intensity: 1.0,
             climate: ClimateSettings::default(),
+            sim: ClimateSimSettings::default(),
         }
     }
 }
@@ -789,6 +881,33 @@ impl ExtractComponent for CloudClimateMap {
     type QueryData = Read<CloudClimateMap>;
     type QueryFilter = With<Camera3d>;
     type Out = CloudClimateMap;
+
+    fn extract_component(item: QueryItem<'_, '_, Self::QueryData>) -> Option<Self::Out> {
+        Some(item.clone())
+    }
+}
+
+/// Per-camera display target the sim step mirrors its propensity
+/// output into each frame. Separate from the ping-pong sim state
+/// (which lives entirely in the render world) so the UI can sample
+/// a stable, non-ping-ponged image — otherwise egui would show
+/// stale data every other frame.
+///
+/// The handle points at a 2D `Rgba8Unorm` image the client owns
+/// ([`CLIMATE_MAP_WIDTH`] × [`CLIMATE_MAP_HEIGHT`] is the expected
+/// size). The sim step writes a grayscale view of the propensity
+/// (R = G = B = propensity) so egui renders the texture as a
+/// brightness map rather than a single channel.
+///
+/// Optional — when this component is absent on a camera, the sim
+/// still runs but doesn't write any preview.
+#[derive(Component, Clone, Debug)]
+pub struct CloudSimStatePreview(pub bevy::asset::Handle<bevy::image::Image>);
+
+impl ExtractComponent for CloudSimStatePreview {
+    type QueryData = Read<CloudSimStatePreview>;
+    type QueryFilter = With<Camera3d>;
+    type Out = CloudSimStatePreview;
 
     fn extract_component(item: QueryItem<'_, '_, Self::QueryData>) -> Option<Self::Out> {
         Some(item.clone())

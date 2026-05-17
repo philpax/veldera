@@ -2,28 +2,28 @@
 //
 // Once per frame, computes the Earth-aware climate physics for every
 // texel of a 1024×512 equirectangular map covering the globe, packing
-// the result into an Rgba8Unorm texture that the runtime cloud passes
-// (raymarch / shadow / composite) sample directly:
+// the result into an Rgba8Unorm texture:
 //
-//   R = cloud propensity  (0..1, high = cloudy)  — runtime + viz input
-//   G = mirror of R                              — egui preview fills
-//                                                  this so the texture
-//                                                  displays as grayscale
-//                                                  rather than red-only
-//   B = mirror of R                              — same as G
-//   A = 1.0                                       — reserved
+//   R = cloud propensity (with noise) (0..1, high = cloudy)
+//       — used as runtime cloud forcing when the sim is OFF, and as
+//         the sim's INITIAL CONDITION when the sim is ON.
+//   G = cloud propensity (NO noise)
+//       — used as the sim's FORCING TARGET when the sim is ON.
+//         Removing the noise term means the sim is anchored to the
+//         structural climatology (right bands at right latitudes,
+//         monsoons, deserts) without being pulled toward the bake's
+//         specific noise blotches. The sim is then free to produce
+//         its own macro-scale variability via advection + Coriolis.
+//   B = mirror of R
+//       — so the egui preview displays grayscale rather than red-
+//         only. Will be repurposed for convection propensity once
+//         cumulonimbus / lightning lands.
+//   A = 1.0 (reserved)
 //
-// The runtime samples R and converts to a smoothstep coverage
-// threshold via `1.0 - R`. Storing propensity (not threshold) in R
-// keeps the egui preview, the on-globe overlay, and the conceptual
-// model all reading the same way: bright = cloudy.
-//
-// G and B carry the same value for now so the egui display is
-// grayscale. When precipitation rendering / cumulonimbus convection
-// land they'll be repurposed (G = precip propensity, B = convection
-// propensity), at which point the egui display becomes a multi-
-// channel RGB viz and we'll add a tooltip / channel selector to
-// disambiguate.
+// The runtime samples a propensity channel and converts to a
+// smoothstep coverage threshold via `1.0 - p`. Storing propensity
+// (not threshold) keeps the egui preview, the on-globe overlay, and
+// the conceptual model all reading the same way: bright = cloudy.
 //
 // This is the single source of truth for climate. The runtime never
 // recomputes propensity per density tap; each raymarch step is one
@@ -136,17 +136,30 @@ fn main(@builtin(global_invocation_id) idx: vec3<u32>) {
     let noise_n = textureSampleLevel(noise_3d, noise_sampler, noise_uv, 0.0).r;
     let climate_noise = (noise_n - 0.5) * 2.0 * CLIMATE_NOISE_AMP;
 
-    // `saturate` collapses negative totals (subtropical suppression
-    // dominating) to 0 = clear sky.
-    let propensity = saturate(
-        lat_prop + ocean_prop + monsoon_prop + stratocumulus_prop
-            + interior_prop + climate_noise,
+    // Structural propensity — all physics EXCEPT the noise term.
+    // This is the sim's forcing target: stable in time-and-space
+    // climatology, no per-frame blotches.
+    let propensity_clean = saturate(
+        lat_prop + ocean_prop + monsoon_prop + stratocumulus_prop + interior_prop,
     );
 
-    // Mirror propensity into G and B so the egui preview displays as
-    // grayscale rather than red-only — see header comment.
+    // Full propensity — clean + noise. Used by the runtime when the
+    // sim is off, and as the sim's initial state when it's on (so
+    // the sim starts from something visually plausible rather than
+    // pure climatology).
+    //
+    // `saturate` collapses negative totals (subtropical suppression
+    // dominating) to 0 = clear sky.
+    let propensity = saturate(propensity_clean + climate_noise);
+
+    // R: full propensity (runtime / sim init).
+    // G: clean propensity (sim forcing target).
+    // B: mirror of R so the egui preview displays as grayscale (the
+    //    R vs. G difference would otherwise tint the preview magenta
+    //    in regions where the noise term is positive).
     textureStore(
-        output, vec2<i32>(idx.xy),
-        vec4(propensity, propensity, propensity, 1.0),
+        output,
+        vec2<i32>(idx.xy),
+        vec4(propensity, propensity_clean, propensity, 1.0),
     );
 }

@@ -193,6 +193,31 @@ pub struct GpuCloudUniform {
     /// declination × seasonal-shift. Positive = northern hemisphere
     /// summer.
     pub climate_itcz_center_deg: f32,
+
+    // ---- Climate sim (consumed by sim_step.wgsl and the runtime).
+    /// 1 = sim active (runtime samples sim_state); 0 = sim disabled
+    /// (runtime samples static climate). See [`ClimateSimSettings`].
+    pub sim_enabled: u32,
+    /// 1 = this dispatch is a reinit step (copy climate R into sim
+    /// state, ignore advection); 0 = normal step.
+    pub sim_reinit: u32,
+    /// World-time duration of one sim integration step, seconds.
+    pub sim_dt_seconds: f32,
+    /// Relaxation timescale (seconds of world time) — how aggressively
+    /// the sim state is pulled toward the climate-forcing target G.
+    /// Larger = more freely evolving sim, less anchored to climate.
+    pub sim_tau_seconds: f32,
+    /// Zonal-wind speed multiplier on the analytic Hadley/Ferrel/polar
+    /// cell field. 1.0 = Earth-realistic; larger = faster weather
+    /// migration; 0.0 = no advection (sim relaxes statically).
+    pub sim_wind_speed: f32,
+    /// Strength of the curl-noise perturbation added to the analytic
+    /// wind. 0 = pure zonal flow; 1 = full perturbation.
+    pub sim_wind_meander: f32,
+    /// Coriolis enable flag. 1 = apply Coriolis deflection in the wind
+    /// field; 0 = no Coriolis. Debug knob — leave on by default.
+    pub sim_coriolis_enabled: u32,
+    pub pad_sim: u32,
 }
 
 /// Per-view storage texture written by the raymarch pass and read by the
@@ -231,6 +256,56 @@ pub const SHADOW_MAP_SIZE: u32 = 1024;
 /// comfortably bigger than what the user can see at any reasonable
 /// camera altitude.
 pub const SHADOW_FOOTPRINT_M: f32 = 100_000.0;
+
+/// Persistent ping-pong sim-state textures for the climate sim.
+///
+/// Two `Rgba16Float` textures at [`crate::CLIMATE_MAP_WIDTH`]×
+/// [`crate::CLIMATE_MAP_HEIGHT`]. Per-frame: the sim step reads the
+/// "previous" slot (alternating each frame via `frame_index`) and
+/// writes the "current" slot. Downstream cloud passes (raymarch,
+/// shadow, composite) read whichever slot is current.
+///
+/// Allocated by hand (not via `TextureCache`) so the contents persist
+/// frame-to-frame.
+#[derive(Component)]
+pub struct CloudSimTextures {
+    #[allow(dead_code)]
+    pub textures: [Texture; 2],
+    pub views: [TextureView; 2],
+    #[allow(dead_code)]
+    pub size: UVec2,
+}
+
+impl CloudSimTextures {
+    pub fn read_view(&self, frame_index: u32) -> &TextureView {
+        &self.views[(frame_index & 1) as usize]
+    }
+    pub fn write_view(&self, frame_index: u32) -> &TextureView {
+        &self.views[((frame_index + 1) & 1) as usize]
+    }
+    /// The view that downstream cloud passes should sample (= the
+    /// `write_view` for the most recent step, which is now the
+    /// "current" state).
+    pub fn current_view(&self, frame_index: u32) -> &TextureView {
+        self.write_view(frame_index)
+    }
+}
+
+/// Per-camera bookkeeping for the climate sim. Lives in the render
+/// world and persists across frames so the sim can decide when to
+/// reinit / catch up.
+#[derive(Component, Clone, Copy, Default, Debug)]
+pub struct CloudSimState {
+    /// World time (seconds since some epoch — same scale as
+    /// `CloudLayers::world_time_seconds`) that the current sim state
+    /// corresponds to.
+    pub sim_world_time: f64,
+    /// Ping-pong index; bit 0 selects read vs write.
+    pub frame_index: u32,
+    /// `false` on the first frame (or after a hard reset) — the next
+    /// sim step will be a reinit (copy climate R into sim state).
+    pub initialised: bool,
+}
 
 /// Persistent ping-pong history textures used by the temporal pass.
 ///
@@ -313,6 +388,7 @@ pub struct CloudBindGroupLayouts {
     pub composite: BindGroupLayoutDescriptor,
     pub shadow_bake: BindGroupLayoutDescriptor,
     pub climate_bake: BindGroupLayoutDescriptor,
+    pub sim_step: BindGroupLayoutDescriptor,
     pub shadow_apply: BindGroupLayoutDescriptor,
     pub god_rays: BindGroupLayoutDescriptor,
     pub fullscreen_shader: FullscreenShader,
@@ -553,6 +629,41 @@ impl FromWorld for CloudBindGroupLayouts {
             ),
         );
 
+        let sim_step = BindGroupLayoutDescriptor::new(
+            "cloud_sim_step_bind_group_layout",
+            &BindGroupLayoutEntries::with_indices(
+                ShaderStages::COMPUTE,
+                (
+                    (0, uniform_buffer::<GpuCloudUniform>(true)),
+                    // Climate map (R = init / runtime fallback,
+                    // G = sim forcing target).
+                    (1, texture_2d(TextureSampleType::default())),
+                    // Clamp-to-edge sampler.
+                    (2, sampler(SamplerBindingType::Filtering)),
+                    // Previous sim state (read).
+                    (3, texture_2d(TextureSampleType::default())),
+                    // Current sim state (write).
+                    (
+                        4,
+                        texture_storage_2d(
+                            TextureFormat::Rgba16Float,
+                            StorageTextureAccess::WriteOnly,
+                        ),
+                    ),
+                    // Display preview (write). Same propensity value
+                    // expanded to grayscale RGB so the egui image
+                    // displays as a brightness map.
+                    (
+                        5,
+                        texture_storage_2d(
+                            TextureFormat::Rgba8Unorm,
+                            StorageTextureAccess::WriteOnly,
+                        ),
+                    ),
+                ),
+            ),
+        );
+
         Self {
             raymarch,
             temporal,
@@ -561,6 +672,7 @@ impl FromWorld for CloudBindGroupLayouts {
             shadow_apply,
             god_rays,
             climate_bake,
+            sim_step,
             fullscreen_shader: world.resource::<FullscreenShader>().clone(),
             composite_fragment: load_embedded_asset!(world, "shaders/cloud_composite.wgsl"),
             shadow_apply_fragment: load_embedded_asset!(world, "shaders/cloud_shadow_apply.wgsl"),
@@ -577,6 +689,7 @@ pub struct CloudPipelines {
     pub temporal: CachedComputePipelineId,
     pub shadow_bake: CachedComputePipelineId,
     pub climate_bake: CachedComputePipelineId,
+    pub sim_step: CachedComputePipelineId,
 }
 
 impl FromWorld for CloudPipelines {
@@ -616,11 +729,20 @@ impl FromWorld for CloudPipelines {
             ..Default::default()
         });
 
+        let sim_step_shader = load_embedded_asset!(world, "shaders/sim_step.wgsl");
+        let sim_step = pipeline_cache.queue_compute_pipeline(ComputePipelineDescriptor {
+            label: Some("cloud_sim_step_pipeline".into()),
+            layout: vec![layouts.sim_step.clone()],
+            shader: sim_step_shader,
+            ..Default::default()
+        });
+
         Self {
             raymarch,
             temporal,
             shadow_bake,
             climate_bake,
+            sim_step,
         }
     }
 }
@@ -803,6 +925,9 @@ pub(crate) struct CloudBindGroups {
     pub shadow_apply: BindGroup,
     pub god_rays: BindGroup,
     pub climate_bake: Option<BindGroup>,
+    /// Optional: only present when both the climate map AND the sim
+    /// ping-pong textures are ready.
+    pub sim_step: Option<BindGroup>,
 }
 
 /// Per-camera, render-world component holding the previous frame's
@@ -848,6 +973,7 @@ pub(super) fn prepare_cloud_uniforms(
         Option<&CloudPrevFrame>,
         Option<&ExtractedCamera>,
         Option<&crate::CloudClimateMap>,
+        Option<&CloudSimState>,
     )>,
 ) {
     // Dominant-light direction: deferred to per-camera scope below
@@ -858,8 +984,18 @@ pub(super) fn prepare_cloud_uniforms(
     // that night-time cloud shadows follow the moon instead of
     // degenerating because the (below-horizon) sun was picked.
 
-    for (entity, cloud, atmosphere, view, sph_cam, cam_ecef, prev_state, camera, climate_map) in
-        &layers
+    for (
+        entity,
+        cloud,
+        atmosphere,
+        view,
+        sph_cam,
+        cam_ecef,
+        prev_state,
+        camera,
+        climate_map,
+        sim_state_prev,
+    ) in &layers
     {
         let quality = cloud.quality;
         let world_time = cloud.world_time_seconds;
@@ -1077,6 +1213,47 @@ pub(super) fn prepare_cloud_uniforms(
             && current_camera_ecef.distance(prev.camera_ecef) > TELEPORT_THRESHOLD_M;
         let history_valid = prev.initialised && !teleported;
 
+        // ---- Climate sim time-bookkeeping ----
+        //
+        // Decide whether this frame's sim dispatch is a normal step
+        // or a reinit. Reinit fires when:
+        //   - no prior sim state (first frame),
+        //   - world time went backward (sim is irreversible),
+        //   - world time jumped forward by more than what the catch-up
+        //     budget can ever close (would otherwise leave the sim
+        //     stuck many frames behind, visibly disconnected).
+        //
+        // Camera moves never trigger reinit — the sim is a global
+        // field, camera-independent.
+        let world_time_now = f64::from(world_time);
+        let sim_dt = f64::from(cloud.sim.dt_seconds.max(1.0));
+        let max_catchup_seconds =
+            f64::from(cloud.sim.max_steps_per_frame.max(1)) * sim_dt * 240.0;
+        let prev_sim = sim_state_prev.copied().unwrap_or_default();
+        let world_delta = world_time_now - prev_sim.sim_world_time;
+        let needs_reinit = !prev_sim.initialised
+            || world_delta < 0.0
+            || world_delta > max_catchup_seconds;
+        // Effective dt for this step: clamp to sim_dt so a slow real-
+        // frame at high time-acceleration doesn't take a huge advection
+        // step in one go (Phase 1 runs one sim step per real frame; the
+        // multi-step-per-frame extension is Phase 1.5).
+        let sim_step_dt = if needs_reinit {
+            0.0
+        } else {
+            world_delta.min(sim_dt).max(0.0)
+        };
+        let sim_world_time_next = if needs_reinit {
+            world_time_now
+        } else {
+            prev_sim.sim_world_time + sim_step_dt
+        };
+        commands.entity(entity).insert(CloudSimState {
+            sim_world_time: sim_world_time_next,
+            frame_index: prev_sim.frame_index.wrapping_add(1),
+            initialised: true,
+        });
+
         commands.entity(entity).insert(GpuCloudUniform {
             max_primary_steps,
             light_steps: quality.light_steps(),
@@ -1152,6 +1329,16 @@ pub(super) fn prepare_cloud_uniforms(
                 let scale = cloud.climate.itcz_seasonal_shift_deg / 23.4;
                 sun_declination_deg * scale + cloud.climate.itcz_north_bias_deg
             },
+            sim_enabled: u32::from(
+                cloud.sim.enabled && cloud.climate.enabled && climate_map.is_some(),
+            ),
+            sim_reinit: u32::from(needs_reinit),
+            sim_dt_seconds: sim_step_dt as f32,
+            sim_tau_seconds: cloud.sim.tau_seconds.max(60.0),
+            sim_wind_speed: cloud.sim.wind_speed.max(0.0),
+            sim_wind_meander: cloud.sim.wind_meander.clamp(0.0, 1.0),
+            sim_coriolis_enabled: u32::from(cloud.sim.coriolis),
+            pad_sim: 0,
         });
 
         commands.entity(entity).insert(CloudPrevFrame {
@@ -1267,6 +1454,47 @@ pub(super) fn prepare_cloud_history_textures(
     }
 }
 
+/// Allocates the per-view climate-sim ping-pong textures at the
+/// climate-map resolution. One-shot: once allocated, the textures
+/// persist for the camera's lifetime (sim state must carry over
+/// frame-to-frame for the simulation to be stateful).
+pub(super) fn prepare_cloud_sim_textures(
+    mut commands: Commands,
+    layers: Query<(Entity, Option<&CloudSimTextures>), With<CloudLayers>>,
+    render_device: Res<RenderDevice>,
+) {
+    for (entity, existing) in &layers {
+        if existing.is_some() {
+            continue;
+        }
+        let size = UVec2::new(crate::CLIMATE_MAP_WIDTH, crate::CLIMATE_MAP_HEIGHT);
+        let make = |label: &'static str| {
+            let texture = render_device.create_texture(&TextureDescriptor {
+                label: Some(label),
+                size: size.to_extents(),
+                mip_level_count: 1,
+                sample_count: 1,
+                dimension: TextureDimension::D2,
+                format: TextureFormat::Rgba16Float,
+                usage: TextureUsages::STORAGE_BINDING | TextureUsages::TEXTURE_BINDING,
+                view_formats: &[],
+            });
+            let view = texture.create_view(&TextureViewDescriptor {
+                label: Some(label),
+                ..Default::default()
+            });
+            (texture, view)
+        };
+        let (tex0, view0) = make("cloud_sim_state_0");
+        let (tex1, view1) = make("cloud_sim_state_1");
+        commands.entity(entity).insert(CloudSimTextures {
+            textures: [tex0, tex1],
+            views: [view0, view1],
+            size,
+        });
+    }
+}
+
 #[derive(Copy, Clone, Debug)]
 enum CloudBindGroupError {
     Atmosphere,
@@ -1309,6 +1537,9 @@ pub(super) fn prepare_cloud_bind_groups(
             &ViewDepthTexture,
             Option<&crate::CloudEarthTopography>,
             Option<&crate::CloudClimateMap>,
+            Option<&CloudSimTextures>,
+            Option<&CloudSimState>,
+            Option<&crate::CloudSimStatePreview>,
         ),
         With<CloudLayers>,
     >,
@@ -1370,6 +1601,9 @@ pub(super) fn prepare_cloud_bind_groups(
         depth_texture,
         topography_handle,
         climate_map_handle,
+        sim_textures,
+        sim_state,
+        sim_preview_handle,
     ) in &layers
     {
         // Resolve topography texture view: if the camera has the
@@ -1391,6 +1625,25 @@ pub(super) fn prepare_cloud_bind_groups(
             .map(|gi| &gi.texture_view)
             .unwrap_or(&fallback_image.d2.texture_view);
 
+        // The runtime cloud passes (raymarch, shadow_bake, composite)
+        // all sample a "current cloud propensity" texture. When the
+        // sim is active we want them to see the simulated state, not
+        // the static bake — so we swap the bound view here. The
+        // shader path is unchanged; the climate model semantics still
+        // apply (`R = propensity`), just sourced from the sim's
+        // ping-pong output instead of the bake. Falls back to the
+        // static climate when sim is off / unavailable.
+        let sim_active = uniform.sim_enabled != 0
+            && sim_textures.is_some()
+            && sim_state.is_some_and(|s| s.initialised);
+        let runtime_climate_view = if sim_active {
+            let sim_tex = sim_textures.expect("sim_active guarantees sim_textures");
+            let idx = sim_state.map_or(0, |s| s.frame_index);
+            sim_tex.current_view(idx)
+        } else {
+            climate_view
+        };
+
         let raymarch = render_device.create_bind_group(
             "cloud_raymarch_bind_group",
             &pipeline_cache.get_bind_group_layout(&layouts.raymarch),
@@ -1409,7 +1662,7 @@ pub(super) fn prepare_cloud_bind_groups(
                 (13, &sampler.clamp),
                 (10, &cloud_tex.raymarch.default_view),
                 (11, depth_texture.view()),
-                (14, climate_view),
+                (14, runtime_climate_view),
             )),
         );
 
@@ -1445,7 +1698,7 @@ pub(super) fn prepare_cloud_bind_groups(
                 (7, &sampler.noise),
                 (8, &shadow_tex.view),
                 (9, topo_view),
-                (10, climate_view),
+                (10, runtime_climate_view),
             )),
         );
 
@@ -1460,7 +1713,7 @@ pub(super) fn prepare_cloud_bind_groups(
                 (4, noise_view),
                 (5, &sampler.noise),
                 (6, &shadow_tex.view),
-                (7, climate_view),
+                (7, runtime_climate_view),
             )),
         );
 
@@ -1514,6 +1767,32 @@ pub(super) fn prepare_cloud_bind_groups(
                 )
             });
 
+        // Sim step bind group — needs the climate map, the sim
+        // ping-pong textures, AND the display preview image all to
+        // be GPU-ready. Otherwise we skip the sim entirely this
+        // frame (the previous sim state stays untouched).
+        let sim_step = sim_textures.and_then(|sim_tex| {
+            let climate_view = climate_map_handle
+                .and_then(|m| gpu_images.get(&m.0))
+                .map(|gi| &gi.texture_view)?;
+            let preview_view = sim_preview_handle
+                .and_then(|p| gpu_images.get(&p.0))
+                .map(|gi| &gi.texture_view)?;
+            let frame_idx = sim_state.map_or(0, |s| s.frame_index);
+            Some(render_device.create_bind_group(
+                "cloud_sim_step_bind_group",
+                &pipeline_cache.get_bind_group_layout(&layouts.sim_step),
+                &BindGroupEntries::with_indices((
+                    (0, cloud_binding.clone()),
+                    (1, climate_view),
+                    (2, &sampler.clamp),
+                    (3, sim_tex.read_view(frame_idx)),
+                    (4, sim_tex.write_view(frame_idx)),
+                    (5, preview_view),
+                )),
+            ))
+        });
+
         commands.entity(entity).insert(CloudBindGroups {
             raymarch,
             temporal,
@@ -1522,6 +1801,7 @@ pub(super) fn prepare_cloud_bind_groups(
             shadow_apply,
             god_rays,
             climate_bake,
+            sim_step,
         });
     }
     Ok(())

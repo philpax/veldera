@@ -143,6 +143,10 @@ fn debug_ui_system(
             .climate_map
             .as_ref()
             .and_then(|h| contexts.image_id(h)),
+        sim_state_preview: climate_assets
+            .sim_state_preview
+            .as_ref()
+            .and_then(|h| contexts.image_id(h)),
     };
 
     let ctx = contexts.ctx_mut()?;

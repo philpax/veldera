@@ -99,4 +99,14 @@ struct CloudUniform {
     climate_latitude_strength: f32,
     climate_ocean_strength: f32,
     climate_itcz_center_deg: f32,
+
+    // Climate sim. See `ClimateSimSettings` in lib.rs.
+    sim_enabled: u32,
+    sim_reinit: u32,
+    sim_dt_seconds: f32,
+    sim_tau_seconds: f32,
+    sim_wind_speed: f32,
+    sim_wind_meander: f32,
+    sim_coriolis_enabled: u32,
+    pad_sim: u32,
 }

@@ -48,8 +48,13 @@ pub enum CloudNode {
     Composite,
     /// Additive volumetric god-ray inscatter (fragment).
     GodRays,
-    /// Climate coverage debug map bake (compute, writes Rgba8Unorm).
+    /// Climate coverage map bake (compute, writes Rgba8Unorm).
     ClimateBake,
+    /// Stateful climate sim integration step (compute, writes
+    /// Rgba16Float). Runs after ClimateBake so it has the latest
+    /// forcing target, before ShadowBake/Raymarch so they sample the
+    /// updated sim state.
+    SimStep,
 }
 
 #[derive(Default)]
@@ -477,6 +482,62 @@ impl ViewNode for CloudClimateBakeNode {
         if !CLIMATE_BAKE_LOGGED.swap(true, Ordering::Relaxed) {
             info!(
                 "cloud climate bake first dispatch ({}×{} workgroups)",
+                groups_x, groups_y
+            );
+        }
+        Ok(())
+    }
+}
+
+
+static SIM_STEP_LOGGED: AtomicBool = AtomicBool::new(false);
+
+/// Climate sim integration step. Skipped silently for cameras
+/// without sim infrastructure (no climate map, no sim ping-pong
+/// textures, or sim disabled).
+#[derive(Default)]
+pub(super) struct CloudSimStepNode;
+
+impl ViewNode for CloudSimStepNode {
+    type ViewQuery = (
+        Read<CloudLayers>,
+        Read<CloudBindGroups>,
+        Read<DynamicUniformIndex<GpuCloudUniform>>,
+    );
+
+    fn run(
+        &self,
+        _graph: &mut RenderGraphContext,
+        render_context: &mut RenderContext,
+        (_layer, bind_groups, cloud_offset): QueryItem<Self::ViewQuery>,
+        world: &World,
+    ) -> Result<(), NodeRunError> {
+        let Some(bind_group) = bind_groups.sim_step.as_ref() else {
+            return Ok(());
+        };
+        let pipelines = world.resource::<CloudPipelines>();
+        let pipeline_cache = world.resource::<PipelineCache>();
+        let Some(sim_pipeline) = pipeline_cache.get_compute_pipeline(pipelines.sim_step) else {
+            return Ok(());
+        };
+
+        let mut pass =
+            render_context
+                .command_encoder()
+                .begin_compute_pass(&ComputePassDescriptor {
+                    label: Some("cloud_sim_step"),
+                    timestamp_writes: None,
+                });
+        pass.set_pipeline(sim_pipeline);
+        pass.set_bind_group(0, bind_group, &[cloud_offset.index()]);
+
+        const WORKGROUP_SIZE: u32 = 8;
+        let groups_x = crate::CLIMATE_MAP_WIDTH.div_ceil(WORKGROUP_SIZE);
+        let groups_y = crate::CLIMATE_MAP_HEIGHT.div_ceil(WORKGROUP_SIZE);
+        pass.dispatch_workgroups(groups_x, groups_y, 1);
+        if !SIM_STEP_LOGGED.swap(true, Ordering::Relaxed) {
+            info!(
+                "cloud sim step first dispatch ({}×{} workgroups)",
                 groups_x, groups_y
             );
         }

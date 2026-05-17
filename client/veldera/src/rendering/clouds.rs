@@ -18,7 +18,7 @@ use bevy_egui::{EguiTextureHandle, EguiUserTextures};
 pub use bevy_pbr_clouds_planet::CloudDebugMode;
 use bevy_pbr_clouds_planet::{
     CLIMATE_MAP_HEIGHT, CLIMATE_MAP_WIDTH, CloudCameraEcef, CloudClimateMap, CloudEarthTopography,
-    CloudLayers, CloudsPlanetPlugin,
+    CloudLayers, CloudSimStatePreview, CloudsPlanetPlugin,
 };
 
 use crate::world::{floating_origin::FloatingOriginCamera, time_of_day::TimeOfDayState};
@@ -47,6 +47,7 @@ impl Plugin for CloudIntegrationPlugin {
                     sync_cloud_camera_ecef,
                     sync_cloud_topography,
                     sync_cloud_climate_map,
+                    sync_cloud_sim_state_preview,
                 ),
             );
     }
@@ -62,6 +63,11 @@ pub struct CloudClimateAssets {
     /// into each frame. Created CPU-side as an empty
     /// `STORAGE | TEXTURE_BINDING` image; the compute shader fills it.
     pub climate_map: Option<Handle<Image>>,
+    /// Sim-state preview the cloud crate's sim-step compute pass
+    /// mirrors its propensity output into each frame so the UI can
+    /// display the actual simulated cloud field (as opposed to the
+    /// climate forcing).
+    pub sim_state_preview: Option<Handle<Image>>,
 }
 
 fn load_climate_assets(
@@ -101,6 +107,30 @@ fn load_climate_assets(
     let climate_handle = images.add(climate_image);
     egui_user_textures.add_image(EguiTextureHandle::Strong(climate_handle.clone()));
     assets.climate_map = Some(climate_handle);
+
+    // Sim-state display preview. Same dimensions as the climate map
+    // (the sim runs at the same resolution). Rgba8Unorm because egui
+    // displays in 8-bit anyway, and Rgba8Unorm storage is more widely
+    // supported than Rgba16Float on WebGPU.
+    let mut sim_state_image = Image {
+        texture_descriptor: TextureDescriptor {
+            label: Some("cloud_sim_state_preview"),
+            size,
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: TextureDimension::D2,
+            format: TextureFormat::Rgba8Unorm,
+            usage: TextureUsages::STORAGE_BINDING | TextureUsages::TEXTURE_BINDING,
+            view_formats: &[],
+        },
+        sampler: ImageSampler::linear(),
+        asset_usage: RenderAssetUsages::RENDER_WORLD,
+        ..default()
+    };
+    sim_state_image.resize(size);
+    let sim_state_handle = images.add(sim_state_image);
+    egui_user_textures.add_image(EguiTextureHandle::Strong(sim_state_handle.clone()));
+    assets.sim_state_preview = Some(sim_state_handle);
 }
 
 /// Drops [`CloudClimateMap`] onto each cloud camera once the climate-map
@@ -117,6 +147,23 @@ fn sync_cloud_climate_map(
         commands
             .entity(entity)
             .insert(CloudClimateMap(handle.clone()));
+    }
+}
+
+/// Drops [`CloudSimStatePreview`] onto each cloud camera once the
+/// preview image is allocated. Idempotent.
+fn sync_cloud_sim_state_preview(
+    mut commands: Commands,
+    assets: Res<CloudClimateAssets>,
+    cameras: Query<Entity, (With<CloudLayers>, Without<CloudSimStatePreview>)>,
+) {
+    let Some(handle) = assets.sim_state_preview.as_ref() else {
+        return;
+    };
+    for entity in &cameras {
+        commands
+            .entity(entity)
+            .insert(CloudSimStatePreview(handle.clone()));
     }
 }
 
