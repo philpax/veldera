@@ -180,6 +180,17 @@ fn render_climate(
             "Peak ITCZ latitude offset at solstice (scaled by sun \
              declination). 12° is roughly realistic.",
         );
+        ui.add(
+            egui::Slider::new(&mut cl.itcz_north_bias_deg, -10.0..=15.0)
+                .text("north bias (°)"),
+        )
+        .on_hover_text(
+            "Constant northward shift of the ITCZ centre. Earth's \
+             annual-mean ITCZ sits ~5° N because the Northern \
+             Hemisphere has more land mass; without this, equinox \
+             dates would render a perfectly symmetric band on the \
+             geographic equator.",
+        );
     });
 
     ui.separator();

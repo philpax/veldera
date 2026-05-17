@@ -514,6 +514,16 @@ pub struct ClimateSettings {
     /// Atlantic; defaulting to 12° gives a visible seasonal shift over
     /// long time-slider scrubs without being cartoonish.
     pub itcz_seasonal_shift_deg: f32,
+    /// Constant northward bias on the ITCZ centre, in degrees.
+    /// Earth's annual-mean ITCZ sits ~5° N because the Northern
+    /// Hemisphere has more land mass (warmer mean surface temperature)
+    /// and the inter-tropical convergence is dragged toward the
+    /// thermal equator rather than the geographic one. Without this,
+    /// our model produces a perfectly symmetric ITCZ at the geographic
+    /// equator on equinox dates, which looks too "designed". Set to
+    /// 0.0 for a symmetric model (e.g. a hypothetical equal-hemisphere
+    /// planet).
+    pub itcz_north_bias_deg: f32,
 }
 
 impl Default for ClimateSettings {
@@ -530,6 +540,7 @@ impl Default for ClimateSettings {
             latitude_strength: 0.85,
             ocean_strength: 0.5,
             itcz_seasonal_shift_deg: 12.0,
+            itcz_north_bias_deg: 5.0,
         }
     }
 }

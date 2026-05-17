@@ -1119,12 +1119,18 @@ pub(super) fn prepare_cloud_uniforms(
             climate_enabled: u32::from(cloud.climate.enabled && climate_map.is_some()),
             climate_latitude_strength: cloud.climate.latitude_strength.clamp(0.0, 1.0),
             climate_ocean_strength: cloud.climate.ocean_strength.clamp(0.0, 1.0),
-            // ITCZ centre tracks sun declination — northern summer
-            // (positive declination) shifts the equatorial cloud band
-            // northward. We use the brightest atmosphere light
-            // (regardless of horizon) as the sun, since seasonal
-            // declination depends on the *date* not on whether the sun
-            // is currently above the camera's horizon.
+            // ITCZ centre = seasonal shift (sun-declination-driven) +
+            // constant northward bias. Earth's annual-mean ITCZ sits
+            // ~5° N because the Northern Hemisphere is warmer on
+            // average (more land), pulling the thermal equator
+            // poleward of the geographic one — so even at equinox
+            // (sun_declination ≈ 0) the band shouldn't sit on the
+            // geographic equator.
+            //
+            // We use the brightest atmosphere light (regardless of
+            // horizon) as the sun, since seasonal declination depends
+            // on the *date* not on whether the sun is currently above
+            // the camera's horizon.
             climate_itcz_center_deg: {
                 const LUMA: Vec3 = Vec3::new(0.2126, 0.7152, 0.0722);
                 let mut sun_dir = Vec3::Z;
@@ -1139,7 +1145,7 @@ pub(super) fn prepare_cloud_uniforms(
                 }
                 let sun_declination_deg = sun_dir.z.clamp(-1.0, 1.0).asin().to_degrees();
                 let scale = cloud.climate.itcz_seasonal_shift_deg / 23.4;
-                sun_declination_deg * scale
+                sun_declination_deg * scale + cloud.climate.itcz_north_bias_deg
             },
         });
 
