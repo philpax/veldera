@@ -49,11 +49,30 @@ const ITCZ_AMP: f32 = 0.55;
 const SUBTROPICAL_AMP: f32 = 0.30;
 const STORM_TRACK_AMP: f32 = 0.25;
 
-// Ocean bonus magnitude (multiplied by per-camera `ocean_strength`).
-// Real stratocumulus decks over cold oceans push cloud cover up by
-// ~15–25 %; 0.15 lands in the middle once the user can dial it
-// further via the strength slider.
+// Ocean bonus magnitude (multiplied by per-camera `ocean_strength`
+// and the latitude factor below). Real stratocumulus decks over cold
+// oceans push cloud cover up by ~15–25 %; 0.15 lands in the middle
+// once the user can dial it further via the strength slider.
 const OCEAN_BONUS_MAX: f32 = 0.15;
+
+// Latitude amplitudes for the ocean bonus. Ocean is NOT uniformly
+// cloudier than land — the difference depends sharply on where in the
+// Hadley cell we are:
+//
+//   - Tropics (under ITCZ): warm SST drives strong convection ⇒
+//     ocean much cloudier than land. +1.
+//   - Subtropics: descending Hadley air over oceanic high pressure
+//     (Pacific/Bermuda/Azores Highs) creates clear oceans punctuated
+//     by stratocumulus decks at the eastern margins. Net effect:
+//     ocean should be CLEARER than land at this latitude. -1.
+//     (The eastern-margin stratocumulus is added back via Climate
+//     #4 once the coast-distance texture is online.)
+//   - Storm tracks: oceanic lows (Aleutian, Icelandic) dump much
+//     more cloud over ocean than land. +0.7.
+//   - Polar: cold, dry; ocean and land similar.
+const OCEAN_TROPICS_AMP: f32 = 1.0;
+const OCEAN_SUBTROPICAL_AMP: f32 = 1.0;
+const OCEAN_STORM_AMP: f32 = 0.7;
 
 // Sea-level threshold on the normalised topography texture. The bake
 // remaps elevation `[-500, +9000] m` → `[0, 255]`, so `0 m` sits at
@@ -80,12 +99,40 @@ fn climate_lat_propensity(offset_from_itcz_deg: f32) -> f32 {
     return saturate(BASELINE + ITCZ_AMP * itcz - SUBTROPICAL_AMP * sub + STORM_TRACK_AMP * storm);
 }
 
-// Ocean-bonus propensity given a sampled topography height in `[0, 1]`
-// and the per-camera `ocean_strength`. Positive = more cloud over
-// ocean.
-fn climate_ocean_propensity(height: f32, ocean_strength: f32) -> f32 {
+// Latitude factor for the ocean bonus, in roughly [-1, +1]. Positive
+// where ocean should be cloudier than land (ITCZ, storm tracks),
+// negative where it should be clearer (subtropical highs).
+// Reuses the same Gaussian shapes as `climate_lat_propensity` so the
+// peaks align with the cloud bands.
+//
+// Use `lat_deg - itcz_center_deg` as input.
+fn climate_ocean_lat_factor(offset_from_itcz_deg: f32) -> f32 {
+    let off = abs(offset_from_itcz_deg);
+    let tropics = exp(-off * off * ITCZ_BAND_SIGMA);
+    let sub = exp(
+        -(off - SUBTROPICAL_OFFSET_DEG) * (off - SUBTROPICAL_OFFSET_DEG) * SUBTROPICAL_BAND_SIGMA,
+    );
+    let storm = exp(
+        -(off - STORM_TRACK_OFFSET_DEG) * (off - STORM_TRACK_OFFSET_DEG) * STORM_TRACK_BAND_SIGMA,
+    );
+    return clamp(
+        OCEAN_TROPICS_AMP * tropics + OCEAN_STORM_AMP * storm - OCEAN_SUBTROPICAL_AMP * sub,
+        -1.0,
+        1.0,
+    );
+}
+
+// Ocean-bonus propensity. Can be negative — the subtropical highs
+// over ocean (descending Hadley air) genuinely suppress cloud cover
+// relative to land at the same latitude, so the model needs to reach
+// below the land baseline there to produce the persistent clear-ocean
+// regions you see over the eastern Pacific, eastern Atlantic, and
+// southern Indian Ocean from orbit.
+//
+// `lat_factor` is `climate_ocean_lat_factor(off_from_itcz)`.
+fn climate_ocean_propensity(height: f32, ocean_strength: f32, lat_factor: f32) -> f32 {
     let ocean = 1.0 - smoothstep(OCEAN_SEA_LEVEL_LO, OCEAN_SEA_LEVEL_HI, height);
-    return ocean * OCEAN_BONUS_MAX * ocean_strength;
+    return ocean * OCEAN_BONUS_MAX * ocean_strength * lat_factor;
 }
 
 // Equirectangular UV for an absolute ECEF world position — used by

@@ -17,7 +17,9 @@
 // stratocumulus, …) without per-pixel cost.
 
 #import bevy_pbr_clouds_planet::types::CloudUniform;
-#import bevy_pbr_clouds_planet::climate::{climate_lat_propensity, climate_ocean_propensity};
+#import bevy_pbr_clouds_planet::climate::{
+    climate_lat_propensity, climate_ocean_propensity, climate_ocean_lat_factor,
+};
 #import bevy_render::maths::PI;
 
 @group(0) @binding(0) var<uniform> cloud: CloudUniform;
@@ -38,9 +40,21 @@ fn main(@builtin(global_invocation_id) idx: vec3<u32>) {
     let lat_rad = (0.5 - uv.y) * PI;
     let lat_deg = lat_rad * (180.0 / PI);
 
-    let lat_prop = climate_lat_propensity(lat_deg - cloud.climate_itcz_center_deg);
+    let off = lat_deg - cloud.climate_itcz_center_deg;
+    let lat_prop = climate_lat_propensity(off);
     let height = textureSampleLevel(topography, topo_sampler, uv, 0.0).r;
-    let ocean_prop = climate_ocean_propensity(height, cloud.climate_ocean_strength);
+    // Latitude-modulated ocean bonus: cloudy under ITCZ + storm
+    // tracks, suppressed under the subtropical highs. Can be
+    // negative, which is the whole point — the eastern Pacific /
+    // Atlantic subtropical clear oceans need to dip BELOW the land
+    // baseline at that latitude, not just stay flat.
+    let ocean_factor = climate_ocean_lat_factor(off);
+    let ocean_prop = climate_ocean_propensity(
+        height, cloud.climate_ocean_strength, ocean_factor,
+    );
+    // `lat_prop + ocean_prop` can go negative when subtropical
+    // suppression dominates over land's small ITCZ-flank bias — that
+    // collapses to 0 propensity (clear) under saturate.
     let propensity = saturate(lat_prop + ocean_prop);
 
     // R: threshold for the runtime smoothstep — lower = more cloud.
