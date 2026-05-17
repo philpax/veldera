@@ -320,26 +320,45 @@ pub(super) fn render_location_tab(
         alt = moon_altitude_deg,
     ));
 
-    // Speed buttons.
+    // Time-speed controls — pause toggle + logarithmic slider from
+    // 0.1× to 100 000×. Pause is a separate boolean so the slider
+    // remembers the user's previous non-zero speed across un-pause.
     ui.horizontal(|ui| {
         ui.label("Time speed:");
-        let speeds = [
-            ("Pause", 0.0),
-            ("1x", 1.0),
-            ("10x", 10.0),
-            ("100x", 100.0),
-            ("1000x", 1000.0),
-        ];
-        for (label, speed) in speeds {
-            let is_selected = location.time_of_day.speed_multiplier == speed;
-            if ui.selectable_label(is_selected, label).clicked() {
+        let current_speed = location.time_of_day.speed_multiplier;
+        let is_paused = current_speed == 0.0;
+        if ui.selectable_label(is_paused, "Pause").clicked() {
+            if is_paused {
+                let resume = location.time_of_day.last_unpaused_speed.max(0.1);
+                location.time_of_day.set_speed(resume);
+            } else {
+                location.time_of_day.last_unpaused_speed = current_speed;
+                location.time_of_day.set_speed(0.0);
+            }
+        }
+        ui.add_enabled_ui(!is_paused, |ui| {
+            let mut speed = if is_paused {
+                location.time_of_day.last_unpaused_speed.max(0.1)
+            } else {
+                current_speed
+            };
+            if ui
+                .add(
+                    egui::Slider::new(&mut speed, 0.1_f32..=100_000.0_f32)
+                        .logarithmic(true)
+                        .text("×"),
+                )
+                .changed()
+                && !is_paused
+            {
                 location.time_of_day.set_speed(speed);
-                if location.time_of_day.mode == TimeMode::Realtime && speed != 1.0 {
-                    // Switching to a non-1x speed in realtime mode should switch to override.
+                if location.time_of_day.mode == TimeMode::Realtime
+                    && (speed - 1.0).abs() > f32::EPSILON
+                {
                     location.time_of_day.mode = TimeMode::Override;
                 }
             }
-        }
+        });
     });
 
     // Execute geocoding/teleport actions.

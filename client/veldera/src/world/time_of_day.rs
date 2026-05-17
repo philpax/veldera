@@ -137,6 +137,11 @@ pub struct TimeOfDayState {
     pub mode: TimeMode,
     /// Speed multiplier for time progression (1.0 = realtime).
     pub speed_multiplier: f32,
+    /// Speed to restore on un-pause. Updated whenever the user
+    /// transitions from non-zero speed → 0, so toggling pause off
+    /// brings back the previous speed instead of always snapping
+    /// to 1×.
+    pub last_unpaused_speed: f32,
     /// Reference instant for elapsed time calculations.
     reference_instant: Instant,
     /// Simulation time at the reference instant (seconds since midnight UTC).
@@ -152,6 +157,7 @@ impl Default for TimeOfDayState {
         Self {
             mode: TimeMode::Realtime,
             speed_multiplier: 1.0,
+            last_unpaused_speed: 1.0,
             reference_instant: Instant::now(),
             reference_sim_time: get_current_utc_seconds(),
             reference_date: get_current_utc_date(),
@@ -586,6 +592,7 @@ mod tests {
         let mut state = TimeOfDayState {
             mode: TimeMode::Override,
             speed_multiplier: 0.0,
+            last_unpaused_speed: 1.0,
             reference_instant: Instant::now(),
             reference_sim_time: 25.0 * 60.0,
             reference_date: SimpleDate {
