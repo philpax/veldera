@@ -34,6 +34,7 @@
 #import bevy_pbr_clouds_planet::types::CloudUniform;
 #import bevy_pbr_clouds_planet::climate::{
     climate_lat_propensity, climate_ocean_propensity, climate_ocean_lat_factor,
+    climate_stratocumulus_bonus,
 };
 #import bevy_render::maths::PI;
 
@@ -105,6 +106,17 @@ fn main(@builtin(global_invocation_id) idx: vec3<u32>) {
     let monsoon_proximity = exp(-off * off * MONSOON_BAND_SIGMA);
     let monsoon_prop = land_factor * monsoon_proximity * MONSOON_AMP;
 
+    // Eastern-margin stratocumulus decks (California, Peru, Namibia,
+    // W. Australia). Lights up subtropical ocean pixels that have
+    // continental land within ~500 km to the east — recovering one
+    // of the brightest features on Earth from orbit. Asymmetric: the
+    // east coast of the same continents (Japan, NE Brazil) gets no
+    // bonus, because the test is "land to the EAST of here", and
+    // those continents have ocean to their east.
+    let stratocumulus_prop = climate_stratocumulus_bonus(
+        topography, topo_sampler, uv, height, off, cloud.climate_ocean_strength,
+    );
+
     // Low-frequency climate noise. Single 3D-noise tap at a planet
     // scale (uv * 3 ⇒ ~3 cycles across the globe horizontally) plus
     // a slow time axis. Breaks the perfect latitude-ring look so
@@ -116,7 +128,9 @@ fn main(@builtin(global_invocation_id) idx: vec3<u32>) {
 
     // `saturate` collapses negative totals (subtropical suppression
     // dominating) to 0 = clear sky.
-    let propensity = saturate(lat_prop + ocean_prop + monsoon_prop + climate_noise);
+    let propensity = saturate(
+        lat_prop + ocean_prop + monsoon_prop + stratocumulus_prop + climate_noise,
+    );
 
     // Mirror propensity into G and B so the egui preview displays as
     // grayscale rather than red-only — see header comment.

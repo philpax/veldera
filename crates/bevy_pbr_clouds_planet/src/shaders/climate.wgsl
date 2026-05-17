@@ -119,6 +119,37 @@ const OCEAN_STORM_AMP: f32 = 0.7;
 const OCEAN_SEA_LEVEL_LO: f32 = 0.04;
 const OCEAN_SEA_LEVEL_HI: f32 = 0.06;
 
+// Persistent eastern-margin stratocumulus decks. Real Earth has
+// bright cloud strips on the EAST side of every subtropical ocean
+// (off California, Peru, Namibia, Western Australia) where
+// trade-wind-driven cold-water upwelling meets descending Hadley
+// air. These are among the brightest features on the planet from
+// orbit. We detect them by: (a) being over ocean, (b) being at a
+// subtropical latitude, (c) having land within ~500 km to the EAST
+// (a continental coast that the ocean sits west of). The "to the
+// east" test is what differentiates California (eastern-margin
+// Pacific, foggy) from Japan (western-margin Pacific, no
+// stratocumulus deck).
+//
+// Amplitude needs to be large enough to overcome the subtropical
+// `lat_prop` suppression AND the negative ocean propensity at the
+// same latitude — without that, the deck is buried under the dry
+// zone it's supposed to override. Real-Earth deck cloud cover
+// jumps ~+0.5 to +0.7 over surrounding subtropical ocean, so 0.70
+// peak bonus (× ocean_strength) is in the right ballpark.
+const STRATOCUMULUS_AMP: f32 = 0.70;
+// Subtropical band where stratocumulus is active — Gaussian centred
+// on the same offset as the subtropical highs. Sigma chosen narrower
+// than SUBTROPICAL_BAND_SIGMA so the deck is concentrated rather
+// than spread the full subtropics.
+const STRATOCUMULUS_LAT_SIGMA: f32 = 0.010;
+// Easterly UV offsets to sample for land detection. 0.003 in U is
+// ~120 km at the equator (slightly less at higher latitudes); three
+// samples out to ~0.015 ≈ 600 km cover the typical reach of the
+// stratocumulus deck. Multiple samples give a graded edge — the
+// deck strength fades as the coast retreats.
+const STRATOCUMULUS_EAST_OFFSETS: array<f32, 3> = array<f32, 3>(0.003, 0.008, 0.015);
+
 // Latitude-only "cloud propensity" (intuitive semantics: 1 = lots of
 // cloud, 0 = clear) as a function of offset (in degrees) from the
 // active ITCZ centre. The bake inverts this to a threshold for the R
@@ -171,6 +202,50 @@ fn climate_ocean_lat_factor(offset_from_itcz_deg: f32) -> f32 {
 fn climate_ocean_propensity(height: f32, ocean_strength: f32, lat_factor: f32) -> f32 {
     let ocean = 1.0 - smoothstep(OCEAN_SEA_LEVEL_LO, OCEAN_SEA_LEVEL_HI, height);
     return ocean * OCEAN_BONUS_MAX * ocean_strength * lat_factor;
+}
+
+// Stratocumulus deck bonus. Caller passes a pre-sampled `here_height`
+// (so we don't double up the central texture tap) plus the texture
+// for the three easterly samples. `ocean_strength` scales the bonus
+// (same per-camera knob the other ocean propensity uses) so the user
+// can fade all ocean effects together.
+fn climate_stratocumulus_bonus(
+    topography: texture_2d<f32>,
+    topo_sampler: sampler,
+    uv: vec2<f32>,
+    here_height: f32,
+    off_from_itcz_deg: f32,
+    ocean_strength: f32,
+) -> f32 {
+    let is_ocean = 1.0 - smoothstep(OCEAN_SEA_LEVEL_LO, OCEAN_SEA_LEVEL_HI, here_height);
+    if is_ocean < 0.01 {
+        return 0.0;
+    }
+    let off_abs = abs(off_from_itcz_deg);
+    let subtropical = exp(
+        -(off_abs - SUBTROPICAL_OFFSET_DEG) * (off_abs - SUBTROPICAL_OFFSET_DEG)
+            * STRATOCUMULUS_LAT_SIGMA,
+    );
+    if subtropical < 0.05 {
+        return 0.0;
+    }
+
+    // Sample topography to the east at three distances. `fract`
+    // handles longitude wrap (the topo sampler is clamp-to-edge, so
+    // a uv.x > 1.0 would otherwise stick to the last column instead
+    // of wrapping around the dateline). The max-over-samples gives
+    // a graded edge: max land density across all three offsets ⇒
+    // strongest bonus when the coast is close, fading as it
+    // retreats.
+    var east_land: f32 = 0.0;
+    for (var i: i32 = 0; i < 3; i = i + 1) {
+        let east_uv = vec2<f32>(fract(uv.x + STRATOCUMULUS_EAST_OFFSETS[i]), uv.y);
+        let h_east = textureSampleLevel(topography, topo_sampler, east_uv, 0.0).r;
+        let land_here = smoothstep(OCEAN_SEA_LEVEL_LO, OCEAN_SEA_LEVEL_HI, h_east);
+        east_land = max(east_land, land_here);
+    }
+
+    return is_ocean * subtropical * east_land * STRATOCUMULUS_AMP * ocean_strength;
 }
 
 // Equirectangular UV for an absolute ECEF world position — used by
