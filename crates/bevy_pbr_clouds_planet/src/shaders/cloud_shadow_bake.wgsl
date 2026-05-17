@@ -28,6 +28,23 @@
 
 const SHADOW_STEPS: u32 = 32u;
 
+// Cone-march parameters. `CONE_RATIO` is `tan(half-angle)` for the
+// cone the ray jitters into around the central sun-direction axis,
+// matching the main raymarch's sun-cone-shadow value. `CONE_OFFSETS`
+// is the same fixed 6-tap pattern from functions.wgsl; we cycle
+// through it per step (one offset per step) rather than fanning out
+// per step, so the bake's density-eval count is unchanged from the
+// straight-line march.
+const CONE_RATIO: f32 = 0.05;
+const CONE_OFFSETS: array<vec3<f32>, 6> = array<vec3<f32>, 6>(
+    vec3<f32>( 0.155,  0.490,  0.000),
+    vec3<f32>( 0.255, -0.290,  0.190),
+    vec3<f32>(-0.220, -0.215,  0.380),
+    vec3<f32>( 0.000,  0.155, -0.420),
+    vec3<f32>(-0.310,  0.080,  0.150),
+    vec3<f32>( 0.430, -0.080, -0.100),
+);
+
 // Mirror of `sample_layer_density` from functions.wgsl, inlined here to
 // avoid pulling in the full main-pass binding set. Only the bits we need
 // for density evaluation are duplicated.
@@ -221,12 +238,29 @@ fn main(@builtin(global_invocation_id) idx: vec3<u32>) {
         t_end = outer_hits.y;
     }
 
+    // Stratified cone-march. Same total density-eval cost as the
+    // straight-line version, but each step jitters slightly off the
+    // central ray inside a cone that widens with distance from the
+    // texel. The cone offsets cycle through a fixed 6-tap pattern so
+    // adjacent shadow texels' rays sample slightly different cloud
+    // positions at each altitude, which softens shadow edges where
+    // the cloud noise has hard transitions — without paying the cost
+    // of a full per-step multi-tap cone (which would 4-6× the bake
+    // dispatch).
+    let n = sun_dir;
+    let up_guess = select(vec3<f32>(0.0, 1.0, 0.0), vec3<f32>(1.0, 0.0, 0.0), abs(n.y) > 0.9);
+    let cone_t_dir = normalize(cross(up_guess, n));
+    let cone_b_dir = cross(n, cone_t_dir);
+
     let t_total = t_end - t_start;
     let dt = t_total / f32(SHADOW_STEPS);
     var optical_depth = 0.0;
     for (var i: u32 = 0u; i < SHADOW_STEPS; i = i + 1u) {
         let t = t_start + (f32(i) + 0.5) * dt;
-        let displacement = sun_dir * t;
+        let cone_r = t * CONE_RATIO;
+        let off = CONE_OFFSETS[i % 6u];
+        let cone_off = (cone_t_dir * off.x + cone_b_dir * off.y + n * off.z) * cone_r;
+        let displacement = sun_dir * t + cone_off;
         let p = ground_pos + displacement;
         // `noise_uv_offset` was baked from the CAMERA's ECEF on the
         // CPU, so the noise lookup expects positions relative to the
