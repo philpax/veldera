@@ -225,10 +225,10 @@ fn main(in: FullscreenVertexOutput) -> @location(0) vec4<f32> {
         // Paint the value onto the visible Earth surface only. The
         // egui Climate sub-tab already shows the flat texture; this
         // overlay's unique value is being able to correlate the model
-        // to the rendered planet (so you can see "ah, the ITCZ is
-        // *here* in the current camera view"). Sky pixels would
-        // produce a meaningless mid-depth projection, so we skip
-        // them and let the destination scene pass through.
+        // to the rendered planet ("ah, the ITCZ is *here* in the
+        // current camera view"). Sky pixels would produce a
+        // meaningless mid-depth projection, so we skip them and let
+        // the destination scene pass through.
         let full_pixel = vec2<i32>(in.position.xy);
         let depth = textureLoad(depth_texture, full_pixel, 0);
         if depth <= 0.0 {
@@ -238,24 +238,43 @@ fn main(in: FullscreenVertexOutput) -> @location(0) vec4<f32> {
         }
         let ndc = vec3(in.uv * vec2(2.0, -2.0) + vec2(-1.0, 1.0), depth);
         let world_h = view.world_from_clip * vec4(ndc, 1.0);
-        let world_pos = world_h.xyz / world_h.w;
+        // `view.world_from_clip` returns RENDER-world (camera-
+        // relative, floating-origin) coordinates, not ECEF. Without
+        // adding the camera's ECEF back, `climate_equirectangular_uv`
+        // computes lat/lon from a direction-from-camera vector — and
+        // since direction-from-camera barely changes as you zoom,
+        // the climate features appear pinned to screen space instead
+        // of locked to the planet surface.
+        let world_pos_render = world_h.xyz / world_h.w;
+        let camera_ecef = atmosphere_transforms.local_up
+            * atmosphere_transforms.camera_radius;
+        let world_pos = world_pos_render + camera_ecef;
 
         let map_uv = climate_equirectangular_uv(world_pos);
         if cloud.debug_mode == DBG_CLIMATE_COVERAGE {
-            // Read the baked climate map directly so the viz matches
-            // exactly what the runtime samples. R holds the
-            // *threshold* (low = cloudy); invert here to show
-            // propensity (bright = cloudy) to match user intuition.
-            let threshold = textureSampleLevel(
+            // The bake stores propensity directly in R (bright =
+            // cloudy), so the viz reads it as-is and matches the
+            // egui preview exactly.
+            let g = textureSampleLevel(
                 climate_map, cloud_sampler, map_uv, 0.0,
             ).r;
-            let g = 1.0 - threshold;
             return vec4<f32>(g, g, g, 0.0);
         } else {
+            // Raw topography heights are tiny — deep ocean = 0, sea
+            // level ≈ 0.05, typical land 0.05-0.20, only Tibet /
+            // Andes / Himalaya climb above 0.4. Displaying the raw
+            // value produces a near-black planet from any camera
+            // pointed at coastal terrain. Linear stretch
+            // `saturate(h * 5)` puts sea level at ~0.25 grey, typical
+            // land at ~0.5-1.0, and ocean stays cleanly black — the
+            // diagnostic question this viz answers is "where does
+            // the climate model think the coastlines are", and
+            // visible land vs. visible ocean is now obvious.
             let height = textureSampleLevel(
                 topography, cloud_sampler, map_uv, 0.0,
             ).r;
-            return vec4<f32>(height, height, height, 0.0);
+            let display = saturate(height * 5.0);
+            return vec4<f32>(display, display, display, 0.0);
         }
     }
     if cloud.debug_mode == DBG_SHADOW_MAP {

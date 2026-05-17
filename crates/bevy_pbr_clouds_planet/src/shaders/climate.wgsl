@@ -7,16 +7,23 @@
 // texture* — the structural physics is evaluated once per frame in
 // `climate_bake.wgsl` and packed into the texture's channels:
 //
-//   R = coverage threshold      (1.0 - cloud propensity), runtime input
-//   G = precipitation propensity (reserved — bake fills it for future
-//                                 rain-rendering / audio-trigger code)
-//   B = convection propensity    (reserved — cumulonimbus / lightning)
-//   A = 1.0                      (reserved)
+//   R = cloud propensity  (0..1, high = cloudy) — runtime + viz input
+//   G/B = mirrored R                            — egui preview shows
+//                                                 grayscale rather
+//                                                 than red-only
+//   A = 1.0                                      — reserved
 //
-// This means the runtime never recomputes climate per density tap;
-// each raymarch step is one bilinear texel fetch. The bake itself
-// runs once per frame at the map resolution (1024×512), which
-// amortises the per-texel physics across an entire frame's pixels.
+// The runtime converts R into a smoothstep coverage threshold via
+// `1.0 - R`. Storing propensity (not threshold) in R keeps the
+// preview, the on-globe overlay, and the conceptual model all
+// reading the same way: bright = cloudy.
+//
+// G/B will be repurposed later for precipitation / convection
+// propensity (rain renderer, cumulonimbus). When that lands the
+// egui display becomes a multi-channel RGB viz.
+//
+// The bake runs once per frame at the map resolution (1024×512),
+// amortising the per-texel physics across an entire frame's pixels.
 
 // ---------- Bake-side physics (called only by climate_bake.wgsl) ----------
 
@@ -161,9 +168,9 @@ fn climate_latitude_offset_deg(world_pos: vec3<f32>, itcz_center_deg: f32) -> f3
 // ---------- Runtime-side sampling (called by raymarch / shadow / composite) ----------
 
 // Sample the baked climate map at a world position. Returns the full
-// texel: R = coverage threshold, G = precipitation propensity,
-// B = convection propensity, A = reserved. Callers usually want the
-// R channel via `climate_coverage_at`.
+// texel — R = cloud propensity (high = cloudy), G/B mirror R for
+// grayscale display, A reserved. Callers usually want the R channel
+// via `climate_coverage_at`.
 fn climate_sample(
     climate_map: texture_2d<f32>,
     climate_sampler: sampler,
@@ -173,11 +180,11 @@ fn climate_sample(
     return textureSampleLevel(climate_map, climate_sampler, uv, 0.0);
 }
 
-// Looks up the climate coverage threshold at `world_pos` and blends
-// it into the layer's `base_coverage` by `latitude_strength` (the
-// per-camera "how much should the model override the layer's flat
-// coverage" knob). When `climate_enabled == 0` the threshold is
-// ignored and `base_coverage` passes through.
+// Looks up the climate cloud propensity at `world_pos`, converts it
+// to a coverage threshold (`1.0 - propensity`), and blends with the
+// layer's `base_coverage` by `latitude_strength`. When
+// `climate_enabled == 0` the threshold is ignored and `base_coverage`
+// passes through.
 fn climate_coverage_at(
     climate_map: texture_2d<f32>,
     climate_sampler: sampler,
@@ -189,6 +196,7 @@ fn climate_coverage_at(
     if climate_enabled == 0u {
         return base_coverage;
     }
-    let threshold = climate_sample(climate_map, climate_sampler, world_pos).r;
+    let propensity = climate_sample(climate_map, climate_sampler, world_pos).r;
+    let threshold = 1.0 - propensity;
     return saturate(mix(base_coverage, threshold, latitude_strength));
 }

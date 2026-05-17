@@ -5,10 +5,25 @@
 // the result into an Rgba8Unorm texture that the runtime cloud passes
 // (raymarch / shadow / composite) sample directly:
 //
-//   R = coverage threshold     (1.0 - cloud propensity) — runtime input
-//   G = precipitation propensity  (0..1) — reserved for rain renderer
-//   B = convection propensity     (0..1) — reserved for cumulonimbus
-//   A = 1.0                      (reserved)
+//   R = cloud propensity  (0..1, high = cloudy)  — runtime + viz input
+//   G = mirror of R                              — egui preview fills
+//                                                  this so the texture
+//                                                  displays as grayscale
+//                                                  rather than red-only
+//   B = mirror of R                              — same as G
+//   A = 1.0                                       — reserved
+//
+// The runtime samples R and converts to a smoothstep coverage
+// threshold via `1.0 - R`. Storing propensity (not threshold) in R
+// keeps the egui preview, the on-globe overlay, and the conceptual
+// model all reading the same way: bright = cloudy.
+//
+// G and B carry the same value for now so the egui display is
+// grayscale. When precipitation rendering / cumulonimbus convection
+// land they'll be repurposed (G = precip propensity, B = convection
+// propensity), at which point the egui display becomes a multi-
+// channel RGB viz and we'll add a tooltip / channel selector to
+// disambiguate.
 //
 // This is the single source of truth for climate. The runtime never
 // recomputes propensity per density tap; each raymarch step is one
@@ -76,6 +91,7 @@ fn main(@builtin(global_invocation_id) idx: vec3<u32>) {
     let ocean_prop = climate_ocean_propensity(
         height, cloud.climate_ocean_strength, ocean_factor,
     );
+
     // Continental monsoon enhancement. When the seasonal ITCZ has
     // shifted onto land (NH summer over India/Sahel; SH summer over
     // northern Australia), convection over the continental surface
@@ -98,23 +114,14 @@ fn main(@builtin(global_invocation_id) idx: vec3<u32>) {
     let noise_n = textureSampleLevel(noise_3d, noise_sampler, noise_uv, 0.0).r;
     let climate_noise = (noise_n - 0.5) * 2.0 * CLIMATE_NOISE_AMP;
 
-    // `lat_prop + ocean_prop` can go negative when subtropical
-    // suppression dominates over land's small ITCZ-flank bias — that
-    // collapses to 0 propensity (clear) under saturate.
+    // `saturate` collapses negative totals (subtropical suppression
+    // dominating) to 0 = clear sky.
     let propensity = saturate(lat_prop + ocean_prop + monsoon_prop + climate_noise);
 
-    // R: threshold for the runtime smoothstep — lower = more cloud.
-    // The raymarch evaluates `smoothstep(threshold - 0.1, threshold +
-    // 0.1, raw_noise)` so storing `1 - propensity` here means high
-    // propensity ⇒ low threshold ⇒ more cloud.
-    let threshold = 1.0 - propensity;
-
-    // G: precipitation propensity (reserved). Future precip renderer
-    // will sample this channel directly. Computing it here is free
-    // because the bake amortises across the full frame.
-    let precip = 0.0;
-    // B: convection propensity (reserved — cumulonimbus / lightning).
-    let convection = 0.0;
-
-    textureStore(output, vec2<i32>(idx.xy), vec4(threshold, precip, convection, 1.0));
+    // Mirror propensity into G and B so the egui preview displays as
+    // grayscale rather than red-only — see header comment.
+    textureStore(
+        output, vec2<i32>(idx.xy),
+        vec4(propensity, propensity, propensity, 1.0),
+    );
 }

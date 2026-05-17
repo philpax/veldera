@@ -1120,9 +1120,9 @@ pub(super) fn prepare_cloud_uniforms(
             shadow_intensity: cloud.shadow_intensity.max(0.0),
             pad_shadow_intensity: 0,
             // Climate sampling is only safe once a `CloudClimateMap`
-            // is bound — without it the runtime would sample the
-            // fallback white texture and read R=1 (max threshold = no
-            // clouds), washing the planet clear.
+            // is bound — without it the runtime samples the fallback
+            // white texture and reads R=1 (max propensity → threshold
+            // collapses to 0, planet caps out at fully overcast).
             climate_enabled: u32::from(cloud.climate.enabled && climate_map.is_some()),
             climate_latitude_strength: cloud.climate.latitude_strength.clamp(0.0, 1.0),
             climate_ocean_strength: cloud.climate.ocean_strength.clamp(0.0, 1.0),
