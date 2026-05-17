@@ -30,6 +30,7 @@ bevy = { version = "0.18.0", default-features = false, features = [
   "bevy_window",
   "bevy_winit",
   "mp3",
+  "png",
   "reflect_auto_register",
   "tonemapping_luts",
   "wav",
