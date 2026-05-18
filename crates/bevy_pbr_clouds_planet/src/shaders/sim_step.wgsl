@@ -1,23 +1,28 @@
 // Climate sim integration step.
 //
-// One Eulerian time step on the climate state field. Reads the
-// previous sim state (R = cloud propensity) and the climate bake's
-// forcing target (G channel of the climate map = denoised
-// climatology), writes the new sim state.
+// One Eulerian time step on the climate state field. The sim carries
+// two coupled scalar fields:
 //
-// Algorithm: semi-Lagrangian advection along an analytic Hadley /
-// Ferrel / polar wind field (with optional Coriolis deflection),
-// plus weak relaxation toward the forcing target:
+//   R = cloud propensity      (0..1; what the runtime samples)
+//   G = vorticity ω           (signed; drives a wind perturbation
+//                              via the streamfunction texture)
 //
-//   came_from = uv − wind * dt           (in UV space)
-//   advected  = sample(prev_state, came_from)
-//   target    = sample(climate_map, uv).g
-//   new_state = advected + (target − advected) * (dt / τ)
+// Algorithm per step:
+//   1. Compose the wind: analytic Hadley/Ferrel zonal + curl-noise
+//      meander + streamfunction curl (from ψ).
+//   2. Semi-Lagrangian backtrace: came_from = uv − wind * dt.
+//   3. Advect R AND G by sampling sim_prev at came_from.
+//   4. Relax R toward the climate forcing target (G channel of the
+//      climate bake), so the propensity field doesn't drift too far
+//      from climatology.
+//   5. Force G from the climate gradient × latitude-dependent
+//      Coriolis sign — baroclinic-style vorticity generation at
+//      climate fronts.
+//   6. Damp G weakly toward 0 (Rayleigh damping) — without this the
+//      sum of forcing accumulates indefinitely.
 //
-// When `cloud.sim_reinit == 1` we skip the integration entirely and
-// just copy the climate R channel (full propensity including the
-// noise term) into the sim state — this is how startup, backward
-// time-jumps, and "too far behind" snap-forwards initialise the sim.
+// When `cloud.sim_reinit == 1` we skip integration entirely and
+// reinitialise: R from climate.R, G = 0 (start with no vorticity).
 
 #import bevy_pbr_clouds_planet::types::CloudUniform;
 #import bevy_render::maths::PI;
@@ -31,6 +36,11 @@
 // output (separate from the ping-pong because egui can't track the
 // per-frame slot alternation).
 @group(0) @binding(5) var preview: texture_storage_2d<rgba8unorm, write>;
+// Streamfunction ψ from the previous frame's Poisson solve. The
+// sim step samples this to compute the wind perturbation
+// `wind_pert = curl(ψ) = (∂ψ/∂y, −∂ψ/∂x)`. One-frame lag is fine —
+// ψ evolves at sim-time scales, not real-time.
+@group(0) @binding(6) var streamfunction: texture_2d<f32>;
 
 // Equirectangular UV → latitude (degrees). v=0 is north pole, v=1 is
 // south pole; v=0.5 is the equator.
@@ -108,6 +118,36 @@ fn curl_noise_2d(p: vec2<f32>) -> vec2<f32> {
     return vec2<f32>(dn_dy, -dn_dx);
 }
 
+// Wind perturbation from the streamfunction ψ: `(∂ψ/∂y, −∂ψ/∂x)`.
+// Divergence-free by construction. Returned in m/s so we can feed
+// it through the same `wind_ms_to_uv_per_s` conversion as the
+// analytic wind — keeps the cos(lat) correction and unit-conversion
+// in one place.
+//
+// Finite differences over one texel; clamps v at the poles. ψ is
+// stored in texel-units (the Jacobi solve uses dx=1), so
+// `(psi_e − psi_w) / (2·texel)` has units of [ψ-value per UV].
+// `sim_vorticity_strength` is the m/s-per-(ψ-gradient-per-UV)
+// scale calibrated for typical ω equilibrium values (~1).
+fn streamfunction_curl_ms(uv: vec2<f32>, size: vec2<f32>) -> vec2<f32> {
+    let texel = 1.0 / size;
+    let u_e = vec2<f32>(fract(uv.x + texel.x), uv.y);
+    let u_w = vec2<f32>(fract(uv.x - texel.x + 1.0), uv.y);
+    let u_n = vec2<f32>(uv.x, clamp(uv.y - texel.y, 0.001, 0.999));
+    let u_s = vec2<f32>(uv.x, clamp(uv.y + texel.y, 0.001, 0.999));
+    let psi_e = textureSampleLevel(streamfunction, clamp_sampler, u_e, 0.0).r;
+    let psi_w = textureSampleLevel(streamfunction, clamp_sampler, u_w, 0.0).r;
+    let psi_n = textureSampleLevel(streamfunction, clamp_sampler, u_n, 0.0).r;
+    let psi_s = textureSampleLevel(streamfunction, clamp_sampler, u_s, 0.0).r;
+    let dpsi_du = (psi_e - psi_w) / (2.0 * texel.x);
+    let dpsi_dv = (psi_s - psi_n) / (2.0 * texel.y);
+    // Curl in the geographic frame. +x = east (+u); +y = north (−v).
+    // So d/dx = d/du, d/dy = −d/dv. Curl = (∂ψ/∂y, −∂ψ/∂x):
+    //   curl_x = −dpsi_dv
+    //   curl_y = −dpsi_du
+    return vec2<f32>(-dpsi_dv, -dpsi_du) * cloud.sim_vorticity_strength;
+}
+
 // Wind vector (m/s in tangent plane: x = east, y = north). Combines:
 //   - Analytic zonal wind (Hadley / Ferrel / polar cells)
 //   - Curl-noise meander — large-scale 2D-divergence-free perturbation
@@ -116,6 +156,9 @@ fn curl_noise_2d(p: vec2<f32>) -> vec2<f32> {
 //     static pattern.
 //   - Coriolis rotation (aesthetic) — rotates the wind vector by a
 //     small angle proportional to sin(lat) for cyclonic handedness.
+//
+// NOTE: the streamfunction-derived perturbation is added separately
+// in UV-per-second space (no need to convert m/s → UV/s twice).
 fn wind_at(uv: vec2<f32>) -> vec2<f32> {
     let lat_deg = uv_to_lat_deg(uv.y);
     let zonal = wind_zonal_ms(lat_deg) * cloud.sim_wind_speed;
@@ -164,8 +207,9 @@ fn main(@builtin(global_invocation_id) idx: vec3<u32>) {
     }
     let uv = (vec2<f32>(idx.xy) + 0.5) / vec2<f32>(size);
 
-    // Reinit path — straight copy of the climate R channel (full
-    // propensity with noise) into the sim state.
+    // Reinit path — straight copy of the climate R channel and zero
+    // vorticity. New cyclones grow over the next few hundred frames
+    // from forcing.
     if cloud.sim_reinit != 0u {
         let init_value = textureSampleLevel(climate_map, clamp_sampler, uv, 0.0).r;
         textureStore(sim_curr, vec2<i32>(idx.xy), vec4(init_value, 0.0, 0.0, 1.0));
@@ -177,37 +221,80 @@ fn main(@builtin(global_invocation_id) idx: vec3<u32>) {
         return;
     }
 
-    // Semi-Lagrangian backtrace.
+    // Compose the wind in m/s: analytic + curl-noise meander +
+    // streamfunction perturbation. Then convert m/s → UV/s once.
     let lat_deg = uv_to_lat_deg(uv.y);
-    let wind_ms = wind_at(uv);
-    let wind_uv_per_s = wind_ms_to_uv_per_s(wind_ms, lat_deg);
-    let displacement_uv = wind_uv_per_s * cloud.sim_dt_seconds;
-    // Wrap u (longitude is cyclic); clamp v (latitude is bounded).
+    let analytic_wind_ms = wind_at(uv);
+    let sf_pert_ms = streamfunction_curl_ms(uv, vec2<f32>(size));
+    let total_wind_ms = analytic_wind_ms + sf_pert_ms;
+    let total_uv_per_s = wind_ms_to_uv_per_s(total_wind_ms, lat_deg);
+    var displacement_uv = total_uv_per_s * cloud.sim_dt_seconds;
+
+    // CFL safety clamp: bound per-step displacement to at most half a
+    // texel in each axis. Bilinear semi-Lagrangian is unconditionally
+    // STABLE for any displacement, but it isn't unconditionally
+    // ACCURATE — once a step jumps multiple texels, transport mixes
+    // far-apart values via bilinear and the field smears. This clamp
+    // means even a misbehaving forcing term (e.g. vorticity blowing
+    // up at climate fronts) can't shred the field; the sim falls
+    // behind the prescribed wind but stays well-behaved.
+    let max_disp = vec2<f32>(0.5, 0.5) / vec2<f32>(size);
+    displacement_uv = clamp(displacement_uv, -max_disp, max_disp);
+
+    // Semi-Lagrangian backtrace.
     let came_from = vec2<f32>(
         fract(uv.x - displacement_uv.x + 1.0),
         clamp(uv.y - displacement_uv.y, 0.001, 0.999),
     );
 
-    let advected = textureSampleLevel(sim_prev, clamp_sampler, came_from, 0.0).r;
+    // Advect BOTH propensity and vorticity from the previous state.
+    let advected = textureSampleLevel(sim_prev, clamp_sampler, came_from, 0.0);
+    let prop_advected = advected.r;
+    let vort_advected = advected.g;
 
-    // Forcing target is the climate map's G channel — the denoised
-    // climatology. Pulls the sim back toward "structurally plausible"
-    // without locking in any specific noise blotches. (`target` is a
-    // reserved WGSL keyword — `forcing` here.)
+    // Propensity relaxation toward the denoised climate target. The
+    // exponential form is stable for any positive dt/τ.
     let forcing = textureSampleLevel(climate_map, clamp_sampler, uv, 0.0).g;
-
-    // Relax. Implicit-Euler-stable for any positive dt/τ ratio:
-    //   new = advected + (forcing − advected) * (1 − exp(−dt/τ))
-    // The exponential form keeps the relax magnitude in [0, 1] no
-    // matter how large dt gets relative to τ — important for the
-    // time-jump catch-up case where dt might be many minutes.
     let relax_alpha = 1.0 - exp(-cloud.sim_dt_seconds / max(cloud.sim_tau_seconds, 1.0));
-    let new_state = advected + (forcing - advected) * relax_alpha;
+    let new_prop = prop_advected + (forcing - prop_advected) * relax_alpha;
 
-    textureStore(sim_curr, vec2<i32>(idx.xy), vec4(new_state, 0.0, 0.0, 1.0));
+    // Vorticity forcing — baroclinic generation from climate
+    // gradient. Real Earth: density gradients at jet streams + the
+    // Coriolis sign produce cyclonic structures. We use the
+    // climate's propensity gradient (cloudy regions correlate with
+    // low pressure / convergence) × sin(lat) (sets the cyclonic
+    // sign per hemisphere) as a simple proxy.
+    let texel = 1.0 / vec2<f32>(size);
+    let g_e = textureSampleLevel(climate_map, clamp_sampler,
+        vec2<f32>(fract(uv.x + texel.x), uv.y), 0.0).g;
+    let g_w = textureSampleLevel(climate_map, clamp_sampler,
+        vec2<f32>(fract(uv.x - texel.x + 1.0), uv.y), 0.0).g;
+    let g_n = textureSampleLevel(climate_map, clamp_sampler,
+        vec2<f32>(uv.x, clamp(uv.y - texel.y, 0.001, 0.999)), 0.0).g;
+    let g_s = textureSampleLevel(climate_map, clamp_sampler,
+        vec2<f32>(uv.x, clamp(uv.y + texel.y, 0.001, 0.999)), 0.0).g;
+    // Magnitude of the climate gradient — places where the climate
+    // changes sharply (e.g., the edge of an ITCZ band) are where
+    // vorticity ought to be generated. We use the per-TEXEL change
+    // (NOT per-UV) so the magnitude lands in O(0.1-1), avoiding
+    // FP16 saturation of the accumulated ω field at sharp fronts.
+    let grad_x = (g_e - g_w) * 0.5;
+    let grad_y = (g_s - g_n) * 0.5;
+    let grad_mag = sqrt(grad_x * grad_x + grad_y * grad_y);
+    let coriolis_sign = sin(lat_deg * PI / 180.0);
+    let forcing_rate = grad_mag * coriolis_sign * cloud.sim_vorticity_forcing;
+    let new_vort_pre_damp = vort_advected + forcing_rate * cloud.sim_dt_seconds;
+
+    // Rayleigh damping — exponential decay toward 0 on the
+    // configured time scale. Same implicit form as the propensity
+    // relaxation but toward a value of 0 instead of `forcing`.
+    let damp_alpha = 1.0 - exp(-cloud.sim_dt_seconds / max(cloud.sim_vorticity_damping_seconds, 1.0));
+    let new_vort = new_vort_pre_damp * (1.0 - damp_alpha);
+
+    textureStore(sim_curr, vec2<i32>(idx.xy), vec4(new_prop, new_vort, 0.0, 1.0));
     textureStore(
         preview,
         vec2<i32>(idx.xy),
-        vec4(new_state, new_state, new_state, 1.0),
+        vec4(new_prop, new_prop, new_prop, 1.0),
     );
 }

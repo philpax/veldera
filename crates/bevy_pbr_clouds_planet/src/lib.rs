@@ -97,6 +97,7 @@ impl Plugin for CloudsPlanetPlugin {
         embedded_asset!(app, "shaders/cloud_god_rays.wgsl");
         embedded_asset!(app, "shaders/climate_bake.wgsl");
         embedded_asset!(app, "shaders/sim_step.wgsl");
+        embedded_asset!(app, "shaders/poisson_jacobi.wgsl");
 
         app.add_plugins((
             ExtractComponentPlugin::<CloudLayers>::default(),
@@ -186,6 +187,10 @@ impl Plugin for CloudsPlanetPlugin {
                 Core3d,
                 CloudNode::SimStep,
             )
+            .add_render_graph_node::<ViewNodeRunner<node::CloudPoissonJacobiNode>>(
+                Core3d,
+                CloudNode::PoissonJacobi,
+            )
             .add_render_graph_edges(
                 Core3d,
                 (
@@ -203,6 +208,13 @@ impl Plugin for CloudsPlanetPlugin {
                     // ShadowBake / Raymarch (which sample the sim
                     // state).
                     CloudNode::SimStep,
+                    // Poisson Jacobi iteration on the vorticity-
+                    // derived streamfunction. Reads the sim's
+                    // just-updated ω (G channel), writes ψ for the
+                    // NEXT frame's sim step. Runs after SimStep so
+                    // it sees the freshest ω; the streamfunction's
+                    // one-frame lag is invisible at sim time scales.
+                    CloudNode::PoissonJacobi,
                     // Shadow bake runs before the main opaque pass so
                     // its result is ready when shadow apply samples
                     // it later.
@@ -632,6 +644,24 @@ pub struct ClimateSimSettings {
     /// or under high time acceleration. Falling persistently behind
     /// triggers a reinit; this knob trades latency for framerate.
     pub max_steps_per_frame: u32,
+    /// Phase 2 — vorticity-streamfunction. Master toggle for the
+    /// dynamic-flow component.
+    pub vorticity_enabled: bool,
+    /// Scale on the streamfunction-derived wind perturbation. 0 =
+    /// vorticity has no effect on the flow (sim reverts to pure
+    /// advection-relaxation); larger values let cyclonic structures
+    /// dominate the analytic background.
+    pub vorticity_strength: f32,
+    /// Rate at which the climate gradient generates new vorticity,
+    /// signed by the Coriolis parameter so cyclones form with the
+    /// correct hemispheric handedness. Units roughly "ω/s per unit
+    /// climate gradient". Crank to get more weather; lower for
+    /// quieter sims.
+    pub vorticity_forcing: f32,
+    /// Rayleigh damping timescale for vorticity. Without this, the
+    /// accumulated forcing would drive ω to infinity. Real GCMs use
+    /// ~1 day for momentum damping; we use a similar default.
+    pub vorticity_damping_seconds: f32,
 }
 
 impl Default for ClimateSimSettings {
@@ -644,6 +674,24 @@ impl Default for ClimateSimSettings {
             wind_meander: 0.5,
             coriolis: true,
             max_steps_per_frame: 4,
+            vorticity_enabled: true,
+            // The streamfunction-derived wind perturbation runs
+            // through `wind_ms_to_uv_per_s` (same path as the
+            // analytic wind), so this knob is in m/s-per-ψ-gradient
+            // units. At equilibrium ω≈1 the Poisson solve produces
+            // ψ peaks of ~100 in our discrete units, gradient ~50k
+            // per UV — 0.0002 lands the resulting perturbation in
+            // the ~10 m/s range, comparable to the analytic trades.
+            vorticity_strength: 0.0002,
+            // Forcing rate (per-second). Calibrated against the
+            // texel-scale climate gradient and the damping τ so
+            // that equilibrium ω lands at ~1 (FP16-safe). The
+            // climate gradient is taken in per-texel units (not
+            // per-UV) so this number is sane.
+            vorticity_forcing: 0.00008,
+            // 1 day — same order as Held-Suarez momentum damping
+            // (k_s = 1/day at the surface).
+            vorticity_damping_seconds: 86_400.0,
         }
     }
 }

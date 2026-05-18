@@ -55,6 +55,12 @@ pub enum CloudNode {
     /// forcing target, before ShadowBake/Raymarch so they sample the
     /// updated sim state.
     SimStep,
+    /// One Jacobi iteration of the Poisson solve for the streamfunction
+    /// ψ that backs the vorticity-driven wind perturbation. Runs
+    /// AFTER SimStep — reads the just-updated vorticity in sim state
+    /// G channel, writes the new ψ for the next frame's sim step to
+    /// sample.
+    PoissonJacobi,
 }
 
 #[derive(Default)]
@@ -538,6 +544,60 @@ impl ViewNode for CloudSimStepNode {
         if !SIM_STEP_LOGGED.swap(true, Ordering::Relaxed) {
             info!(
                 "cloud sim step first dispatch ({}×{} workgroups)",
+                groups_x, groups_y
+            );
+        }
+        Ok(())
+    }
+}
+
+static POISSON_LOGGED: AtomicBool = AtomicBool::new(false);
+
+/// One Jacobi iteration of the streamfunction Poisson solve. Skipped
+/// silently if the sim's bind groups aren't ready.
+#[derive(Default)]
+pub(super) struct CloudPoissonJacobiNode;
+
+impl ViewNode for CloudPoissonJacobiNode {
+    type ViewQuery = (
+        Read<CloudLayers>,
+        Read<CloudBindGroups>,
+        Read<DynamicUniformIndex<GpuCloudUniform>>,
+    );
+
+    fn run(
+        &self,
+        _graph: &mut RenderGraphContext,
+        render_context: &mut RenderContext,
+        (_layer, bind_groups, cloud_offset): QueryItem<Self::ViewQuery>,
+        world: &World,
+    ) -> Result<(), NodeRunError> {
+        let Some(bind_group) = bind_groups.poisson_jacobi.as_ref() else {
+            return Ok(());
+        };
+        let pipelines = world.resource::<CloudPipelines>();
+        let pipeline_cache = world.resource::<PipelineCache>();
+        let Some(pipeline) = pipeline_cache.get_compute_pipeline(pipelines.poisson_jacobi) else {
+            return Ok(());
+        };
+
+        let mut pass =
+            render_context
+                .command_encoder()
+                .begin_compute_pass(&ComputePassDescriptor {
+                    label: Some("cloud_poisson_jacobi"),
+                    timestamp_writes: None,
+                });
+        pass.set_pipeline(pipeline);
+        pass.set_bind_group(0, bind_group, &[cloud_offset.index()]);
+
+        const WORKGROUP_SIZE: u32 = 8;
+        let groups_x = crate::CLIMATE_MAP_WIDTH.div_ceil(WORKGROUP_SIZE);
+        let groups_y = crate::CLIMATE_MAP_HEIGHT.div_ceil(WORKGROUP_SIZE);
+        pass.dispatch_workgroups(groups_x, groups_y, 1);
+        if !POISSON_LOGGED.swap(true, Ordering::Relaxed) {
+            info!(
+                "cloud poisson jacobi first dispatch ({}×{} workgroups)",
                 groups_x, groups_y
             );
         }

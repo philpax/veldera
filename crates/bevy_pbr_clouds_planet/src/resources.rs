@@ -217,7 +217,17 @@ pub struct GpuCloudUniform {
     /// Coriolis enable flag. 1 = apply Coriolis deflection in the wind
     /// field; 0 = no Coriolis. Debug knob — leave on by default.
     pub sim_coriolis_enabled: u32,
-    pub pad_sim: u32,
+    /// Scale on the streamfunction-derived wind perturbation. Larger
+    /// = stronger cyclonic flow on top of the analytic wind.
+    pub sim_vorticity_strength: f32,
+    /// Rate at which the climate gradient generates new vorticity
+    /// (Coriolis-signed baroclinic forcing).
+    pub sim_vorticity_forcing: f32,
+    /// Rayleigh damping timescale for vorticity, seconds. Without
+    /// this, accumulated forcing would push ω → ∞ over time.
+    pub sim_vorticity_damping_seconds: f32,
+    pub pad_sim_0: u32,
+    pub pad_sim_1: u32,
 }
 
 /// Per-view storage texture written by the raymarch pass and read by the
@@ -288,6 +298,29 @@ impl CloudSimTextures {
     /// "current" state).
     pub fn current_view(&self, frame_index: u32) -> &TextureView {
         self.write_view(frame_index)
+    }
+}
+
+/// Ping-pong textures for the streamfunction ψ computed each frame
+/// from the sim's vorticity field. Same resolution as the sim state
+/// (climate-map sized). Single useful channel (R), but uses
+/// `Rgba16Float` because R16Float storage is patchily supported on
+/// WebGPU.
+#[derive(Component)]
+pub struct CloudStreamfunctionTextures {
+    #[allow(dead_code)]
+    pub textures: [Texture; 2],
+    pub views: [TextureView; 2],
+    #[allow(dead_code)]
+    pub size: UVec2,
+}
+
+impl CloudStreamfunctionTextures {
+    pub fn read_view(&self, frame_index: u32) -> &TextureView {
+        &self.views[(frame_index & 1) as usize]
+    }
+    pub fn write_view(&self, frame_index: u32) -> &TextureView {
+        &self.views[((frame_index + 1) & 1) as usize]
     }
 }
 
@@ -389,6 +422,7 @@ pub struct CloudBindGroupLayouts {
     pub shadow_bake: BindGroupLayoutDescriptor,
     pub climate_bake: BindGroupLayoutDescriptor,
     pub sim_step: BindGroupLayoutDescriptor,
+    pub poisson_jacobi: BindGroupLayoutDescriptor,
     pub shadow_apply: BindGroupLayoutDescriptor,
     pub god_rays: BindGroupLayoutDescriptor,
     pub fullscreen_shader: FullscreenShader,
@@ -660,6 +694,33 @@ impl FromWorld for CloudBindGroupLayouts {
                             StorageTextureAccess::WriteOnly,
                         ),
                     ),
+                    // Streamfunction ψ from the Poisson solve (read,
+                    // sampled).
+                    (6, texture_2d(TextureSampleType::default())),
+                ),
+            ),
+        );
+
+        let poisson_jacobi = BindGroupLayoutDescriptor::new(
+            "cloud_poisson_jacobi_bind_group_layout",
+            &BindGroupLayoutEntries::with_indices(
+                ShaderStages::COMPUTE,
+                (
+                    (0, uniform_buffer::<GpuCloudUniform>(true)),
+                    // Sim state — read ω (G channel).
+                    (1, texture_2d(TextureSampleType::default())),
+                    // Clamp-to-edge sampler.
+                    (2, sampler(SamplerBindingType::Filtering)),
+                    // ψ previous iterate (read).
+                    (3, texture_2d(TextureSampleType::default())),
+                    // ψ current iterate (write).
+                    (
+                        4,
+                        texture_storage_2d(
+                            TextureFormat::Rgba16Float,
+                            StorageTextureAccess::WriteOnly,
+                        ),
+                    ),
                 ),
             ),
         );
@@ -673,6 +734,7 @@ impl FromWorld for CloudBindGroupLayouts {
             god_rays,
             climate_bake,
             sim_step,
+            poisson_jacobi,
             fullscreen_shader: world.resource::<FullscreenShader>().clone(),
             composite_fragment: load_embedded_asset!(world, "shaders/cloud_composite.wgsl"),
             shadow_apply_fragment: load_embedded_asset!(world, "shaders/cloud_shadow_apply.wgsl"),
@@ -690,6 +752,7 @@ pub struct CloudPipelines {
     pub shadow_bake: CachedComputePipelineId,
     pub climate_bake: CachedComputePipelineId,
     pub sim_step: CachedComputePipelineId,
+    pub poisson_jacobi: CachedComputePipelineId,
 }
 
 impl FromWorld for CloudPipelines {
@@ -737,12 +800,21 @@ impl FromWorld for CloudPipelines {
             ..Default::default()
         });
 
+        let poisson_shader = load_embedded_asset!(world, "shaders/poisson_jacobi.wgsl");
+        let poisson_jacobi = pipeline_cache.queue_compute_pipeline(ComputePipelineDescriptor {
+            label: Some("cloud_poisson_jacobi_pipeline".into()),
+            layout: vec![layouts.poisson_jacobi.clone()],
+            shader: poisson_shader,
+            ..Default::default()
+        });
+
         Self {
             raymarch,
             temporal,
             shadow_bake,
             climate_bake,
             sim_step,
+            poisson_jacobi,
         }
     }
 }
@@ -928,6 +1000,10 @@ pub(crate) struct CloudBindGroups {
     /// Optional: only present when both the climate map AND the sim
     /// ping-pong textures are ready.
     pub sim_step: Option<BindGroup>,
+    /// Optional: one Jacobi iteration of the Poisson solve. Built
+    /// when both sim and streamfunction ping-pong textures are
+    /// available.
+    pub poisson_jacobi: Option<BindGroup>,
 }
 
 /// Per-camera, render-world component holding the previous frame's
@@ -1338,7 +1414,19 @@ pub(super) fn prepare_cloud_uniforms(
             sim_wind_speed: cloud.sim.wind_speed.max(0.0),
             sim_wind_meander: cloud.sim.wind_meander.clamp(0.0, 1.0),
             sim_coriolis_enabled: u32::from(cloud.sim.coriolis),
-            pad_sim: 0,
+            sim_vorticity_strength: if cloud.sim.vorticity_enabled {
+                cloud.sim.vorticity_strength.max(0.0)
+            } else {
+                0.0
+            },
+            sim_vorticity_forcing: if cloud.sim.vorticity_enabled {
+                cloud.sim.vorticity_forcing.max(0.0)
+            } else {
+                0.0
+            },
+            sim_vorticity_damping_seconds: cloud.sim.vorticity_damping_seconds.max(60.0),
+            pad_sim_0: 0,
+            pad_sim_1: 0,
         });
 
         commands.entity(entity).insert(CloudPrevFrame {
@@ -1458,40 +1546,57 @@ pub(super) fn prepare_cloud_history_textures(
 /// climate-map resolution. One-shot: once allocated, the textures
 /// persist for the camera's lifetime (sim state must carry over
 /// frame-to-frame for the simulation to be stateful).
+#[allow(clippy::type_complexity)]
 pub(super) fn prepare_cloud_sim_textures(
     mut commands: Commands,
-    layers: Query<(Entity, Option<&CloudSimTextures>), With<CloudLayers>>,
+    layers: Query<
+        (
+            Entity,
+            Option<&CloudSimTextures>,
+            Option<&CloudStreamfunctionTextures>,
+        ),
+        With<CloudLayers>,
+    >,
     render_device: Res<RenderDevice>,
 ) {
-    for (entity, existing) in &layers {
-        if existing.is_some() {
-            continue;
-        }
-        let size = UVec2::new(crate::CLIMATE_MAP_WIDTH, crate::CLIMATE_MAP_HEIGHT);
-        let make = |label: &'static str| {
-            let texture = render_device.create_texture(&TextureDescriptor {
-                label: Some(label),
-                size: size.to_extents(),
-                mip_level_count: 1,
-                sample_count: 1,
-                dimension: TextureDimension::D2,
-                format: TextureFormat::Rgba16Float,
-                usage: TextureUsages::STORAGE_BINDING | TextureUsages::TEXTURE_BINDING,
-                view_formats: &[],
-            });
-            let view = texture.create_view(&TextureViewDescriptor {
-                label: Some(label),
-                ..Default::default()
-            });
-            (texture, view)
-        };
-        let (tex0, view0) = make("cloud_sim_state_0");
-        let (tex1, view1) = make("cloud_sim_state_1");
-        commands.entity(entity).insert(CloudSimTextures {
-            textures: [tex0, tex1],
-            views: [view0, view1],
-            size,
+    let size = UVec2::new(crate::CLIMATE_MAP_WIDTH, crate::CLIMATE_MAP_HEIGHT);
+    let make_rgba16f = |label: &'static str| {
+        let texture = render_device.create_texture(&TextureDescriptor {
+            label: Some(label),
+            size: size.to_extents(),
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: TextureDimension::D2,
+            format: TextureFormat::Rgba16Float,
+            usage: TextureUsages::STORAGE_BINDING | TextureUsages::TEXTURE_BINDING,
+            view_formats: &[],
         });
+        let view = texture.create_view(&TextureViewDescriptor {
+            label: Some(label),
+            ..Default::default()
+        });
+        (texture, view)
+    };
+
+    for (entity, existing_sim, existing_sf) in &layers {
+        if existing_sim.is_none() {
+            let (tex0, view0) = make_rgba16f("cloud_sim_state_0");
+            let (tex1, view1) = make_rgba16f("cloud_sim_state_1");
+            commands.entity(entity).insert(CloudSimTextures {
+                textures: [tex0, tex1],
+                views: [view0, view1],
+                size,
+            });
+        }
+        if existing_sf.is_none() {
+            let (tex0, view0) = make_rgba16f("cloud_streamfunction_0");
+            let (tex1, view1) = make_rgba16f("cloud_streamfunction_1");
+            commands.entity(entity).insert(CloudStreamfunctionTextures {
+                textures: [tex0, tex1],
+                views: [view0, view1],
+                size,
+            });
+        }
     }
 }
 
@@ -1540,6 +1645,7 @@ pub(super) fn prepare_cloud_bind_groups(
             Option<&CloudSimTextures>,
             Option<&CloudSimState>,
             Option<&crate::CloudSimStatePreview>,
+            Option<&CloudStreamfunctionTextures>,
         ),
         With<CloudLayers>,
     >,
@@ -1604,6 +1710,7 @@ pub(super) fn prepare_cloud_bind_groups(
         sim_textures,
         sim_state,
         sim_preview_handle,
+        streamfunction_textures,
     ) in &layers
     {
         // Resolve topography texture view: if the camera has the
@@ -1768,9 +1875,8 @@ pub(super) fn prepare_cloud_bind_groups(
             });
 
         // Sim step bind group — needs the climate map, the sim
-        // ping-pong textures, AND the display preview image all to
-        // be GPU-ready. Otherwise we skip the sim entirely this
-        // frame (the previous sim state stays untouched).
+        // ping-pong textures, the display preview image, AND the
+        // streamfunction texture all GPU-ready. Otherwise skip.
         let sim_step = sim_textures.and_then(|sim_tex| {
             let climate_view = climate_map_handle
                 .and_then(|m| gpu_images.get(&m.0))
@@ -1778,6 +1884,7 @@ pub(super) fn prepare_cloud_bind_groups(
             let preview_view = sim_preview_handle
                 .and_then(|p| gpu_images.get(&p.0))
                 .map(|gi| &gi.texture_view)?;
+            let sf_tex = streamfunction_textures?;
             let frame_idx = sim_state.map_or(0, |s| s.frame_index);
             Some(render_device.create_bind_group(
                 "cloud_sim_step_bind_group",
@@ -1789,6 +1896,32 @@ pub(super) fn prepare_cloud_bind_groups(
                     (3, sim_tex.read_view(frame_idx)),
                     (4, sim_tex.write_view(frame_idx)),
                     (5, preview_view),
+                    // Read ψ from the previous Poisson iterate.
+                    // The Poisson node writes to sf_tex.write_view
+                    // each frame, so this frame's "read" is what the
+                    // previous frame's Poisson just wrote.
+                    (6, sf_tex.read_view(frame_idx)),
+                )),
+            ))
+        });
+
+        // Poisson Jacobi bind group — one iteration per real frame.
+        // Reads ω from the sim's CURRENT slot (just written above by
+        // the sim step in the same frame), reads ψ from the previous
+        // slot, writes ψ to the current slot.
+        let poisson_jacobi = sim_textures.and_then(|sim_tex| {
+            let sf_tex = streamfunction_textures?;
+            let frame_idx = sim_state.map_or(0, |s| s.frame_index);
+            Some(render_device.create_bind_group(
+                "cloud_poisson_jacobi_bind_group",
+                &pipeline_cache.get_bind_group_layout(&layouts.poisson_jacobi),
+                &BindGroupEntries::with_indices((
+                    (0, cloud_binding.clone()),
+                    // Sim state slot the sim_step JUST WROTE.
+                    (1, sim_tex.write_view(frame_idx)),
+                    (2, &sampler.clamp),
+                    (3, sf_tex.read_view(frame_idx)),
+                    (4, sf_tex.write_view(frame_idx)),
                 )),
             ))
         });
@@ -1802,6 +1935,7 @@ pub(super) fn prepare_cloud_bind_groups(
             god_rays,
             climate_bake,
             sim_step,
+            poisson_jacobi,
         });
     }
     Ok(())

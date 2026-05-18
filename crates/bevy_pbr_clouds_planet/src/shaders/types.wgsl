@@ -108,5 +108,11 @@ struct CloudUniform {
     sim_wind_speed: f32,
     sim_wind_meander: f32,
     sim_coriolis_enabled: u32,
-    pad_sim: u32,
+    // Phase 2 — vorticity-streamfunction. See `ClimateSimSettings`
+    // for the user-facing knobs these mirror.
+    sim_vorticity_strength: f32,
+    sim_vorticity_forcing: f32,
+    sim_vorticity_damping_seconds: f32,
+    pad_sim_0: u32,
+    pad_sim_1: u32,
 }

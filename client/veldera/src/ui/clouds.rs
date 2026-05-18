@@ -249,6 +249,60 @@ fn render_climate(ui: &mut egui::Ui, cloud: &mut CloudLayers, image_ids: &Atmosp
              = smoother evolution; larger = bigger jumps per step. \
              60 s default.",
         );
+
+        ui.label("Vorticity (Phase 2):");
+        ui.checkbox(&mut sim_state.vorticity_enabled, "Vorticity-streamfunction enabled")
+            .on_hover_text(
+                "Carries a vorticity field alongside the propensity \
+                 field; solves a Poisson equation each frame for a \
+                 streamfunction whose curl perturbs the wind. Enables \
+                 spontaneous cyclonic structures (mid-latitude lows, \
+                 tropical waves) on top of the analytic flow.",
+            );
+        ui.add_enabled_ui(sim_state.vorticity_enabled, |ui| {
+            ui.add(
+                egui::Slider::new(&mut sim_state.vorticity_strength, 0.0..=0.002)
+                    .logarithmic(true)
+                    .text("vorticity strength"),
+            )
+            .on_hover_text(
+                "Scale on the streamfunction-derived wind perturbation \
+                 (m/s per ψ-gradient unit). Default 2e-4 lands the \
+                 perturbation ~comparable to the trades when ω is at \
+                 equilibrium. A safety CFL clamp in the shader bounds \
+                 the per-step displacement so very high values just \
+                 cap rather than blowing the sim up.",
+            );
+            ui.add(
+                egui::Slider::new(&mut sim_state.vorticity_forcing, 0.0..=0.001)
+                    .logarithmic(true)
+                    .text("vorticity forcing"),
+            )
+            .on_hover_text(
+                "Rate at which the climate gradient generates new \
+                 vorticity (Coriolis-signed). Calibrated against the \
+                 damping τ so default 8e-5 gives equilibrium ω ~1 \
+                 (FP16-safe). Crank for more dramatic cyclogenesis; \
+                 too high saturates the field.",
+            );
+            let mut damping_hours = sim_state.vorticity_damping_seconds / 3600.0;
+            if ui
+                .add(
+                    egui::Slider::new(&mut damping_hours, 1.0..=240.0)
+                        .logarithmic(true)
+                        .text("damping (hours)"),
+                )
+                .on_hover_text(
+                    "Rayleigh damping timescale for vorticity. Real \
+                     GCMs use ~1 day. Lower = faster decay (less \
+                     persistent weather); higher = vorticity \
+                     accumulates over longer windows.",
+                )
+                .changed()
+            {
+                sim_state.vorticity_damping_seconds = damping_hours * 3600.0;
+            }
+        });
     });
 
     ui.separator();
