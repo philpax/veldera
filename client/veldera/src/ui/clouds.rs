@@ -251,14 +251,17 @@ fn render_climate(ui: &mut egui::Ui, cloud: &mut CloudLayers, image_ids: &Atmosp
         );
 
         ui.label("Vorticity (Phase 2):");
-        ui.checkbox(&mut sim_state.vorticity_enabled, "Vorticity-streamfunction enabled")
-            .on_hover_text(
-                "Carries a vorticity field alongside the propensity \
+        ui.checkbox(
+            &mut sim_state.vorticity_enabled,
+            "Vorticity-streamfunction enabled",
+        )
+        .on_hover_text(
+            "Carries a vorticity field alongside the propensity \
                  field; solves a Poisson equation each frame for a \
                  streamfunction whose curl perturbs the wind. Enables \
                  spontaneous cyclonic structures (mid-latitude lows, \
                  tropical waves) on top of the analytic flow.",
-            );
+        );
         ui.add_enabled_ui(sim_state.vorticity_enabled, |ui| {
             ui.add(
                 egui::Slider::new(&mut sim_state.vorticity_strength, 0.0..=0.002)

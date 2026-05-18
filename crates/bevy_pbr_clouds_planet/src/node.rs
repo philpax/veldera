@@ -495,7 +495,6 @@ impl ViewNode for CloudClimateBakeNode {
     }
 }
 
-
 static SIM_STEP_LOGGED: AtomicBool = AtomicBool::new(false);
 
 /// Climate sim integration step. Skipped silently for cameras

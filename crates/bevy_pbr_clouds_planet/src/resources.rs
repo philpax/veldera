@@ -1303,13 +1303,11 @@ pub(super) fn prepare_cloud_uniforms(
         // field, camera-independent.
         let world_time_now = f64::from(world_time);
         let sim_dt = f64::from(cloud.sim.dt_seconds.max(1.0));
-        let max_catchup_seconds =
-            f64::from(cloud.sim.max_steps_per_frame.max(1)) * sim_dt * 240.0;
+        let max_catchup_seconds = f64::from(cloud.sim.max_steps_per_frame.max(1)) * sim_dt * 240.0;
         let prev_sim = sim_state_prev.copied().unwrap_or_default();
         let world_delta = world_time_now - prev_sim.sim_world_time;
-        let needs_reinit = !prev_sim.initialised
-            || world_delta < 0.0
-            || world_delta > max_catchup_seconds;
+        let needs_reinit =
+            !prev_sim.initialised || world_delta < 0.0 || world_delta > max_catchup_seconds;
         // Effective dt for this step: clamp to sim_dt so a slow real-
         // frame at high time-acceleration doesn't take a huge advection
         // step in one go (Phase 1 runs one sim step per real frame; the
