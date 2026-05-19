@@ -239,6 +239,14 @@ fn main() {
         ..Default::default()
     }));
 
+    // GPU/CPU timing instrumentation for every pass marked with
+    // `pass_span` / `time_span` (the cloud + atmosphere crates do this
+    // throughout). Results land in `DiagnosticsStore` under
+    // `render/{pass_name}/*` paths; the Diagnostics tab in the debug UI
+    // surfaces them. Timestamp queries are real on Vulkan/DX12, CPU-only
+    // fallback on Metal/WebGPU.
+    app.add_plugins(bevy::render::diagnostic::RenderDiagnosticsPlugin);
+
     // Parse launch parameters (CLI args on native, URL query params on WASM).
     let params = launch_params::parse();
     app.insert_resource(params);

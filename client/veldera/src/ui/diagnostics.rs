@@ -129,6 +129,10 @@ pub(super) fn render_diagnostics_tab(
 
     ui.separator();
 
+    render_gpu_pass_table(ui, &diag.diagnostics);
+
+    ui.separator();
+
     // Debug visualization toggle.
     let mut debug_enabled = is_physics_debug_enabled(&diag.config_store);
     if ui
@@ -162,6 +166,105 @@ pub(super) fn render_diagnostics_tab(
         // Clear history when not in a vehicle.
         diag.vehicle_history.clear();
     }
+}
+
+/// Render the GPU-pass timing table.
+///
+/// Reads the `render/{pass}/elapsed_gpu` and `render/{pass}/elapsed_cpu`
+/// diagnostics published by `RenderDiagnosticsPlugin` (which wraps the
+/// timestamp-query plumbing for `pass_span` / `time_span` calls in our
+/// render nodes). Sorted by GPU time descending so the hot pass sits at
+/// the top.
+///
+/// Falls back gracefully when timestamps aren't available: on
+/// Metal/WebGPU/WebGL2 only CPU times are recorded, and the GPU column
+/// shows `—`.
+fn render_gpu_pass_table(ui: &mut egui::Ui, diagnostics: &DiagnosticsStore) {
+    use std::collections::BTreeMap;
+
+    // (gpu_ms, cpu_ms) keyed by pass name. BTreeMap so iteration is
+    // alphabetically stable; we re-sort by GPU time below for display.
+    let mut rows: BTreeMap<String, (Option<f64>, Option<f64>)> = BTreeMap::new();
+    for diag in diagnostics.iter() {
+        let path = diag.path().as_str();
+        // We only care about the render-pass entries our nodes emit:
+        // `render/<pass>/elapsed_gpu` or `render/<pass>/elapsed_cpu`.
+        let Some(rest) = path.strip_prefix("render/") else {
+            continue;
+        };
+        let (pass, field) = match rest.rsplit_once('/') {
+            Some((p, f)) => (p, f),
+            None => continue,
+        };
+        let entry = rows.entry(pass.to_string()).or_default();
+        let value = diag.smoothed();
+        match field {
+            "elapsed_gpu" => entry.0 = value,
+            "elapsed_cpu" => entry.1 = value,
+            _ => {}
+        }
+    }
+
+    if rows.is_empty() {
+        ui.label("GPU passes: (no render diagnostics available yet)");
+        return;
+    }
+
+    ui.label("GPU passes (smoothed, ms):");
+    let total_gpu: f64 = rows.values().filter_map(|(g, _)| *g).sum();
+    let total_cpu: f64 = rows.values().filter_map(|(_, c)| *c).sum();
+
+    // Sort by GPU time desc; passes with no GPU value get pushed to the
+    // bottom but still listed.
+    let mut sorted: Vec<_> = rows.into_iter().collect();
+    sorted.sort_by(|(_, (g_a, _)), (_, (g_b, _))| {
+        g_b.unwrap_or(0.0)
+            .partial_cmp(&g_a.unwrap_or(0.0))
+            .unwrap_or(std::cmp::Ordering::Equal)
+    });
+
+    TableBuilder::new(ui)
+        .id_salt("gpu_passes_table")
+        .column(Column::exact(200.0))
+        .column(Column::exact(70.0))
+        .column(Column::exact(70.0))
+        .header(18.0, |mut row| {
+            row.col(|ui| {
+                ui.strong("Pass");
+            });
+            row.col(|ui| {
+                ui.strong("GPU ms");
+            });
+            row.col(|ui| {
+                ui.strong("CPU ms");
+            });
+        })
+        .body(|mut body| {
+            for (name, (gpu, cpu)) in sorted {
+                body.row(16.0, |mut row| {
+                    row.col(|ui| {
+                        ui.label(name);
+                    });
+                    row.col(|ui| {
+                        ui.label(gpu.map_or_else(|| "—".to_string(), |v| format!("{v:.3}")));
+                    });
+                    row.col(|ui| {
+                        ui.label(cpu.map_or_else(|| "—".to_string(), |v| format!("{v:.3}")));
+                    });
+                });
+            }
+            body.row(16.0, |mut row| {
+                row.col(|ui| {
+                    ui.strong("Total");
+                });
+                row.col(|ui| {
+                    ui.strong(format!("{total_gpu:.3}"));
+                });
+                row.col(|ui| {
+                    ui.strong(format!("{total_cpu:.3}"));
+                });
+            });
+        });
 }
 
 /// Render vehicle diagnostics section.

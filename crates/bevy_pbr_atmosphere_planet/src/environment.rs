@@ -33,6 +33,7 @@ use bevy::{
     math::{Quat, UVec2},
     pbr::{GpuLights, LightMeta, ViewLightsUniformOffset},
     render::{
+        diagnostic::RecordDiagnostics,
         extract_component::{ComponentUniforms, DynamicUniformIndex, ExtractComponent},
         render_asset::RenderAssets,
         render_graph::{NodeRunError, RenderGraphContext, ViewNode},
@@ -350,6 +351,7 @@ impl ViewNode for EnvironmentNode {
             return Ok(());
         };
 
+        let diagnostics = render_context.diagnostic_recorder();
         let mut pass =
             render_context
                 .command_encoder()
@@ -357,6 +359,7 @@ impl ViewNode for EnvironmentNode {
                     label: Some("atmosphere_environment_pass"),
                     timestamp_writes: None,
                 });
+        let span = diagnostics.pass_span(&mut pass, "atmosphere_environment");
 
         pass.set_pipeline(environment_pipeline);
         pass.set_bind_group(
@@ -372,6 +375,7 @@ impl ViewNode for EnvironmentNode {
         );
 
         pass.dispatch_workgroups(env_map.size.x / 8, env_map.size.y / 8, 6);
+        span.end(&mut pass);
 
         Ok(())
     }

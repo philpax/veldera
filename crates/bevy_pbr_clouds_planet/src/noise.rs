@@ -21,6 +21,7 @@ use bevy::{
     image::ToExtents,
     math::UVec3,
     render::{
+        diagnostic::RecordDiagnostics,
         render_graph::{Node, NodeRunError, RenderGraphContext},
         render_resource::{binding_types::*, *},
         renderer::{RenderContext, RenderDevice},
@@ -181,6 +182,7 @@ impl Node for NoiseBakeNode {
             &BindGroupEntries::with_indices(((0, texture_view),)),
         );
 
+        let diagnostics = render_context.diagnostic_recorder();
         let mut pass =
             render_context
                 .command_encoder()
@@ -188,10 +190,12 @@ impl Node for NoiseBakeNode {
                     label: Some("cloud_noise_bake"),
                     timestamp_writes: None,
                 });
+        let span = diagnostics.pass_span(&mut pass, "cloud_noise_bake");
         pass.set_pipeline(compute_pipeline);
         pass.set_bind_group(0, &bind_group, &[]);
         let groups = NOISE_RES / NOISE_WORKGROUP_SIZE;
         pass.dispatch_workgroups(groups, groups, groups);
+        span.end(&mut pass);
         drop(pass);
 
         bake_state.mark_done();

@@ -5,6 +5,7 @@ use bevy::{
     pbr::ViewLightsUniformOffset,
     render::{
         camera::ExtractedCamera,
+        diagnostic::RecordDiagnostics,
         extract_component::DynamicUniformIndex,
         render_graph::{NodeRunError, RenderGraphContext, RenderLabel, ViewNode},
         render_resource::{ComputePassDescriptor, PipelineCache, RenderPassDescriptor},
@@ -102,6 +103,7 @@ impl ViewNode for CloudRaymarchNode {
             return Ok(());
         };
 
+        let diagnostics = render_context.diagnostic_recorder();
         let mut pass =
             render_context
                 .command_encoder()
@@ -109,6 +111,7 @@ impl ViewNode for CloudRaymarchNode {
                     label: Some("cloud_raymarch"),
                     timestamp_writes: None,
                 });
+        let span = diagnostics.pass_span(&mut pass, "cloud_raymarch");
         pass.set_pipeline(raymarch_pipeline);
         pass.set_bind_group(
             0,
@@ -132,6 +135,7 @@ impl ViewNode for CloudRaymarchNode {
                 groups_x, groups_y, textures.raymarch_size.x, textures.raymarch_size.y
             );
         }
+        span.end(&mut pass);
         Ok(())
     }
 }
@@ -165,6 +169,7 @@ impl ViewNode for CloudTemporalNode {
             return Ok(());
         };
 
+        let diagnostics = render_context.diagnostic_recorder();
         let mut pass =
             render_context
                 .command_encoder()
@@ -172,6 +177,7 @@ impl ViewNode for CloudTemporalNode {
                     label: Some("cloud_temporal"),
                     timestamp_writes: None,
                 });
+        let span = diagnostics.pass_span(&mut pass, "cloud_temporal");
         pass.set_pipeline(temporal_pipeline);
         pass.set_bind_group(
             0,
@@ -190,6 +196,7 @@ impl ViewNode for CloudTemporalNode {
         if !TEMPORAL_LOGGED.swap(true, Ordering::Relaxed) {
             info!("cloud temporal first dispatch");
         }
+        span.end(&mut pass);
         Ok(())
     }
 }
@@ -229,6 +236,7 @@ impl ViewNode for CloudCompositeNode {
             return Ok(());
         };
 
+        let diagnostics = render_context.diagnostic_recorder();
         let mut pass = render_context.begin_tracked_render_pass(RenderPassDescriptor {
             label: Some("cloud_composite"),
             color_attachments: &[Some(view_target.get_color_attachment())],
@@ -236,6 +244,7 @@ impl ViewNode for CloudCompositeNode {
             timestamp_writes: None,
             occlusion_query_set: None,
         });
+        let span = diagnostics.pass_span(pass.wgpu_pass(), "cloud_composite");
 
         if let Some(viewport) = camera.viewport.as_ref() {
             pass.set_camera_viewport(viewport);
@@ -255,6 +264,7 @@ impl ViewNode for CloudCompositeNode {
         if !COMPOSITE_LOGGED.swap(true, Ordering::Relaxed) {
             info!("cloud composite first draw");
         }
+        span.end(pass.wgpu_pass());
         Ok(())
     }
 }
@@ -286,6 +296,7 @@ impl ViewNode for CloudShadowBakeNode {
             return Ok(());
         };
 
+        let diagnostics = render_context.diagnostic_recorder();
         let mut pass =
             render_context
                 .command_encoder()
@@ -293,6 +304,7 @@ impl ViewNode for CloudShadowBakeNode {
                     label: Some("cloud_shadow_bake"),
                     timestamp_writes: None,
                 });
+        let span = diagnostics.pass_span(&mut pass, "cloud_shadow_bake");
         pass.set_pipeline(bake_pipeline);
         pass.set_bind_group(
             0,
@@ -310,6 +322,7 @@ impl ViewNode for CloudShadowBakeNode {
         if !SHADOW_BAKE_LOGGED.swap(true, Ordering::Relaxed) {
             info!("cloud shadow bake first dispatch ({}² workgroups)", groups);
         }
+        span.end(&mut pass);
         Ok(())
     }
 }
@@ -342,6 +355,7 @@ impl ViewNode for CloudShadowApplyNode {
             return Ok(());
         };
 
+        let diagnostics = render_context.diagnostic_recorder();
         let mut pass = render_context.begin_tracked_render_pass(RenderPassDescriptor {
             label: Some("cloud_shadow_apply"),
             color_attachments: &[Some(view_target.get_color_attachment())],
@@ -349,6 +363,7 @@ impl ViewNode for CloudShadowApplyNode {
             timestamp_writes: None,
             occlusion_query_set: None,
         });
+        let span = diagnostics.pass_span(pass.wgpu_pass(), "cloud_shadow_apply");
 
         if let Some(viewport) = camera.viewport.as_ref() {
             pass.set_camera_viewport(viewport);
@@ -364,6 +379,7 @@ impl ViewNode for CloudShadowApplyNode {
         if !SHADOW_APPLY_LOGGED.swap(true, Ordering::Relaxed) {
             info!("cloud shadow apply first draw");
         }
+        span.end(pass.wgpu_pass());
         Ok(())
     }
 }
@@ -407,6 +423,7 @@ impl ViewNode for CloudGodRaysNode {
             return Ok(());
         };
 
+        let diagnostics = render_context.diagnostic_recorder();
         let mut pass = render_context.begin_tracked_render_pass(RenderPassDescriptor {
             label: Some("cloud_god_rays"),
             color_attachments: &[Some(view_target.get_color_attachment())],
@@ -414,6 +431,7 @@ impl ViewNode for CloudGodRaysNode {
             timestamp_writes: None,
             occlusion_query_set: None,
         });
+        let span = diagnostics.pass_span(pass.wgpu_pass(), "cloud_god_rays");
 
         if let Some(viewport) = camera.viewport.as_ref() {
             pass.set_camera_viewport(viewport);
@@ -434,6 +452,7 @@ impl ViewNode for CloudGodRaysNode {
         if !GOD_RAYS_LOGGED.swap(true, Ordering::Relaxed) {
             info!("cloud god rays first draw");
         }
+        span.end(pass.wgpu_pass());
         Ok(())
     }
 }
@@ -470,6 +489,7 @@ impl ViewNode for CloudClimateBakeNode {
             return Ok(());
         };
 
+        let diagnostics = render_context.diagnostic_recorder();
         let mut pass =
             render_context
                 .command_encoder()
@@ -477,6 +497,7 @@ impl ViewNode for CloudClimateBakeNode {
                     label: Some("cloud_climate_bake"),
                     timestamp_writes: None,
                 });
+        let span = diagnostics.pass_span(&mut pass, "cloud_climate_bake");
         pass.set_pipeline(bake_pipeline);
         pass.set_bind_group(0, bind_group, &[cloud_offset.index()]);
 
@@ -491,6 +512,7 @@ impl ViewNode for CloudClimateBakeNode {
                 groups_x, groups_y
             );
         }
+        span.end(&mut pass);
         Ok(())
     }
 }
@@ -526,6 +548,7 @@ impl ViewNode for CloudSimStepNode {
             return Ok(());
         };
 
+        let diagnostics = render_context.diagnostic_recorder();
         let mut pass =
             render_context
                 .command_encoder()
@@ -533,6 +556,7 @@ impl ViewNode for CloudSimStepNode {
                     label: Some("cloud_sim_step"),
                     timestamp_writes: None,
                 });
+        let span = diagnostics.pass_span(&mut pass, "cloud_sim_step");
         pass.set_pipeline(sim_pipeline);
         pass.set_bind_group(0, bind_group, &[cloud_offset.index()]);
 
@@ -546,6 +570,7 @@ impl ViewNode for CloudSimStepNode {
                 groups_x, groups_y
             );
         }
+        span.end(&mut pass);
         Ok(())
     }
 }
@@ -580,6 +605,7 @@ impl ViewNode for CloudPoissonJacobiNode {
             return Ok(());
         };
 
+        let diagnostics = render_context.diagnostic_recorder();
         let mut pass =
             render_context
                 .command_encoder()
@@ -587,6 +613,7 @@ impl ViewNode for CloudPoissonJacobiNode {
                     label: Some("cloud_poisson_jacobi"),
                     timestamp_writes: None,
                 });
+        let span = diagnostics.pass_span(&mut pass, "cloud_poisson_jacobi");
         pass.set_pipeline(pipeline);
         pass.set_bind_group(0, bind_group, &[cloud_offset.index()]);
 
@@ -600,6 +627,7 @@ impl ViewNode for CloudPoissonJacobiNode {
                 groups_x, groups_y
             );
         }
+        span.end(&mut pass);
         Ok(())
     }
 }
