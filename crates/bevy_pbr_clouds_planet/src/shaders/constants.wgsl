@@ -58,6 +58,20 @@ const TERMINATOR_WRAP_INTERCEPT: f32 = 0.1;
 // `saturate(CLOUD_RAW_MAX - threshold)`.
 const CLOUD_RAW_MAX: f32 = 0.7;
 
+// Per-sample shading morph distances, in metres along the camera
+// ray. Each primary step's `t` selects between `shade_full` (close)
+// and `shade_simple` (far): pure full below `_NEAR_M`, mix in
+// between, pure simple above `_FAR_M`.
+//
+// Driving this per-sample (not per-camera-altitude) means a
+// low-altitude flight looking at the horizon gets the cheap path on
+// the distant cloud band while keeping detailed cone-shadow +
+// multi-scatter on the near cells, and an orbital view automatically
+// gets the cheap path on every sample (since every sample is hundreds
+// of km away).
+const SHADE_MORPH_NEAR_M: f32 = 20000.0;
+const SHADE_MORPH_FAR_M: f32 = 80000.0;
+
 // Wrenninge multi-scatter octave coefficients. Each successive
 // octave scales the sun-direction optical depth, contribution, and
 // HG eccentricity by these factors. Tuned for

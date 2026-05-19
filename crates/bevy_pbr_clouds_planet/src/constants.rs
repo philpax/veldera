@@ -7,17 +7,6 @@
 
 use glam::Vec3;
 
-/// Camera altitude (metres above the planet surface) at which the
-/// per-pixel volumetric raymarch starts blending toward the cheap
-/// analytic 2D cloud sample. Below this, the raymarch runs at full
-/// quality.
-pub const ORBITAL_BLEND_START_ALT_M: f32 = 50_000.0;
-
-/// Camera altitude (metres) at which the analytic 2D path fully
-/// replaces the raymarch. Above this, the raymarch is skipped
-/// entirely.
-pub const ORBITAL_BLEND_FULL_ALT_M: f32 = 150_000.0;
-
 /// Camera-position delta (metres) above which the temporal history
 /// buffer is invalidated. Tracks teleports / large jumps; smaller
 /// motions reproject normally.

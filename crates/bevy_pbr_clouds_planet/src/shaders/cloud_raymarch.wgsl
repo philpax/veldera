@@ -43,6 +43,7 @@ fn depth_to_camera_dist(uv: vec2<f32>, depth: f32) -> f32 {
     EARTH_SHINE_MULTIPLIER,
     TWILIGHT_BAND_LO, TWILIGHT_BAND_HI,
     TERMINATOR_WRAP_SLOPE, TERMINATOR_WRAP_INTERCEPT,
+    SHADE_MORPH_NEAR_M, SHADE_MORPH_FAR_M,
     WRENNINGE_ATTENUATION, WRENNINGE_CONTRIBUTION, WRENNINGE_ECCENTRICITY,
 };
 
@@ -152,13 +153,13 @@ fn main(@builtin(global_invocation_id) idx: vec3<u32>) {
     let local_up = atmosphere_transforms.local_up;
     let cam_world = local_up * r_cam;
 
-    // Altitude-driven shading morph. The density integration (cloud
-    // *shape*) is always the same — at orbital altitudes only the
-    // per-sample lighting model changes, from full cone-shadow +
-    // multi-scatter to a cheap Lambert + ambient. Same noise samples
-    // get fed through, so the silhouette stays coherent across the
-    // transition; only contrast / shadow detail morphs out.
-    let orbital_blend = cloud.orbital_blend;
+    // Per-sample shading morph (LOD by distance). The density
+    // integration is invariant; only the per-step lighting model
+    // changes — close samples get the full cone-shadow + Wrenninge
+    // path, far samples get Lambert + earth-shine. Same noise samples
+    // get fed through at every distance, so the silhouette stays
+    // coherent; only contrast / shadow detail morphs out as you look
+    // at distant clouds. See `SHADE_MORPH_*_M` constants for the band.
 
     // Sample camera depth so we can clip the cloud march to terrain. The
     // depth buffer is the MSAA target the main pass writes to; we read
@@ -273,21 +274,25 @@ fn main(@builtin(global_invocation_id) idx: vec3<u32>) {
             continue;
         }
 
-        // Per-sample shading. Choose the model based on altitude:
-        // pure simple at full orbital (no cone shadow, no octaves),
-        // pure full at sub-orbital, and a blend through the
-        // transition band. Both functions take the same `sample_pos`
-        // — the density field (cloud shape) is invariant, only the
-        // lighting model morphs.
+        // Per-sample shading. Choose the model from this sample's
+        // distance from the camera: pure full close-in (cone shadow +
+        // Wrenninge octaves resolve per-cell detail), pure simple far
+        // out (Lambert + earth-shine for sub-pixel cells), mixed in
+        // between. Density (cloud *shape*) is sampled the same way at
+        // every distance — only lighting morphs.
+        let distance_t = saturate(
+            (t - SHADE_MORPH_NEAR_M) / (SHADE_MORPH_FAR_M - SHADE_MORPH_NEAR_M),
+        );
+        let morph = distance_t * distance_t * (3.0 - 2.0 * distance_t);
         var radiance: vec3<f32>;
-        if orbital_blend >= 0.999 {
+        if morph >= 0.999 {
             radiance = shade_simple(sample_pos);
-        } else if orbital_blend <= 0.001 {
+        } else if morph <= 0.001 {
             radiance = shade_full(sample_pos, sample_pos_local, ray_dir_ws, density);
         } else {
             let full = shade_full(sample_pos, sample_pos_local, ray_dir_ws, density);
             let simple = shade_simple(sample_pos);
-            radiance = mix(full, simple, orbital_blend);
+            radiance = mix(full, simple, morph);
         }
 
         // Beer's law extinction across the segment.

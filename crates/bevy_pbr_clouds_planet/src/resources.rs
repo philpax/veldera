@@ -33,9 +33,7 @@ use bevy_pbr_atmosphere_planet::{
 
 use crate::{
     CloudCameraEcef, CloudLayers, MAX_CLOUD_LAYERS,
-    constants::{
-        ORBITAL_BLEND_FULL_ALT_M, ORBITAL_BLEND_START_ALT_M, REC709_LUMA, TELEPORT_THRESHOLD_M,
-    },
+    constants::{REC709_LUMA, TELEPORT_THRESHOLD_M},
     noise::NoiseTextures,
 };
 
@@ -112,12 +110,7 @@ pub struct GpuCloudUniform {
     /// (that's CPU-accumulated into `wind_offset` to keep precision
     /// bounded over long sessions).
     pub time_seconds: f32,
-    /// Smoothstepped 0..1 from sub-orbital to fully-orbital camera
-    /// altitude. The cloud raymarch shader blends from full per-pixel
-    /// volumetric raymarch (0) to a cheap analytic 2D sample on the
-    /// cloud sphere (1). See [`prepare_cloud_uniforms`] for the
-    /// altitude band.
-    pub orbital_blend: f32,
+    pub pad_top1: u32,
     pub pad_top2: u32,
 
     /// Previous frame's `clip_from_world` matrix. Used by the temporal
@@ -1098,42 +1091,15 @@ pub(super) fn prepare_cloud_uniforms(
             || sph_cam.local_up.normalize_or_zero().as_dvec3() * f64::from(sph_cam.camera_radius),
             |c| c.0,
         );
-        let camera_altitude_m =
-            (camera_ecef_f64.length() - f64::from(atmosphere.bottom_radius)) as f32;
 
-        // Orbital LOD: above ~50 km, each screen pixel covers many
-        // cloud cells and the per-pixel volumetric raymarch is wasted —
-        // its self-shadow / multi-scatter detail is sub-pixel. The
-        // shader blends to a cheap analytic 2D sample on the cloud
-        // sphere over this band; at full orbital it skips the raymarch
-        // entirely.
-        //
-        // `light_steps` and `octaves` stay at the quality-tier base
-        // value across the whole sub-orbital range. They're the
-        // load-bearing knobs for the close-up satellite-imagery look:
-        // - Cutting `light_steps` makes adjacent primary samples
-        //   disagree on cone-shadow magnitude, fracturing the cloud
-        //   into stipple the temporal pass can't smooth.
-        // - Cutting `octaves` collapses the diffuse fill that lifts
-        //   shadowed cloud interiors, so partial-coverage regions
-        //   contrast-pop and read as noisy holes.
-        // Both were tested as orbital-floored and produced the chunky
-        // brown stipple over deserts in the analytic-transition zone.
-        // The hybrid does the work instead.
-        //
-        // `max_primary_steps` is scaled by `orbital_blend` so the
-        // transition band (where both raymarch + analytic run) doesn't
-        // double-pay. Once `orbital_blend = 1` the raymarch is skipped
-        // entirely, so the value at that end is academic.
-        let orbital_blend = {
-            let t = ((camera_altitude_m - ORBITAL_BLEND_START_ALT_M)
-                / (ORBITAL_BLEND_FULL_ALT_M - ORBITAL_BLEND_START_ALT_M))
-                .clamp(0.0, 1.0);
-            t * t * (3.0 - 2.0 * t)
-        };
-        let primary_factor = 1.0 - orbital_blend * 0.6;
-        let max_primary_steps =
-            ((quality.primary_steps() as f32 * primary_factor).round() as u32).max(32);
+        // Cost control runs entirely per-sample in the shader now: a
+        // distance-driven morph picks `shade_full` for close samples
+        // and `shade_simple` for far ones. No camera-altitude branch
+        // here — orbital views automatically get the cheap path on
+        // every sample (since every sample is hundreds of km away),
+        // and low-altitude flights still get the cheap path on the
+        // distant cloud band toward the horizon.
+        let max_primary_steps = quality.primary_steps();
         let light_steps = quality.light_steps();
         let octaves = quality.octaves();
 
@@ -1348,7 +1314,7 @@ pub(super) fn prepare_cloud_uniforms(
             full_size,
             layer_count: layer_count as u32,
             time_seconds: world_time,
-            orbital_blend,
+            pad_top1: 0,
             pad_top2: 0,
             prev_clip_from_world: prev.clip_from_world,
             prev_camera_ecef: prev.camera_ecef,
