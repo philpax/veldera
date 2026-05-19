@@ -130,7 +130,16 @@ fn short_system_name(full: &str) -> String {
 }
 
 fn render_render(ui: &mut egui::Ui, diagnostics: &DiagnosticsStore) {
-    let mut rows: BTreeMap<String, (Option<f64>, Option<f64>)> = BTreeMap::new();
+    // A pass that ran once at startup (e.g. cloud_noise_bake) writes
+    // a single measurement and never updates the diagnostic again.
+    // Bevy's `smoothed()` keeps returning that one stale value
+    // forever — there are no zero samples to decay it. Filter by
+    // the most recent measurement's age so we display "(startup)"
+    // for anything that hasn't reported a sample recently.
+    let now = std::time::Instant::now();
+    const STALE_THRESHOLD: std::time::Duration = std::time::Duration::from_millis(500);
+    // (gpu_ms, cpu_ms, stale_flag).
+    let mut rows: BTreeMap<String, (Option<f64>, Option<f64>, bool)> = BTreeMap::new();
     for diag in diagnostics.iter() {
         let path = diag.path().as_str();
         let Some(rest) = path.strip_prefix("render/") else {
@@ -141,11 +150,18 @@ fn render_render(ui: &mut egui::Ui, diagnostics: &DiagnosticsStore) {
         };
         let entry = rows.entry(pass.to_string()).or_default();
         let value = diag.smoothed();
+        let is_stale = diag
+            .measurement()
+            .is_none_or(|m| now.saturating_duration_since(m.time) > STALE_THRESHOLD);
         match field {
             "elapsed_gpu" => entry.0 = value,
             "elapsed_cpu" => entry.1 = value,
             _ => {}
         }
+        // A pass is stale only if BOTH of its measurements are stale.
+        // The `_gpu` and `_cpu` halves are written at the same time,
+        // so in practice both halves agree.
+        entry.2 = entry.2 || is_stale;
     }
 
     if rows.is_empty() {
@@ -153,8 +169,19 @@ fn render_render(ui: &mut egui::Ui, diagnostics: &DiagnosticsStore) {
         return;
     }
 
-    let total_gpu: f64 = rows.values().filter_map(|(g, _)| *g).sum();
-    let total_cpu: f64 = rows.values().filter_map(|(_, c)| *c).sum();
+    // Totals exclude stale passes — they aren't actually running this
+    // frame, so summing their startup cost into "this frame's budget"
+    // would be misleading.
+    let total_gpu: f64 = rows
+        .values()
+        .filter(|(_, _, stale)| !stale)
+        .filter_map(|(g, _, _)| *g)
+        .sum();
+    let total_cpu: f64 = rows
+        .values()
+        .filter(|(_, _, stale)| !stale)
+        .filter_map(|(_, c, _)| *c)
+        .sum();
     ui.label(format!(
         "Per-pass GPU / CPU time (smoothed). Total GPU: {total_gpu:.3} ms, total CPU: {total_cpu:.3} ms",
     ));
@@ -164,11 +191,16 @@ fn render_render(ui: &mut egui::Ui, diagnostics: &DiagnosticsStore) {
     );
     ui.add_space(2.0);
 
+    // Sort: non-stale by GPU ms desc, then stale (one-shot) rows
+    // bottom-of-table so they don't dominate the active hot list.
     let mut sorted: Vec<_> = rows.into_iter().collect();
-    sorted.sort_by(|(_, (g_a, _)), (_, (g_b, _))| {
-        g_b.unwrap_or(0.0)
+    sorted.sort_by(|(_, (g_a, _, sa)), (_, (g_b, _, sb))| match (sa, sb) {
+        (false, true) => std::cmp::Ordering::Less,
+        (true, false) => std::cmp::Ordering::Greater,
+        _ => g_b
+            .unwrap_or(0.0)
             .partial_cmp(&g_a.unwrap_or(0.0))
-            .unwrap_or(std::cmp::Ordering::Equal)
+            .unwrap_or(std::cmp::Ordering::Equal),
     });
 
     egui::ScrollArea::vertical()
@@ -191,20 +223,32 @@ fn render_render(ui: &mut egui::Ui, diagnostics: &DiagnosticsStore) {
                     });
                 })
                 .body(|mut body| {
-                    for (name, (gpu, cpu)) in sorted {
+                    for (name, (gpu, cpu, stale)) in sorted {
                         body.row(16.0, |mut row| {
                             row.col(|ui| {
-                                ui.label(name);
+                                if stale {
+                                    ui.weak(format!("{name} (startup)"));
+                                } else {
+                                    ui.label(name);
+                                }
                             });
                             row.col(|ui| {
-                                ui.label(
-                                    gpu.map_or_else(|| "—".to_string(), |v| format!("{v:.3}")),
-                                );
+                                let text =
+                                    gpu.map_or_else(|| "—".to_string(), |v| format!("{v:.3}"));
+                                if stale {
+                                    ui.weak(text);
+                                } else {
+                                    ui.label(text);
+                                }
                             });
                             row.col(|ui| {
-                                ui.label(
-                                    cpu.map_or_else(|| "—".to_string(), |v| format!("{v:.3}")),
-                                );
+                                let text =
+                                    cpu.map_or_else(|| "—".to_string(), |v| format!("{v:.3}"));
+                                if stale {
+                                    ui.weak(text);
+                                } else {
+                                    ui.label(text);
+                                }
                             });
                         });
                     }
