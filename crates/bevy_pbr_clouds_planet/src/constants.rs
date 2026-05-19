@@ -49,6 +49,25 @@ pub const SHADOW_FOOTPRINT_M: f32 = 100_000.0;
 /// motions reproject normally.
 pub const TELEPORT_THRESHOLD_M: f32 = 5_000.0;
 
+// ---- Primary-steps altitude LOD ------------------------------------
+
+/// Camera altitude (metres) below which the primary-march step count
+/// stays at the quality tier's base value. Above this, the count
+/// smoothly ramps down toward [`PRIMARY_STEPS_LOD_FLOOR`].
+pub const PRIMARY_STEPS_LOD_START_ALT_M: f32 = 10_000.0;
+
+/// Camera altitude (metres) above which the primary-march step count
+/// is at its [`PRIMARY_STEPS_LOD_FLOOR`] multiple of the base. The
+/// ramp from [`PRIMARY_STEPS_LOD_START_ALT_M`] to here is
+/// smoothstepped.
+pub const PRIMARY_STEPS_LOD_FULL_ALT_M: f32 = 200_000.0;
+
+/// Floor multiplier on `quality.primary_steps()` at full orbital
+/// altitude. Lower values (tested 0.25) collapse `dt` to ~2.5 km,
+/// coarse enough that one dense sample dominates a ray's colour and
+/// the whole cloud cap reads as a brown wash at sunset.
+pub const PRIMARY_STEPS_LOD_FLOOR: f32 = 0.6;
+
 // ---- Lighting / colour ---------------------------------------------
 
 /// Rec.709 luminance coefficients. Used by the fog-colour and

@@ -34,6 +34,7 @@ use bevy_pbr_atmosphere_planet::{
 use crate::{
     CloudCameraEcef, CloudLayers, MAX_CLOUD_LAYERS,
     constants::{
+        PRIMARY_STEPS_LOD_FLOOR, PRIMARY_STEPS_LOD_FULL_ALT_M, PRIMARY_STEPS_LOD_START_ALT_M,
         REC709_LUMA, SHADOW_FOOTPRINT_M, SHADOW_MAP_SIZE, TELEPORT_THRESHOLD_M,
     },
     noise::NoiseTextures,
@@ -1081,15 +1082,31 @@ pub(super) fn prepare_cloud_uniforms(
             || sph_cam.local_up.normalize_or_zero().as_dvec3() * f64::from(sph_cam.camera_radius),
             |c| c.0,
         );
+        let camera_altitude_m =
+            (camera_ecef_f64.length() - f64::from(atmosphere.bottom_radius)) as f32;
 
-        // Cost control runs entirely per-sample in the shader now: a
-        // distance-driven morph picks `shade_full` for close samples
-        // and `shade_simple` for far ones. No camera-altitude branch
-        // here — orbital views automatically get the cheap path on
-        // every sample (since every sample is hundreds of km away),
-        // and low-altitude flights still get the cheap path on the
-        // distant cloud band toward the horizon.
-        let max_primary_steps = quality.primary_steps();
+        // Per-sample cost (`shade_full` vs `shade_simple`) is driven
+        // purely by distance from the camera in the shader, so a
+        // low-altitude horizon view still pays full shading on near
+        // cells and cheap shading on distant ones.
+        //
+        // *Sampling density* is a separate concern. At orbital the
+        // cloud-shell chord stretches to ~200 km; running base
+        // `primary_steps` over that span means the per-step density-
+        // sample cost (still incurred even on empty steps for the
+        // early-out check) dominates. Smoothly scale steps down to
+        // [`PRIMARY_STEPS_LOD_FLOOR`] of the base by orbital altitude
+        // so the empty-step tax is roughly constant per frame
+        // regardless of camera altitude.
+        let primary_lod = {
+            let t = ((camera_altitude_m - PRIMARY_STEPS_LOD_START_ALT_M)
+                / (PRIMARY_STEPS_LOD_FULL_ALT_M - PRIMARY_STEPS_LOD_START_ALT_M))
+                .clamp(0.0, 1.0);
+            let s = t * t * (3.0 - 2.0 * t);
+            1.0 - s * (1.0 - PRIMARY_STEPS_LOD_FLOOR)
+        };
+        let max_primary_steps =
+            ((quality.primary_steps() as f32 * primary_lod).round() as u32).max(32);
         let light_steps = quality.light_steps();
         let octaves = quality.octaves();
 
