@@ -19,9 +19,9 @@ use tracing::info;
 
 use crate::{
     CloudLayers,
+    constants::SHADOW_MAP_SIZE,
     resources::{
         CloudBindGroups, CloudPipelines, CloudRenderPipelineIds, CloudTextures, GpuCloudUniform,
-        SHADOW_MAP_SIZE,
     },
 };
 

@@ -29,17 +29,12 @@ use bevy::{
 };
 use tracing::info;
 
-/// 3D noise texture resolution. Schneider's reference uses 128³ (8 MB at
-/// Rgba8Unorm); we use 256³ (64 MB) for finer cloud-cell detail at the
-/// same world-tile size, which is the dominant lever on apparent cloud
-/// resolution from any sane camera distance. Cost is GPU memory only —
-/// the bake is one-shot at startup so the extra compute is invisible.
-/// For WASM/low quality we could drop to 128³ or 64³ in a later phase.
-pub const NOISE_RES: u32 = 256;
+pub use crate::constants::NOISE_RES;
 
 /// Workgroup size for the noise compute shader. Total invocations per
 /// dispatch are `(NOISE_RES / WORKGROUP_SIZE)^3`. 4×4×4 = 64 threads/group is
-/// a safe portable choice across desktop and WebGPU.
+/// a safe portable choice across desktop and WebGPU. Must match the
+/// `@workgroup_size` in `noise_bake.wgsl`.
 pub const NOISE_WORKGROUP_SIZE: u32 = 4;
 
 /// Resource that owns the baked 3D noise texture and its view.

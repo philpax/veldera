@@ -33,7 +33,9 @@ use bevy_pbr_atmosphere_planet::{
 
 use crate::{
     CloudCameraEcef, CloudLayers, MAX_CLOUD_LAYERS,
-    constants::{REC709_LUMA, TELEPORT_THRESHOLD_M},
+    constants::{
+        REC709_LUMA, SHADOW_FOOTPRINT_M, SHADOW_MAP_SIZE, TELEPORT_THRESHOLD_M,
+    },
     noise::NoiseTextures,
 };
 
@@ -258,18 +260,6 @@ pub struct CloudShadowTexture {
     #[allow(dead_code)]
     pub size: u32,
 }
-
-/// Side-length of the cloud-shadow texture, in pixels. ~1k square strikes
-/// a good balance between detail and bake cost — at the default 200 km
-/// footprint this gives ~200 m per texel.
-pub const SHADOW_MAP_SIZE: u32 = 1024;
-
-/// Half the world-space side length of the shadow map's footprint, in
-/// metres. The map covers a 2× this square in the local tangent plane,
-/// centred on the camera. 100 km half-side = 200 km × 200 km square,
-/// comfortably bigger than what the user can see at any reasonable
-/// camera altitude.
-pub const SHADOW_FOOTPRINT_M: f32 = 100_000.0;
 
 /// Persistent ping-pong sim-state textures for the climate sim.
 ///

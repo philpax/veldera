@@ -72,9 +72,7 @@ use resources::{
     prepare_cloud_uniforms, queue_cloud_render_pipelines,
 };
 
-/// Maximum number of cloud sub-layers in a single [`CloudLayers`] container.
-/// Must match the WGSL constant of the same name.
-pub const MAX_CLOUD_LAYERS: usize = 3;
+pub use constants::{CLIMATE_MAP_HEIGHT, CLIMATE_MAP_WIDTH, MAX_CLOUD_LAYERS};
 
 /// Plugin that registers the volumetric-cloud render pipeline.
 ///
@@ -906,15 +904,6 @@ impl ExtractComponent for CloudEarthTopography {
         Some(item.clone())
     }
 }
-
-/// Dimensions of the [`CloudClimateMap`] bake target. 1024×512 gives
-/// ~39 km per texel at the equator, which is comfortable headroom for
-/// the climate model's spatial scales (latitude bands, monsoon
-/// boundaries, stratocumulus deck edges) and bilinear-samples cleanly
-/// from the runtime cloud passes. The bake dispatches at 8×8
-/// workgroups, so the dimensions must be 8-aligned.
-pub const CLIMATE_MAP_WIDTH: u32 = 1024;
-pub const CLIMATE_MAP_HEIGHT: u32 = 512;
 
 /// Per-camera bake target for the climate-coverage debug map.
 ///
