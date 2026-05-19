@@ -31,138 +31,102 @@ fn depth_to_camera_dist(uv: vec2<f32>, depth: f32) -> f32 {
     let view_pos = view.view_from_clip * vec4(ndc_xy, depth, 1.0);
     return length(view_pos.xyz / view_pos.w);
 }
-#import bevy_render::maths::ray_sphere_intersect;
 #import bevy_pbr_clouds_planet::functions::{
     uv_to_ray_direction_ws, direction_world_to_atmosphere,
     sample_transmittance, sample_aerial_inscattering, sample_sky_view,
     dual_henyey_greenstein_layer, dual_henyey_greenstein_layer_eccentric,
     sample_cloud_density, sample_layer_density, sample_light_optical_depth,
-    cloud_shell_segment, climate_coverage,
+    cloud_shell_segment,
 };
 #import bevy_pbr_clouds_planet::constants::{
     AERIAL_LUT_MAX_DISTANCE, AERIAL_LUT_FADE_RANGE,
     EARTH_SHINE_MULTIPLIER,
     TWILIGHT_BAND_LO, TWILIGHT_BAND_HI,
     TERMINATOR_WRAP_SLOPE, TERMINATOR_WRAP_INTERCEPT,
-    CLOUD_RAW_MAX,
     WRENNINGE_ATTENUATION, WRENNINGE_CONTRIBUTION, WRENNINGE_ECCENTRICITY,
 };
 
-// Chord length of a ray through a spherical shell `[inner_r, outer_r]`,
-// in metres. Returns 0 if the ray misses the shell or only intersects
-// behind the camera.
-fn shell_chord(cam_pos: vec3<f32>, ray_dir: vec3<f32>, inner_r: f32, outer_r: f32) -> f32 {
-    let r = length(cam_pos);
-    let mu = dot(ray_dir, normalize(cam_pos));
-    let outer = ray_sphere_intersect(r, mu, outer_r);
-    if outer.y < 0.0 {
-        return 0.0;
-    }
-    let outer_start = max(outer.x, 0.0);
-    let outer_end = outer.y;
-    if outer_end <= outer_start {
-        return 0.0;
-    }
-    let outer_chord = outer_end - outer_start;
-    let inner = ray_sphere_intersect(r, mu, inner_r);
-    if inner.y < 0.0 {
-        return outer_chord;
-    }
-    let inner_chord = max(0.0, inner.y - max(inner.x, 0.0));
-    return max(0.0, outer_chord - inner_chord);
-}
-
-// Cheap orbital cloud sample. From 100+ km altitude each screen pixel
-// covers many cloud cells (the noise tile is ~4 km), so the per-pixel
-// volumetric raymarch — primary_steps × light_steps × octaves of
-// noise lookups + lighting math — buys sub-pixel fidelity nobody can
-// see. Real satellite imagery shows clouds as smooth coverage with
-// soft sun shading; this matches that look in O(1) per pixel.
-//
-// Modelling: per layer, compute a "cloud fraction" along the column
-// from the same coverage threshold the raymarch uses. The raymarch
-// gates density by `smoothstep(threshold ± 0.1, raw_noise)`; since
-// `raw = shape × v_profile` and `shape ∈ [0,1]`, `v_profile_peak ≈
-// 0.7`, the column-averaged fraction-cloudy is approximately
-// `saturate(RAW_MAX - threshold)`. Multiply by the actual ray chord
-// length within that layer's shell and the layer's density_scale to
-// get the column's optical depth.
-//
-// Lighting is earth-shine + per-light Lambert against the cloud
-// normal, modulated by the atmosphere transmittance LUT — sunset
-// orange / horizon dimming still tints the orbital clouds.
-//
-// Returns `vec4(rgb=inscattering, a=transmittance)` matching the
-// raymarch output so downstream temporal + composite passes don't
-// need a code path for it.
-fn analytic_orbital_cloud(cam_world: vec3<f32>, ray_dir_ws: vec3<f32>) -> vec4<f32> {
-    let segment = cloud_shell_segment(cam_world, ray_dir_ws);
-    if segment.y <= segment.x {
-        return vec4(0.0, 0.0, 0.0, 1.0);
-    }
-    let t_mid = mix(segment.x, segment.y, 0.5);
-    let sample_pos = cam_world + ray_dir_ws * t_mid;
-
-    var total_optical_depth = 0.0;
-    for (var i: u32 = 0u; i < cloud.layer_count; i = i + 1u) {
-        let layer = cloud.layers[i];
-        if layer.enabled == 0u {
-            continue;
-        }
-        let climate_base = climate_coverage(sample_pos, layer.coverage, layer.climate_strength);
-        var threshold = climate_base;
-        if layer.weather_tile > 0.0 && layer.weather_strength > 0.0 {
-            let t = cloud.time_seconds;
-            let r_uv = (sample_pos + vec3<f32>(t * 2.0, 0.0, 0.0)) / layer.weather_tile;
-            let c_uv = (sample_pos + vec3<f32>(t * 8.0, 0.0, 0.0)) / (layer.weather_tile * 10.0);
-            let p_uv = (sample_pos + vec3<f32>(t * 25.0, 0.0, 0.0)) / (layer.weather_tile * 40.0);
-            let r_n = textureSampleLevel(noise_3d, cloud_sampler, fract(r_uv), 0.0).r;
-            let c_n = textureSampleLevel(noise_3d, cloud_sampler, fract(c_uv), 0.0).r;
-            let p_n = textureSampleLevel(noise_3d, cloud_sampler, fract(p_uv), 0.0).r;
-            let mixed = r_n * 0.20 + c_n * 0.30 + p_n * 0.50;
-            let pushed = smoothstep(0.3, 0.7, mixed);
-            let weather = (pushed - 0.5) * 2.0;
-            threshold = saturate(climate_base - weather * layer.weather_strength);
-        }
-        let cloud_fraction = saturate(CLOUD_RAW_MAX - threshold);
-        if cloud_fraction <= 0.0 {
-            continue;
-        }
-        let chord = shell_chord(cam_world, ray_dir_ws, layer.inner_radius, layer.outer_radius);
-        total_optical_depth = total_optical_depth + cloud_fraction * layer.density_scale * chord;
-    }
-    if total_optical_depth < 0.001 {
-        return vec4(0.0, 0.0, 0.0, 1.0);
-    }
-
-    let transmittance = exp(-total_optical_depth);
-    let alpha = 1.0 - transmittance;
-
+// Simple per-sample shading. Earth-shine + per-light Lambert against
+// the cloud-sphere normal, modulated by the atmosphere transmittance
+// LUT. No cone shadow, no multi-scatter octaves, no phase function.
+// At orbital altitudes each pixel covers many cloud cells and the
+// expensive per-step lighting is sub-pixel detail nobody can see —
+// the cloud reads as smooth coverage with broad sun shading.
+fn shade_simple(sample_pos: vec3<f32>) -> vec3<f32> {
     let local_r = length(sample_pos);
     let sample_up = sample_pos / max(local_r, 1.0);
     let up_as = direction_world_to_atmosphere(sample_up, atmosphere_transforms.local_up);
-
-    // Same earth-shine constant the raymarch uses; matches close-up
-    // shading at the analytic/raymarch crossover so the blend is
-    // smooth.
     let earth_shine = sample_sky_view(local_r, up_as) * EARTH_SHINE_MULTIPLIER;
     var radiance = earth_shine;
+    for (var li: u32 = 0u; li < atmosphere_lights.count; li = li + 1u) {
+        let light = atmosphere_lights.lights[li];
+        let mu_light = dot(light.direction_to_light, sample_up);
+        let twilight = smoothstep(TWILIGHT_BAND_LO, TWILIGHT_BAND_HI, mu_light);
+        let atmo_t = sample_transmittance(local_r, mu_light) * twilight;
+        let lit = saturate(mu_light * TERMINATOR_WRAP_SLOPE + TERMINATOR_WRAP_INTERCEPT);
+        radiance = radiance + light.color * atmo_t * lit;
+    }
+    return radiance;
+}
 
+// Full per-sample shading. Earth-shine + per-light cone-shadow march
+// + Wrenninge multi-scatter octave loop. `density` is the total
+// density at `sample_pos` (used to weight per-layer phase
+// contributions). The expensive parts — `sample_light_optical_depth`
+// (light_steps texture samples) and the octave/layer loop — make
+// this the hot path at sub-orbital altitudes.
+fn shade_full(
+    sample_pos: vec3<f32>,
+    sample_pos_local: vec3<f32>,
+    ray_dir_ws: vec3<f32>,
+    density: f32,
+) -> vec3<f32> {
+    let local_r = length(sample_pos);
+    let sample_up = sample_pos / max(local_r, 1.0);
+    let up_as = direction_world_to_atmosphere(sample_up, atmosphere_transforms.local_up);
+    let earth_shine = sample_sky_view(local_r, up_as) * EARTH_SHINE_MULTIPLIER;
+    var radiance = earth_shine;
     for (var li: u32 = 0u; li < atmosphere_lights.count; li = li + 1u) {
         let light = atmosphere_lights.lights[li];
         let light_dir_ws = light.direction_to_light;
         let mu_light = dot(light_dir_ws, sample_up);
-        // Twilight fade matching the raymarch.
         let twilight = smoothstep(TWILIGHT_BAND_LO, TWILIGHT_BAND_HI, mu_light);
         let atmo_t = sample_transmittance(local_r, mu_light) * twilight;
-        // Lambert-on-cloud-sphere with a small terminator wrap, so the
-        // day/night boundary fades rather than hard-clipping.
-        let lit = saturate(mu_light * TERMINATOR_WRAP_SLOPE + TERMINATOR_WRAP_INTERCEPT);
-        radiance = radiance + light.color * atmo_t * lit;
-    }
+        let tau_light = sample_light_optical_depth(sample_pos, sample_pos_local, light_dir_ws);
+        let cos_theta = dot(ray_dir_ws, light_dir_ws);
 
-    let inscattering = radiance * alpha * view.exposure;
-    return vec4(inscattering, transmittance);
+        var multi_layer_sum = vec3<f32>(0.0);
+        for (var li2: u32 = 0u; li2 < cloud.layer_count; li2 = li2 + 1u) {
+            let layer_d = sample_layer_density(li2, sample_pos, sample_pos_local);
+            if layer_d <= 1e-9 {
+                continue;
+            }
+            let weight = layer_d / max(density, 1e-9);
+            var octave_sum = vec3<f32>(0.0);
+            var attenuation = 1.0;
+            var contribution = 1.0;
+            var eccentricity = 1.0;
+            for (var oct: u32 = 0u; oct < cloud.octaves; oct = oct + 1u) {
+                let cloud_t_n = exp(-tau_light * attenuation);
+                let phase_n = dual_henyey_greenstein_layer_eccentric(li2, cos_theta, eccentricity);
+                octave_sum = octave_sum + (cloud_t_n * phase_n * contribution);
+                attenuation = attenuation * WRENNINGE_ATTENUATION;
+                contribution = contribution * WRENNINGE_CONTRIBUTION;
+                eccentricity = eccentricity * WRENNINGE_ECCENTRICITY;
+            }
+            multi_layer_sum = multi_layer_sum + octave_sum * weight;
+        }
+        radiance = radiance + light.color * atmo_t * multi_layer_sum;
+
+        // Shadow-weighted ambient bounce: cone-march measures direct
+        // sun blocked by surrounding cloud mass, but doesn't account
+        // for the diffuse multi-scattered light that fills those
+        // shadowed interiors. Without this, dark valleys between
+        // cells read as near-black grey from mid-altitude views.
+        let shadow_term = (1.0 - exp(-tau_light * 0.5)) * twilight;
+        radiance = radiance + earth_shine * shadow_term * 0.5;
+    }
+    return radiance;
 }
 
 // Debug-mode constants matching CloudDebugMode in lib.rs.
@@ -188,15 +152,13 @@ fn main(@builtin(global_invocation_id) idx: vec3<u32>) {
     let local_up = atmosphere_transforms.local_up;
     let cam_world = local_up * r_cam;
 
-    // Orbital fast path. At full orbital altitude the raymarch is
-    // skipped entirely — the analytic 2D sample is what every pixel
-    // gets. Debug modes are still served by the raymarch path below.
+    // Altitude-driven shading morph. The density integration (cloud
+    // *shape*) is always the same — at orbital altitudes only the
+    // per-sample lighting model changes, from full cone-shadow +
+    // multi-scatter to a cheap Lambert + ambient. Same noise samples
+    // get fed through, so the silhouette stays coherent across the
+    // transition; only contrast / shadow detail morphs out.
     let orbital_blend = cloud.orbital_blend;
-    if orbital_blend >= 0.999 && cloud.debug_mode == DBG_OFF {
-        let result = analytic_orbital_cloud(cam_world, ray_dir_ws);
-        textureStore(cloud_raymarch_out, vec2<i32>(idx.xy), result);
-        return;
-    }
 
     // Sample camera depth so we can clip the cloud march to terrain. The
     // depth buffer is the MSAA target the main pass writes to; we read
@@ -311,82 +273,21 @@ fn main(@builtin(global_invocation_id) idx: vec3<u32>) {
             continue;
         }
 
-        // Multi-layer lighting: Earth-shine + per-layer Wrenninge octave
-        // loop, weighted by each layer's contribution to the total density
-        // at this sample. This lets cumulus and cirrus shade with their
-        // own phase functions even when both are visible.
-        let local_r = length(sample_pos);
-        let sample_up = sample_pos / max(local_r, 1.0);
-        let up_as = direction_world_to_atmosphere(sample_up, atmosphere_transforms.local_up);
-
-        // Earth-shine: real sky colour in the upward hemisphere as ambient
-        // illumination on the cloud sample. Sampled in a single direction
-        // (the cloud sample's local up) but multiplied by an approximate
-        // hemispherical integral factor — a real cloud receives diffuse
-        // skylight from the entire upper hemisphere and bounces it through
-        // multi-scatter, which is what keeps cloud tops bright pink-white
-        // at sunset rather than dim-orange when the directional sun
-        // contribution would otherwise dominate. 3.0 is a Schneider-style
-        // figure that lands sunset cloud tops at recognisably "satellite
-        // imagery" brightness without washing out close-up views.
-        let earth_shine = sample_sky_view(local_r, up_as) * EARTH_SHINE_MULTIPLIER;
-        var radiance = earth_shine;
-
-        // Cone-march toward each light is shared across layers (it
-        // integrates *total* density along the sun ray, not per-layer).
-        for (var li: u32 = 0u; li < atmosphere_lights.count; li = li + 1u) {
-            let light = atmosphere_lights.lights[li];
-            let light_dir_ws = light.direction_to_light;
-            let mu_light = dot(light_dir_ws, sample_up);
-            // Smooth twilight transition rather than a hard cutoff at
-            // local horizon. Real clouds get dimmer continuously as the
-            // sun dips below — the abrupt step from 1×transmittance to 0
-            // produces a knife-edge terminator on the cloud cap visible
-            // from orbit. Fade over ~3° below the horizon.
-            let twilight = smoothstep(TWILIGHT_BAND_LO, TWILIGHT_BAND_HI, mu_light);
-            let atmo_t = sample_transmittance(local_r, mu_light) * twilight;
-            let tau_light = sample_light_optical_depth(sample_pos, sample_pos_local, light_dir_ws);
-            let cos_theta = dot(ray_dir_ws, light_dir_ws);
-
-            // Walk every active sub-layer and sum its phase-weighted
-            // contribution, weighted by the layer's share of the total
-            // density at this sample point.
-            var multi_layer_sum = vec3<f32>(0.0);
-            for (var li2: u32 = 0u; li2 < cloud.layer_count; li2 = li2 + 1u) {
-                let layer_d = sample_layer_density(li2, sample_pos, sample_pos_local);
-                if layer_d <= 1e-9 {
-                    continue;
-                }
-                let weight = layer_d / max(density, 1e-9);
-
-                var octave_sum = vec3<f32>(0.0);
-                var attenuation = 1.0;
-                var contribution = 1.0;
-                var eccentricity = 1.0;
-                for (var oct: u32 = 0u; oct < cloud.octaves; oct = oct + 1u) {
-                    let cloud_t_n = exp(-tau_light * attenuation);
-                    let phase_n = dual_henyey_greenstein_layer_eccentric(li2, cos_theta, eccentricity);
-                    octave_sum = octave_sum + (cloud_t_n * phase_n * contribution);
-                    attenuation = attenuation * WRENNINGE_ATTENUATION;
-                    contribution = contribution * WRENNINGE_CONTRIBUTION;
-                    eccentricity = eccentricity * WRENNINGE_ECCENTRICITY;
-                }
-                multi_layer_sum = multi_layer_sum + octave_sum * weight;
-            }
-            radiance = radiance + light.color * atmo_t * multi_layer_sum;
-
-            // Shadow-weighted ambient bounce: cone-march measures direct
-            // sun blocked by surrounding cloud mass, but doesn't account
-            // for the diffuse multi-scattered light that fills those
-            // shadowed interiors. Without this, dark valleys between
-            // cells read as near-black grey from mid-altitude views.
-            // Lift the sample radiance toward the local sky colour
-            // proportional to cone-shadow heaviness so sunlit tops are
-            // untouched but heavily-shadowed interiors get a soft fill.
-            // Gated by `twilight` so lights below horizon don't
-            // contribute fake bounce at night.
-            let shadow_term = (1.0 - exp(-tau_light * 0.5)) * twilight;
-            radiance = radiance + earth_shine * shadow_term * 0.5;
+        // Per-sample shading. Choose the model based on altitude:
+        // pure simple at full orbital (no cone shadow, no octaves),
+        // pure full at sub-orbital, and a blend through the
+        // transition band. Both functions take the same `sample_pos`
+        // — the density field (cloud shape) is invariant, only the
+        // lighting model morphs.
+        var radiance: vec3<f32>;
+        if orbital_blend >= 0.999 {
+            radiance = shade_simple(sample_pos);
+        } else if orbital_blend <= 0.001 {
+            radiance = shade_full(sample_pos, sample_pos_local, ray_dir_ws, density);
+        } else {
+            let full = shade_full(sample_pos, sample_pos_local, ray_dir_ws, density);
+            let simple = shade_simple(sample_pos);
+            radiance = mix(full, simple, orbital_blend);
         }
 
         // Beer's law extinction across the segment.
@@ -435,17 +336,5 @@ fn main(@builtin(global_invocation_id) idx: vec3<u32>) {
     // structure.
     inscattering = inscattering * view.exposure;
 
-    var result = vec4(inscattering, transmittance);
-
-    // Transition band: blend in the analytic 2D sample as altitude
-    // approaches orbital. By `orbital_blend = 1` the raymarch is
-    // skipped above (fast path), so we only hit this when
-    // 0 < orbital_blend < 0.999. The analytic call costs ~one ray-
-    // sphere + a few texture samples, dwarfed by the raymarch.
-    if orbital_blend > 0.001 && cloud.debug_mode == DBG_OFF {
-        let analytic = analytic_orbital_cloud(cam_world, ray_dir_ws);
-        result = mix(result, analytic, orbital_blend);
-    }
-
-    textureStore(cloud_raymarch_out, vec2<i32>(idx.xy), result);
+    textureStore(cloud_raymarch_out, vec2<i32>(idx.xy), vec4(inscattering, transmittance));
 }
