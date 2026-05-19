@@ -136,7 +136,11 @@ fn render_render(ui: &mut egui::Ui, diagnostics: &DiagnosticsStore) {
     // forever — there are no zero samples to decay it. Filter by
     // the most recent measurement's age so we display "(startup)"
     // for anything that hasn't reported a sample recently.
-    let now = std::time::Instant::now();
+    // `DiagnosticMeasurement::time` is `bevy_platform::time::Instant`,
+    // which on WASM is *not* `std::time::Instant` (it wraps a JS
+    // performance.now() polyfill). Use bevy's `Instant` so both
+    // platforms work.
+    let now = bevy::platform::time::Instant::now();
     const STALE_THRESHOLD: std::time::Duration = std::time::Duration::from_millis(500);
     // (gpu_ms, cpu_ms, stale_flag).
     let mut rows: BTreeMap<String, (Option<f64>, Option<f64>, bool)> = BTreeMap::new();
