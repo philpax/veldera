@@ -49,7 +49,11 @@ struct CloudUniform {
 
     layer_count: u32,
     time_seconds: f32,
-    pad_top1: u32,
+    // 0 below ORBITAL_START_ALT, 1 above ORBITAL_FULL_ALT, smoothstepped
+    // between. Drives the cloud_raymarch shader's switch from per-pixel
+    // volumetric raymarch (sub-orbital) to a cheap analytic 2D sample
+    // on the cloud sphere (orbital).
+    orbital_blend: f32,
     pad_top2: u32,
 
     prev_clip_from_world: mat4x4<f32>,

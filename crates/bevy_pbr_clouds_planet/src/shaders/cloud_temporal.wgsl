@@ -23,6 +23,7 @@
 #import bevy_pbr_atmosphere_planet::types::AtmosphereTransforms;
 #import bevy_pbr_clouds_planet::types::CloudUniform;
 #import bevy_render::maths::ray_sphere_intersect;
+#import bevy_pbr_clouds_planet::constants::CLOUD_MARCH_MAX_DISTANCE;
 
 @group(0) @binding(0) var<uniform> cloud: CloudUniform;
 @group(0) @binding(1) var<uniform> atmosphere_transforms: AtmosphereTransforms;
@@ -33,9 +34,6 @@
 @group(0) @binding(6) var lut_sampler: sampler;
 @group(0) @binding(7) var history_out: texture_storage_2d<rgba16float, write>;
 
-// Maximum cloud-march distance — must match `CLOUD_MARCH_MAX_DISTANCE` in
-// functions.wgsl. Used to clamp the reprojection depth for distant rays.
-const CLOUD_MARCH_MAX_DISTANCE: f32 = 200000.0;
 // Temporal blend factor: weight given to the current frame each step. Lower
 // = smoother but slower to converge / more ghosting.
 const BLEND_ALPHA: f32 = 0.1;

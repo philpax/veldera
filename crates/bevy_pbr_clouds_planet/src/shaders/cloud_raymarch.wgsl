@@ -31,29 +31,139 @@ fn depth_to_camera_dist(uv: vec2<f32>, depth: f32) -> f32 {
     let view_pos = view.view_from_clip * vec4(ndc_xy, depth, 1.0);
     return length(view_pos.xyz / view_pos.w);
 }
+#import bevy_render::maths::ray_sphere_intersect;
 #import bevy_pbr_clouds_planet::functions::{
     uv_to_ray_direction_ws, direction_world_to_atmosphere,
     sample_transmittance, sample_aerial_inscattering, sample_sky_view,
     dual_henyey_greenstein_layer, dual_henyey_greenstein_layer_eccentric,
     sample_cloud_density, sample_layer_density, sample_light_optical_depth,
-    cloud_shell_segment,
+    cloud_shell_segment, climate_coverage,
+};
+#import bevy_pbr_clouds_planet::constants::{
+    AERIAL_LUT_MAX_DISTANCE, AERIAL_LUT_FADE_RANGE,
+    EARTH_SHINE_MULTIPLIER,
+    TWILIGHT_BAND_LO, TWILIGHT_BAND_HI,
+    TERMINATOR_WRAP_SLOPE, TERMINATOR_WRAP_INTERCEPT,
+    CLOUD_RAW_MAX,
+    WRENNINGE_ATTENUATION, WRENNINGE_CONTRIBUTION, WRENNINGE_ECCENTRICITY,
 };
 
-// Wrenninge multi-scatter octave coefficients. Octave count comes from the
-// quality-tier-driven `cloud.octaves`. Each successive octave scales the
-// sun-direction optical depth, contribution, and HG eccentricity by these
-// factors. Tuned for `contribution > attenuation` so deeper octaves
-// model the diffuse multi-scattered light that real cumulus tops
-// exhibit — without this the directional phase function dominates and
-// tops read as warm-tinted (sun colour through phase) rather than
-// soft-white. Bumped contribution 0.75 → 0.9 and attenuation 0.4 → 0.55
-// because at sunset / from-orbit views the per-sample sun colour is a
-// saturated orange (long-path atmospheric extinction), and the higher
-// multi-scatter weight is what keeps cloud tops looking like satellite
-// imagery (warm-white) rather than brown.
-const WRENNINGE_ATTENUATION: f32 = 0.55;
-const WRENNINGE_CONTRIBUTION: f32 = 0.9;
-const WRENNINGE_ECCENTRICITY: f32 = 0.6;
+// Chord length of a ray through a spherical shell `[inner_r, outer_r]`,
+// in metres. Returns 0 if the ray misses the shell or only intersects
+// behind the camera.
+fn shell_chord(cam_pos: vec3<f32>, ray_dir: vec3<f32>, inner_r: f32, outer_r: f32) -> f32 {
+    let r = length(cam_pos);
+    let mu = dot(ray_dir, normalize(cam_pos));
+    let outer = ray_sphere_intersect(r, mu, outer_r);
+    if outer.y < 0.0 {
+        return 0.0;
+    }
+    let outer_start = max(outer.x, 0.0);
+    let outer_end = outer.y;
+    if outer_end <= outer_start {
+        return 0.0;
+    }
+    let outer_chord = outer_end - outer_start;
+    let inner = ray_sphere_intersect(r, mu, inner_r);
+    if inner.y < 0.0 {
+        return outer_chord;
+    }
+    let inner_chord = max(0.0, inner.y - max(inner.x, 0.0));
+    return max(0.0, outer_chord - inner_chord);
+}
+
+// Cheap orbital cloud sample. From 100+ km altitude each screen pixel
+// covers many cloud cells (the noise tile is ~4 km), so the per-pixel
+// volumetric raymarch — primary_steps × light_steps × octaves of
+// noise lookups + lighting math — buys sub-pixel fidelity nobody can
+// see. Real satellite imagery shows clouds as smooth coverage with
+// soft sun shading; this matches that look in O(1) per pixel.
+//
+// Modelling: per layer, compute a "cloud fraction" along the column
+// from the same coverage threshold the raymarch uses. The raymarch
+// gates density by `smoothstep(threshold ± 0.1, raw_noise)`; since
+// `raw = shape × v_profile` and `shape ∈ [0,1]`, `v_profile_peak ≈
+// 0.7`, the column-averaged fraction-cloudy is approximately
+// `saturate(RAW_MAX - threshold)`. Multiply by the actual ray chord
+// length within that layer's shell and the layer's density_scale to
+// get the column's optical depth.
+//
+// Lighting is earth-shine + per-light Lambert against the cloud
+// normal, modulated by the atmosphere transmittance LUT — sunset
+// orange / horizon dimming still tints the orbital clouds.
+//
+// Returns `vec4(rgb=inscattering, a=transmittance)` matching the
+// raymarch output so downstream temporal + composite passes don't
+// need a code path for it.
+fn analytic_orbital_cloud(cam_world: vec3<f32>, ray_dir_ws: vec3<f32>) -> vec4<f32> {
+    let segment = cloud_shell_segment(cam_world, ray_dir_ws);
+    if segment.y <= segment.x {
+        return vec4(0.0, 0.0, 0.0, 1.0);
+    }
+    let t_mid = mix(segment.x, segment.y, 0.5);
+    let sample_pos = cam_world + ray_dir_ws * t_mid;
+
+    var total_optical_depth = 0.0;
+    for (var i: u32 = 0u; i < cloud.layer_count; i = i + 1u) {
+        let layer = cloud.layers[i];
+        if layer.enabled == 0u {
+            continue;
+        }
+        let climate_base = climate_coverage(sample_pos, layer.coverage, layer.climate_strength);
+        var threshold = climate_base;
+        if layer.weather_tile > 0.0 && layer.weather_strength > 0.0 {
+            let t = cloud.time_seconds;
+            let r_uv = (sample_pos + vec3<f32>(t * 2.0, 0.0, 0.0)) / layer.weather_tile;
+            let c_uv = (sample_pos + vec3<f32>(t * 8.0, 0.0, 0.0)) / (layer.weather_tile * 10.0);
+            let p_uv = (sample_pos + vec3<f32>(t * 25.0, 0.0, 0.0)) / (layer.weather_tile * 40.0);
+            let r_n = textureSampleLevel(noise_3d, cloud_sampler, fract(r_uv), 0.0).r;
+            let c_n = textureSampleLevel(noise_3d, cloud_sampler, fract(c_uv), 0.0).r;
+            let p_n = textureSampleLevel(noise_3d, cloud_sampler, fract(p_uv), 0.0).r;
+            let mixed = r_n * 0.20 + c_n * 0.30 + p_n * 0.50;
+            let pushed = smoothstep(0.3, 0.7, mixed);
+            let weather = (pushed - 0.5) * 2.0;
+            threshold = saturate(climate_base - weather * layer.weather_strength);
+        }
+        let cloud_fraction = saturate(CLOUD_RAW_MAX - threshold);
+        if cloud_fraction <= 0.0 {
+            continue;
+        }
+        let chord = shell_chord(cam_world, ray_dir_ws, layer.inner_radius, layer.outer_radius);
+        total_optical_depth = total_optical_depth + cloud_fraction * layer.density_scale * chord;
+    }
+    if total_optical_depth < 0.001 {
+        return vec4(0.0, 0.0, 0.0, 1.0);
+    }
+
+    let transmittance = exp(-total_optical_depth);
+    let alpha = 1.0 - transmittance;
+
+    let local_r = length(sample_pos);
+    let sample_up = sample_pos / max(local_r, 1.0);
+    let up_as = direction_world_to_atmosphere(sample_up, atmosphere_transforms.local_up);
+
+    // Same earth-shine constant the raymarch uses; matches close-up
+    // shading at the analytic/raymarch crossover so the blend is
+    // smooth.
+    let earth_shine = sample_sky_view(local_r, up_as) * EARTH_SHINE_MULTIPLIER;
+    var radiance = earth_shine;
+
+    for (var li: u32 = 0u; li < atmosphere_lights.count; li = li + 1u) {
+        let light = atmosphere_lights.lights[li];
+        let light_dir_ws = light.direction_to_light;
+        let mu_light = dot(light_dir_ws, sample_up);
+        // Twilight fade matching the raymarch.
+        let twilight = smoothstep(TWILIGHT_BAND_LO, TWILIGHT_BAND_HI, mu_light);
+        let atmo_t = sample_transmittance(local_r, mu_light) * twilight;
+        // Lambert-on-cloud-sphere with a small terminator wrap, so the
+        // day/night boundary fades rather than hard-clipping.
+        let lit = saturate(mu_light * TERMINATOR_WRAP_SLOPE + TERMINATOR_WRAP_INTERCEPT);
+        radiance = radiance + light.color * atmo_t * lit;
+    }
+
+    let inscattering = radiance * alpha * view.exposure;
+    return vec4(inscattering, transmittance);
+}
 
 // Debug-mode constants matching CloudDebugMode in lib.rs.
 const DBG_OFF: u32 = 0u;
@@ -77,6 +187,16 @@ fn main(@builtin(global_invocation_id) idx: vec3<u32>) {
     let r_cam = atmosphere_transforms.camera_radius;
     let local_up = atmosphere_transforms.local_up;
     let cam_world = local_up * r_cam;
+
+    // Orbital fast path. At full orbital altitude the raymarch is
+    // skipped entirely — the analytic 2D sample is what every pixel
+    // gets. Debug modes are still served by the raymarch path below.
+    let orbital_blend = cloud.orbital_blend;
+    if orbital_blend >= 0.999 && cloud.debug_mode == DBG_OFF {
+        let result = analytic_orbital_cloud(cam_world, ray_dir_ws);
+        textureStore(cloud_raymarch_out, vec2<i32>(idx.xy), result);
+        return;
+    }
 
     // Sample camera depth so we can clip the cloud march to terrain. The
     // depth buffer is the MSAA target the main pass writes to; we read
@@ -209,7 +329,7 @@ fn main(@builtin(global_invocation_id) idx: vec3<u32>) {
         // contribution would otherwise dominate. 3.0 is a Schneider-style
         // figure that lands sunset cloud tops at recognisably "satellite
         // imagery" brightness without washing out close-up views.
-        let earth_shine = sample_sky_view(local_r, up_as) * 3.0;
+        let earth_shine = sample_sky_view(local_r, up_as) * EARTH_SHINE_MULTIPLIER;
         var radiance = earth_shine;
 
         // Cone-march toward each light is shared across layers (it
@@ -223,7 +343,7 @@ fn main(@builtin(global_invocation_id) idx: vec3<u32>) {
             // sun dips below — the abrupt step from 1×transmittance to 0
             // produces a knife-edge terminator on the cloud cap visible
             // from orbit. Fade over ~3° below the horizon.
-            let twilight = smoothstep(-0.05, 0.0, mu_light);
+            let twilight = smoothstep(TWILIGHT_BAND_LO, TWILIGHT_BAND_HI, mu_light);
             let atmo_t = sample_transmittance(local_r, mu_light) * twilight;
             let tau_light = sample_light_optical_depth(sample_pos, sample_pos_local, light_dir_ws);
             let cos_theta = dot(ray_dir_ws, light_dir_ws);
@@ -297,17 +417,15 @@ fn main(@builtin(global_invocation_id) idx: vec3<u32>) {
 
     // Apply aerial perspective at the cloud's mid-distance.
     //
-    // The atmosphere's aerial-view LUT only covers the first ~32 km;
-    // sampling past that range clamps to the LUT's far edge, which is
-    // the saturated orange/red of light scattered through 32 km of
-    // atmosphere. From orbital altitudes (200+ km) every cloud sample is
-    // way beyond the LUT range, so without a fade the entire cloud cap
-    // gets tinted with that orange. Fade the AP contribution out as the
-    // sample moves past the LUT range — past ~50 km the cloud is so far
-    // away that AP from the *atmosphere* (which is 100 km thick) doesn't
-    // really apply anyway.
+    // The atmosphere's aerial-view LUT only covers the first
+    // `AERIAL_LUT_MAX_DISTANCE`; sampling past that clamps to the
+    // LUT's far edge, which is the saturated orange/red of light
+    // scattered through that much atmosphere. From orbital altitudes
+    // every cloud sample is way beyond LUT range, so without a fade
+    // the entire cloud cap gets tinted with that orange. Fade AP out
+    // across `AERIAL_LUT_FADE_RANGE` past the LUT's far edge.
     let t_mid = mix(t_start, t_end, 0.5);
-    let ap_fade = saturate(1.0 - (t_mid - 32000.0) / 18000.0);
+    let ap_fade = saturate(1.0 - (t_mid - AERIAL_LUT_MAX_DISTANCE) / AERIAL_LUT_FADE_RANGE);
     let aerial = sample_aerial_inscattering(uv, t_mid);
     inscattering = inscattering + aerial * (1.0 - transmittance) * ap_fade;
 
@@ -317,9 +435,17 @@ fn main(@builtin(global_invocation_id) idx: vec3<u32>) {
     // structure.
     inscattering = inscattering * view.exposure;
 
-    textureStore(
-        cloud_raymarch_out,
-        vec2<i32>(idx.xy),
-        vec4(inscattering, transmittance),
-    );
+    var result = vec4(inscattering, transmittance);
+
+    // Transition band: blend in the analytic 2D sample as altitude
+    // approaches orbital. By `orbital_blend = 1` the raymarch is
+    // skipped above (fast path), so we only hit this when
+    // 0 < orbital_blend < 0.999. The analytic call costs ~one ray-
+    // sphere + a few texture samples, dwarfed by the raymarch.
+    if orbital_blend > 0.001 && cloud.debug_mode == DBG_OFF {
+        let analytic = analytic_orbital_cloud(cam_world, ray_dir_ws);
+        result = mix(result, analytic, orbital_blend);
+    }
+
+    textureStore(cloud_raymarch_out, vec2<i32>(idx.xy), result);
 }

@@ -8,6 +8,9 @@
     noise_3d, cloud_sampler, lut_sampler, climate_map,
 };
 #import bevy_pbr_clouds_planet::climate::climate_coverage_at;
+#import bevy_pbr_clouds_planet::constants::{
+    CLOUD_MARCH_MAX_DISTANCE, AERIAL_LUT_MAX_DISTANCE,
+};
 
 // World-space ray direction for a screen UV. Mirrors the atmosphere's
 // `uv_to_ray_direction`: build the homogeneous near-plane position, divide
@@ -75,12 +78,10 @@ fn sample_sky_view(local_r: f32, dir_as: vec3<f32>) -> vec3<f32> {
 // Returns the un-fade value (caller handles per-slice fade if needed).
 fn sample_aerial_inscattering(uv: vec2<f32>, t: f32) -> vec3<f32> {
     // Atmosphere uses `aerial_view_lut_max_distance`, but that uniform isn't
-    // in our bind group. We approximate by clamping to the texture's depth
-    // range, then sampling. The atmosphere defaults to 32 km; clouds
-    // generally sit within that.
-    // The texture stores log(inscattering); recover with exp.
+    // in our bind group; we mirror it as `AERIAL_LUT_MAX_DISTANCE` in
+    // constants.wgsl. The texture stores log(inscattering); recover with exp.
     let num_slices = f32(textureDimensions(aerial_view_lut).z);
-    let max_distance = 32000.0; // matches atmosphere default
+    let max_distance = AERIAL_LUT_MAX_DISTANCE;
     let depth = saturate(t / max_distance - 0.5 / num_slices);
     let sample = textureSampleLevel(aerial_view_lut, lut_sampler, vec3(uv, depth), 0.0);
     let t_slice = max_distance / num_slices;
@@ -315,15 +316,6 @@ fn sample_light_optical_depth(
     }
     return optical_depth;
 }
-
-// Maximum cloud-march distance. From a low-altitude observer the cloud-
-// shell horizon sits at roughly sqrt(2·R·h) — ~150 km from 2 km altitude,
-// ~290 km from 6 km altitude — so an 80 km cap reads as a hard wall of
-// "clouds end here" at any forward-looking angle. 200 km comfortably
-// covers the visible cap for camera altitudes up to ~3 km without
-// becoming meaningless (per-step `dt` at 128 primary steps grows to
-// 1.5 km, still smaller than the 4 km noise tile).
-const CLOUD_MARCH_MAX_DISTANCE: f32 = 200000.0;
 
 // Compute the cloud-march entry/exit `t` covering ALL enabled sub-layers'
 // shells. The march walks the union shell from the closest enabled inner

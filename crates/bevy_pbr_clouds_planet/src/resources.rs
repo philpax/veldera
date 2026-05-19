@@ -31,7 +31,13 @@ use bevy_pbr_atmosphere_planet::{
     SphericalAtmosphereCamera,
 };
 
-use crate::{CloudCameraEcef, CloudLayers, MAX_CLOUD_LAYERS, noise::NoiseTextures};
+use crate::{
+    CloudCameraEcef, CloudLayers, MAX_CLOUD_LAYERS,
+    constants::{
+        ORBITAL_BLEND_FULL_ALT_M, ORBITAL_BLEND_START_ALT_M, REC709_LUMA, TELEPORT_THRESHOLD_M,
+    },
+    noise::NoiseTextures,
+};
 
 /// Per-view uniform consumed by the cloud raymarch and composite shaders.
 ///
@@ -106,7 +112,12 @@ pub struct GpuCloudUniform {
     /// (that's CPU-accumulated into `wind_offset` to keep precision
     /// bounded over long sessions).
     pub time_seconds: f32,
-    pub pad_top1: u32,
+    /// Smoothstepped 0..1 from sub-orbital to fully-orbital camera
+    /// altitude. The cloud raymarch shader blends from full per-pixel
+    /// volumetric raymarch (0) to a cheap analytic 2D sample on the
+    /// cloud sphere (1). See [`prepare_cloud_uniforms`] for the
+    /// altitude band.
+    pub orbital_blend: f32,
     pub pad_top2: u32,
 
     /// Previous frame's `clip_from_world` matrix. Used by the temporal
@@ -1024,11 +1035,6 @@ pub struct CloudPrevFrame {
     pub initialised: bool,
 }
 
-/// Threshold (m) for the camera-position delta above which we treat the
-/// frame as a teleport and discard the temporal history. ~5 km / frame
-/// would be a hard transition that reprojection couldn't follow anyway.
-const TELEPORT_THRESHOLD_M: f32 = 5_000.0;
-
 /// Builds the per-view `GpuCloudUniform`. Runs once per frame per camera.
 ///
 /// Also drives the temporal pipeline by reading the prev-frame state from
@@ -1095,34 +1101,41 @@ pub(super) fn prepare_cloud_uniforms(
         let camera_altitude_m =
             (camera_ecef_f64.length() - f64::from(atmosphere.bottom_radius)) as f32;
 
-        // Altitude-driven LOD on primary march steps. From ground level
-        // a grazing ray can spend ~50 km inside the shell and benefits
-        // from every sample; from orbital altitude the visible cloud cap
-        // shrinks to a small angular region per pixel. Scale linearly
-        // from 1.0 below 10 km to `LOD_MIN` above 200 km, smoothstepped
-        // for a gentle transition, floored at `STEP_FLOOR`.
+        // Orbital LOD: above ~50 km, each screen pixel covers many
+        // cloud cells and the per-pixel volumetric raymarch is wasted —
+        // its self-shadow / multi-scatter detail is sub-pixel. The
+        // shader blends to a cheap analytic 2D sample on the cloud
+        // sphere over this band; at full orbital it skips the raymarch
+        // entirely.
         //
-        // `LOD_MIN` was 0.25 (32 steps from a 128 base) but that's
-        // coarse enough — `dt ≈ 2.5 km` — that one dense sample
-        // dominates the integral and the entire ray's colour collapses
-        // to that sample's lighting. From orbit at sunset the sample's
-        // sun-direction radiance is heavily orange (long-path
-        // atmospheric extinction); collapsing the integral to one
-        // sample amplifies the orange into a brown wash. 0.6 (76
-        // steps) keeps the per-ray integration smooth enough to
-        // average the orange-lit tops with their ambient earth-shine.
-        let lod = {
-            const LOD_FULL_ALT: f32 = 10_000.0;
-            const LOD_MIN_ALT: f32 = 200_000.0;
-            const LOD_MIN: f32 = 0.6;
-            let t =
-                ((camera_altitude_m - LOD_FULL_ALT) / (LOD_MIN_ALT - LOD_FULL_ALT)).clamp(0.0, 1.0);
-            let s = t * t * (3.0 - 2.0 * t);
-            1.0 - s * (1.0 - LOD_MIN)
+        // `light_steps` and `octaves` stay at the quality-tier base
+        // value across the whole sub-orbital range. They're the
+        // load-bearing knobs for the close-up satellite-imagery look:
+        // - Cutting `light_steps` makes adjacent primary samples
+        //   disagree on cone-shadow magnitude, fracturing the cloud
+        //   into stipple the temporal pass can't smooth.
+        // - Cutting `octaves` collapses the diffuse fill that lifts
+        //   shadowed cloud interiors, so partial-coverage regions
+        //   contrast-pop and read as noisy holes.
+        // Both were tested as orbital-floored and produced the chunky
+        // brown stipple over deserts in the analytic-transition zone.
+        // The hybrid does the work instead.
+        //
+        // `max_primary_steps` is scaled by `orbital_blend` so the
+        // transition band (where both raymarch + analytic run) doesn't
+        // double-pay. Once `orbital_blend = 1` the raymarch is skipped
+        // entirely, so the value at that end is academic.
+        let orbital_blend = {
+            let t = ((camera_altitude_m - ORBITAL_BLEND_START_ALT_M)
+                / (ORBITAL_BLEND_FULL_ALT_M - ORBITAL_BLEND_START_ALT_M))
+                .clamp(0.0, 1.0);
+            t * t * (3.0 - 2.0 * t)
         };
-        const STEP_FLOOR: u32 = 32;
-        let base_steps = quality.primary_steps();
-        let max_primary_steps = ((base_steps as f32 * lod) as u32).max(STEP_FLOOR);
+        let primary_factor = 1.0 - orbital_blend * 0.6;
+        let max_primary_steps =
+            ((quality.primary_steps() as f32 * primary_factor).round() as u32).max(32);
+        let light_steps = quality.light_steps();
+        let octaves = quality.octaves();
 
         // Fog colour, in the already-exposed HDR scale the composite
         // operates in (no `view.exposure` multiply in the shader). We
@@ -1138,7 +1151,6 @@ pub(super) fn prepare_cloud_uniforms(
         // sensible brightness, with sun-elevation twilight fade.
         let fog_color = {
             let up = sph_cam.local_up.normalize_or_zero();
-            const LUMA: Vec3 = Vec3::new(0.2126, 0.7152, 0.0722);
             let mut best_chroma = Vec3::ZERO;
             let mut best_elevation = -1.0f32;
             let mut best_lum: f32 = 0.0;
@@ -1148,7 +1160,7 @@ pub(super) fn prepare_cloud_uniforms(
                 if elevation < -0.1 {
                     continue;
                 }
-                let lum = light.color.dot(LUMA);
+                let lum = light.color.dot(REC709_LUMA);
                 if lum > best_lum {
                     best_lum = lum;
                     best_elevation = elevation;
@@ -1269,7 +1281,6 @@ pub(super) fn prepare_cloud_uniforms(
         // contribution is rejected), the moon is above, and shadows
         // track *its* direction. No light above horizon ⇒ elevation
         // stays at the floor and the apply pass becomes a no-op.
-        const LUMA: Vec3 = Vec3::new(0.2126, 0.7152, 0.0722);
         let mut best_lum: f32 = 0.0;
         let mut dominant_elev: f32 = -1.0;
         for i in 0..(atmosphere_lights.0.count as usize) {
@@ -1278,7 +1289,7 @@ pub(super) fn prepare_cloud_uniforms(
             if elev < -0.05 {
                 continue;
             }
-            let lum = l.color.dot(LUMA);
+            let lum = l.color.dot(REC709_LUMA);
             if lum > best_lum {
                 best_lum = lum;
                 dominant_elev = elev;
@@ -1330,14 +1341,14 @@ pub(super) fn prepare_cloud_uniforms(
 
         commands.entity(entity).insert(GpuCloudUniform {
             max_primary_steps,
-            light_steps: quality.light_steps(),
-            octaves: quality.octaves(),
+            light_steps,
+            octaves,
             debug_mode: cloud.debug_mode as u32,
             buffer_size,
             full_size,
             layer_count: layer_count as u32,
             time_seconds: world_time,
-            pad_top1: 0,
+            orbital_blend,
             pad_top2: 0,
             prev_clip_from_world: prev.clip_from_world,
             prev_camera_ecef: prev.camera_ecef,
@@ -1388,12 +1399,11 @@ pub(super) fn prepare_cloud_uniforms(
             // on the *date* not on whether the sun is currently above
             // the camera's horizon.
             climate_itcz_center_deg: {
-                const LUMA: Vec3 = Vec3::new(0.2126, 0.7152, 0.0722);
                 let mut sun_dir = Vec3::Z;
                 let mut best_lum: f32 = 0.0;
                 for i in 0..(atmosphere_lights.0.count as usize) {
                     let l = &atmosphere_lights.0.lights[i];
-                    let lum = l.color.dot(LUMA);
+                    let lum = l.color.dot(REC709_LUMA);
                     if lum > best_lum {
                         best_lum = lum;
                         sun_dir = l.direction_to_light;
