@@ -10,6 +10,7 @@ mod constants;
 mod input;
 mod launch_params;
 mod physics;
+mod profiler;
 mod rendering;
 mod ui;
 mod vehicle;
@@ -234,18 +235,32 @@ fn main() {
         window.prevent_default_event_handling = true;
     }
 
-    app.add_plugins(DefaultPlugins.set(WindowPlugin {
-        primary_window: Some(window),
-        ..Default::default()
-    }));
+    app.add_plugins(
+        DefaultPlugins
+            .set(WindowPlugin {
+                primary_window: Some(window),
+                ..Default::default()
+            })
+            .set(bevy::log::LogPlugin {
+                // Hooks our `tracing-subscriber::Layer` that times
+                // every Bevy `system` span; the Profiler > Logic
+                // debug-UI subtab consumes the results. The
+                // `bevy/trace` feature must be on (we enable it in
+                // the native deps block of `Cargo.toml`) for system
+                // spans to actually emit.
+                custom_layer: profiler::install_layer,
+                ..Default::default()
+            }),
+    );
 
     // GPU/CPU timing instrumentation for every pass marked with
     // `pass_span` / `time_span` (the cloud + atmosphere crates do this
     // throughout). Results land in `DiagnosticsStore` under
-    // `render/{pass_name}/*` paths; the Diagnostics tab in the debug UI
-    // surfaces them. Timestamp queries are real on Vulkan/DX12, CPU-only
-    // fallback on Metal/WebGPU.
+    // `render/{pass_name}/*` paths; the Profiler > Render debug-UI
+    // subtab surfaces them. Timestamp queries are real on Vulkan/DX12,
+    // CPU-only fallback on Metal/WebGPU.
     app.add_plugins(bevy::render::diagnostic::RenderDiagnosticsPlugin);
+    app.add_plugins(profiler::ProfilerPlugin);
 
     // Parse launch parameters (CLI args on native, URL query params on WASM).
     let params = launch_params::parse();

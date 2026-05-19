@@ -7,6 +7,7 @@ mod clouds;
 mod diagnostics;
 mod gameplay;
 mod location;
+mod profiler;
 
 use std::sync::Arc;
 
@@ -69,6 +70,7 @@ enum DebugTab {
     Gameplay,
     Atmosphere,
     Diagnostics,
+    Profiler,
 }
 
 /// State for the debug UI.
@@ -78,6 +80,8 @@ pub struct DebugUiState {
     selected_tab: DebugTab,
     /// Currently selected sub-tab inside the Atmosphere tab.
     pub atmosphere_subtab: clouds::AtmosphereSubTab,
+    /// Currently selected sub-tab inside the Profiler tab.
+    pub profiler_subtab: profiler::ProfilerSubTab,
 }
 
 fn setup_fonts(mut contexts: EguiContexts, mut commands: Commands) {
@@ -129,6 +133,7 @@ fn debug_ui_system(
     mut gameplay_params: gameplay::GameplayParams,
     mut clouds_params: clouds::CloudParams,
     mut diag_params: diagnostics::DiagnosticsParams,
+    profiler_params: profiler::ProfilerParams,
     climate_assets: Res<crate::rendering::clouds::CloudClimateAssets>,
 ) -> Result {
     // Resolve egui image ids BEFORE taking `ctx_mut` (same borrow on
@@ -172,6 +177,7 @@ fn debug_ui_system(
                     (DebugTab::Gameplay, "Gameplay"),
                     (DebugTab::Atmosphere, "Atmosphere"),
                     (DebugTab::Diagnostics, "Diagnostics"),
+                    (DebugTab::Profiler, "Profiler"),
                 ] {
                     if ui
                         .selectable_label(ui_state.selected_tab == tab, label)
@@ -206,6 +212,13 @@ fn debug_ui_system(
                 }
                 DebugTab::Diagnostics => {
                     diagnostics::render_diagnostics_tab(ui, &mut diag_params, position);
+                }
+                DebugTab::Profiler => {
+                    profiler::render_profiler_tab(
+                        ui,
+                        &profiler_params,
+                        &mut ui_state.profiler_subtab,
+                    );
                 }
             }
         });

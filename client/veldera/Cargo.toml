@@ -74,6 +74,10 @@ bevy = { version = "0.18.0", default-features = false, features = [
   "bevy_winit",
   "multi_threaded",
   "tonemapping_luts",
+  # Enables `tracing` spans on every Bevy system; the in-game CPU
+  # profiler subscribes to these via `LogPlugin::custom_layer`.
+  # Native-only since `tracing-subscriber` is already native-only.
+  "trace",
   "x11"
 ] }
 bevy-tokio-tasks = "0.18"
