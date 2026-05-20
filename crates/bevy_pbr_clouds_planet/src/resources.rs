@@ -1190,6 +1190,23 @@ pub(super) fn prepare_cloud_uniforms(
         let camera_altitude_m =
             (camera_ecef_f64.length() - f64::from(atmosphere.bottom_radius)) as f32;
 
+        // For the floating-origin noise/warp UV offset trick we need
+        // a camera position that EXACTLY matches what the shader will
+        // reconstruct as `cam_world = local_up * camera_radius` (in
+        // f32). Using `camera_ecef_f64` here breaks the cancellation:
+        // CPU `fract(C_true / tile)` + shader `(P − C_quantised) / tile`
+        // ≠ `fract(P / tile)` when `C_true ≠ C_quantised`, and the
+        // residual `(C_true − C_quantised) / tile` shows up as a
+        // deterministic camera-position-dependent shift of the noise
+        // UV at every sample. Even though the magnitude is small
+        // (~0.5 m / tile), accumulated through hundreds of opacity
+        // samples it's enough to visibly morph cloud silhouettes as
+        // the camera flies past. Compute the offsets from the
+        // f32-quantised `local_up * camera_radius` so they cancel
+        // exactly with what the shader sees.
+        let camera_ecef_for_offsets_f64 =
+            (sph_cam.local_up * sph_cam.camera_radius).as_dvec3();
+
         // Per-sample cost (`shade_full` vs `shade_simple`) is driven
         // purely by distance from the camera in the shader, so a
         // low-altitude horizon view still pays full shading on near
@@ -1271,14 +1288,15 @@ pub(super) fn prepare_cloud_uniforms(
             // Per-axis `(cam / tile).fract()`, in f64 to retain the
             // precision before the result gets used as a small f32 add
             // in the shader.
-            let cam_uv = (camera_ecef_f64 / tile).map(|v| v.rem_euclid(1.0));
+            let cam_uv = (camera_ecef_for_offsets_f64 / tile).map(|v| v.rem_euclid(1.0));
             let noise_uv_offset = cam_uv.as_vec3();
             // Same idea for the warp scale (tile × 4). Without a
             // dedicated offset, the warp lookup wraps at the noise tile
             // boundary (4 km) instead of its own (16 km), popping
             // 0.25 cycles every noise-tile crossing.
             let warp_tile_f64 = tile * 4.0;
-            let warp_uv = (camera_ecef_f64 / warp_tile_f64).map(|v| v.rem_euclid(1.0));
+            let warp_uv =
+                (camera_ecef_for_offsets_f64 / warp_tile_f64).map(|v| v.rem_euclid(1.0));
             let warp_uv_offset = warp_uv.as_vec3();
             gpu_layers[i] = GpuCloudSubLayer {
                 inner_radius: atmosphere.bottom_radius + sub.inner_altitude,
