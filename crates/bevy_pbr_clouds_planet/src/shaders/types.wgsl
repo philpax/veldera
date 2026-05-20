@@ -55,6 +55,14 @@ struct CloudUniform {
     // Scales the per-pixel `t_first` sub-grid jitter (`0..1`).
     // See `CloudLayers::raymarch_jitter_magnitude`.
     raymarch_jitter_magnitude: f32,
+    // Scales the TAA Halton sub-pixel jitter window. See
+    // `CloudLayers::raymarch_taa_jitter_magnitude`.
+    raymarch_taa_jitter_magnitude: f32,
+    // 1 = rotate the per-pixel `t_first` hash by the golden ratio
+    // each frame. See `CloudLayers::raymarch_jitter_temporal_rotation`.
+    raymarch_jitter_temporal_rotation: u32,
+    pad_jitter_a: u32,
+    pad_jitter_b: u32,
 
     prev_clip_from_world: mat4x4<f32>,
 

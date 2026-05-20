@@ -120,6 +120,15 @@ pub struct GpuCloudUniform {
     /// Per-pixel `t_first` sub-grid jitter magnitude. Driven by
     /// [`crate::CloudLayers::raymarch_jitter_magnitude`].
     pub raymarch_jitter_magnitude: f32,
+    /// TAA Halton-jitter window scaling. Driven by
+    /// [`crate::CloudLayers::raymarch_taa_jitter_magnitude`].
+    pub raymarch_taa_jitter_magnitude: f32,
+    /// 1 = animate the per-pixel `t_first` hash via a golden-ratio
+    /// rotation per frame. Driven by
+    /// [`crate::CloudLayers::raymarch_jitter_temporal_rotation`].
+    pub raymarch_jitter_temporal_rotation: u32,
+    pub pad_jitter_a: u32,
+    pub pad_jitter_b: u32,
 
     /// Previous frame's `clip_from_world` matrix. Used by the temporal
     /// pass to reproject each pixel into the previous frame's screen
@@ -1415,6 +1424,10 @@ pub(super) fn prepare_cloud_uniforms(
             time_seconds: world_time,
             raymarch_jitter: u32::from(cloud.raymarch_jitter),
             raymarch_jitter_magnitude: cloud.raymarch_jitter_magnitude,
+            raymarch_taa_jitter_magnitude: cloud.raymarch_taa_jitter_magnitude,
+            raymarch_jitter_temporal_rotation: u32::from(cloud.raymarch_jitter_temporal_rotation),
+            pad_jitter_a: 0,
+            pad_jitter_b: 0,
             prev_clip_from_world: prev.clip_from_world,
             prev_camera_ecef: prev.camera_ecef,
             frame_index: prev.frame_index.wrapping_add(1),

@@ -59,7 +59,26 @@ fn depth_to_camera_dist(uv: vec2<f32>, depth: f32) -> f32 {
 // migrates between pixels with different hashes, so per-pixel
 // values change at sub-pixel-resolution. The temporal pass + a
 // later denoiser smooth the residual.
-fn pixel_hash(p: vec2<u32>) -> f32 {
+// Per-pixel white-noise hash. Fully-mixed integer hash → uniform
+// random per pixel, no spatial structure. White noise's flat
+// spectrum is what kills the Moiré rings from the world-snapped
+// sample grid; blue-noise alternatives (IGN, etc.) have hidden
+// low-frequency content that can re-align with the ring pattern
+// and reinforce it instead.
+//
+// Optional per-frame golden-ratio Cranley-Patterson rotation gated
+// by `cloud.raymarch_jitter_temporal_rotation`. With rotation on,
+// every pixel sees a different sub-step offset every frame and the
+// temporal pass accumulates them into a smooth result — this is the
+// default when TAA ray-direction jitter is off.
+//
+// **Pick exactly one** of (TAA ray-direction jitter,
+// per-frame hash rotation). Enabling both stacks two sources of
+// per-frame variance into more motion than the temporal pass's 3×3
+// neighbourhood clamp can absorb; the clamp rejects the history
+// blend and visible noise *increases*.
+const GOLDEN_RATIO: f32 = 1.61803398874989;
+fn pixel_hash(p: vec2<u32>, frame: u32, animate: bool) -> f32 {
     var h = (p.x ^ 73856093u) * 19349663u;
     h = h ^ (p.y * 83492791u);
     h = h ^ (h >> 16u);
@@ -67,7 +86,11 @@ fn pixel_hash(p: vec2<u32>) -> f32 {
     h = h ^ (h >> 13u);
     h = h * 0xc2b2ae35u;
     h = h ^ (h >> 16u);
-    return f32(h & 0xffffffu) / 16777216.0;
+    let base = f32(h & 0xffffffu) / 16777216.0;
+    if animate {
+        return fract(base + GOLDEN_RATIO * f32(frame));
+    }
+    return base;
 }
 
 // Halton low-discrepancy sequence at the given index in base `b`.
@@ -205,7 +228,9 @@ fn main(@builtin(global_invocation_id) idx: vec3<u32>) {
     // detail stays sharp while the per-frame variance averages out.
     var jitter_uv = vec2<f32>(0.0);
     if cloud.raymarch_jitter != 0u {
-        jitter_uv = jitter_for_frame(cloud.frame_index) / vec2<f32>(cloud.full_size);
+        jitter_uv = jitter_for_frame(cloud.frame_index)
+            * cloud.raymarch_taa_jitter_magnitude
+            / vec2<f32>(cloud.full_size);
     }
     let uv = (vec2<f32>(idx.xy) + 0.5) / vec2<f32>(cloud.buffer_size) + jitter_uv;
     let ray_dir_ws = uv_to_ray_direction_ws(uv);
@@ -350,7 +375,13 @@ fn main(@builtin(global_invocation_id) idx: vec3<u32>) {
     // `[-dt/2, +dt/2) × magnitude`. World-stability per pixel still
     // holds — the jitter is a fixed additive constant per pixel and
     // doesn't depend on camera position.
-    let jitter = (pixel_hash(idx.xy) - 0.5) * dt * cloud.raymarch_jitter_magnitude;
+    let jitter = (
+        pixel_hash(
+            idx.xy,
+            cloud.frame_index,
+            cloud.raymarch_jitter_temporal_rotation != 0u,
+        ) - 0.5
+    ) * dt * cloud.raymarch_jitter_magnitude;
     let t_first = ceil((t_start + cam_proj) / dt) * dt - cam_proj + jitter;
     let max_iter = u32(ceil((t_end - t_first) / dt)) + 1u;
 

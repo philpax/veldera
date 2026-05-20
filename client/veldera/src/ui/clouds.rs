@@ -108,8 +108,10 @@ fn render_overview(ui: &mut egui::Ui, cloud: &mut CloudLayers) {
     ui.checkbox(&mut cloud.raymarch_jitter, "Raymarch jitter (TAA)")
         .on_hover_text(
             "On: per-frame sub-pixel Halton(2,3) jitter on the raymarch ray direction; the temporal \
-             pass accumulates 16 frames into an effectively higher-resolution image. Off: \
-             unjittered — sharper per-frame but more aliasing in stills. A/B for tuning.",
+             pass accumulates 16 frames into an effectively higher-resolution image. Off (default): \
+             unjittered ray; the temporal pass relies on per-frame hash rotation for variance. \
+             ONLY enable this if Per-frame hash rotation is off — both at once breaks the \
+             neighbourhood clamp.",
         );
     ui.add(
         egui::Slider::new(&mut cloud.raymarch_jitter_magnitude, 0.0..=1.0)
@@ -119,6 +121,29 @@ fn render_overview(ui: &mut egui::Ui, cloud: &mut CloudLayers) {
         "Scales the per-pixel sub-step jitter that breaks the Moiré rings from the world-snapped \
          sample grid. 1.0 = full (original); 0.0 = no jitter (rings return); lower values reduce \
          per-pixel speckle the denoiser has to clean up, especially at cloud silhouettes.",
+    );
+    ui.add_enabled(
+        cloud.raymarch_jitter,
+        egui::Slider::new(&mut cloud.raymarch_taa_jitter_magnitude, 0.5..=4.0)
+            .text("TAA jitter magnitude"),
+    )
+    .on_hover_text(
+        "Scales the TAA Halton(2,3) sub-pixel jitter window. 1.0 = the default ±0.5 full-res \
+         pixel range. Larger values widen the per-frame sub-pixel footprint each pixel covers, so \
+         the temporal pass accumulates more distinct samples and the noise spreads across more \
+         frames — at the cost of more motion the neighbourhood clamp has to manage (more ghosting \
+         risk).",
+    );
+    ui.checkbox(
+        &mut cloud.raymarch_jitter_temporal_rotation,
+        "Per-frame hash rotation",
+    )
+    .on_hover_text(
+        "Rotate the per-pixel `t_first` hash by the golden ratio each frame so every pixel sees \
+         a different sub-step offset every frame. The temporal pass accumulates the independent \
+         samples per output pixel. Default on. ONLY safe when TAA ray-direction jitter is off — \
+         enabling both stacks too much per-frame variance for the neighbourhood clamp to absorb \
+         and visible noise *increases*.",
     );
 
     ui.checkbox(&mut cloud.denoise, "Denoise (A-Trous wavelet)")

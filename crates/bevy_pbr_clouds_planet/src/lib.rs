@@ -540,10 +540,18 @@ pub struct CloudLayers {
     pub climate: ClimateSettings,
     /// Stateful climate simulation. See [`ClimateSimSettings`].
     pub sim: ClimateSimSettings,
-    /// Per-frame sub-pixel TAA jitter on the cloud raymarch.
-    /// The temporal pass accumulates jittered frames into an
-    /// effectively higher-resolution image, anti-aliasing the
-    /// half-res raymarch output. Toggleable for A/B comparison.
+    /// Per-frame sub-pixel TAA jitter on the cloud raymarch ray
+    /// direction. The temporal pass accumulates jittered frames into
+    /// an effectively higher-resolution image, anti-aliasing the
+    /// half-res raymarch output.
+    ///
+    /// Default `false`. Combined with
+    /// [`Self::raymarch_jitter_temporal_rotation`] (default on) the
+    /// temporal pass already gets enough per-frame variation to
+    /// smooth the noise without paying the ghosting cost of jittering
+    /// the ray direction itself. Turning this on adds finer
+    /// sub-pixel AA at the cost of extra motion the neighbourhood
+    /// clamp has to manage.
     pub raymarch_jitter: bool,
     /// Scales the per-pixel `t_first` sub-grid jitter that breaks
     /// the Moiré rings from the world-snapped sample grid. `1.0` is
@@ -553,6 +561,27 @@ pub struct CloudLayers {
     /// decorrelation. `0.0` disables the jitter entirely (rings
     /// return). Default `1.0`.
     pub raymarch_jitter_magnitude: f32,
+    /// Scales the TAA sub-pixel jitter window (the Halton(2,3) offset
+    /// applied to the ray direction). `1.0` is the default ±0.5
+    /// full-res pixel range. Larger values widen the per-frame
+    /// sub-pixel footprint of each pixel so the temporal pass
+    /// accumulates more distinct samples, at the cost of more
+    /// per-frame motion the neighbourhood clamp has to manage.
+    pub raymarch_taa_jitter_magnitude: f32,
+    /// If true, the per-pixel `t_first` sub-grid hash is rotated by
+    /// the golden ratio each frame (Cranley-Patterson rotation), so
+    /// every pixel sees a different sub-step offset every frame.
+    /// The temporal pass accumulates these independent samples per
+    /// output pixel and converges to a smooth result.
+    ///
+    /// Default `true`, but **only safe** when
+    /// [`Self::raymarch_jitter`] (TAA ray-direction jitter) is off.
+    /// With both enabled the per-frame ray motion + per-frame hash
+    /// rotation combine into more variance than the temporal pass's
+    /// 3×3 neighbourhood clamp can absorb, so the clamp rejects the
+    /// history blend and visible noise *increases*. Pick one source
+    /// of per-frame decorrelation, not both.
+    pub raymarch_jitter_temporal_rotation: bool,
     /// Edge-avoiding A-Trous wavelet denoise pass. Spatial counterpart
     /// to the temporal pass — smooths the per-pixel stochastic noise
     /// from the raymarch's `t_first` jitter.
@@ -814,8 +843,10 @@ impl CloudLayers {
             shadow_intensity: 1.0,
             climate: ClimateSettings::default(),
             sim: ClimateSimSettings::default(),
-            raymarch_jitter: true,
+            raymarch_jitter: false,
             raymarch_jitter_magnitude: 1.0,
+            raymarch_taa_jitter_magnitude: 1.0,
+            raymarch_jitter_temporal_rotation: true,
             denoise: true,
             denoise_iterations: 1,
             denoise_sigma_transmittance: 0.1,
@@ -835,8 +866,10 @@ impl CloudLayers {
             shadow_intensity: 1.0,
             climate: ClimateSettings::default(),
             sim: ClimateSimSettings::default(),
-            raymarch_jitter: true,
+            raymarch_jitter: false,
             raymarch_jitter_magnitude: 1.0,
+            raymarch_taa_jitter_magnitude: 1.0,
+            raymarch_jitter_temporal_rotation: true,
             denoise: true,
             denoise_iterations: 1,
             denoise_sigma_transmittance: 0.1,
@@ -862,8 +895,10 @@ impl CloudLayers {
             shadow_intensity: 1.0,
             climate: ClimateSettings::default(),
             sim: ClimateSimSettings::default(),
-            raymarch_jitter: true,
+            raymarch_jitter: false,
             raymarch_jitter_magnitude: 1.0,
+            raymarch_taa_jitter_magnitude: 1.0,
+            raymarch_jitter_temporal_rotation: true,
             denoise: true,
             denoise_iterations: 1,
             denoise_sigma_transmittance: 0.1,
