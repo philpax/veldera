@@ -33,7 +33,7 @@ use crate::{
         LogicalPlayer, RadialFrame,
     },
     physics::DespawnOutsidePhysicsRange,
-    ui::DiagnosticsTabOpen,
+    ui::VehicleTabOpen,
     world::floating_origin::{FloatingOriginCamera, WorldPosition},
 };
 
@@ -80,7 +80,7 @@ impl Plugin for VehiclePlugin {
                 check_vehicle_folder_loaded,
                 process_vehicle_actions,
                 toggle_vehicle_mode,
-                draw_thruster_gizmos.run_if(|tab: Res<DiagnosticsTabOpen>| tab.0),
+                draw_thruster_gizmos.run_if(|tab: Res<VehicleTabOpen>| tab.0),
             ),
         )
         .add_observer(on_vehicle_scene_ready);

@@ -1,28 +1,21 @@
-//! Diagnostics tab for the debug UI.
+//! Vehicles tab for the debug UI.
 //!
-//! Displays FPS, node count, physics debug toggle, and vehicle diagnostics.
+//! Spawner buttons up top, plus telemetry, plots, and tuning sliders
+//! for the currently-spawned vehicle (if any).
 
 use std::collections::VecDeque;
 
-use bevy::{
-    diagnostic::{DiagnosticsStore, FrameTimeDiagnosticsPlugin},
-    ecs::system::SystemParam,
-    gizmos::config::GizmoConfigStore,
-    prelude::*,
-};
+use bevy::{ecs::system::SystemParam, prelude::*};
 use bevy_egui::egui;
 use egui_extras::{Column, TableBuilder};
 use egui_plot::{Line, Plot, PlotPoints};
-use glam::DVec3;
 
 use crate::{
-    physics::{is_physics_debug_enabled, toggle_physics_debug},
-    rendering::mesh::RocktreeMeshMarker,
+    camera::CameraModeState,
     vehicle::{
-        Vehicle, VehicleDragConfig, VehicleHoverConfig, VehicleInput, VehicleMovementConfig,
-        VehicleState,
+        Vehicle, VehicleActions, VehicleDefinitions, VehicleDragConfig, VehicleHoverConfig,
+        VehicleInput, VehicleMovementConfig, VehicleState,
     },
-    world::lod::LodState,
 };
 
 /// Number of samples to keep in vehicle history.
@@ -77,13 +70,12 @@ pub struct VehicleRightRequest {
     pub pending: bool,
 }
 
-/// Resources for the diagnostics tab.
+/// Resources for the vehicles tab.
 #[derive(SystemParam)]
-pub(super) struct DiagnosticsParams<'w, 's> {
-    pub diagnostics: Res<'w, DiagnosticsStore>,
-    pub lod_state: Res<'w, LodState>,
-    pub mesh_query: Query<'w, 's, &'static RocktreeMeshMarker>,
-    pub config_store: ResMut<'w, GizmoConfigStore>,
+pub(super) struct VehicleParams<'w, 's> {
+    pub camera_mode: Res<'w, CameraModeState>,
+    pub vehicle_definitions: Res<'w, VehicleDefinitions>,
+    pub vehicle_actions: ResMut<'w, VehicleActions>,
     pub vehicle_query: Query<
         'w,
         's,
@@ -100,67 +92,61 @@ pub(super) struct DiagnosticsParams<'w, 's> {
     pub vehicle_right_request: ResMut<'w, VehicleRightRequest>,
 }
 
-/// Render the diagnostics tab content.
-pub(super) fn render_diagnostics_tab(
-    ui: &mut egui::Ui,
-    diag: &mut DiagnosticsParams,
-    position: DVec3,
-) {
-    let fps = diag
-        .diagnostics
-        .get(&FrameTimeDiagnosticsPlugin::FPS)
-        .and_then(bevy::diagnostic::Diagnostic::smoothed)
-        .unwrap_or(0.0);
-    let loaded_nodes = diag.lod_state.loaded_node_count();
-    let loading_nodes = diag.lod_state.loading_node_count();
-    let mesh_count = diag.mesh_query.iter().count();
-    let collider_count = diag.lod_state.physics_collider_count();
+/// Render the vehicles tab content: spawner first, then telemetry/
+/// tuning for the currently-spawned vehicle if there is one.
+pub(super) fn render_vehicles_tab(ui: &mut egui::Ui, params: &mut VehicleParams) {
+    render_spawner(ui, params);
 
-    ui.label(format!("FPS: {fps:.0}"));
-    ui.label(format!(
-        "Position: ({:.0}, {:.0}, {:.0})",
-        position.x, position.y, position.z
-    ));
-    ui.label(format!(
-        "Nodes: {loaded_nodes} loaded, {loading_nodes} loading"
-    ));
-    ui.label(format!("Meshes: {mesh_count}"));
-    ui.label(format!("Colliders: {collider_count}"));
+    let Some((vehicle, state, input, mut hover_config, mut movement_config, mut drag_config)) =
+        params.vehicle_query.iter_mut().next()
+    else {
+        params.vehicle_history.clear();
+        return;
+    };
+
+    params
+        .vehicle_history
+        .push_sample(state.speed, state.altitude, state.hover_force.length());
 
     ui.separator();
+    render_vehicle_diagnostics(
+        ui,
+        vehicle,
+        state,
+        input,
+        &mut hover_config,
+        &mut movement_config,
+        &mut drag_config,
+        &params.vehicle_history,
+        &mut params.vehicle_right_request,
+    );
+}
 
-    // Debug visualization toggle.
-    let mut debug_enabled = is_physics_debug_enabled(&diag.config_store);
-    if ui
-        .checkbox(&mut debug_enabled, "Debug visualization")
-        .changed()
-    {
-        toggle_physics_debug(&mut diag.config_store);
+/// Spawner buttons + the minimal "you're in this vehicle" status with
+/// an Exit button when the camera is following one.
+fn render_spawner(ui: &mut egui::Ui, params: &mut VehicleParams) {
+    ui.label("Spawn:");
+    if params.vehicle_definitions.vehicles.is_empty() {
+        ui.label("Loading...");
+    } else {
+        ui.horizontal_wrapped(|ui| {
+            for (idx, def) in params.vehicle_definitions.vehicles.iter().enumerate() {
+                if ui
+                    .button(&def.name)
+                    .on_hover_text(&def.description)
+                    .clicked()
+                {
+                    params.vehicle_actions.request_spawn(idx);
+                }
+            }
+        });
     }
 
-    // Vehicle diagnostics (if in a vehicle).
-    if let Some((vehicle, state, input, mut hover_config, mut movement_config, mut drag_config)) =
-        diag.vehicle_query.iter_mut().next()
+    if params.camera_mode.is_follow_entity()
+        && !params.vehicle_query.is_empty()
+        && ui.button("Exit vehicle (E)").clicked()
     {
-        // Update history with new sample.
-        diag.vehicle_history
-            .push_sample(state.speed, state.altitude, state.hover_force.length());
-
-        ui.separator();
-        render_vehicle_diagnostics(
-            ui,
-            vehicle,
-            state,
-            input,
-            &mut hover_config,
-            &mut movement_config,
-            &mut drag_config,
-            &diag.vehicle_history,
-            &mut diag.vehicle_right_request,
-        );
-    } else {
-        // Clear history when not in a vehicle.
-        diag.vehicle_history.clear();
+        params.vehicle_actions.request_exit();
     }
 }
 

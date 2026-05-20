@@ -4,10 +4,11 @@
 
 mod camera;
 mod clouds;
-mod diagnostics;
-mod gameplay;
 mod location;
+mod physics;
 mod profiler;
+mod streaming;
+mod vehicle;
 
 use std::sync::Arc;
 
@@ -18,11 +19,14 @@ use leafwing_input_manager::prelude::*;
 
 use crate::input::CameraAction;
 
-pub use diagnostics::VehicleRightRequest;
+pub use vehicle::VehicleRightRequest;
 
-/// Resource tracking whether the diagnostics tab is currently open.
+/// Resource tracking whether the vehicle tab is currently open.
+///
+/// Vehicle systems (e.g. thruster gizmo overlay) consult this to skip
+/// per-frame work when the user isn't looking at the tab.
 #[derive(Resource, Default)]
-pub struct DiagnosticsTabOpen(pub bool);
+pub struct VehicleTabOpen(pub bool);
 
 /// Resource controlling whether the debug UI is visible.
 #[derive(Resource)]
@@ -46,9 +50,9 @@ impl Plugin for DebugUiPlugin {
             .add_plugins(FrameTimeDiagnosticsPlugin::default())
             .init_resource::<location::CoordinateInputState>()
             .init_resource::<DebugUiState>()
-            .init_resource::<diagnostics::VehicleHistory>()
+            .init_resource::<vehicle::VehicleHistory>()
             .init_resource::<VehicleRightRequest>()
-            .init_resource::<DiagnosticsTabOpen>()
+            .init_resource::<VehicleTabOpen>()
             .init_resource::<UiVisible>()
             .add_systems(Update, toggle_ui_visible)
             .add_systems(
@@ -67,9 +71,10 @@ enum DebugTab {
     #[default]
     LocationAndTime,
     Camera,
-    Gameplay,
+    Vehicles,
     Atmosphere,
-    Diagnostics,
+    Streaming,
+    Physics,
     Profiler,
 }
 
@@ -127,12 +132,13 @@ fn debug_ui_system(
     mut contexts: EguiContexts,
     time: Res<Time>,
     mut ui_state: ResMut<DebugUiState>,
-    mut diagnostics_tab_open: ResMut<DiagnosticsTabOpen>,
+    mut vehicle_tab_open: ResMut<VehicleTabOpen>,
     mut location_params: location::LocationParams,
     mut camera_params: camera::CameraParams,
-    mut gameplay_params: gameplay::GameplayParams,
     mut clouds_params: clouds::CloudParams,
-    mut diag_params: diagnostics::DiagnosticsParams,
+    streaming_params: streaming::StreamingParams,
+    mut physics_params: physics::PhysicsParams,
+    mut vehicle_params: vehicle::VehicleParams,
     profiler_params: profiler::ProfilerParams,
     climate_assets: Res<crate::rendering::clouds::CloudClimateAssets>,
 ) -> Result {
@@ -174,9 +180,10 @@ fn debug_ui_system(
                 for (tab, label) in [
                     (DebugTab::LocationAndTime, "Location & time"),
                     (DebugTab::Camera, "Camera"),
-                    (DebugTab::Gameplay, "Gameplay"),
+                    (DebugTab::Vehicles, "Vehicles"),
                     (DebugTab::Atmosphere, "Atmosphere"),
-                    (DebugTab::Diagnostics, "Diagnostics"),
+                    (DebugTab::Streaming, "Streaming"),
+                    (DebugTab::Physics, "Physics"),
                     (DebugTab::Profiler, "Profiler"),
                 ] {
                     if ui
@@ -189,8 +196,10 @@ fn debug_ui_system(
             });
             ui.separator();
 
-            // Update diagnostics tab open state.
-            diagnostics_tab_open.0 = ui_state.selected_tab == DebugTab::Diagnostics;
+            // Vehicle systems (e.g. thruster gizmo overlay) gate on
+            // this so they skip per-frame work unless the user is
+            // actually looking at the tab.
+            vehicle_tab_open.0 = ui_state.selected_tab == DebugTab::Vehicles;
 
             match ui_state.selected_tab {
                 DebugTab::LocationAndTime => {
@@ -199,8 +208,8 @@ fn debug_ui_system(
                 DebugTab::Camera => {
                     camera::render_camera_tab(ui, &mut camera_params);
                 }
-                DebugTab::Gameplay => {
-                    gameplay::render_gameplay_tab(ui, &mut gameplay_params);
+                DebugTab::Vehicles => {
+                    vehicle::render_vehicles_tab(ui, &mut vehicle_params);
                 }
                 DebugTab::Atmosphere => {
                     clouds::render_atmosphere_tab(
@@ -210,8 +219,11 @@ fn debug_ui_system(
                         &atmosphere_image_ids,
                     );
                 }
-                DebugTab::Diagnostics => {
-                    diagnostics::render_diagnostics_tab(ui, &mut diag_params, position);
+                DebugTab::Streaming => {
+                    streaming::render_streaming_tab(ui, &streaming_params);
+                }
+                DebugTab::Physics => {
+                    physics::render_physics_tab(ui, &mut physics_params);
                 }
                 DebugTab::Profiler => {
                     profiler::render_profiler_tab(

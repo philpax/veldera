@@ -2,7 +2,11 @@
 //!
 //! Provides geocoding search, coordinate input, altitude control, and time-of-day settings.
 
-use bevy::{ecs::system::SystemParam, prelude::*};
+use bevy::{
+    diagnostic::{DiagnosticsStore, FrameTimeDiagnosticsPlugin},
+    ecs::system::SystemParam,
+    prelude::*,
+};
 use bevy_egui::egui;
 use glam::DVec3;
 
@@ -39,6 +43,7 @@ pub(super) struct LocationParams<'w, 's> {
     pub http_client: Res<'w, HttpClient>,
     pub spawner: TaskSpawner<'w, 's>,
     pub altitude_request: ResMut<'w, AltitudeRequest>,
+    pub diagnostics: Res<'w, DiagnosticsStore>,
 }
 
 /// Render the location & time tab content and execute any resulting actions.
@@ -48,6 +53,17 @@ pub(super) fn render_location_tab(
     location: &mut LocationParams,
     position: DVec3,
 ) {
+    let fps = location
+        .diagnostics
+        .get(&FrameTimeDiagnosticsPlugin::FPS)
+        .and_then(bevy::diagnostic::Diagnostic::smoothed)
+        .unwrap_or(0.0);
+    ui.label(format!(
+        "FPS: {fps:.0}  ·  Position: ({:.0}, {:.0}, {:.0})",
+        position.x, position.y, position.z
+    ));
+    ui.separator();
+
     let (lat_deg, lon_deg) = ecef_to_lat_lon(position);
     let altitude = position.length() - crate::constants::EARTH_RADIUS_M_F64;
 
