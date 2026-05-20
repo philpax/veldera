@@ -239,6 +239,7 @@ fn render_overview(ui: &mut egui::Ui, cloud: &mut CloudLayers) {
                 CloudDebugMode::ShadowMap,
                 CloudDebugMode::ClimateCoverage,
                 CloudDebugMode::Topography,
+                CloudDebugMode::KFirst,
             ] {
                 if ui
                     .selectable_label(matches_mode(cloud.debug_mode, mode), label_for(mode))
@@ -590,6 +591,7 @@ fn label_for(mode: CloudDebugMode) -> &'static str {
         CloudDebugMode::ShadowMap => "Shadow map (raw)",
         CloudDebugMode::ClimateCoverage => "Climate coverage",
         CloudDebugMode::Topography => "Topography",
+        CloudDebugMode::KFirst => "First-cell index k_first",
     }
 }
 
@@ -621,6 +623,12 @@ fn help_for(mode: CloudDebugMode) -> &'static str {
         }
         CloudDebugMode::Topography => {
             "Raw topography height value. Sea level ≈ mid-grey, ocean dark, mountains bright."
+        }
+        CloudDebugMode::KFirst => {
+            "Colour-cycles each pixel by the world-snap first-cell index (k_first mod 6). As the \
+             camera moves the bands shift across the screen at each integer-k transition. If \
+             these bands' shifting correlates with observed cloud morphing, the world-snap grid \
+             is the source of the step function."
         }
     }
 }

@@ -231,6 +231,7 @@ const DBG_SHELL_HIT: u32 = 1u;
 const DBG_NOISE: u32 = 2u;
 const DBG_DENSITY: u32 = 3u;
 const DBG_OPACITY: u32 = 4u;
+const DBG_K_FIRST: u32 = 11u;
 
 @compute @workgroup_size(8, 8, 1)
 fn main(@builtin(global_invocation_id) idx: vec3<u32>) {
@@ -347,7 +348,7 @@ fn main(@builtin(global_invocation_id) idx: vec3<u32>) {
             }
         }
         // For DBG_OPACITY we still need to run the loop. Handle below.
-        if cloud.debug_mode != DBG_OPACITY {
+        if cloud.debug_mode != DBG_OPACITY && cloud.debug_mode != DBG_K_FIRST {
             textureStore(cloud_raymarch_out, vec2<i32>(idx.xy), vec4(dbg, 0.0));
             return;
         }
@@ -385,6 +386,14 @@ fn main(@builtin(global_invocation_id) idx: vec3<u32>) {
     // world-snapped.
     let dt = cloud.primary_step_world_m;
     let cam_proj = dot(cam_world, ray_dir_ws);
+    // World-snapped un-jittered first sample. Subsequent samples step
+    // by `dt`. The PER-SAMPLE jitter (below) is derived from each
+    // sample's UN-JITTERED world position, hashed to a 4 m cell —
+    // see `world_cell_jitter_value`. This is stable per world cell
+    // regardless of which pixel observes it, fixing the fly-by
+    // shape-morph that the world-snap commit only partially
+    // addressed (its per-pixel hash flipped when a cloud cell
+    // migrated to a different pixel).
     // Cell-fade integration. Each world-snap sample at integer
     // grid-index `k` represents a `dt`-wide cell centred on
     // `t_unjit = k*dt - cam_proj`. The cell's contribution to
@@ -393,13 +402,37 @@ fn main(@builtin(global_invocation_id) idx: vec3<u32>) {
     // Without this fade, a sample is binary in/out of the chord and
     // produces a `exp(density·dt) ≈ 1.5×` step in transmittance
     // each time the camera's motion sweeps `t_end` (or `t_start`)
-    // across a grid point. The PER-SAMPLE jitter (below) is derived
-    // from each sample's UN-JITTERED world position, hashed to a
-    // 4 m cell — see `world_cell_jitter_value`.
+    // across a grid point — visible as the cloud's silhouette
+    // periodically switching as you fly past it.
     let k_first = i32(ceil((t_start + cam_proj - 0.5 * dt) / dt));
     let k_last = i32(floor((t_end + cam_proj + 0.5 * dt) / dt));
     let max_iter = u32(max(k_last - k_first + 1, 0));
     let animate_jitter = cloud.raymarch_jitter_temporal_rotation != 0u;
+
+    // Debug: visualise the world-snap first-cell index. Each integer
+    // value of `k_first` colours into a different hue; as the camera
+    // moves the bands shift visibly across the screen at integer-k
+    // transitions. If the user's reported camera-position step
+    // function correlates with these band transitions, the
+    // world-snap grid is responsible.
+    if cloud.debug_mode == DBG_K_FIRST {
+        if !hit {
+            textureStore(cloud_raymarch_out, vec2<i32>(idx.xy), vec4(0.0, 0.0, 0.0, 0.0));
+            return;
+        }
+        let k_mod = u32(k_first - (k_first / 6) * 6 + 6) % 6u;
+        var dbg_color = vec3<f32>(0.0);
+        switch k_mod {
+            case 0u: { dbg_color = vec3<f32>(1.0, 0.0, 0.0); }
+            case 1u: { dbg_color = vec3<f32>(1.0, 0.5, 0.0); }
+            case 2u: { dbg_color = vec3<f32>(1.0, 1.0, 0.0); }
+            case 3u: { dbg_color = vec3<f32>(0.0, 1.0, 0.0); }
+            case 4u: { dbg_color = vec3<f32>(0.0, 0.5, 1.0); }
+            default: { dbg_color = vec3<f32>(0.6, 0.0, 1.0); }
+        }
+        textureStore(cloud_raymarch_out, vec2<i32>(idx.xy), vec4(dbg_color, 0.0));
+        return;
+    }
 
     var transmittance: f32 = 1.0;
     var inscattering = vec3<f32>(0.0);

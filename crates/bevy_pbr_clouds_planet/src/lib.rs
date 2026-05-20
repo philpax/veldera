@@ -984,6 +984,12 @@ pub enum CloudDebugMode {
     /// mid-grey (~0.05); ocean dark; mountains bright. Useful for
     /// confirming the topography asset is bound and aligned.
     Topography = 10,
+    /// Colour-cycles each pixel by its world-snap first-cell index
+    /// `k_first` modulo a small period. If the user-observed
+    /// camera-position step-function in cloud opacity correlates
+    /// with bands of `k_first` changing across the screen, the
+    /// world-snap grid is the source.
+    KFirst = 11,
 }
 
 impl ExtractComponent for CloudLayers {
