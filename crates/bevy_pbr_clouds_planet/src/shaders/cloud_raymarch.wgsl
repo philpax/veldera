@@ -385,35 +385,49 @@ fn main(@builtin(global_invocation_id) idx: vec3<u32>) {
     // world-snapped.
     let dt = cloud.primary_step_world_m;
     let cam_proj = dot(cam_world, ray_dir_ws);
-    // World-snapped un-jittered first sample. Subsequent samples step
-    // by `dt`. The PER-SAMPLE jitter (below) is derived from each
-    // sample's UN-JITTERED world position, hashed to a 4 m cell —
-    // see `world_cell_jitter_value`. This is stable per world cell
-    // regardless of which pixel observes it, fixing the fly-by
-    // shape-morph that the world-snap commit only partially
-    // addressed (its per-pixel hash flipped when a cloud cell
-    // migrated to a different pixel).
-    let t_first_unjit = ceil((t_start + cam_proj) / dt) * dt - cam_proj;
-    let max_iter = u32(ceil((t_end - t_first_unjit) / dt)) + 1u;
+    // Cell-fade integration. Each world-snap sample at integer
+    // grid-index `k` represents a `dt`-wide cell centred on
+    // `t_unjit = k*dt - cam_proj`. The cell's contribution to
+    // opacity is scaled by how much of `[t_unjit - dt/2,
+    // t_unjit + dt/2]` overlaps the valid chord `[t_start, t_end]`.
+    // Without this fade, a sample is binary in/out of the chord and
+    // produces a `exp(density·dt) ≈ 1.5×` step in transmittance
+    // each time the camera's motion sweeps `t_end` (or `t_start`)
+    // across a grid point. The PER-SAMPLE jitter (below) is derived
+    // from each sample's UN-JITTERED world position, hashed to a
+    // 4 m cell — see `world_cell_jitter_value`.
+    let k_first = i32(ceil((t_start + cam_proj - 0.5 * dt) / dt));
+    let k_last = i32(floor((t_end + cam_proj + 0.5 * dt) / dt));
+    let max_iter = u32(max(k_last - k_first + 1, 0));
     let animate_jitter = cloud.raymarch_jitter_temporal_rotation != 0u;
 
     var transmittance: f32 = 1.0;
     var inscattering = vec3<f32>(0.0);
-    var t_unjit = t_first_unjit;
     var iter: u32 = 0u;
 
     loop {
-        if iter >= max_iter || t_unjit >= t_end {
+        if iter >= max_iter {
             break;
         }
+
+        let k = k_first + i32(iter);
+        let t_unjit = f32(k) * dt - cam_proj;
+        let cell_lo = t_unjit - 0.5 * dt;
+        let cell_hi = t_unjit + 0.5 * dt;
+        let weight = saturate((min(cell_hi, t_end) - max(cell_lo, t_start)) / dt);
+
+        if weight <= 1e-4 {
+            iter = iter + 1u;
+            continue;
+        }
+        let effective_dt = dt * weight;
 
         // Per-sample world-cell jitter. The un-jittered world point
         // is the position the world-snap grid would land on; we hash
         // that for the stable per-cell offset, then jitter the actual
-        // sample t. Beer's law still uses the constant `dt` (the
-        // un-jittered spacing); the small re-distribution of sample
-        // positions within each `dt` interval averages out across
-        // frames via the temporal pass.
+        // sample t. Beer's law uses `effective_dt` (= dt × overlap
+        // weight) so cells partially outside the chord contribute
+        // proportionally — smooth fade in/out at the boundaries.
         let world_pos_unjit = cam_world + ray_dir_ws * t_unjit;
         let jitter = (
             world_cell_jitter_value(world_pos_unjit, cloud.frame_index, animate_jitter) - 0.5
@@ -449,8 +463,11 @@ fn main(@builtin(global_invocation_id) idx: vec3<u32>) {
                 radiance = mix(full, simple, morph);
             }
 
-            // Beer's law extinction across the segment.
-            let step_t = exp(-density * dt);
+            // Beer's law extinction across the segment. `effective_dt`
+            // = `dt × overlap_weight` so boundary cells contribute
+            // proportionally — smooth fade as `t_end` (or `t_start`)
+            // sweeps across grid points under camera motion.
+            let step_t = exp(-density * effective_dt);
             // Single-scattering inscattering integral with cloud
             // single-scattering albedo approximated as 1:
             // ∫ exp(-σ·t) · σ_s · phase · L_sun dt =
@@ -464,7 +481,6 @@ fn main(@builtin(global_invocation_id) idx: vec3<u32>) {
             }
         }
 
-        t_unjit = t_unjit + dt;
         iter = iter + 1u;
     }
 
