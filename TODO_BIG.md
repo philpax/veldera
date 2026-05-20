@@ -3,7 +3,7 @@
 - [ ] physics should use the target tile size, or the best available if no better is available
 - [ ] light pollution map?
 - [ ] optimise update_lod_requests
-- [ ] deal with clouds moving when camera moves
+- [ ] cloud opacity has a deterministic-per-camera-pose step function: as the camera translates (any direction), the cloud silhouette is stable for stretches of ~5–15 km and then discretely switches to a new stable state. Period varies by ray (different clouds → different periods). Confirmed it is NOT: temporal pass / history (it's deterministic per pose, not time-dependent), per-pixel hash, per-world-cell hash, sub-grid jitter (still present at magnitude 0), `noise_lod_bias`, `primary_step_world_m` (constant period across all values), the world-snap chord boundary (boundary fade made this smooth), the CPU/shader floating-origin precision mismatch, the climate sim, or the `k_first` integer (its band period is ~400 m at nadir, way smaller). Visible in both Opacity debug viz and normal render. Next step: RenderDoc frame capture either side of a transition and diff every uniform/storage texture to localise which value changes discretely.
 - [ ] shouldn't be able to shoot projectiles when in camera transition or after switching camera modes or when deselecting ui lock
 - [ ] actual water tiles: will need to bring in a shader and potentially find and mask out the world tiles that correspond to water. use existing elevation map for this?
 - [ ] grappling: on-foot medium-scale traversal
