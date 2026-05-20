@@ -15,7 +15,7 @@ use crate::{
             GEOCODING_THROTTLE_SECS, GeocodingState, HttpClient, TeleportAnimation, TeleportState,
         },
         moon::compute_moon_state,
-        time_of_day::{SECONDS_PER_HOUR, TimeMode, TimeOfDayState, local_to_utc},
+        time_of_day::{SECONDS_PER_HOUR, TimeMode, TimeOfDayState, local_to_utc, seconds_to_hms},
     },
 };
 
@@ -230,10 +230,7 @@ pub(super) fn render_location_tab(
     // what a clock at the camera's longitude would say (UTC and local
     // disagree on the date for ~half of any given day).
     let local_date = location.time_of_day.current_date_at_longitude(lon_deg);
-    let utc_seconds = location.time_of_day.current_utc_seconds();
-    let utc_h = (utc_seconds / 3600.0) as u32;
-    let utc_m = ((utc_seconds % 3600.0) / 60.0) as u32;
-    let utc_s = (utc_seconds % 60.0) as u32;
+    let (utc_h, utc_m, utc_s) = seconds_to_hms(location.time_of_day.current_utc_seconds());
     ui.label(format!(
         "Date: {}-{:02}-{:02}",
         local_date.year, local_date.month, local_date.day
@@ -243,9 +240,7 @@ pub(super) fn render_location_tab(
     // Display current local time with timezone offset.
     let local_hours = location.time_of_day.local_hours_at_longitude(lon_deg);
     let offset_hours = lon_deg / 15.0;
-    let hours = local_hours as u32;
-    let minutes = ((local_hours - f64::from(hours)) * 60.0) as u32;
-    let seconds = ((local_hours * 3600.0) % 60.0) as u32;
+    let (hours, minutes, seconds) = seconds_to_hms(local_hours * SECONDS_PER_HOUR);
     let offset_sign = if offset_hours >= 0.0 { "+" } else { "" };
 
     let is_override = location.time_of_day.mode == TimeMode::Override;

@@ -45,6 +45,12 @@ pub struct SimpleDate {
 }
 
 impl SimpleDate {
+    /// Construct a [`SimpleDate`] from its components.
+    #[cfg_attr(target_family = "wasm", allow(dead_code))]
+    pub const fn new(year: i32, month: u32, day: u32) -> Self {
+        Self { year, month, day }
+    }
+
     /// Construct a [`chrono::NaiveDate`] for interop with widgets that
     /// expect one (e.g. egui_extras' `DatePickerButton`).
     pub fn to_naive(self) -> Option<chrono::NaiveDate> {
@@ -282,6 +288,13 @@ pub const SECONDS_PER_HOUR: f64 = 3600.0;
 
 /// Seconds in a day.
 pub const SECONDS_PER_DAY: f64 = 86400.0;
+
+/// Split a `seconds-since-midnight` value into `(hours, minutes, seconds)`.
+/// Negative values are clamped to 0.
+pub fn seconds_to_hms(seconds: f64) -> (u32, u32, u32) {
+    let total = seconds.max(0.0) as u32;
+    (total / 3600, (total % 3600) / 60, total % 60)
+}
 
 /// Project a UTC `(seconds, date)` pair to the corresponding local
 /// time at a longitude. `local_seconds` is wrapped into

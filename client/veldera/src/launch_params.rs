@@ -7,7 +7,10 @@ use std::fmt;
 
 use bevy::prelude::*;
 
-use crate::camera::CameraMode;
+use crate::{
+    camera::CameraMode,
+    world::time_of_day::{SimpleDate, seconds_to_hms},
+};
 
 /// Default starting latitude (NYC).
 const DEFAULT_LAT: f64 = 40.7;
@@ -44,33 +47,26 @@ impl Default for LaunchParams {
     }
 }
 
-/// A parsed UTC date-time override.
+/// A parsed date-time override, stored as a [`SimpleDate`] plus
+/// seconds-since-midnight. Used for both UTC and local-time CLI
+/// inputs; the [`world::time_of_day`](crate::world::time_of_day)
+/// helpers convert between the two.
 ///
 /// Format: `YYYY-MM-DDTHH:MM:SS` (e.g. `2024-06-21T12:00:00`).
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Copy)]
 pub struct DateTimeOverride {
-    pub year: i32,
-    pub month: u32,
-    pub day: u32,
-    pub hour: u32,
-    pub minute: u32,
-    pub second: u32,
-}
-
-#[allow(dead_code)]
-impl DateTimeOverride {
-    /// Returns the time-of-day as UTC seconds since midnight.
-    pub fn utc_seconds(&self) -> f64 {
-        f64::from(self.hour) * 3600.0 + f64::from(self.minute) * 60.0 + f64::from(self.second)
-    }
+    pub date: SimpleDate,
+    /// Seconds since midnight, `[0, 86400)`.
+    pub seconds: f64,
 }
 
 impl fmt::Display for DateTimeOverride {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let (h, m, s) = seconds_to_hms(self.seconds);
         write!(
             f,
-            "{:04}-{:02}-{:02}T{:02}:{:02}:{:02}",
-            self.year, self.month, self.day, self.hour, self.minute, self.second
+            "{:04}-{:02}-{:02}T{h:02}:{m:02}:{s:02}",
+            self.date.year, self.date.month, self.date.day,
         )
     }
 }
@@ -133,12 +129,8 @@ mod native {
         }
 
         Ok(DateTimeOverride {
-            year,
-            month,
-            day,
-            hour,
-            minute,
-            second,
+            date: SimpleDate::new(year, month, day),
+            seconds: f64::from(hour) * 3600.0 + f64::from(minute) * 60.0 + f64::from(second),
         })
     }
 
@@ -162,18 +154,37 @@ mod native {
         mode: CameraMode,
 
         /// UTC date-time override (format: YYYY-MM-DDTHH:MM:SS).
-        #[arg(long, value_parser = parse_datetime)]
+        #[arg(long, value_parser = parse_datetime, conflicts_with = "datetime_local")]
         datetime: Option<DateTimeOverride>,
+
+        /// Local date-time override at the spawn coordinates (format:
+        /// YYYY-MM-DDTHH:MM:SS). Converted to UTC using the
+        /// `--lon`-derived solar-time offset (15°/hour, ignores
+        /// political timezones). Mutually exclusive with `--datetime`.
+        #[arg(long, value_parser = parse_datetime, conflicts_with = "datetime")]
+        datetime_local: Option<DateTimeOverride>,
     }
 
     pub fn parse() -> LaunchParams {
+        use crate::world::time_of_day::local_to_utc;
+
         let args = CliArgs::parse();
+        // Local → UTC conversion uses the longitude-derived solar
+        // offset (the same one [`utc_to_local`] uses for the UI
+        // clock display), so `--datetime-local` round-trips with
+        // what the in-game "Local" readout shows.
+        let datetime = args.datetime.or_else(|| {
+            args.datetime_local.map(|local| {
+                let (seconds, date) = local_to_utc(local.seconds, local.date, args.lon);
+                DateTimeOverride { date, seconds }
+            })
+        });
         LaunchParams {
             lat: args.lat,
             lon: args.lon,
             altitude: args.altitude,
             camera_mode: args.mode,
-            datetime: args.datetime,
+            datetime,
         }
     }
 }

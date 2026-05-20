@@ -43,7 +43,7 @@ use world::{
     loader::DataLoaderPlugin,
     lod::LodPlugin,
     moon::{MOON_ANGULAR_DIAMETER, Moon, MoonPlugin},
-    time_of_day::{SimpleDate, Sun, TimeOfDayPlugin, TimeOfDayState},
+    time_of_day::{Sun, TimeOfDayPlugin, TimeOfDayState},
 };
 
 /// Plugin for the main application.
@@ -206,13 +206,8 @@ fn setup_scene(
 
 /// Apply the date-time override from launch parameters, if provided.
 fn apply_datetime_override(params: Res<LaunchParams>, mut time_state: ResMut<TimeOfDayState>) {
-    if let Some(ref dt) = params.datetime {
-        let date = SimpleDate {
-            year: dt.year,
-            month: dt.month,
-            day: dt.day,
-        };
-        time_state.set_override_utc(date, dt.utc_seconds());
+    if let Some(dt) = params.datetime {
+        time_state.set_override_utc(dt.date, dt.seconds);
         tracing::info!("Time override set to {dt} UTC");
     }
 }
