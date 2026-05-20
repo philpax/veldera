@@ -52,15 +52,18 @@ struct CloudUniform {
     // 1 = per-frame sub-pixel jitter on the raymarch ray direction
     // for TAA-style anti-aliasing; 0 = unjittered.
     raymarch_jitter: u32,
-    pad_top2: u32,
+    // Scales the per-pixel `t_first` sub-grid jitter (`0..1`).
+    // See `CloudLayers::raymarch_jitter_magnitude`.
+    raymarch_jitter_magnitude: f32,
 
     prev_clip_from_world: mat4x4<f32>,
 
     prev_camera_ecef: vec3<f32>,
     frame_index: u32,
     temporal_history_valid: u32,
-    pad_bot0: u32,
-    pad_bot1: u32,
+    // Denoise pass edge-stop sigmas — see `CloudLayers::denoise_*`.
+    denoise_sigma_transmittance: f32,
+    denoise_sigma_color: f32,
     pad_bot2: u32,
 
     layers: array<CloudSubLayer, MAX_CLOUD_LAYERS>,

@@ -40,6 +40,13 @@ pub enum CloudNode {
     ShadowBake,
     /// Half-resolution cloud raymarch (compute).
     Raymarch,
+    /// Edge-avoiding A-Trous wavelet denoise of the raymarch output
+    /// (compute, runs `CloudLayers::denoise_iterations` dispatches
+    /// ping-ponging between the raymarch buffer and the denoise
+    /// scratch). When `CloudLayers::denoise` is off this node skips
+    /// its dispatches and the temporal pass binds the raymarch
+    /// buffer directly.
+    Denoise,
     /// Reproject + blend into the ping-pong history buffer (compute).
     Temporal,
     /// Modulate-blend the cloud shadow map into the HDR view target so
@@ -139,6 +146,84 @@ impl ViewNode for CloudRaymarchNode {
         Ok(())
     }
 }
+
+#[derive(Default)]
+pub(super) struct CloudDenoiseNode;
+
+impl ViewNode for CloudDenoiseNode {
+    type ViewQuery = (
+        Read<CloudLayers>,
+        Read<CloudTextures>,
+        Read<CloudBindGroups>,
+        Read<DynamicUniformIndex<GpuCloudUniform>>,
+    );
+
+    fn run(
+        &self,
+        _graph: &mut RenderGraphContext,
+        render_context: &mut RenderContext,
+        (cloud_layer, textures, bind_groups, cloud_offset): QueryItem<Self::ViewQuery>,
+        world: &World,
+    ) -> Result<(), NodeRunError> {
+        // Skip when denoise is off. The temporal pass switches to
+        // read directly from `raymarch` in that case (see
+        // `prepare_cloud_bind_groups`).
+        if !cloud_layer.denoise {
+            return Ok(());
+        }
+
+        let pipelines = world.resource::<CloudPipelines>();
+        let pipeline_cache = world.resource::<PipelineCache>();
+
+        // Use only the first `n` pipelines based on the runtime
+        // iteration count. Clamped to `[1, DENOISE_ITERATIONS_MAX]`
+        // and forced odd so the ping-pong's final write lands in
+        // `denoise_scratch` (which the temporal pass binds).
+        let n = (cloud_layer.denoise_iterations as usize)
+            .clamp(1, crate::constants::DENOISE_ITERATIONS_MAX);
+        let n = if n.is_multiple_of(2) { n - 1 } else { n };
+
+        // Gather the pipelines we'll use up-front. If any are still
+        // compiling, bail — the next frame we'll catch it.
+        let mut compiled: [Option<&_>; crate::constants::DENOISE_ITERATIONS_MAX] =
+            [None; crate::constants::DENOISE_ITERATIONS_MAX];
+        for (i, &id) in pipelines.denoise.iter().enumerate().take(n) {
+            let Some(p) = pipeline_cache.get_compute_pipeline(id) else {
+                return Ok(());
+            };
+            compiled[i] = Some(p);
+        }
+
+        let diagnostics = render_context.diagnostic_recorder();
+        let mut pass =
+            render_context
+                .command_encoder()
+                .begin_compute_pass(&ComputePassDescriptor {
+                    label: Some("cloud_denoise"),
+                    timestamp_writes: None,
+                });
+        let span = diagnostics.pass_span(&mut pass, "cloud_denoise");
+
+        const WORKGROUP_SIZE: u32 = 8;
+        let groups_x = textures.raymarch_size.x.div_ceil(WORKGROUP_SIZE);
+        let groups_y = textures.raymarch_size.y.div_ceil(WORKGROUP_SIZE);
+        for (i, pipeline) in compiled.iter().enumerate().take(n) {
+            pass.set_pipeline(pipeline.unwrap());
+            pass.set_bind_group(0, &bind_groups.denoise[i], &[cloud_offset.index()]);
+            pass.dispatch_workgroups(groups_x, groups_y, 1);
+        }
+        if !DENOISE_LOGGED.swap(true, Ordering::Relaxed) {
+            info!(
+                "cloud denoise first dispatch ({} iterations, {}x{} buffer)",
+                n, textures.raymarch_size.x, textures.raymarch_size.y,
+            );
+        }
+        span.end(&mut pass);
+        Ok(())
+    }
+}
+
+static DENOISE_LOGGED: AtomicBool = AtomicBool::new(false);
 
 #[derive(Default)]
 pub(super) struct CloudTemporalNode;

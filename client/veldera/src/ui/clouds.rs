@@ -111,6 +111,53 @@ fn render_overview(ui: &mut egui::Ui, cloud: &mut CloudLayers) {
              pass accumulates 16 frames into an effectively higher-resolution image. Off: \
              unjittered — sharper per-frame but more aliasing in stills. A/B for tuning.",
         );
+    ui.add(
+        egui::Slider::new(&mut cloud.raymarch_jitter_magnitude, 0.0..=1.0)
+            .text("sub-grid jitter magnitude"),
+    )
+    .on_hover_text(
+        "Scales the per-pixel sub-step jitter that breaks the Moiré rings from the world-snapped \
+         sample grid. 1.0 = full (original); 0.0 = no jitter (rings return); lower values reduce \
+         per-pixel speckle the denoiser has to clean up, especially at cloud silhouettes.",
+    );
+
+    ui.checkbox(&mut cloud.denoise, "Denoise (A-Trous wavelet)")
+        .on_hover_text(
+            "Spatial denoise pass on the half-res raymarch output before the temporal pass. \
+             Smooths the per-pixel stochastic noise from the `t_first` jitter. Off: raw raymarch \
+             feeds the temporal pass directly.",
+        );
+    ui.add_enabled(
+        cloud.denoise,
+        egui::Slider::new(&mut cloud.denoise_iterations, 1..=5)
+            .step_by(2.0)
+            .text("iterations"),
+    )
+    .on_hover_text(
+        "Number of A-Trous wavelet iterations (must be odd: 1, 3, or 5). Higher = wider \
+         effective bilateral reach, more edge-pixel candidates to average with, slower. \
+         Each iteration doubles the tap spacing.",
+    );
+    ui.add_enabled(
+        cloud.denoise,
+        egui::Slider::new(&mut cloud.denoise_sigma_transmittance, 0.01..=1.0)
+            .text("σ transmittance")
+            .logarithmic(true),
+    )
+    .on_hover_text(
+        "Edge-stop sigma on cloud-alpha similarity. Smaller = sharper silhouettes preserved but \
+         less smoothing; larger = smoother but cloud edges blur into the sky.",
+    );
+    ui.add_enabled(
+        cloud.denoise,
+        egui::Slider::new(&mut cloud.denoise_sigma_color, 0.01..=5.0)
+            .text("σ color")
+            .logarithmic(true),
+    )
+    .on_hover_text(
+        "Edge-stop sigma on pre-exposure RGB similarity. Preserves per-cell shading transitions \
+         and sun-lit highlights.",
+    );
 
     ui.separator();
 

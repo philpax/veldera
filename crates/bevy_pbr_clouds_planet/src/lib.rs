@@ -62,8 +62,8 @@ pub use node::CloudNode;
 pub use resources::{CloudBindGroupLayouts, CloudPipelines, CloudSampler, CloudTextures};
 
 use node::{
-    CloudCompositeNode, CloudRaymarchNode, CloudShadowApplyNode, CloudShadowBakeNode,
-    CloudTemporalNode,
+    CloudCompositeNode, CloudDenoiseNode, CloudRaymarchNode, CloudShadowApplyNode,
+    CloudShadowBakeNode, CloudTemporalNode,
 };
 use noise::{
     NoiseBakeState, NoiseBindGroupLayout, NoiseDownsampleBindGroupLayout, NoiseDownsamplePipeline,
@@ -94,6 +94,7 @@ impl Plugin for CloudsPlanetPlugin {
         embedded_asset!(app, "shaders/noise_bake.wgsl");
         embedded_asset!(app, "shaders/noise_downsample.wgsl");
         embedded_asset!(app, "shaders/cloud_raymarch.wgsl");
+        embedded_asset!(app, "shaders/cloud_denoise.wgsl");
         embedded_asset!(app, "shaders/cloud_temporal.wgsl");
         embedded_asset!(app, "shaders/cloud_shadow_bake.wgsl");
         embedded_asset!(app, "shaders/cloud_shadow_apply.wgsl");
@@ -172,6 +173,7 @@ impl Plugin for CloudsPlanetPlugin {
                 CloudNode::ShadowBake,
             )
             .add_render_graph_node::<ViewNodeRunner<CloudRaymarchNode>>(Core3d, CloudNode::Raymarch)
+            .add_render_graph_node::<ViewNodeRunner<CloudDenoiseNode>>(Core3d, CloudNode::Denoise)
             .add_render_graph_node::<ViewNodeRunner<CloudTemporalNode>>(Core3d, CloudNode::Temporal)
             .add_render_graph_node::<ViewNodeRunner<CloudShadowApplyNode>>(
                 Core3d,
@@ -238,6 +240,11 @@ impl Plugin for CloudsPlanetPlugin {
                     // scene without being dimmed by their own shadow.
                     CloudNode::ShadowApply,
                     CloudNode::Raymarch,
+                    // Spatial denoise on the raymarch output before
+                    // temporal accumulates. When `CloudLayers::denoise`
+                    // is off the node is a no-op and the temporal
+                    // pass reads the raymarch buffer directly.
+                    CloudNode::Denoise,
                     CloudNode::Temporal,
                     CloudNode::Composite,
                     // God rays add their additive HDR inscatter on top
@@ -534,6 +541,31 @@ pub struct CloudLayers {
     /// effectively higher-resolution image, anti-aliasing the
     /// half-res raymarch output. Toggleable for A/B comparison.
     pub raymarch_jitter: bool,
+    /// Scales the per-pixel `t_first` sub-grid jitter that breaks
+    /// the Moiré rings from the world-snapped sample grid. `1.0` is
+    /// `±PRIMARY_STEP_WORLD_M/2` (the original); smaller values
+    /// reduce inter-pixel variance (and edge speckle for the
+    /// denoiser to chew on) at the cost of weaker ring
+    /// decorrelation. `0.0` disables the jitter entirely (rings
+    /// return). Default `1.0`.
+    pub raymarch_jitter_magnitude: f32,
+    /// Edge-avoiding A-Trous wavelet denoise pass. Spatial counterpart
+    /// to the temporal pass — smooths the per-pixel stochastic noise
+    /// from the raymarch's `t_first` jitter.
+    pub denoise: bool,
+    /// Number of A-Trous iterations to dispatch when `denoise` is on.
+    /// Must be **odd** so the ping-pong lands the final result in
+    /// `denoise_scratch`. Capped at
+    /// [`crate::constants::DENOISE_ITERATIONS_MAX`]. Higher = wider
+    /// effective bilateral reach, more edge-pixel candidates,
+    /// slower. Default `3`.
+    pub denoise_iterations: u32,
+    /// Edge-stop sigma on transmittance (cloud-alpha) similarity in
+    /// the denoise pass. Smaller = sharper silhouettes preserved.
+    pub denoise_sigma_transmittance: f32,
+    /// Edge-stop sigma on RGB (pre-exposure inscattering) similarity
+    /// in the denoise pass. Preserves per-cell shading transitions.
+    pub denoise_sigma_color: f32,
 }
 
 /// Tunable knobs for the latitude/topography-driven cloud climate model.
@@ -771,6 +803,11 @@ impl CloudLayers {
             climate: ClimateSettings::default(),
             sim: ClimateSimSettings::default(),
             raymarch_jitter: true,
+            raymarch_jitter_magnitude: 1.0,
+            denoise: true,
+            denoise_iterations: 3,
+            denoise_sigma_transmittance: 0.1,
+            denoise_sigma_color: 0.5,
         }
     }
 
@@ -786,6 +823,11 @@ impl CloudLayers {
             climate: ClimateSettings::default(),
             sim: ClimateSimSettings::default(),
             raymarch_jitter: true,
+            raymarch_jitter_magnitude: 1.0,
+            denoise: true,
+            denoise_iterations: 3,
+            denoise_sigma_transmittance: 0.1,
+            denoise_sigma_color: 0.5,
         }
     }
 
@@ -807,6 +849,11 @@ impl CloudLayers {
             climate: ClimateSettings::default(),
             sim: ClimateSimSettings::default(),
             raymarch_jitter: true,
+            raymarch_jitter_magnitude: 1.0,
+            denoise: true,
+            denoise_iterations: 3,
+            denoise_sigma_transmittance: 0.1,
+            denoise_sigma_color: 0.5,
         }
     }
 }

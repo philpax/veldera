@@ -117,7 +117,9 @@ pub struct GpuCloudUniform {
     /// 0 = unjittered. Driven by
     /// [`crate::CloudLayers::raymarch_jitter`].
     pub raymarch_jitter: u32,
-    pub pad_top2: u32,
+    /// Per-pixel `t_first` sub-grid jitter magnitude. Driven by
+    /// [`crate::CloudLayers::raymarch_jitter_magnitude`].
+    pub raymarch_jitter_magnitude: f32,
 
     /// Previous frame's `clip_from_world` matrix. Used by the temporal
     /// pass to reproject each pixel into the previous frame's screen
@@ -139,8 +141,12 @@ pub struct GpuCloudUniform {
     /// temporal blend uses this to ignore the (uninitialised or stale)
     /// history and write the raw raymarch instead.
     pub temporal_history_valid: u32,
-    pub pad_bot0: u32,
-    pub pad_bot1: u32,
+    /// Edge-stop sigma on transmittance (alpha) for the denoise pass.
+    /// Driven by [`crate::CloudLayers::denoise_sigma_transmittance`].
+    pub denoise_sigma_transmittance: f32,
+    /// Edge-stop sigma on RGB (pre-exposure inscattering) for the
+    /// denoise pass. Driven by [`crate::CloudLayers::denoise_sigma_color`].
+    pub denoise_sigma_color: f32,
     pub pad_bot2: u32,
 
     pub layers: [GpuCloudSubLayer; MAX_CLOUD_LAYERS],
@@ -248,6 +254,11 @@ pub struct GpuCloudUniform {
 #[derive(Component)]
 pub struct CloudTextures {
     pub raymarch: CachedTexture,
+    /// Scratch buffer for the A-Trous denoise iterations. The denoise
+    /// pass ping-pongs between this and `raymarch`. With odd
+    /// `DENOISE_ITERATIONS` the final result lands here, which the
+    /// temporal pass binds (when denoise is enabled).
+    pub denoise_scratch: CachedTexture,
     pub raymarch_size: UVec2,
 }
 
@@ -415,6 +426,7 @@ impl FromWorld for CloudSampler {
 #[derive(Resource)]
 pub struct CloudBindGroupLayouts {
     pub raymarch: BindGroupLayoutDescriptor,
+    pub denoise: BindGroupLayoutDescriptor,
     pub temporal: BindGroupLayoutDescriptor,
     pub composite: BindGroupLayoutDescriptor,
     pub shadow_bake: BindGroupLayoutDescriptor,
@@ -502,6 +514,27 @@ impl FromWorld for CloudBindGroupLayouts {
                     // Output: this frame's blended history.
                     (
                         7,
+                        texture_storage_2d(
+                            TextureFormat::Rgba16Float,
+                            StorageTextureAccess::WriteOnly,
+                        ),
+                    ),
+                ),
+            ),
+        );
+
+        let denoise = BindGroupLayoutDescriptor::new(
+            "cloud_denoise_bind_group_layout",
+            &BindGroupLayoutEntries::with_indices(
+                ShaderStages::COMPUTE,
+                (
+                    // Cloud uniform — denoise sigmas live here.
+                    (0, uniform_buffer::<GpuCloudUniform>(true)),
+                    // Input (one ping-pong slot).
+                    (1, texture_2d(TextureSampleType::default())),
+                    // Output (the other ping-pong slot).
+                    (
+                        2,
                         texture_storage_2d(
                             TextureFormat::Rgba16Float,
                             StorageTextureAccess::WriteOnly,
@@ -725,6 +758,7 @@ impl FromWorld for CloudBindGroupLayouts {
 
         Self {
             raymarch,
+            denoise,
             temporal,
             composite,
             shadow_bake,
@@ -746,6 +780,11 @@ impl FromWorld for CloudBindGroupLayouts {
 #[derive(Resource)]
 pub struct CloudPipelines {
     pub raymarch: CachedComputePipelineId,
+    /// One pipeline per A-Trous denoise iteration. Each entry shares
+    /// `shaders/cloud_denoise.wgsl` but binds a different entry
+    /// point (`iter_1`, `iter_2`, `iter_4`) so the tap spacing is
+    /// hard-coded per pipeline.
+    pub denoise: [CachedComputePipelineId; crate::constants::DENOISE_ITERATIONS_MAX],
     pub temporal: CachedComputePipelineId,
     pub shadow_bake: CachedComputePipelineId,
     pub climate_bake: CachedComputePipelineId,
@@ -773,6 +812,18 @@ impl FromWorld for CloudPipelines {
             layout: vec![layouts.temporal.clone()],
             shader: temporal_shader,
             ..Default::default()
+        });
+
+        let denoise_shader = load_embedded_asset!(world, "shaders/cloud_denoise.wgsl");
+        let denoise_entries = ["iter_1", "iter_2", "iter_4", "iter_8", "iter_16"];
+        let denoise = std::array::from_fn(|i| {
+            pipeline_cache.queue_compute_pipeline(ComputePipelineDescriptor {
+                label: Some(format!("cloud_denoise_pipeline_{}", denoise_entries[i]).into()),
+                layout: vec![layouts.denoise.clone()],
+                shader: denoise_shader.clone(),
+                entry_point: Some(denoise_entries[i].into()),
+                ..Default::default()
+            })
         });
 
         let climate_bake_shader = load_embedded_asset!(world, "shaders/climate_bake.wgsl");
@@ -808,6 +859,7 @@ impl FromWorld for CloudPipelines {
 
         Self {
             raymarch,
+            denoise,
             temporal,
             shadow_bake,
             climate_bake,
@@ -989,6 +1041,11 @@ pub(super) fn queue_cloud_render_pipelines(
 #[derive(Component)]
 pub(crate) struct CloudBindGroups {
     pub raymarch: BindGroup,
+    /// One per A-Trous iteration, ping-ponging between the raymarch
+    /// buffer and the denoise scratch. With odd `DENOISE_ITERATIONS`,
+    /// the final result lands in `denoise_scratch` (which the
+    /// temporal pass binds when denoise is enabled).
+    pub denoise: [BindGroup; crate::constants::DENOISE_ITERATIONS_MAX],
     pub temporal: BindGroup,
     pub composite: BindGroup,
     pub shadow_bake: BindGroup,
@@ -1325,13 +1382,13 @@ pub(super) fn prepare_cloud_uniforms(
             layer_count: layer_count as u32,
             time_seconds: world_time,
             raymarch_jitter: u32::from(cloud.raymarch_jitter),
-            pad_top2: 0,
+            raymarch_jitter_magnitude: cloud.raymarch_jitter_magnitude,
             prev_clip_from_world: prev.clip_from_world,
             prev_camera_ecef: prev.camera_ecef,
             frame_index: prev.frame_index.wrapping_add(1),
             temporal_history_valid: u32::from(history_valid),
-            pad_bot0: 0,
-            pad_bot1: 0,
+            denoise_sigma_transmittance: cloud.denoise_sigma_transmittance,
+            denoise_sigma_color: cloud.denoise_sigma_color,
             pad_bot2: 0,
             layers: gpu_layers,
             shadow_from_world,
@@ -1431,21 +1488,33 @@ pub(super) fn prepare_cloud_textures(
     mut texture_cache: ResMut<TextureCache>,
 ) {
     for (entity, uniform) in &layers {
+        let half_res_desc = TextureDescriptor {
+            label: Some("cloud_half_res_buffer"),
+            size: uniform.buffer_size.to_extents(),
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: TextureDimension::D2,
+            format: TextureFormat::Rgba16Float,
+            usage: TextureUsages::STORAGE_BINDING | TextureUsages::TEXTURE_BINDING,
+            view_formats: &[],
+        };
         let raymarch = texture_cache.get(
             &render_device,
             TextureDescriptor {
                 label: Some("cloud_raymarch_buffer"),
-                size: uniform.buffer_size.to_extents(),
-                mip_level_count: 1,
-                sample_count: 1,
-                dimension: TextureDimension::D2,
-                format: TextureFormat::Rgba16Float,
-                usage: TextureUsages::STORAGE_BINDING | TextureUsages::TEXTURE_BINDING,
-                view_formats: &[],
+                ..half_res_desc
+            },
+        );
+        let denoise_scratch = texture_cache.get(
+            &render_device,
+            TextureDescriptor {
+                label: Some("cloud_denoise_scratch"),
+                ..half_res_desc
             },
         );
         commands.entity(entity).insert(CloudTextures {
             raymarch,
+            denoise_scratch,
             raymarch_size: uniform.buffer_size,
         });
     }
@@ -1614,25 +1683,23 @@ impl std::error::Error for CloudBindGroupError {}
 #[allow(clippy::too_many_arguments, clippy::type_complexity)]
 pub(super) fn prepare_cloud_bind_groups(
     mut commands: Commands,
-    layers: Query<
-        (
-            Entity,
-            &CloudTextures,
-            &CloudHistoryTextures,
-            &CloudShadowTexture,
-            &GpuCloudUniform,
-            &AtmosphereTextures,
-            &SphericalAtmosphereCamera,
-            &ViewDepthTexture,
-            Option<&crate::CloudEarthTopography>,
-            Option<&crate::CloudClimateMap>,
-            Option<&CloudSimTextures>,
-            Option<&CloudSimState>,
-            Option<&crate::CloudSimStatePreview>,
-            Option<&CloudStreamfunctionTextures>,
-        ),
-        With<CloudLayers>,
-    >,
+    layers: Query<(
+        Entity,
+        &CloudLayers,
+        &CloudTextures,
+        &CloudHistoryTextures,
+        &CloudShadowTexture,
+        &GpuCloudUniform,
+        &AtmosphereTextures,
+        &SphericalAtmosphereCamera,
+        &ViewDepthTexture,
+        Option<&crate::CloudEarthTopography>,
+        Option<&crate::CloudClimateMap>,
+        Option<&CloudSimTextures>,
+        Option<&CloudSimState>,
+        Option<&crate::CloudSimStatePreview>,
+        Option<&CloudStreamfunctionTextures>,
+    )>,
     render_device: Res<RenderDevice>,
     layouts: Res<CloudBindGroupLayouts>,
     pipeline_cache: Res<PipelineCache>,
@@ -1682,6 +1749,7 @@ pub(super) fn prepare_cloud_bind_groups(
 
     for (
         entity,
+        cloud_layer,
         cloud_tex,
         history_tex,
         shadow_tex,
@@ -1757,8 +1825,57 @@ pub(super) fn prepare_cloud_bind_groups(
             )),
         );
 
+        // Denoise ping-pong bind groups. Even iterations write into
+        // `denoise_scratch`, odd back into `raymarch`. With an odd
+        // total iteration count the final result is in
+        // `denoise_scratch`.
+        let denoise_ping_pong = [
+            (
+                &cloud_tex.raymarch.default_view,
+                &cloud_tex.denoise_scratch.default_view,
+            ),
+            (
+                &cloud_tex.denoise_scratch.default_view,
+                &cloud_tex.raymarch.default_view,
+            ),
+            (
+                &cloud_tex.raymarch.default_view,
+                &cloud_tex.denoise_scratch.default_view,
+            ),
+            (
+                &cloud_tex.denoise_scratch.default_view,
+                &cloud_tex.raymarch.default_view,
+            ),
+            (
+                &cloud_tex.raymarch.default_view,
+                &cloud_tex.denoise_scratch.default_view,
+            ),
+        ];
+        let denoise = std::array::from_fn(|i| {
+            let (input, output) = denoise_ping_pong[i];
+            render_device.create_bind_group(
+                "cloud_denoise_bind_group",
+                &pipeline_cache.get_bind_group_layout(&layouts.denoise),
+                &BindGroupEntries::with_indices((
+                    (0, cloud_binding.clone()),
+                    (1, input),
+                    (2, output),
+                )),
+            )
+        });
+
         let history_read = history_tex.read_view(uniform.frame_index);
         let history_write = history_tex.write_view(uniform.frame_index);
+        // Temporal reads from `denoise_scratch` when denoise is on
+        // (the final ping-pong landing for an odd iteration count)
+        // and from `raymarch` directly when off — the denoise node
+        // skips dispatches when off, so `denoise_scratch` would
+        // otherwise contain stale data.
+        let temporal_input = if cloud_layer.denoise {
+            &cloud_tex.denoise_scratch.default_view
+        } else {
+            &cloud_tex.raymarch.default_view
+        };
         let temporal = render_device.create_bind_group(
             "cloud_temporal_bind_group",
             &pipeline_cache.get_bind_group_layout(&layouts.temporal),
@@ -1766,7 +1883,7 @@ pub(super) fn prepare_cloud_bind_groups(
                 (0, cloud_binding.clone()),
                 (1, transforms_binding.clone()),
                 (2, view_binding.clone()),
-                (3, &cloud_tex.raymarch.default_view),
+                (3, temporal_input),
                 (4, history_read),
                 (5, depth_texture.view()),
                 (6, &sampler.clamp),
@@ -1912,6 +2029,7 @@ pub(super) fn prepare_cloud_bind_groups(
 
         commands.entity(entity).insert(CloudBindGroups {
             raymarch,
+            denoise,
             temporal,
             composite,
             shadow_bake,

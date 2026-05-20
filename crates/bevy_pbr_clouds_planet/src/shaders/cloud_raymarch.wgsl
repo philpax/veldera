@@ -343,11 +343,14 @@ fn main(@builtin(global_invocation_id) idx: vec3<u32>) {
     // world-snapped.
     let dt = PRIMARY_STEP_WORLD_M;
     let cam_proj = dot(cam_world, ray_dir_ws);
-    // Per-pixel sub-step offset to break the inter-pixel coherence of
-    // the per-ray snap grid. World-stability per pixel still holds —
-    // the jitter is a fixed additive constant per pixel and doesn't
-    // depend on camera position. Range `[-dt/2, +dt/2)`.
-    let jitter = (pixel_hash(idx.xy) - 0.5) * dt;
+    // Per-pixel sub-step offset to break the inter-pixel coherence
+    // of the per-ray snap grid (kills the Moiré rings). Scaled by
+    // `cloud.raymarch_jitter_magnitude` (`CloudLayers`) so the user
+    // can trade off ring decorrelation vs per-pixel variance. Range
+    // `[-dt/2, +dt/2) × magnitude`. World-stability per pixel still
+    // holds — the jitter is a fixed additive constant per pixel and
+    // doesn't depend on camera position.
+    let jitter = (pixel_hash(idx.xy) - 0.5) * dt * cloud.raymarch_jitter_magnitude;
     let t_first = ceil((t_start + cam_proj) / dt) * dt - cam_proj + jitter;
     let max_iter = u32(ceil((t_end - t_first) / dt)) + 1u;
 

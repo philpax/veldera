@@ -51,6 +51,17 @@ pub const SHADOW_MAP_SIZE: u32 = 1024;
 /// shadow" (transmittance = 1) in the apply pass.
 pub const SHADOW_FOOTPRINT_M: f32 = 100_000.0;
 
+// ---- Denoise -------------------------------------------------------
+
+/// Maximum number of edge-avoiding A-Trous wavelet iterations
+/// available in the denoise pass. Each iteration's tap spacing
+/// doubles (1, 2, 4, 8, 16 half-res pixels). Must equal the number
+/// of `iter_*` entry points in `shaders/cloud_denoise.wgsl`. The
+/// runtime [`crate::CloudLayers::denoise_iterations`] picks how
+/// many to actually dispatch (must be **odd** so the ping-pong
+/// lands the final result in `denoise_scratch`).
+pub const DENOISE_ITERATIONS_MAX: usize = 5;
+
 // ---- Temporal pass -------------------------------------------------
 
 /// Camera-position delta (metres) above which the temporal history
