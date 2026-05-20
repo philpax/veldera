@@ -105,6 +105,15 @@ fn render_overview(ui: &mut egui::Ui, cloud: &mut CloudLayers) {
 
     ui.separator();
 
+    ui.checkbox(&mut cloud.raymarch_jitter, "Raymarch jitter (TAA)")
+        .on_hover_text(
+            "On: per-frame sub-pixel Halton(2,3) jitter on the raymarch ray direction; the temporal \
+             pass accumulates 16 frames into an effectively higher-resolution image. Off: \
+             unjittered — sharper per-frame but more aliasing in stills. A/B for tuning.",
+        );
+
+    ui.separator();
+
     ui.label(format!(
         "World time: {:.1} s (wind / weather derive from this; set the world clock to move clouds)",
         cloud.world_time_seconds,

@@ -49,7 +49,9 @@ struct CloudUniform {
 
     layer_count: u32,
     time_seconds: f32,
-    pad_top1: u32,
+    // 1 = per-frame sub-pixel jitter on the raymarch ray direction
+    // for TAA-style anti-aliasing; 0 = unjittered.
+    raymarch_jitter: u32,
     pad_top2: u32,
 
     prev_clip_from_world: mat4x4<f32>,

@@ -113,7 +113,10 @@ pub struct GpuCloudUniform {
     /// (that's CPU-accumulated into `wind_offset` to keep precision
     /// bounded over long sessions).
     pub time_seconds: f32,
-    pub pad_top1: u32,
+    /// 1 = per-frame sub-pixel jitter on the raymarch ray direction;
+    /// 0 = unjittered. Driven by
+    /// [`crate::CloudLayers::raymarch_jitter`].
+    pub raymarch_jitter: u32,
     pub pad_top2: u32,
 
     /// Previous frame's `clip_from_world` matrix. Used by the temporal
@@ -1321,7 +1324,7 @@ pub(super) fn prepare_cloud_uniforms(
             full_size,
             layer_count: layer_count as u32,
             time_seconds: world_time,
-            pad_top1: 0,
+            raymarch_jitter: u32::from(cloud.raymarch_jitter),
             pad_top2: 0,
             prev_clip_from_world: prev.clip_from_world,
             prev_camera_ecef: prev.camera_ecef,

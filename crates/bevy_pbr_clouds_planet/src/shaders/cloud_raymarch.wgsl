@@ -47,6 +47,37 @@ fn depth_to_camera_dist(uv: vec2<f32>, depth: f32) -> f32 {
     WRENNINGE_ATTENUATION, WRENNINGE_CONTRIBUTION, WRENNINGE_ECCENTRICITY,
 };
 
+// Halton low-discrepancy sequence at the given index in base `b`.
+// Drives the per-frame TAA jitter: each frame samples a different
+// sub-pixel offset and the temporal pass accumulates them into an
+// effectively higher-resolution image, anti-aliasing the half-res
+// raymarch output.
+fn halton(index: u32, base: u32) -> f32 {
+    var f: f32 = 1.0;
+    var r: f32 = 0.0;
+    var i: u32 = index;
+    for (var k: u32 = 0u; k < 32u; k = k + 1u) {
+        if i == 0u {
+            break;
+        }
+        f = f / f32(base);
+        r = r + f * f32(i % base);
+        i = i / base;
+    }
+    return r;
+}
+
+// 16-frame Halton(2, 3) jitter cycle centred on 0. Returns the
+// sub-pixel offset in full-resolution-pixel units, range
+// `[-0.5, +0.5]` on each axis. 16 frames balances convergence speed
+// after disocclusion vs reaching the full effective supersampling
+// pattern.
+const JITTER_PERIOD: u32 = 16u;
+fn jitter_for_frame(frame: u32) -> vec2<f32> {
+    let i = (frame % JITTER_PERIOD) + 1u;
+    return vec2(halton(i, 2u), halton(i, 3u)) - vec2(0.5);
+}
+
 // Simple per-sample shading. Earth-shine + per-light Lambert against
 // the cloud-sphere normal, modulated by the atmosphere transmittance
 // LUT. No cone shadow, no multi-scatter octaves, no phase function.
@@ -143,7 +174,16 @@ fn main(@builtin(global_invocation_id) idx: vec3<u32>) {
         return;
     }
 
-    let uv = (vec2<f32>(idx.xy) + 0.5) / vec2<f32>(cloud.buffer_size);
+    // Sub-full-res-pixel TAA jitter on the ray direction. With the
+    // temporal pass accumulating sixteen jittered frames into a
+    // running average, the result anti-aliases the half-res raymarch
+    // output without the focal-softness of a blur kernel — fine cloud
+    // detail stays sharp while the per-frame variance averages out.
+    var jitter_uv = vec2<f32>(0.0);
+    if cloud.raymarch_jitter != 0u {
+        jitter_uv = jitter_for_frame(cloud.frame_index) / vec2<f32>(cloud.full_size);
+    }
+    let uv = (vec2<f32>(idx.xy) + 0.5) / vec2<f32>(cloud.buffer_size) + jitter_uv;
     let ray_dir_ws = uv_to_ray_direction_ws(uv);
 
     // Camera position in atmosphere-space coordinates: at (0, R, 0).

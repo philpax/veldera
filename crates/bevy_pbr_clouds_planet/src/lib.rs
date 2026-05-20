@@ -523,6 +523,11 @@ pub struct CloudLayers {
     pub climate: ClimateSettings,
     /// Stateful climate simulation. See [`ClimateSimSettings`].
     pub sim: ClimateSimSettings,
+    /// Per-frame sub-pixel TAA jitter on the cloud raymarch.
+    /// The temporal pass accumulates jittered frames into an
+    /// effectively higher-resolution image, anti-aliasing the
+    /// half-res raymarch output. Toggleable for A/B comparison.
+    pub raymarch_jitter: bool,
 }
 
 /// Tunable knobs for the latitude/topography-driven cloud climate model.
@@ -759,6 +764,7 @@ impl CloudLayers {
             shadow_intensity: 1.0,
             climate: ClimateSettings::default(),
             sim: ClimateSimSettings::default(),
+            raymarch_jitter: true,
         }
     }
 
@@ -773,6 +779,7 @@ impl CloudLayers {
             shadow_intensity: 1.0,
             climate: ClimateSettings::default(),
             sim: ClimateSimSettings::default(),
+            raymarch_jitter: true,
         }
     }
 
@@ -793,6 +800,7 @@ impl CloudLayers {
             shadow_intensity: 1.0,
             climate: ClimateSettings::default(),
             sim: ClimateSimSettings::default(),
+            raymarch_jitter: true,
         }
     }
 }
