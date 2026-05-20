@@ -31,6 +31,15 @@ pub const CLIMATE_MAP_HEIGHT: u32 = 512;
 /// GPU memory only — the bake is one-shot at startup.
 pub const NOISE_RES: u32 = 256;
 
+/// Number of mip levels generated for the noise texture. With
+/// `NOISE_RES = 256` mips run 256, 128, 64, 32, 16, 8, 4, 2 — eight
+/// levels, finest texel ≈ `noise_tile / 256`, coarsest ≈
+/// `noise_tile / 2`. The primary-march LOD maps `dt` into this range,
+/// so per-sample noise lookups read a pre-filtered representation
+/// matched to the world-space step size instead of point-sampling and
+/// aliasing under camera motion.
+pub const NOISE_MIP_COUNT: u32 = 8;
+
 // ---- Cloud shadow map ----------------------------------------------
 
 /// Side length of the square cloud-shadow texture, in texels.

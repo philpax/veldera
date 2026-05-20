@@ -1,15 +1,23 @@
 //! GPU-baked 3D noise texture for cloud density sampling.
 //!
-//! At the first call to [`NoiseBakeNode`], a compute shader writes a
-//! 128×128×128 `Rgba8Unorm` storage texture. Channels:
+//! At the first call to [`NoiseBakeNode`], a compute shader writes mip 0
+//! of an `NOISE_RES`³ `Rgba8Unorm` storage texture. Channels:
 //!
 //! - **R** — low-frequency Perlin-Worley (overall cloud-mass shape).
 //! - **G** — mid-frequency Worley (puff shape).
 //! - **B** — high-frequency Worley (erosion at the edges).
 //! - **A** — reserved (currently zero).
 //!
-//! The bake is one-shot: [`NoiseBakeState::done`] flips to `true` after the
-//! first dispatch and the node becomes a no-op on subsequent frames.
+//! After mip 0 is baked, [`NoiseBakeNode`] dispatches a chain of
+//! 2×2×2 box-filter downsample passes to fill in mips 1..[`NOISE_MIP_COUNT`].
+//! The runtime samples with `textureSampleLevel` at a LOD chosen from
+//! the primary-march step size, so a long `dt` reads a pre-filtered
+//! representation of the cloud field instead of point-sampling and
+//! aliasing under camera motion.
+//!
+//! The bake is one-shot: [`NoiseBakeState::done`] flips to `true` after
+//! the first dispatch chain and the node becomes a no-op on subsequent
+//! frames.
 
 use bevy::{
     asset::load_embedded_asset,
@@ -29,22 +37,25 @@ use bevy::{
 };
 use tracing::info;
 
-pub use crate::constants::NOISE_RES;
+pub use crate::constants::{NOISE_MIP_COUNT, NOISE_RES};
 
-/// Workgroup size for the noise compute shader. Total invocations per
-/// dispatch are `(NOISE_RES / WORKGROUP_SIZE)^3`. 4×4×4 = 64 threads/group is
-/// a safe portable choice across desktop and WebGPU. Must match the
-/// `@workgroup_size` in `noise_bake.wgsl`.
+/// Workgroup size for the noise compute shaders. Total invocations
+/// per dispatch are `(NOISE_RES / WORKGROUP_SIZE)^3`. 4×4×4 = 64
+/// threads/group is a safe portable choice across desktop and
+/// WebGPU. Must match `@workgroup_size` in `noise_bake.wgsl` and
+/// `noise_downsample.wgsl`.
 pub const NOISE_WORKGROUP_SIZE: u32 = 4;
 
-/// Resource that owns the baked 3D noise texture and its view.
+/// Resource that owns the baked 3D noise texture and its views.
 ///
-/// Populated by [`create_noise_textures`] at startup; the view is created
-/// alongside the texture so all frames can read it without ceremony.
+/// `view` is the all-mips sampled view bound by the runtime cloud
+/// shaders; `mip_views` are per-mip storage views used by the bake
+/// (mip 0) and downsample (mip 1..N) compute dispatches.
 #[derive(Resource, Default)]
 pub struct NoiseTextures {
     pub texture: Option<Texture>,
     pub view: Option<TextureView>,
+    pub mip_views: Vec<TextureView>,
 }
 
 impl NoiseTextures {
@@ -69,7 +80,7 @@ impl NoiseBakeState {
     }
 }
 
-/// Bind-group layout for the noise bake compute shader.
+/// Bind-group layout for the noise bake compute shader (mip 0).
 #[derive(Resource)]
 pub struct NoiseBindGroupLayout {
     pub layout: BindGroupLayoutDescriptor,
@@ -85,6 +96,35 @@ impl FromWorld for NoiseBindGroupLayout {
                     0,
                     texture_storage_3d(TextureFormat::Rgba8Unorm, StorageTextureAccess::WriteOnly),
                 ),),
+            ),
+        );
+        Self { layout }
+    }
+}
+
+/// Bind-group layout for the noise downsample compute shader.
+/// Reads one mip level (sampled), writes the next (storage).
+#[derive(Resource)]
+pub struct NoiseDownsampleBindGroupLayout {
+    pub layout: BindGroupLayoutDescriptor,
+}
+
+impl FromWorld for NoiseDownsampleBindGroupLayout {
+    fn from_world(_world: &mut World) -> Self {
+        let layout = BindGroupLayoutDescriptor::new(
+            "cloud_noise_downsample_bind_group_layout",
+            &BindGroupLayoutEntries::with_indices(
+                ShaderStages::COMPUTE,
+                (
+                    (0, texture_3d(TextureSampleType::Float { filterable: true })),
+                    (
+                        1,
+                        texture_storage_3d(
+                            TextureFormat::Rgba8Unorm,
+                            StorageTextureAccess::WriteOnly,
+                        ),
+                    ),
+                ),
             ),
         );
         Self { layout }
@@ -112,8 +152,32 @@ impl FromWorld for NoisePipeline {
     }
 }
 
-/// Allocates the 128³ `Rgba8Unorm` storage texture used as the bake target
-/// and as the runtime sample source.
+/// Cached noise downsample compute pipeline.
+#[derive(Resource)]
+pub struct NoiseDownsamplePipeline {
+    pub pipeline: CachedComputePipelineId,
+}
+
+impl FromWorld for NoiseDownsamplePipeline {
+    fn from_world(world: &mut World) -> Self {
+        let pipeline_cache = world.resource::<PipelineCache>();
+        let layout = world
+            .resource::<NoiseDownsampleBindGroupLayout>()
+            .layout
+            .clone();
+        let shader = load_embedded_asset!(world, "shaders/noise_downsample.wgsl");
+        let pipeline = pipeline_cache.queue_compute_pipeline(ComputePipelineDescriptor {
+            label: Some("cloud_noise_downsample_pipeline".into()),
+            layout: vec![layout],
+            shader,
+            ..Default::default()
+        });
+        Self { pipeline }
+    }
+}
+
+/// Allocates the `NOISE_RES`³ `Rgba8Unorm` storage texture with
+/// [`NOISE_MIP_COUNT`] mip levels and the per-mip + all-mips views.
 pub fn create_noise_textures(
     mut textures: ResMut<NoiseTextures>,
     render_device: Res<RenderDevice>,
@@ -122,7 +186,7 @@ pub fn create_noise_textures(
     let texture = render_device.create_texture(&TextureDescriptor {
         label: Some("cloud_noise_3d"),
         size,
-        mip_level_count: 1,
+        mip_level_count: NOISE_MIP_COUNT,
         sample_count: 1,
         dimension: TextureDimension::D3,
         format: TextureFormat::Rgba8Unorm,
@@ -133,17 +197,35 @@ pub fn create_noise_textures(
         label: Some("cloud_noise_3d_view"),
         format: Some(TextureFormat::Rgba8Unorm),
         dimension: Some(TextureViewDimension::D3),
+        base_mip_level: 0,
+        mip_level_count: Some(NOISE_MIP_COUNT),
         ..Default::default()
     });
+    let mut mip_views = Vec::with_capacity(NOISE_MIP_COUNT as usize);
+    for mip in 0..NOISE_MIP_COUNT {
+        mip_views.push(texture.create_view(&TextureViewDescriptor {
+            label: Some("cloud_noise_3d_mip_view"),
+            format: Some(TextureFormat::Rgba8Unorm),
+            dimension: Some(TextureViewDimension::D3),
+            base_mip_level: mip,
+            mip_level_count: Some(1),
+            ..Default::default()
+        }));
+    }
     textures.texture = Some(texture);
     textures.view = Some(view);
-    info!("cloud noise 3D texture allocated ({} ³)", NOISE_RES);
+    textures.mip_views = mip_views;
+    info!("cloud noise 3D texture allocated ({NOISE_RES}³, {NOISE_MIP_COUNT} mips)");
 }
 
-/// Render-graph node that runs the one-shot noise bake.
+/// Render-graph node that runs the one-shot noise bake + mip downsample chain.
 ///
-/// Reads [`NoiseBakeState::done`]; on first invocation, dispatches the
-/// compute shader and flips the flag. Cheap no-op on every subsequent frame.
+/// On first invocation:
+/// 1. Dispatches `noise_bake.wgsl` to write mip 0 at full resolution.
+/// 2. For each subsequent mip 1..N-1, dispatches `noise_downsample.wgsl`
+///    reading mip i-1 and writing mip i (2×2×2 box filter).
+///
+/// Subsequent frames are a cheap no-op via [`NoiseBakeState::done`].
 #[derive(Default)]
 pub struct NoiseBakeNode;
 
@@ -159,42 +241,77 @@ impl Node for NoiseBakeNode {
             return Ok(());
         }
 
-        let pipeline = world.resource::<NoisePipeline>();
+        let bake_pipeline = world.resource::<NoisePipeline>();
+        let downsample_pipeline = world.resource::<NoiseDownsamplePipeline>();
         let pipeline_cache = world.resource::<PipelineCache>();
-        let layout = world.resource::<NoiseBindGroupLayout>();
+        let bake_layout = world.resource::<NoiseBindGroupLayout>();
+        let downsample_layout = world.resource::<NoiseDownsampleBindGroupLayout>();
         let textures = world.resource::<NoiseTextures>();
 
-        let (Some(compute_pipeline), Some(texture_view)) = (
-            pipeline_cache.get_compute_pipeline(pipeline.pipeline),
-            textures.view.as_ref(),
+        let (Some(bake_compute), Some(downsample_compute)) = (
+            pipeline_cache.get_compute_pipeline(bake_pipeline.pipeline),
+            pipeline_cache.get_compute_pipeline(downsample_pipeline.pipeline),
         ) else {
             return Ok(());
         };
+        if textures.mip_views.len() != NOISE_MIP_COUNT as usize {
+            return Ok(());
+        }
 
-        let bind_group = render_context.render_device().create_bind_group(
+        let render_device = render_context.render_device().clone();
+
+        // Mip 0: write the noise from scratch.
+        let bake_bind_group = render_device.create_bind_group(
             "cloud_noise_bake_bind_group",
-            &pipeline_cache.get_bind_group_layout(&layout.layout),
-            &BindGroupEntries::with_indices(((0, texture_view),)),
+            &pipeline_cache.get_bind_group_layout(&bake_layout.layout),
+            &BindGroupEntries::with_indices(((0, &textures.mip_views[0]),)),
         );
 
         let diagnostics = render_context.diagnostic_recorder();
-        let mut pass =
-            render_context
-                .command_encoder()
-                .begin_compute_pass(&ComputePassDescriptor {
-                    label: Some("cloud_noise_bake"),
-                    timestamp_writes: None,
-                });
-        let span = diagnostics.pass_span(&mut pass, "cloud_noise_bake");
-        pass.set_pipeline(compute_pipeline);
-        pass.set_bind_group(0, &bind_group, &[]);
-        let groups = NOISE_RES / NOISE_WORKGROUP_SIZE;
-        pass.dispatch_workgroups(groups, groups, groups);
-        span.end(&mut pass);
-        drop(pass);
+        {
+            let mut pass =
+                render_context
+                    .command_encoder()
+                    .begin_compute_pass(&ComputePassDescriptor {
+                        label: Some("cloud_noise_bake"),
+                        timestamp_writes: None,
+                    });
+            let span = diagnostics.pass_span(&mut pass, "cloud_noise_bake");
+            pass.set_pipeline(bake_compute);
+            pass.set_bind_group(0, &bake_bind_group, &[]);
+            let groups = NOISE_RES / NOISE_WORKGROUP_SIZE;
+            pass.dispatch_workgroups(groups, groups, groups);
+            span.end(&mut pass);
+        }
+
+        // Mips 1..N: downsample previous level.
+        for mip in 1..NOISE_MIP_COUNT {
+            let bind_group = render_device.create_bind_group(
+                "cloud_noise_downsample_bind_group",
+                &pipeline_cache.get_bind_group_layout(&downsample_layout.layout),
+                &BindGroupEntries::with_indices((
+                    (0, &textures.mip_views[(mip - 1) as usize]),
+                    (1, &textures.mip_views[mip as usize]),
+                )),
+            );
+            let mut pass =
+                render_context
+                    .command_encoder()
+                    .begin_compute_pass(&ComputePassDescriptor {
+                        label: Some("cloud_noise_downsample"),
+                        timestamp_writes: None,
+                    });
+            let span = diagnostics.pass_span(&mut pass, "cloud_noise_downsample");
+            pass.set_pipeline(downsample_compute);
+            pass.set_bind_group(0, &bind_group, &[]);
+            let mip_res = (NOISE_RES >> mip).max(1);
+            let groups = mip_res.div_ceil(NOISE_WORKGROUP_SIZE).max(1);
+            pass.dispatch_workgroups(groups, groups, groups);
+            span.end(&mut pass);
+        }
 
         bake_state.mark_done();
-        info!("cloud noise bake dispatched ({}³ workgroups)", groups);
+        info!("cloud noise bake + mip chain dispatched ({NOISE_MIP_COUNT} mips)");
         Ok(())
     }
 }

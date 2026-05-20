@@ -145,11 +145,37 @@ fn climate_coverage(world_pos: vec3<f32>, base_coverage: f32, layer_strength: f3
 // `layer.noise_uv_offset` (= `(camera_ecef / tile).fract()` in f64) so the
 // final noise UV is world-aligned with full precision — no 6.4×10⁶ m / 4 km
 // f32 division in the shader.
-fn sample_layer_density(layer_i: u32, world_pos: vec3<f32>, sample_pos_local: vec3<f32>) -> f32 {
+fn sample_layer_density(
+    layer_i: u32,
+    world_pos: vec3<f32>,
+    sample_pos_local: vec3<f32>,
+    dt: f32,
+) -> f32 {
     let layer = cloud.layers[layer_i];
     if layer.enabled == 0u {
         return 0.0;
     }
+    // Mip LOD for the noise lookups. A texel in the noise texture
+    // covers `layer.noise_tile / 256` metres of world (256 = NOISE_RES);
+    // we want each step's noise sample to represent the entire `dt`-
+    // wide world region the step integrates over. log2 of the ratio
+    // gives the LOD; clamped so very small `dt` doesn't go negative
+    // (mip 0 is already the finest) and very large `dt` doesn't sample
+    // past the available mip count.
+    //
+    // `LOD_BIAS` shifts samples toward finer mips so that the noise
+    // field's filtered features sit at a much smaller spatial scale
+    // than the world-snapped sample grid spacing. Without enough
+    // bias, the mip's coarse voxel structure (e.g. mip 5 = 500 m
+    // texels for a 4 km tile) lines up with the 500 m step grid and
+    // creates visible Moiré ripples. Biasing down to ~mip 2 (60 m
+    // texels) leaves the regular sampling reading from a much finer
+    // field — the beat pattern between them collapses, and a per-
+    // pixel jitter (applied in `cloud_raymarch.wgsl` to `t_first`)
+    // breaks the remaining inter-pixel coherence.
+    let LOD_BIAS = 3.0;
+    let texel_world = max(layer.noise_tile / 256.0, 1e-3);
+    let lod = clamp(log2(max(dt, texel_world) / texel_world) - LOD_BIAS, 0.0, 7.0);
     // Altitude above the layer's inner shell. We use `length(world_pos)`
     // directly — the paraboloidal Taylor approximation
     // `dot_up + perp²/(2r)` was tempting because the leading terms are
@@ -177,7 +203,10 @@ fn sample_layer_density(layer_i: u32, world_pos: vec3<f32>, sample_pos_local: ve
     let warp_tile = layer.noise_tile * 4.0;
     var warp_uv = sample_pos_local / warp_tile + layer.warp_uv_offset;
     warp_uv += vec3<f32>(0.0, cloud.time_seconds * layer.evolution_rate, 0.0);
-    let warp_n = textureSampleLevel(noise_3d, cloud_sampler, fract(warp_uv), 0.0);
+    // Warp tile is 4× the noise tile, so a `dt` that maps to LOD `n` on
+    // the main noise maps to LOD `n - 2` on the warp. Clamped to 0.
+    let warp_lod = max(lod - 2.0, 0.0);
+    let warp_n = textureSampleLevel(noise_3d, cloud_sampler, fract(warp_uv), warp_lod);
     let warp = (warp_n.gb - 0.5) * 0.4; // ±20 % of tile
 
     // Main noise lookup. Two-octave FBM-like sample.
@@ -195,9 +224,17 @@ fn sample_layer_density(layer_i: u32, world_pos: vec3<f32>, sample_pos_local: ve
         shell_h * vertical_cycles,
         layer.noise_uv_offset.z + sample_pos_local.z / tile + layer.wind_offset.y / tile + warp.y,
     );
-    let n_lo = textureSampleLevel(noise_3d, cloud_sampler, fract(noise_uv), 0.0);
+    let n_lo = textureSampleLevel(noise_3d, cloud_sampler, fract(noise_uv), lod);
     // Higher-frequency octave at different position so it doesn't align.
-    let n_hi = textureSampleLevel(noise_3d, cloud_sampler, fract(noise_uv * 2.13 + vec3(0.37, 0.19, 0.71)), 0.0);
+    // 2.13× tighter spatial frequency means it represents finer detail;
+    // shift its LOD up by log2(2.13) ≈ 1.09 so an over-large dt also
+    // anti-aliases this octave (otherwise the hi octave shimmers in
+    // isolation even when the lo octave is properly mip-filtered).
+    let n_hi = textureSampleLevel(
+        noise_3d, cloud_sampler,
+        fract(noise_uv * 2.13 + vec3(0.37, 0.19, 0.71)),
+        clamp(lod + 1.09, 0.0, 7.0),
+    );
     let n = mix(n_lo, n_hi, 0.35);
 
     let base = n.r;
@@ -250,10 +287,10 @@ fn sample_layer_density(layer_i: u32, world_pos: vec3<f32>, sample_pos_local: ve
 // Total cloud density, summed across every enabled sub-layer. Takes both
 // the absolute `world_pos` (for radius/shell) and `sample_pos_local`
 // (camera-relative, for high-precision noise lookups).
-fn sample_cloud_density(world_pos: vec3<f32>, sample_pos_local: vec3<f32>) -> f32 {
+fn sample_cloud_density(world_pos: vec3<f32>, sample_pos_local: vec3<f32>, dt: f32) -> f32 {
     var total = 0.0;
     for (var i: u32 = 0u; i < cloud.layer_count; i = i + 1u) {
-        total = total + sample_layer_density(i, world_pos, sample_pos_local);
+        total = total + sample_layer_density(i, world_pos, sample_pos_local, dt);
     }
     return total;
 }
@@ -309,7 +346,7 @@ fn sample_light_optical_depth(
         let displacement = centre_off + cone_off;
         let p = start_pos + displacement;
         let p_local = start_pos_local + displacement;
-        let d = sample_cloud_density(p, p_local);
+        let d = sample_cloud_density(p, p_local, step);
         optical_depth = optical_depth + d * step;
         t = t + step;
         step = step * growth;

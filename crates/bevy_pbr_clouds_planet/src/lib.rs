@@ -65,7 +65,10 @@ use node::{
     CloudCompositeNode, CloudRaymarchNode, CloudShadowApplyNode, CloudShadowBakeNode,
     CloudTemporalNode,
 };
-use noise::{NoiseBakeState, NoiseBindGroupLayout, NoisePipeline, NoiseTextures};
+use noise::{
+    NoiseBakeState, NoiseBindGroupLayout, NoiseDownsampleBindGroupLayout, NoiseDownsamplePipeline,
+    NoisePipeline, NoiseTextures,
+};
 use resources::{
     GpuCloudUniform, prepare_cloud_bind_groups, prepare_cloud_history_textures,
     prepare_cloud_shadow_textures, prepare_cloud_sim_textures, prepare_cloud_textures,
@@ -89,6 +92,7 @@ impl Plugin for CloudsPlanetPlugin {
         load_shader_library!(app, "shaders/functions.wgsl");
 
         embedded_asset!(app, "shaders/noise_bake.wgsl");
+        embedded_asset!(app, "shaders/noise_downsample.wgsl");
         embedded_asset!(app, "shaders/cloud_raymarch.wgsl");
         embedded_asset!(app, "shaders/cloud_temporal.wgsl");
         embedded_asset!(app, "shaders/cloud_shadow_bake.wgsl");
@@ -139,9 +143,11 @@ impl Plugin for CloudsPlanetPlugin {
         render_app
             .init_resource::<CloudSampler>()
             .init_resource::<NoiseBindGroupLayout>()
+            .init_resource::<NoiseDownsampleBindGroupLayout>()
             .init_resource::<NoiseBakeState>()
             .init_resource::<NoiseTextures>()
             .init_resource::<NoisePipeline>()
+            .init_resource::<NoiseDownsamplePipeline>()
             .init_resource::<CloudBindGroupLayouts>()
             .init_resource::<CloudPipelines>()
             .init_resource::<SpecializedRenderPipelines<CloudBindGroupLayouts>>()

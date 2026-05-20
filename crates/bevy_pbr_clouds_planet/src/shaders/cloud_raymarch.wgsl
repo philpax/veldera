@@ -44,8 +44,31 @@ fn depth_to_camera_dist(uv: vec2<f32>, depth: f32) -> f32 {
     TWILIGHT_BAND_LO, TWILIGHT_BAND_HI,
     TERMINATOR_WRAP_SLOPE, TERMINATOR_WRAP_INTERCEPT,
     SHADE_MORPH_NEAR_M, SHADE_MORPH_FAR_M,
+    PRIMARY_STEP_WORLD_M,
     WRENNINGE_ATTENUATION, WRENNINGE_CONTRIBUTION, WRENNINGE_ECCENTRICITY,
 };
+
+// Stable per-pixel hash → `[0, 1)` float. Used to give each pixel a
+// fixed sub-step offset on `t_first` so adjacent pixels' world-snap
+// grids don't line up constructively across the screen — without
+// this, the regular per-ray snap grid creates visible Moiré ripples
+// where ray directions hit special alignments with the noise mip
+// structure. Hash is deterministic per pixel (same across frames)
+// so it doesn't undo the world-snap's camera-motion stability for
+// any one pixel — but as the camera moves, the same world point
+// migrates between pixels with different hashes, so per-pixel
+// values change at sub-pixel-resolution. The temporal pass + a
+// later denoiser smooth the residual.
+fn pixel_hash(p: vec2<u32>) -> f32 {
+    var h = (p.x ^ 73856093u) * 19349663u;
+    h = h ^ (p.y * 83492791u);
+    h = h ^ (h >> 16u);
+    h = h * 0x85ebca6bu;
+    h = h ^ (h >> 13u);
+    h = h * 0xc2b2ae35u;
+    h = h ^ (h >> 16u);
+    return f32(h & 0xffffffu) / 16777216.0;
+}
 
 // Halton low-discrepancy sequence at the given index in base `b`.
 // Drives the per-frame TAA jitter: each frame samples a different
@@ -112,6 +135,7 @@ fn shade_full(
     sample_pos_local: vec3<f32>,
     ray_dir_ws: vec3<f32>,
     density: f32,
+    dt: f32,
 ) -> vec3<f32> {
     let local_r = length(sample_pos);
     let sample_up = sample_pos / max(local_r, 1.0);
@@ -129,7 +153,7 @@ fn shade_full(
 
         var multi_layer_sum = vec3<f32>(0.0);
         for (var li2: u32 = 0u; li2 < cloud.layer_count; li2 = li2 + 1u) {
-            let layer_d = sample_layer_density(li2, sample_pos, sample_pos_local);
+            let layer_d = sample_layer_density(li2, sample_pos, sample_pos_local, dt);
             if layer_d <= 1e-9 {
                 continue;
             }
@@ -268,7 +292,7 @@ fn main(@builtin(global_invocation_id) idx: vec3<u32>) {
                 let n = textureSampleLevel(noise_3d, cloud_sampler, fract(noise_uv), 0.0);
                 dbg = n.rgb;
             } else if cloud.debug_mode == DBG_DENSITY {
-                let d = sample_cloud_density(mid_pos, mid_pos_local);
+                let d = sample_cloud_density(mid_pos, mid_pos_local, 0.0);
                 // Total density from all layers, normalised by the largest
                 // enabled layer's density_scale for display.
                 var max_scale = 1e-6;
@@ -293,62 +317,96 @@ fn main(@builtin(global_invocation_id) idx: vec3<u32>) {
         return;
     }
 
-    let t_total = t_end - t_start;
-    let max_steps = cloud.max_primary_steps;
-    let dt = t_total / f32(max_steps);
+    // World-snapped sample positions. Instead of `dt = t_total / N`
+    // which resamples the noise field at different world points every
+    // time the camera moves the chord shrinks/grows, we snap each
+    // sample's `t` such that the *world position* `cam + ray_dir * t`
+    // lands on a grid spaced by `PRIMARY_STEP_WORLD_M` along the ray.
+    // As the camera moves, the same cloud cell gets sampled at the
+    // same world positions every frame — silhouettes stay stable
+    // instead of morphing as you approach. Combined with mip-aware
+    // noise (per-sample LOD matched to `dt`), small position shifts
+    // produce only small value differences.
+    //
+    // `cam_proj` is the camera's projection onto the ray direction.
+    // World positions where `dot(P, ray_dir) = k * step` happen at
+    // `t = k * step - cam_proj`. Solve for the first `k` that puts us
+    // inside the chord, then march by `step` until past `t_end` or
+    // the iteration safety bound.
+    //
+    // `max_iter` is fixed by the chord-cap distance divided by the
+    // world step. With a 200 km cap and 500 m steps, ~400 iterations.
+    // The transmittance early-out breaks out of dense clouds well
+    // before that; the cap matters for grazing rays through partial
+    // cover. Decoupled from `cloud.max_primary_steps` since that was
+    // a chord-relative budget that no longer applies once steps are
+    // world-snapped.
+    let dt = PRIMARY_STEP_WORLD_M;
+    let cam_proj = dot(cam_world, ray_dir_ws);
+    // Per-pixel sub-step offset to break the inter-pixel coherence of
+    // the per-ray snap grid. World-stability per pixel still holds —
+    // the jitter is a fixed additive constant per pixel and doesn't
+    // depend on camera position. Range `[-dt/2, +dt/2)`.
+    let jitter = (pixel_hash(idx.xy) - 0.5) * dt;
+    let t_first = ceil((t_start + cam_proj) / dt) * dt - cam_proj + jitter;
+    let max_iter = u32(ceil((t_end - t_first) / dt)) + 1u;
 
     var transmittance: f32 = 1.0;
     var inscattering = vec3<f32>(0.0);
+    var t = t_first;
+    var iter: u32 = 0u;
 
-    for (var i: u32 = 0u; i < max_steps; i = i + 1u) {
-        let t = t_start + (f32(i) + 0.3) * dt;
-        let sample_pos_local = ray_dir_ws * t;
-        let sample_pos = cam_world + sample_pos_local;
-        let density = sample_cloud_density(sample_pos, sample_pos_local);
-        // Skip empty space. Threshold is in absolute extinction units (1/m);
-        // 1e-7 is safely below any realistic density_scale × normalised
-        // density so we don't accidentally drop visible clouds. Higher
-        // thresholds become a perf optimization but easily silently kill the
-        // raymarch when density_scale is small.
-        if density <= 1e-7 {
-            continue;
-        }
-
-        // Per-sample shading. Choose the model from this sample's
-        // distance from the camera: pure full close-in (cone shadow +
-        // Wrenninge octaves resolve per-cell detail), pure simple far
-        // out (Lambert + earth-shine for sub-pixel cells), mixed in
-        // between. Density (cloud *shape*) is sampled the same way at
-        // every distance — only lighting morphs.
-        let distance_t = saturate(
-            (t - SHADE_MORPH_NEAR_M) / (SHADE_MORPH_FAR_M - SHADE_MORPH_NEAR_M),
-        );
-        let morph = distance_t * distance_t * (3.0 - 2.0 * distance_t);
-        var radiance: vec3<f32>;
-        if morph >= 0.999 {
-            radiance = shade_simple(sample_pos);
-        } else if morph <= 0.001 {
-            radiance = shade_full(sample_pos, sample_pos_local, ray_dir_ws, density);
-        } else {
-            let full = shade_full(sample_pos, sample_pos_local, ray_dir_ws, density);
-            let simple = shade_simple(sample_pos);
-            radiance = mix(full, simple, morph);
-        }
-
-        // Beer's law extinction across the segment.
-        let sample_t = exp(-density * dt);
-        // Single-scattering inscattering integral with cloud single-scattering
-        // albedo approximated as 1 (clouds are mostly scattering, very little
-        // absorption): ∫ exp(-σt) · σ_s · phase · L_sun dt = phase · L_sun · (1 - exp(-σ·dt))
-        // when σ_s ≈ σ. So density does NOT appear as a factor here — it
-        // controls the *opacity* via sample_t, not the per-segment radiance.
-        let segment_radiance = radiance * (1.0 - sample_t);
-        inscattering = inscattering + transmittance * segment_radiance;
-        transmittance = transmittance * sample_t;
-
-        if transmittance < 0.005 {
+    loop {
+        if iter >= max_iter || t >= t_end {
             break;
         }
+
+        let sample_pos_local = ray_dir_ws * t;
+        let sample_pos = cam_world + sample_pos_local;
+        let density = sample_cloud_density(sample_pos, sample_pos_local, dt);
+        // Skip empty space. Threshold is in absolute extinction units (1/m);
+        // 1e-7 is safely below any realistic density_scale × normalised
+        // density so we don't accidentally drop visible clouds.
+        if density > 1e-7 {
+            // Per-sample shading. Choose the model from this sample's
+            // distance from the camera: pure full close-in (cone
+            // shadow + Wrenninge octaves resolve per-cell detail),
+            // pure simple far out (Lambert + earth-shine for sub-pixel
+            // cells), mixed in between. Density (cloud *shape*) is
+            // sampled the same way at every distance — only lighting
+            // morphs.
+            let distance_t = saturate(
+                (t - SHADE_MORPH_NEAR_M) / (SHADE_MORPH_FAR_M - SHADE_MORPH_NEAR_M),
+            );
+            let morph = distance_t * distance_t * (3.0 - 2.0 * distance_t);
+            var radiance: vec3<f32>;
+            if morph >= 0.999 {
+                radiance = shade_simple(sample_pos);
+            } else if morph <= 0.001 {
+                radiance = shade_full(sample_pos, sample_pos_local, ray_dir_ws, density, dt);
+            } else {
+                let full = shade_full(sample_pos, sample_pos_local, ray_dir_ws, density, dt);
+                let simple = shade_simple(sample_pos);
+                radiance = mix(full, simple, morph);
+            }
+
+            // Beer's law extinction across the segment.
+            let step_t = exp(-density * dt);
+            // Single-scattering inscattering integral with cloud
+            // single-scattering albedo approximated as 1:
+            // ∫ exp(-σ·t) · σ_s · phase · L_sun dt =
+            // phase · L_sun · (1 - exp(-σ·dt)) when σ_s ≈ σ.
+            let segment_radiance = radiance * (1.0 - step_t);
+            inscattering = inscattering + transmittance * segment_radiance;
+            transmittance = transmittance * step_t;
+
+            if transmittance < 0.005 {
+                break;
+            }
+        }
+
+        t = t + dt;
+        iter = iter + 1u;
     }
 
     if cloud.debug_mode == DBG_OPACITY {

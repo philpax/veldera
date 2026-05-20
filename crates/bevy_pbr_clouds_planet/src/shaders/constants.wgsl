@@ -72,6 +72,21 @@ const CLOUD_RAW_MAX: f32 = 0.7;
 const SHADE_MORPH_NEAR_M: f32 = 20000.0;
 const SHADE_MORPH_FAR_M: f32 = 80000.0;
 
+// Primary-march step size in world metres. The raymarch snaps each
+// sample's `t` to a world-space grid spaced by this much along the
+// ray direction, so the world positions sampled by a given pixel
+// are stable across camera motion — only the first/last sample
+// indices shift as the chord grows or shrinks. Without this, a
+// chord-relative `dt = t_total / N` resamples the noise field at
+// different world points every time the camera moves, making cloud
+// silhouettes visibly morph as you approach them.
+//
+// Calibrated to the noise tile and the available mip range: a 4 km
+// tile at 256 texels gives a 15.6 m finest texel, so 500 m sample
+// spacing lands near mip 5 — comfortably inside the mip chain and
+// fine enough to resolve individual cloud cells.
+const PRIMARY_STEP_WORLD_M: f32 = 500.0;
+
 // Wrenninge multi-scatter octave coefficients. Each successive
 // octave scales the sun-direction optical depth, contribution, and
 // HG eccentricity by these factors. Tuned for
