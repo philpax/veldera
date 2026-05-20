@@ -61,8 +61,11 @@ struct CloudUniform {
     // 1 = rotate the per-pixel `t_first` hash by the golden ratio
     // each frame. See `CloudLayers::raymarch_jitter_temporal_rotation`.
     raymarch_jitter_temporal_rotation: u32,
-    pad_jitter_a: u32,
-    pad_jitter_b: u32,
+    // Cloud-noise mip-LOD bias. See `CloudLayers::raymarch_lod_bias`.
+    raymarch_lod_bias: f32,
+    // World-space spacing between primary-march samples. See
+    // `CloudLayers::primary_step_world_m`.
+    primary_step_world_m: f32,
 
     prev_clip_from_world: mat4x4<f32>,
 

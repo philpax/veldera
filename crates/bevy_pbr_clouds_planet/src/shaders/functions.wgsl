@@ -173,9 +173,12 @@ fn sample_layer_density(
     // field — the beat pattern between them collapses, and a per-
     // pixel jitter (applied in `cloud_raymarch.wgsl` to `t_first`)
     // breaks the remaining inter-pixel coherence.
-    let LOD_BIAS = 3.0;
     let texel_world = max(layer.noise_tile / 256.0, 1e-3);
-    let lod = clamp(log2(max(dt, texel_world) / texel_world) - LOD_BIAS, 0.0, 7.0);
+    let lod = clamp(
+        log2(max(dt, texel_world) / texel_world) - cloud.raymarch_lod_bias,
+        0.0,
+        7.0,
+    );
     // Altitude above the layer's inner shell. We use `length(world_pos)`
     // directly — the paraboloidal Taylor approximation
     // `dot_up + perp²/(2r)` was tempting because the leading terms are

@@ -127,8 +127,12 @@ pub struct GpuCloudUniform {
     /// rotation per frame. Driven by
     /// [`crate::CloudLayers::raymarch_jitter_temporal_rotation`].
     pub raymarch_jitter_temporal_rotation: u32,
-    pub pad_jitter_a: u32,
-    pub pad_jitter_b: u32,
+    /// Cloud-noise mip-LOD bias. Driven by
+    /// [`crate::CloudLayers::raymarch_lod_bias`].
+    pub raymarch_lod_bias: f32,
+    /// World-space spacing between consecutive primary-march samples.
+    /// Driven by [`crate::CloudLayers::primary_step_world_m`].
+    pub primary_step_world_m: f32,
 
     /// Previous frame's `clip_from_world` matrix. Used by the temporal
     /// pass to reproject each pixel into the previous frame's screen
@@ -1426,8 +1430,8 @@ pub(super) fn prepare_cloud_uniforms(
             raymarch_jitter_magnitude: cloud.raymarch_jitter_magnitude,
             raymarch_taa_jitter_magnitude: cloud.raymarch_taa_jitter_magnitude,
             raymarch_jitter_temporal_rotation: u32::from(cloud.raymarch_jitter_temporal_rotation),
-            pad_jitter_a: 0,
-            pad_jitter_b: 0,
+            raymarch_lod_bias: cloud.raymarch_lod_bias,
+            primary_step_world_m: cloud.primary_step_world_m.max(1.0),
             prev_clip_from_world: prev.clip_from_world,
             prev_camera_ecef: prev.camera_ecef,
             frame_index: prev.frame_index.wrapping_add(1),

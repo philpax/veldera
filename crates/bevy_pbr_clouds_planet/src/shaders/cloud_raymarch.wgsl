@@ -44,7 +44,6 @@ fn depth_to_camera_dist(uv: vec2<f32>, depth: f32) -> f32 {
     TWILIGHT_BAND_LO, TWILIGHT_BAND_HI,
     TERMINATOR_WRAP_SLOPE, TERMINATOR_WRAP_INTERCEPT,
     SHADE_MORPH_NEAR_M, SHADE_MORPH_FAR_M,
-    PRIMARY_STEP_WORLD_M,
     WRENNINGE_ATTENUATION, WRENNINGE_CONTRIBUTION, WRENNINGE_ECCENTRICITY,
 };
 
@@ -59,28 +58,46 @@ fn depth_to_camera_dist(uv: vec2<f32>, depth: f32) -> f32 {
 // migrates between pixels with different hashes, so per-pixel
 // values change at sub-pixel-resolution. The temporal pass + a
 // later denoiser smooth the residual.
-// Per-pixel white-noise hash. Fully-mixed integer hash → uniform
-// random per pixel, no spatial structure. White noise's flat
-// spectrum is what kills the Moiré rings from the world-snapped
-// sample grid; blue-noise alternatives (IGN, etc.) have hidden
-// low-frequency content that can re-align with the ring pattern
-// and reinforce it instead.
+// World-cell hash for the primary-step sub-grid jitter.
 //
+// Earlier versions hashed on the screen pixel (`idx.xy`), which
+// gave each pixel a stable sub-step offset but made the SAME world
+// cloud cell pick a different offset every time it migrated across
+// pixels under camera motion. That meant fly-by motion produced
+// visible shape-morph on the same cloud — even with the world-snap
+// commit's per-ray grid alignment, each "pixel that was looking at
+// cell P" snapped to a different sub-grid index than the next
+// pixel to look at P would.
+//
+// Hashing on the **un-jittered world position** of each sample,
+// quantised to a `CELL_SIZE`-metre grid, gives the property: same
+// world cell always picks the same offset, regardless of which
+// pixel observes it or where the camera is. Adjacent pixels' rays
+// at distance still fall in different cells (perpendicular
+// separation ≈ T × pixel-angular-size), so Moiré decorrelation
+// survives.
+//
+// CELL_SIZE is chosen ≪ `PRIMARY_STEP_WORLD_M` (so adjacent samples
+// along the ray fall in different cells) and ≫ the f32 quantisation
+// of `world_pos` at ECEF magnitudes (≈ 0.7 m). 4 m hits both.
+const WORLD_CELL_SIZE: f32 = 4.0;
+const INV_WORLD_CELL_SIZE: f32 = 0.25;
+
 // Optional per-frame golden-ratio Cranley-Patterson rotation gated
 // by `cloud.raymarch_jitter_temporal_rotation`. With rotation on,
-// every pixel sees a different sub-step offset every frame and the
-// temporal pass accumulates them into a smooth result — this is the
-// default when TAA ray-direction jitter is off.
-//
-// **Pick exactly one** of (TAA ray-direction jitter,
-// per-frame hash rotation). Enabling both stacks two sources of
-// per-frame variance into more motion than the temporal pass's 3×3
-// neighbourhood clamp can absorb; the clamp rejects the history
-// blend and visible noise *increases*.
+// each world cell's jitter advances by the golden ratio each frame
+// so the temporal pass accumulates more independent samples per
+// world cell. World-cell-stable so the cell's "rotation phase" is
+// consistent across pixels — fixes the pre-world-cell-hash
+// neighbourhood-clamp interaction. **Still pick one of** (TAA
+// ray-direction jitter, per-frame hash rotation): enabling both
+// stacks variance the clamp can't absorb.
 const GOLDEN_RATIO: f32 = 1.61803398874989;
-fn pixel_hash(p: vec2<u32>, frame: u32, animate: bool) -> f32 {
-    var h = (p.x ^ 73856093u) * 19349663u;
-    h = h ^ (p.y * 83492791u);
+fn world_cell_jitter_value(world_pos_unjit: vec3<f32>, frame: u32, animate: bool) -> f32 {
+    let cell = vec3<i32>(floor(world_pos_unjit * INV_WORLD_CELL_SIZE));
+    var h = u32(cell.x) * 73856093u;
+    h = h ^ (u32(cell.y) * 19349663u);
+    h = h ^ (u32(cell.z) * 83492791u);
     h = h ^ (h >> 16u);
     h = h * 0x85ebca6bu;
     h = h ^ (h >> 13u);
@@ -366,34 +383,42 @@ fn main(@builtin(global_invocation_id) idx: vec3<u32>) {
     // cover. Decoupled from `cloud.max_primary_steps` since that was
     // a chord-relative budget that no longer applies once steps are
     // world-snapped.
-    let dt = PRIMARY_STEP_WORLD_M;
+    let dt = cloud.primary_step_world_m;
     let cam_proj = dot(cam_world, ray_dir_ws);
-    // Per-pixel sub-step offset to break the inter-pixel coherence
-    // of the per-ray snap grid (kills the Moiré rings). Scaled by
-    // `cloud.raymarch_jitter_magnitude` (`CloudLayers`) so the user
-    // can trade off ring decorrelation vs per-pixel variance. Range
-    // `[-dt/2, +dt/2) × magnitude`. World-stability per pixel still
-    // holds — the jitter is a fixed additive constant per pixel and
-    // doesn't depend on camera position.
-    let jitter = (
-        pixel_hash(
-            idx.xy,
-            cloud.frame_index,
-            cloud.raymarch_jitter_temporal_rotation != 0u,
-        ) - 0.5
-    ) * dt * cloud.raymarch_jitter_magnitude;
-    let t_first = ceil((t_start + cam_proj) / dt) * dt - cam_proj + jitter;
-    let max_iter = u32(ceil((t_end - t_first) / dt)) + 1u;
+    // World-snapped un-jittered first sample. Subsequent samples step
+    // by `dt`. The PER-SAMPLE jitter (below) is derived from each
+    // sample's UN-JITTERED world position, hashed to a 4 m cell —
+    // see `world_cell_jitter_value`. This is stable per world cell
+    // regardless of which pixel observes it, fixing the fly-by
+    // shape-morph that the world-snap commit only partially
+    // addressed (its per-pixel hash flipped when a cloud cell
+    // migrated to a different pixel).
+    let t_first_unjit = ceil((t_start + cam_proj) / dt) * dt - cam_proj;
+    let max_iter = u32(ceil((t_end - t_first_unjit) / dt)) + 1u;
+    let animate_jitter = cloud.raymarch_jitter_temporal_rotation != 0u;
 
     var transmittance: f32 = 1.0;
     var inscattering = vec3<f32>(0.0);
-    var t = t_first;
+    var t_unjit = t_first_unjit;
     var iter: u32 = 0u;
 
     loop {
-        if iter >= max_iter || t >= t_end {
+        if iter >= max_iter || t_unjit >= t_end {
             break;
         }
+
+        // Per-sample world-cell jitter. The un-jittered world point
+        // is the position the world-snap grid would land on; we hash
+        // that for the stable per-cell offset, then jitter the actual
+        // sample t. Beer's law still uses the constant `dt` (the
+        // un-jittered spacing); the small re-distribution of sample
+        // positions within each `dt` interval averages out across
+        // frames via the temporal pass.
+        let world_pos_unjit = cam_world + ray_dir_ws * t_unjit;
+        let jitter = (
+            world_cell_jitter_value(world_pos_unjit, cloud.frame_index, animate_jitter) - 0.5
+        ) * dt * cloud.raymarch_jitter_magnitude;
+        let t = t_unjit + jitter;
 
         let sample_pos_local = ray_dir_ws * t;
         let sample_pos = cam_world + sample_pos_local;
@@ -439,7 +464,7 @@ fn main(@builtin(global_invocation_id) idx: vec3<u32>) {
             }
         }
 
-        t = t + dt;
+        t_unjit = t_unjit + dt;
         iter = iter + 1u;
     }
 

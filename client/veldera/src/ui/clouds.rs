@@ -134,6 +134,25 @@ fn render_overview(ui: &mut egui::Ui, cloud: &mut CloudLayers) {
          frames — at the cost of more motion the neighbourhood clamp has to manage (more ghosting \
          risk).",
     );
+    ui.add(
+        egui::Slider::new(&mut cloud.raymarch_lod_bias, 0.0..=5.0).text("noise LOD bias"),
+    )
+    .on_hover_text(
+        "Mip bias for the cloud noise. The shader picks mip from `log2(dt / texel_world) - bias`. \
+         Higher bias = finer noise detail but more opacity-integration variance under camera \
+         motion (the 500 m step grid samples a fine field unevenly, so thin features morph as \
+         samples shift past them). Lower bias = softer clouds, more stable. Default 3.",
+    );
+    ui.add(
+        egui::Slider::new(&mut cloud.primary_step_world_m, 100.0..=1000.0)
+            .text("primary step (m)")
+            .step_by(50.0),
+    )
+    .on_hover_text(
+        "World-space spacing between consecutive raymarch samples. Smaller = more samples = \
+         smoother opacity integration = less morphing under motion, but proportionally more \
+         raymarch cost. Default 500 m.",
+    );
     ui.checkbox(
         &mut cloud.raymarch_jitter_temporal_rotation,
         "Per-frame hash rotation",

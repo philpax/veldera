@@ -568,6 +568,24 @@ pub struct CloudLayers {
     /// accumulates more distinct samples, at the cost of more
     /// per-frame motion the neighbourhood clamp has to manage.
     pub raymarch_taa_jitter_magnitude: f32,
+    /// Mip-LOD bias for the cloud-noise sampling. Negative shifts
+    /// toward finer mips; positive toward coarser. The shader picks
+    /// mip from `log2(dt / texel_world) - bias`, so for the default
+    /// `dt = primary_step_world_m = 500 m` and `noise_tile = 4 km`
+    /// (16 m texels at mip 0), `bias = 3` lands on ~mip 2 (~60 m
+    /// texels). Higher bias = finer detail, more integration
+    /// variance under camera motion (sample positions move relative
+    /// to thin cloud features). Lower bias = smoother clouds, more
+    /// stable under motion.
+    pub raymarch_lod_bias: f32,
+    /// World-space spacing between consecutive primary-march samples,
+    /// in metres. Affects perf roughly linearly: smaller = more
+    /// samples per ray, slower; larger = fewer, faster. Empirically
+    /// the persistent cloud-shape-morph under oblique camera motion
+    /// is roughly independent of this within 100..1000 m (so it's
+    /// not an integration-undersampling issue); pick a value that
+    /// trades fidelity for perf to taste. Default `800.0`.
+    pub primary_step_world_m: f32,
     /// If true, the per-pixel `t_first` sub-grid hash is rotated by
     /// the golden ratio each frame (Cranley-Patterson rotation), so
     /// every pixel sees a different sub-step offset every frame.
@@ -846,6 +864,8 @@ impl CloudLayers {
             raymarch_jitter: false,
             raymarch_jitter_magnitude: 1.0,
             raymarch_taa_jitter_magnitude: 1.0,
+            raymarch_lod_bias: 3.0,
+            primary_step_world_m: 800.0,
             raymarch_jitter_temporal_rotation: true,
             denoise: true,
             denoise_iterations: 1,
@@ -869,6 +889,8 @@ impl CloudLayers {
             raymarch_jitter: false,
             raymarch_jitter_magnitude: 1.0,
             raymarch_taa_jitter_magnitude: 1.0,
+            raymarch_lod_bias: 3.0,
+            primary_step_world_m: 800.0,
             raymarch_jitter_temporal_rotation: true,
             denoise: true,
             denoise_iterations: 1,
@@ -898,6 +920,8 @@ impl CloudLayers {
             raymarch_jitter: false,
             raymarch_jitter_magnitude: 1.0,
             raymarch_taa_jitter_magnitude: 1.0,
+            raymarch_lod_bias: 3.0,
+            primary_step_world_m: 800.0,
             raymarch_jitter_temporal_rotation: true,
             denoise: true,
             denoise_iterations: 1,
