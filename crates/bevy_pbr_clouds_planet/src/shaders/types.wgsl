@@ -64,7 +64,9 @@ struct CloudUniform {
     // Denoise pass edge-stop sigmas — see `CloudLayers::denoise_*`.
     denoise_sigma_transmittance: f32,
     denoise_sigma_color: f32,
-    pad_bot2: u32,
+    // SVGF variance-modulation strength. Effective transmittance
+    // sigma is `denoise_sigma_transmittance + denoise_variance_strength * stddev`.
+    denoise_variance_strength: f32,
 
     layers: array<CloudSubLayer, MAX_CLOUD_LAYERS>,
 

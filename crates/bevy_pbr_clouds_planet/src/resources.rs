@@ -147,7 +147,9 @@ pub struct GpuCloudUniform {
     /// Edge-stop sigma on RGB (pre-exposure inscattering) for the
     /// denoise pass. Driven by [`crate::CloudLayers::denoise_sigma_color`].
     pub denoise_sigma_color: f32,
-    pub pad_bot2: u32,
+    /// SVGF variance-modulation strength. Driven by
+    /// [`crate::CloudLayers::denoise_variance_strength`].
+    pub denoise_variance_strength: f32,
 
     pub layers: [GpuCloudSubLayer; MAX_CLOUD_LAYERS],
 
@@ -364,6 +366,14 @@ pub struct CloudHistoryTextures {
     #[allow(dead_code)]
     pub textures: [Texture; 2],
     pub views: [TextureView; 2],
+    /// Ping-pong for the EMA of α² used by the SVGF variance
+    /// estimate. R16Float; the temporal pass reads the prev frame's
+    /// slot and writes this frame's. The denoise pass reads
+    /// `m2_view_write` of the current frame plus the temporal output's
+    /// alpha to derive variance = max(0, m² − α²) per-pixel.
+    #[allow(dead_code)]
+    pub m2_textures: [Texture; 2],
+    pub m2_views: [TextureView; 2],
     pub size: UVec2,
 }
 
@@ -375,6 +385,12 @@ impl CloudHistoryTextures {
     }
     pub fn write_view(&self, frame_index: u32) -> &TextureView {
         &self.views[((frame_index + 1) & 1) as usize]
+    }
+    pub fn m2_read_view(&self, frame_index: u32) -> &TextureView {
+        &self.m2_views[(frame_index & 1) as usize]
+    }
+    pub fn m2_write_view(&self, frame_index: u32) -> &TextureView {
+        &self.m2_views[((frame_index + 1) & 1) as usize]
     }
 }
 
@@ -519,6 +535,17 @@ impl FromWorld for CloudBindGroupLayouts {
                             StorageTextureAccess::WriteOnly,
                         ),
                     ),
+                    // Previous frame's EMA of α² for the SVGF variance
+                    // estimate (R16Float).
+                    (8, texture_2d(TextureSampleType::default())),
+                    // Output: this frame's EMA of α².
+                    (
+                        9,
+                        texture_storage_2d(
+                            TextureFormat::R16Float,
+                            StorageTextureAccess::WriteOnly,
+                        ),
+                    ),
                 ),
             ),
         );
@@ -540,6 +567,11 @@ impl FromWorld for CloudBindGroupLayouts {
                             StorageTextureAccess::WriteOnly,
                         ),
                     ),
+                    // This frame's EMA of α² (m²). Combined with the
+                    // input alpha (m¹), variance is computed as
+                    // `max(0, m² − m¹²)` and used to modulate the
+                    // edge-stop sigmas.
+                    (3, texture_2d(TextureSampleType::default())),
                 ),
             ),
         );
@@ -1389,7 +1421,7 @@ pub(super) fn prepare_cloud_uniforms(
             temporal_history_valid: u32::from(history_valid),
             denoise_sigma_transmittance: cloud.denoise_sigma_transmittance,
             denoise_sigma_color: cloud.denoise_sigma_color,
-            pad_bot2: 0,
+            denoise_variance_strength: cloud.denoise_variance_strength,
             layers: gpu_layers,
             shadow_from_world,
             shadow_footprint: footprint,
@@ -1568,14 +1600,14 @@ pub(super) fn prepare_cloud_history_textures(
         {
             continue;
         }
-        let make = |label: &'static str| {
+        let make = |label: &'static str, format: TextureFormat| {
             let texture = render_device.create_texture(&TextureDescriptor {
                 label: Some(label),
                 size: uniform.buffer_size.to_extents(),
                 mip_level_count: 1,
                 sample_count: 1,
                 dimension: TextureDimension::D2,
-                format: TextureFormat::Rgba16Float,
+                format,
                 usage: TextureUsages::STORAGE_BINDING | TextureUsages::TEXTURE_BINDING,
                 view_formats: &[],
             });
@@ -1585,11 +1617,15 @@ pub(super) fn prepare_cloud_history_textures(
             });
             (texture, view)
         };
-        let (tex0, view0) = make("cloud_history_0");
-        let (tex1, view1) = make("cloud_history_1");
+        let (tex0, view0) = make("cloud_history_0", TextureFormat::Rgba16Float);
+        let (tex1, view1) = make("cloud_history_1", TextureFormat::Rgba16Float);
+        let (m2_tex0, m2_view0) = make("cloud_history_m2_0", TextureFormat::R16Float);
+        let (m2_tex1, m2_view1) = make("cloud_history_m2_1", TextureFormat::R16Float);
         commands.entity(entity).insert(CloudHistoryTextures {
             textures: [tex0, tex1],
             views: [view0, view1],
+            m2_textures: [m2_tex0, m2_tex1],
+            m2_views: [m2_view0, m2_view1],
             size: uniform.buffer_size,
         });
     }
@@ -1825,15 +1861,42 @@ pub(super) fn prepare_cloud_bind_groups(
             )),
         );
 
-        // Denoise ping-pong bind groups. Even iterations write into
-        // `denoise_scratch`, odd back into `raymarch`. With an odd
-        // total iteration count the final result is in
-        // `denoise_scratch`.
+        let history_read = history_tex.read_view(uniform.frame_index);
+        let history_write = history_tex.write_view(uniform.frame_index);
+        let m2_read = history_tex.m2_read_view(uniform.frame_index);
+        let m2_write = history_tex.m2_write_view(uniform.frame_index);
+
+        // Render graph order: Raymarch → Temporal → Denoise →
+        // Composite. Temporal sees the raw raymarch noise; its
+        // history-write output is then the input to the denoise
+        // chain. This is the standard SVGF order — temporal-first so
+        // accumulated per-pixel variance is meaningful for the
+        // spatial filter.
+        let temporal = render_device.create_bind_group(
+            "cloud_temporal_bind_group",
+            &pipeline_cache.get_bind_group_layout(&layouts.temporal),
+            &BindGroupEntries::with_indices((
+                (0, cloud_binding.clone()),
+                (1, transforms_binding.clone()),
+                (2, view_binding.clone()),
+                (3, &cloud_tex.raymarch.default_view),
+                (4, history_read),
+                (5, depth_texture.view()),
+                (6, &sampler.clamp),
+                (7, history_write),
+                (8, m2_read),
+                (9, m2_write),
+            )),
+        );
+
+        // Denoise ping-pong. iter 0 reads the just-written temporal
+        // history; subsequent iterations alternate between
+        // `denoise_scratch` and `raymarch` (which we can safely
+        // reuse as scratch — the temporal pass already consumed its
+        // output). With an odd `denoise_iterations` the final lands
+        // in `denoise_scratch`.
         let denoise_ping_pong = [
-            (
-                &cloud_tex.raymarch.default_view,
-                &cloud_tex.denoise_scratch.default_view,
-            ),
+            (history_write, &cloud_tex.denoise_scratch.default_view),
             (
                 &cloud_tex.denoise_scratch.default_view,
                 &cloud_tex.raymarch.default_view,
@@ -1860,44 +1923,26 @@ pub(super) fn prepare_cloud_bind_groups(
                     (0, cloud_binding.clone()),
                     (1, input),
                     (2, output),
+                    (3, m2_write),
                 )),
             )
         });
 
-        let history_read = history_tex.read_view(uniform.frame_index);
-        let history_write = history_tex.write_view(uniform.frame_index);
-        // Temporal reads from `denoise_scratch` when denoise is on
-        // (the final ping-pong landing for an odd iteration count)
-        // and from `raymarch` directly when off — the denoise node
-        // skips dispatches when off, so `denoise_scratch` would
-        // otherwise contain stale data.
-        let temporal_input = if cloud_layer.denoise {
+        // Composite reads the denoise output when denoise is on (the
+        // final ping-pong landing in `denoise_scratch` for an odd
+        // iteration count), otherwise the temporal history
+        // directly.
+        let composite_input = if cloud_layer.denoise {
             &cloud_tex.denoise_scratch.default_view
         } else {
-            &cloud_tex.raymarch.default_view
+            history_write
         };
-        let temporal = render_device.create_bind_group(
-            "cloud_temporal_bind_group",
-            &pipeline_cache.get_bind_group_layout(&layouts.temporal),
-            &BindGroupEntries::with_indices((
-                (0, cloud_binding.clone()),
-                (1, transforms_binding.clone()),
-                (2, view_binding.clone()),
-                (3, temporal_input),
-                (4, history_read),
-                (5, depth_texture.view()),
-                (6, &sampler.clamp),
-                (7, history_write),
-            )),
-        );
-
         let composite = render_device.create_bind_group(
             "cloud_composite_bind_group",
             &pipeline_cache.get_bind_group_layout(&layouts.composite),
             &BindGroupEntries::with_indices((
                 (0, cloud_binding.clone()),
-                // Composite samples this frame's blended history.
-                (1, history_write),
+                (1, composite_input),
                 (2, &sampler.clamp),
                 (3, depth_texture.view()),
                 (4, view_binding.clone()),

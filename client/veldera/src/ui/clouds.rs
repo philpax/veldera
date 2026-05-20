@@ -158,6 +158,17 @@ fn render_overview(ui: &mut egui::Ui, cloud: &mut CloudLayers) {
         "Edge-stop sigma on pre-exposure RGB similarity. Preserves per-cell shading transitions \
          and sun-lit highlights.",
     );
+    ui.add_enabled(
+        cloud.denoise,
+        egui::Slider::new(&mut cloud.denoise_variance_strength, 0.0..=8.0).text("SVGF variance"),
+    )
+    .on_hover_text(
+        "SVGF variance-modulation strength. The temporal pass accumulates per-pixel α² and the \
+         denoise pass derives variance = max(0, m² − α²). Effective transmittance σ is then \
+         `σ_t + strength × stddev`, so higher = more smoothing in still-noisy regions. 0 = pure \
+         A-Trous (no variance term). Cloud silhouettes have naturally high α-variance so high \
+         values blur edges — start small (~1) and tune.",
+    );
 
     ui.separator();
 

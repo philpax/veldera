@@ -27,6 +27,11 @@
 @group(0) @binding(0) var<uniform> cloud: CloudUniform;
 @group(0) @binding(1) var in_tex: texture_2d<f32>;
 @group(0) @binding(2) var out_tex: texture_storage_2d<rgba16float, write>;
+// SVGF per-pixel α² EMA. Variance = max(0, m² − α²) modulates the
+// transmittance edge-stop sigma so high-variance pixels (still
+// converging) get smoothed more aggressively while low-variance
+// pixels (already stable) keep their edges crisp.
+@group(0) @binding(3) var m2_tex: texture_2d<f32>;
 
 // 5×5 binomial kernel (Pascal row 4 outer-product). Spatial weights
 // before edge stops are applied.
@@ -54,10 +59,18 @@ fn denoise_step(idx: vec2<u32>, step_width: i32) {
     let centre = textureLoad(in_tex, vec2<i32>(idx), 0);
     let bounds = vec2<i32>(size) - vec2(1);
 
-    let inv_sigma_t_sq = 1.0 / max(
-        cloud.denoise_sigma_transmittance * cloud.denoise_sigma_transmittance,
-        1e-8,
-    );
+    // SVGF: scale the transmittance edge-stop by the per-pixel
+    // standard deviation. var_a = max(0, E[α²] − E[α]²) where
+    // E[α] is `centre.a` (the temporally-blended history). A
+    // converged pixel has near-zero variance → sigma stays at the
+    // base value → edges preserved. A still-noisy pixel has high
+    // variance → sigma grows → neighbours blur in.
+    let centre_m2 = textureLoad(m2_tex, vec2<i32>(idx), 0).r;
+    let variance_a = max(0.0, centre_m2 - centre.a * centre.a);
+    let std_dev_a = sqrt(variance_a);
+    let effective_sigma_t =
+        cloud.denoise_sigma_transmittance + cloud.denoise_variance_strength * std_dev_a;
+    let inv_sigma_t_sq = 1.0 / max(effective_sigma_t * effective_sigma_t, 1e-8);
     let inv_sigma_c_sq = 1.0 / max(
         cloud.denoise_sigma_color * cloud.denoise_sigma_color,
         1e-8,

@@ -33,6 +33,11 @@
 @group(0) @binding(5) var depth_texture: texture_depth_multisampled_2d;
 @group(0) @binding(6) var lut_sampler: sampler;
 @group(0) @binding(7) var history_out: texture_storage_2d<rgba16float, write>;
+// SVGF variance accumulation: EMA of α² (the second moment of cloud
+// transmittance). Combined with the smoothed α (first moment) in the
+// denoise pass to derive variance = max(0, m² − α²) per-pixel.
+@group(0) @binding(8) var m2_in: texture_2d<f32>;
+@group(0) @binding(9) var m2_out: texture_storage_2d<r16float, write>;
 
 // Temporal blend factor: weight given to the current frame each step. Lower
 // = smoother but slower to converge / more ghosting.
@@ -102,10 +107,14 @@ fn main(@builtin(global_invocation_id) idx: vec3<u32>) {
     }
     let uv = (vec2<f32>(idx.xy) + 0.5) / vec2<f32>(cloud.buffer_size);
     let current = textureLoad(raymarch_in, vec2<i32>(idx.xy), 0);
+    let current_a2 = current.a * current.a;
 
-    // First-frame / post-teleport: skip reprojection.
+    // First-frame / post-teleport: skip reprojection. Seed m² with α²
+    // (variance = 0), so the denoise falls back to its base sigmas
+    // until temporal accumulation builds up a meaningful estimate.
     if cloud.temporal_history_valid == 0u {
         textureStore(history_out, vec2<i32>(idx.xy), current);
+        textureStore(m2_out, vec2<i32>(idx.xy), vec4(current_a2, 0.0, 0.0, 0.0));
         return;
     }
 
@@ -119,6 +128,7 @@ fn main(@builtin(global_invocation_id) idx: vec3<u32>) {
     // If the ray missed the shell, nothing to reproject; just take current.
     if t_end <= t_start {
         textureStore(history_out, vec2<i32>(idx.xy), current);
+        textureStore(m2_out, vec2<i32>(idx.xy), vec4(current_a2, 0.0, 0.0, 0.0));
         return;
     }
 
@@ -144,6 +154,7 @@ fn main(@builtin(global_invocation_id) idx: vec3<u32>) {
     // Behind the prev camera or at infinity → fall back to current.
     if prev_clip.w <= 1e-4 {
         textureStore(history_out, vec2<i32>(idx.xy), current);
+        textureStore(m2_out, vec2<i32>(idx.xy), vec4(current_a2, 0.0, 0.0, 0.0));
         return;
     }
     let prev_ndc = prev_clip.xyz / prev_clip.w;
@@ -152,10 +163,12 @@ fn main(@builtin(global_invocation_id) idx: vec3<u32>) {
     // Outside the prev frame's viewport → no history, use current.
     if any(prev_uv < vec2(0.0)) || any(prev_uv > vec2(1.0)) {
         textureStore(history_out, vec2<i32>(idx.xy), current);
+        textureStore(m2_out, vec2<i32>(idx.xy), vec4(current_a2, 0.0, 0.0, 0.0));
         return;
     }
 
     var history = textureSampleLevel(history_in, lut_sampler, prev_uv, 0.0);
+    let history_m2 = textureSampleLevel(m2_in, lut_sampler, prev_uv, 0.0).r;
 
     // Neighborhood colour clamping — the standard TAA trick to suppress
     // ghosting. Compute the 3×3 min/max of the *current* frame's raymarch
@@ -178,5 +191,7 @@ fn main(@builtin(global_invocation_id) idx: vec3<u32>) {
     history = clamp(history, nb_min, nb_max);
 
     let blended = mix(history, current, BLEND_ALPHA);
+    let blended_m2 = mix(history_m2, current_a2, BLEND_ALPHA);
     textureStore(history_out, vec2<i32>(idx.xy), blended);
+    textureStore(m2_out, vec2<i32>(idx.xy), vec4(blended_m2, 0.0, 0.0, 0.0));
 }

@@ -240,12 +240,16 @@ impl Plugin for CloudsPlanetPlugin {
                     // scene without being dimmed by their own shadow.
                     CloudNode::ShadowApply,
                     CloudNode::Raymarch,
-                    // Spatial denoise on the raymarch output before
-                    // temporal accumulates. When `CloudLayers::denoise`
-                    // is off the node is a no-op and the temporal
-                    // pass reads the raymarch buffer directly.
-                    CloudNode::Denoise,
+                    // Temporal first, then spatial denoise (standard
+                    // SVGF order). Temporal sees the raw raymarch
+                    // noise so the accumulated per-pixel variance is
+                    // a meaningful signal for the denoise pass to
+                    // modulate its edge stops by. When
+                    // `CloudLayers::denoise` is off the denoise node
+                    // skips its dispatches and composite reads the
+                    // temporal history directly.
                     CloudNode::Temporal,
+                    CloudNode::Denoise,
                     CloudNode::Composite,
                     // God rays add their additive HDR inscatter on top
                     // of the cloud-composited scene, before transparency.
@@ -566,6 +570,14 @@ pub struct CloudLayers {
     /// Edge-stop sigma on RGB (pre-exposure inscattering) similarity
     /// in the denoise pass. Preserves per-cell shading transitions.
     pub denoise_sigma_color: f32,
+    /// SVGF variance-modulation strength. The effective transmittance
+    /// sigma becomes `sigma_t + denoise_variance_strength * stddev`,
+    /// so larger values smooth high-variance (still-noisy) regions
+    /// harder. `0.0` disables variance modulation (pure A-Trous);
+    /// the SVGF paper's luminance default is `4.0`. Cloud silhouettes
+    /// have legitimately high α-variance, so default conservatively
+    /// to `1.0` and tune via UI.
+    pub denoise_variance_strength: f32,
 }
 
 /// Tunable knobs for the latitude/topography-driven cloud climate model.
@@ -805,9 +817,10 @@ impl CloudLayers {
             raymarch_jitter: true,
             raymarch_jitter_magnitude: 1.0,
             denoise: true,
-            denoise_iterations: 3,
+            denoise_iterations: 1,
             denoise_sigma_transmittance: 0.1,
             denoise_sigma_color: 0.5,
+            denoise_variance_strength: 0.0,
         }
     }
 
@@ -825,9 +838,10 @@ impl CloudLayers {
             raymarch_jitter: true,
             raymarch_jitter_magnitude: 1.0,
             denoise: true,
-            denoise_iterations: 3,
+            denoise_iterations: 1,
             denoise_sigma_transmittance: 0.1,
             denoise_sigma_color: 0.5,
+            denoise_variance_strength: 0.0,
         }
     }
 
@@ -851,9 +865,10 @@ impl CloudLayers {
             raymarch_jitter: true,
             raymarch_jitter_magnitude: 1.0,
             denoise: true,
-            denoise_iterations: 3,
+            denoise_iterations: 1,
             denoise_sigma_transmittance: 0.1,
             denoise_sigma_color: 0.5,
+            denoise_variance_strength: 0.0,
         }
     }
 }
