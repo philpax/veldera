@@ -1204,8 +1204,7 @@ pub(super) fn prepare_cloud_uniforms(
         // the camera flies past. Compute the offsets from the
         // f32-quantised `local_up * camera_radius` so they cancel
         // exactly with what the shader sees.
-        let camera_ecef_for_offsets_f64 =
-            (sph_cam.local_up * sph_cam.camera_radius).as_dvec3();
+        let camera_ecef_for_offsets_f64 = (sph_cam.local_up * sph_cam.camera_radius).as_dvec3();
 
         // Per-sample cost (`shade_full` vs `shade_simple`) is driven
         // purely by distance from the camera in the shader, so a
@@ -1295,8 +1294,7 @@ pub(super) fn prepare_cloud_uniforms(
             // boundary (4 km) instead of its own (16 km), popping
             // 0.25 cycles every noise-tile crossing.
             let warp_tile_f64 = tile * 4.0;
-            let warp_uv =
-                (camera_ecef_for_offsets_f64 / warp_tile_f64).map(|v| v.rem_euclid(1.0));
+            let warp_uv = (camera_ecef_for_offsets_f64 / warp_tile_f64).map(|v| v.rem_euclid(1.0));
             let warp_uv_offset = warp_uv.as_vec3();
             gpu_layers[i] = GpuCloudSubLayer {
                 inner_radius: atmosphere.bottom_radius + sub.inner_altitude,

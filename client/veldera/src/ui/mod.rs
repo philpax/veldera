@@ -14,6 +14,7 @@ use std::sync::Arc;
 
 use bevy::{diagnostic::FrameTimeDiagnosticsPlugin, prelude::*};
 use bevy_egui::{EguiContexts, EguiPlugin, EguiPrimaryContextPass, egui};
+use egui_dock::{DockArea, DockState, Style};
 use glam::DVec3;
 use leafwing_input_manager::prelude::*;
 
@@ -65,10 +66,9 @@ impl Plugin for DebugUiPlugin {
     }
 }
 
-/// Which tab is currently selected in the debug UI.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+/// Which tab in the debug UI dock.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum DebugTab {
-    #[default]
     LocationAndTime,
     Camera,
     Vehicles,
@@ -78,15 +78,49 @@ enum DebugTab {
     Profiler,
 }
 
+impl DebugTab {
+    fn label(self) -> &'static str {
+        match self {
+            DebugTab::LocationAndTime => "Location & time",
+            DebugTab::Camera => "Camera",
+            DebugTab::Vehicles => "Vehicles",
+            DebugTab::Atmosphere => "Atmosphere",
+            DebugTab::Streaming => "Streaming",
+            DebugTab::Physics => "Physics",
+            DebugTab::Profiler => "Profiler",
+        }
+    }
+}
+
 /// State for the debug UI.
-#[derive(Resource, Default)]
+#[derive(Resource)]
 pub struct DebugUiState {
-    /// Currently selected tab.
-    selected_tab: DebugTab,
+    /// `egui_dock` tab tree. All tabs start in one node; the user can
+    /// drag any tab into a new horizontal/vertical split inside the
+    /// `Debug` window.
+    dock_state: DockState<DebugTab>,
     /// Currently selected sub-tab inside the Atmosphere tab.
     pub atmosphere_subtab: clouds::AtmosphereSubTab,
     /// Currently selected sub-tab inside the Profiler tab.
     pub profiler_subtab: profiler::ProfilerSubTab,
+}
+
+impl Default for DebugUiState {
+    fn default() -> Self {
+        Self {
+            dock_state: DockState::new(vec![
+                DebugTab::LocationAndTime,
+                DebugTab::Camera,
+                DebugTab::Vehicles,
+                DebugTab::Atmosphere,
+                DebugTab::Streaming,
+                DebugTab::Physics,
+                DebugTab::Profiler,
+            ]),
+            atmosphere_subtab: clouds::AtmosphereSubTab::default(),
+            profiler_subtab: profiler::ProfilerSubTab::default(),
+        }
+    }
 }
 
 fn setup_fonts(mut contexts: EguiContexts, mut commands: Commands) {
@@ -171,71 +205,90 @@ fn debug_ui_system(
         (DVec3::ZERO, 0.0)
     };
 
-    // Render the debug panel.
+    // Track whether the Vehicles tab actually rendered this frame
+    // (the render closure below only fires for currently-visible
+    // tabs in the dock). Vehicle systems (e.g. thruster gizmo
+    // overlay) gate on this so they skip per-frame work unless the
+    // user is actually looking at the tab.
+    let mut vehicles_rendered = false;
+
+    // Split the borrows of `DebugUiState` so the dock state can be
+    // mutated by `DockArea` while the sub-tab fields are captured by
+    // the render closure. The borrow checker accepts this because
+    // each field is borrowed exactly once.
+    let DebugUiState {
+        dock_state,
+        atmosphere_subtab,
+        profiler_subtab,
+    } = &mut *ui_state;
+
+    // The dock viewer is a thin closure-backed shim. Each `SystemParam`
+    // has its own `'w`/`'s` lifetimes which differ per param, so
+    // building a TabViewer struct that holds them all explicitly
+    // requires N extra lifetime parameters and gets ugly fast. The
+    // closure lets the compiler infer all of them.
+    let render_tab = |ui: &mut egui::Ui, tab: &mut DebugTab| match tab {
+        DebugTab::LocationAndTime => {
+            location::render_location_tab(ui, &time, &mut location_params, position);
+        }
+        DebugTab::Camera => {
+            camera::render_camera_tab(ui, &mut camera_params);
+        }
+        DebugTab::Vehicles => {
+            vehicles_rendered = true;
+            vehicle::render_vehicles_tab(ui, &mut vehicle_params);
+        }
+        DebugTab::Atmosphere => {
+            clouds::render_atmosphere_tab(
+                ui,
+                &mut clouds_params,
+                atmosphere_subtab,
+                &atmosphere_image_ids,
+            );
+        }
+        DebugTab::Streaming => {
+            streaming::render_streaming_tab(ui, &streaming_params);
+        }
+        DebugTab::Physics => {
+            physics::render_physics_tab(ui, &mut physics_params);
+        }
+        DebugTab::Profiler => {
+            profiler::render_profiler_tab(ui, &profiler_params, profiler_subtab);
+        }
+    };
+
     egui::Window::new("Debug")
         .default_pos([10.0, 10.0])
+        .default_size([520.0, 480.0])
         .show(ctx, |ui| {
-            // Tab bar.
-            ui.horizontal(|ui| {
-                for (tab, label) in [
-                    (DebugTab::LocationAndTime, "Location & time"),
-                    (DebugTab::Camera, "Camera"),
-                    (DebugTab::Vehicles, "Vehicles"),
-                    (DebugTab::Atmosphere, "Atmosphere"),
-                    (DebugTab::Streaming, "Streaming"),
-                    (DebugTab::Physics, "Physics"),
-                    (DebugTab::Profiler, "Profiler"),
-                ] {
-                    if ui
-                        .selectable_label(ui_state.selected_tab == tab, label)
-                        .clicked()
-                    {
-                        ui_state.selected_tab = tab;
-                    }
-                }
-            });
-            ui.separator();
-
-            // Vehicle systems (e.g. thruster gizmo overlay) gate on
-            // this so they skip per-frame work unless the user is
-            // actually looking at the tab.
-            vehicle_tab_open.0 = ui_state.selected_tab == DebugTab::Vehicles;
-
-            match ui_state.selected_tab {
-                DebugTab::LocationAndTime => {
-                    location::render_location_tab(ui, &time, &mut location_params, position);
-                }
-                DebugTab::Camera => {
-                    camera::render_camera_tab(ui, &mut camera_params);
-                }
-                DebugTab::Vehicles => {
-                    vehicle::render_vehicles_tab(ui, &mut vehicle_params);
-                }
-                DebugTab::Atmosphere => {
-                    clouds::render_atmosphere_tab(
-                        ui,
-                        &mut clouds_params,
-                        &mut ui_state,
-                        &atmosphere_image_ids,
-                    );
-                }
-                DebugTab::Streaming => {
-                    streaming::render_streaming_tab(ui, &streaming_params);
-                }
-                DebugTab::Physics => {
-                    physics::render_physics_tab(ui, &mut physics_params);
-                }
-                DebugTab::Profiler => {
-                    profiler::render_profiler_tab(
-                        ui,
-                        &profiler_params,
-                        &mut ui_state.profiler_subtab,
-                    );
-                }
-            }
+            let mut viewer = ClosureViewer { render: render_tab };
+            DockArea::new(dock_state)
+                .style(Style::from_egui(ui.style()))
+                .show_inside(ui, &mut viewer);
         });
 
+    vehicle_tab_open.0 = vehicles_rendered;
+
     Ok(())
+}
+
+/// Adapter between `egui_dock`'s `TabViewer` trait and a closure that
+/// dispatches per-tab rendering. Saves us from spelling out every
+/// `SystemParam`'s `'w`/`'s` lifetimes in the viewer struct.
+struct ClosureViewer<F: FnMut(&mut egui::Ui, &mut DebugTab)> {
+    render: F,
+}
+
+impl<F: FnMut(&mut egui::Ui, &mut DebugTab)> egui_dock::TabViewer for ClosureViewer<F> {
+    type Tab = DebugTab;
+
+    fn title(&mut self, tab: &mut Self::Tab) -> egui::WidgetText {
+        tab.label().into()
+    }
+
+    fn ui(&mut self, ui: &mut egui::Ui, tab: &mut Self::Tab) {
+        (self.render)(ui, tab);
+    }
 }
 
 // ============================================================================

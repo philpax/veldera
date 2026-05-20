@@ -48,7 +48,7 @@ impl AtmosphereSubTab {
 pub(super) fn render_atmosphere_tab(
     ui: &mut egui::Ui,
     clouds: &mut CloudParams,
-    ui_state: &mut crate::ui::DebugUiState,
+    subtab: &mut AtmosphereSubTab,
     image_ids: &AtmosphereImageIds,
 ) {
     let Ok(mut cloud) = clouds.cloud_query.single_mut() else {
@@ -65,17 +65,14 @@ pub(super) fn render_atmosphere_tab(
             AtmosphereSubTab::GodRays,
             AtmosphereSubTab::Climate,
         ] {
-            if ui
-                .selectable_label(ui_state.atmosphere_subtab == tab, tab.label())
-                .clicked()
-            {
-                ui_state.atmosphere_subtab = tab;
+            if ui.selectable_label(*subtab == tab, tab.label()).clicked() {
+                *subtab = tab;
             }
         }
     });
     ui.separator();
 
-    match ui_state.atmosphere_subtab {
+    match subtab {
         AtmosphereSubTab::Overview => render_overview(ui, &mut cloud),
         AtmosphereSubTab::Layers => render_layers(ui, &mut cloud),
         AtmosphereSubTab::Shadows => render_shadows(ui, &mut cloud),
