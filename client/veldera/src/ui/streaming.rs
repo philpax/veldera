@@ -434,7 +434,7 @@ fn collider_depth_range(snapshot: &LodSnapshot) -> (Option<usize>, Option<usize>
     let mut min = None;
     let mut max = None;
     for path in &snapshot.physics_collider_paths {
-        let d = path.len();
+        let d = path.depth();
         min = Some(min.map_or(d, |m: usize| m.min(d)));
         max = Some(max.map_or(d, |m: usize| m.max(d)));
     }

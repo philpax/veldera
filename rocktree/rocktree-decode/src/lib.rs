@@ -27,6 +27,7 @@ pub mod indices;
 pub mod normals;
 pub mod obb;
 pub mod octants;
+pub mod octree_path;
 pub mod path;
 pub mod texcoords;
 pub mod texture;
@@ -37,6 +38,7 @@ pub use indices::{strip_to_triangles, unpack_indices};
 pub use normals::{unpack_for_normals, unpack_normals};
 pub use obb::unpack_obb;
 pub use octants::unpack_octant_mask_and_layer_bounds;
+pub use octree_path::{OctreePath, ParseOctreePathError};
 pub use path::unpack_path_and_flags;
 pub use texcoords::unpack_tex_coords;
 pub use varint::read_varint;
@@ -105,10 +107,10 @@ pub struct OrientedBoundingBox {
 }
 
 /// Result of unpacking path and flags from node metadata.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Copy)]
 pub struct PathAndFlags {
-    /// Octant path string (e.g., "01234567").
-    pub path: String,
+    /// Octant path (1–4 octants for relative bulk paths).
+    pub path: OctreePath,
     /// Flags from the node metadata.
     pub flags: u32,
     /// Path level (1-4 for relative paths).

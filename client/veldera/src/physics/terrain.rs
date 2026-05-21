@@ -15,7 +15,7 @@ use rocktree::Mesh as RocktreeMesh;
 pub struct TerrainCollider {
     /// The octant path for this collider's source node. Stored for debugging/future use.
     #[allow(dead_code)]
-    pub path: String,
+    pub path: rocktree_decode::OctreePath,
 }
 
 /// Create a terrain collider from rocktree mesh data.

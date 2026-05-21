@@ -72,7 +72,7 @@ impl ProjectileFireState {
 #[derive(Component)]
 pub struct Projectile {
     /// Path of the tile the projectile last contacted (if any).
-    pub contact_tile: Option<String>,
+    pub contact_tile: Option<rocktree_decode::OctreePath>,
 }
 
 /// System that fires projectiles on left-click when cursor is grabbed.
@@ -212,7 +212,7 @@ pub fn despawn_projectiles(
 ) {
     for (entity, projectile) in &query {
         // Despawn if contact tile was unloaded.
-        if let Some(ref tile_path) = projectile.contact_tile
+        if let Some(tile_path) = projectile.contact_tile
             && !lod_state.is_node_loaded(tile_path)
         {
             tracing::debug!("Despawning projectile: contact tile '{tile_path}' unloaded");

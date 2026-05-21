@@ -1,6 +1,6 @@
 //! Path and flags unpacking.
 
-use crate::PathAndFlags;
+use crate::{OctreePath, PathAndFlags};
 
 /// Unpack path and flags from node metadata.
 ///
@@ -25,11 +25,11 @@ pub fn unpack_path_and_flags(path_and_flags: u32) -> PathAndFlags {
     let level = 1 + (path_and_flags & 3) as usize;
     let mut remaining = path_and_flags >> 2;
 
-    // Extract path digits (3 bits each, for `level` digits).
-    let mut path = String::with_capacity(level);
+    // Extract `level` octants directly into an OctreePath (3 bits each).
+    let mut path = OctreePath::ROOT;
     for _ in 0..level {
         let digit = (remaining & 7) as u8;
-        path.push((b'0' + digit) as char);
+        path = path.push(digit);
         remaining >>= 3;
     }
 
@@ -43,6 +43,10 @@ pub fn unpack_path_and_flags(path_and_flags: u32) -> PathAndFlags {
 mod tests {
     use super::*;
 
+    fn p(s: &str) -> OctreePath {
+        OctreePath::parse(s).unwrap()
+    }
+
     #[test]
     fn test_unpack_path_and_flags_level1() {
         // Level 1: level - 1 = 0, so lower 2 bits = 0.
@@ -52,7 +56,7 @@ mod tests {
         let result = unpack_path_and_flags(0b101_00);
 
         assert_eq!(result.level, 1);
-        assert_eq!(result.path, "5");
+        assert_eq!(result.path, p("5"));
         assert_eq!(result.flags, 0);
     }
 
@@ -65,7 +69,7 @@ mod tests {
         let result = unpack_path_and_flags(packed);
 
         assert_eq!(result.level, 2);
-        assert_eq!(result.path, "37");
+        assert_eq!(result.path, p("37"));
         assert_eq!(result.flags, 0);
     }
 
@@ -78,19 +82,18 @@ mod tests {
         let result = unpack_path_and_flags(packed);
 
         assert_eq!(result.level, 4);
-        assert_eq!(result.path, "0123");
+        assert_eq!(result.path, p("0123"));
         assert_eq!(result.flags, 0);
     }
 
     #[test]
     fn test_unpack_path_and_flags_with_flags() {
         // Level 1, path = 0, flags = 5.
-        // Packed: flags(5) << 5 | path(0) << 2 | level-1(0) = 0b101_000_00 = 160.
-        let packed = (5 << 5) | (0 << 2) | 0;
+        let packed = (5 << 5) | (0 << 2);
         let result = unpack_path_and_flags(packed);
 
         assert_eq!(result.level, 1);
-        assert_eq!(result.path, "0");
+        assert_eq!(result.path, p("0"));
         assert_eq!(result.flags, 5);
     }
 
@@ -104,7 +107,7 @@ mod tests {
         let result = unpack_path_and_flags(packed);
 
         assert_eq!(result.level, 3);
-        assert_eq!(result.path, "764");
+        assert_eq!(result.path, p("764"));
         assert_eq!(result.flags, 42);
     }
 }

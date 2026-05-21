@@ -12,7 +12,7 @@ use crate::{
 };
 use glam::{DMat4, Vec3};
 use prost::Message;
-use rocktree_decode::OrientedBoundingBox;
+use rocktree_decode::{OctreePath, OrientedBoundingBox};
 use rocktree_proto as proto;
 use std::sync::Arc;
 
@@ -131,7 +131,7 @@ impl<C: Cache> Client<C> {
             message: e.to_string(),
         })?;
 
-        Self::decode_bulk_metadata(&request.path, &proto)
+        Self::decode_bulk_metadata(request.path, &proto)
     }
 
     /// Fetch node data for a given request.
@@ -160,7 +160,7 @@ impl<C: Cache> Client<C> {
             message: e.to_string(),
         })?;
 
-        Self::decode_node_data(&request.path, &proto)
+        Self::decode_node_data(request.path, &proto)
     }
 
     /// Fetch raw bytes from a URL, using cache if available.
@@ -239,7 +239,10 @@ impl<C: Cache> Client<C> {
     }
 
     /// Decode bulk metadata from protobuf.
-    fn decode_bulk_metadata(base_path: &str, proto: &proto::BulkMetadata) -> Result<BulkMetadata> {
+    fn decode_bulk_metadata(
+        base_path: OctreePath,
+        proto: &proto::BulkMetadata,
+    ) -> Result<BulkMetadata> {
         // Flags from the proto definition.
         const NODATA: u32 = 8;
         const LEAF: u32 = 4;
@@ -273,16 +276,16 @@ impl<C: Cache> Client<C> {
             let path_and_flags = node_meta.path_and_flags.unwrap_or(0);
             let pf = rocktree_decode::unpack_path_and_flags(path_and_flags);
 
-            let full_path = format!("{base_path}{}", pf.path);
+            let full_path = base_path.extend(pf.path);
 
             let has_data = (pf.flags & NODATA) == 0;
             let is_leaf = (pf.flags & LEAF) != 0;
             let use_imagery_epoch = (pf.flags & USE_IMAGERY_EPOCH) != 0;
 
-            // Check for child bulk (4-char paths that aren't leaves).
-            if pf.path.len() == 4 && !is_leaf {
+            // Check for child bulk (4-octant paths that aren't leaves).
+            if pf.path.depth() == 4 && !is_leaf {
                 let epoch = node_meta.bulk_metadata_epoch.unwrap_or(head_epoch);
-                child_bulk_paths.insert(pf.path.clone(), epoch);
+                child_bulk_paths.insert(pf.path, epoch);
             }
 
             // Skip nodes without OBB if they have data or aren't leaves.
@@ -332,7 +335,7 @@ impl<C: Cache> Client<C> {
         }
 
         Ok(BulkMetadata {
-            path: base_path.to_string(),
+            path: base_path,
             head_node_center,
             meters_per_texel,
             nodes,
@@ -342,7 +345,7 @@ impl<C: Cache> Client<C> {
     }
 
     /// Decode node data from protobuf.
-    fn decode_node_data(path: &str, proto: &proto::NodeData) -> Result<Node> {
+    fn decode_node_data(path: OctreePath, proto: &proto::NodeData) -> Result<Node> {
         let matrix_data: &[f64] = &proto.matrix_globe_from_mesh;
         let matrix_globe_from_mesh = if matrix_data.len() == 16 {
             DMat4::from_cols_array(matrix_data.try_into().unwrap_or(&[0.0; 16]))
@@ -372,7 +375,7 @@ impl<C: Cache> Client<C> {
         };
 
         Ok(Node {
-            path: path.to_string(),
+            path,
             matrix_globe_from_mesh,
             meters_per_texel: 1.0, // Will be set from metadata.
             obb,

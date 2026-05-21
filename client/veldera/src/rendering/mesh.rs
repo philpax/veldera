@@ -180,7 +180,7 @@ pub fn matrix_to_world_position_and_transform(matrix: &glam::DMat4) -> (WorldPos
 #[derive(Component)]
 pub struct RocktreeMeshMarker {
     /// The octant path for this node.
-    pub path: String,
+    pub path: rocktree_decode::OctreePath,
     /// Oriented bounding box from the node's bulk metadata.
     pub obb: rocktree_decode::OrientedBoundingBox,
     /// Meters per texel (LOD metric) for this mesh. Stored for debugging/future use.

@@ -37,7 +37,7 @@ use rocktree::{
     BulkMetadata, BulkRequest, Frustum, LodMetrics, Mesh as RocktreeMesh, Node, NodeMetadata,
     NodeRequest,
 };
-use rocktree_decode::OrientedBoundingBox;
+use rocktree_decode::{OctreePath, OrientedBoundingBox};
 
 use crate::{
     async_runtime::TaskSpawner,
@@ -164,7 +164,7 @@ pub enum SnapshotNodeState {
 /// One node entry in a [`LodSnapshot`].
 #[derive(Clone, Debug)]
 pub struct SnapshotNode {
-    pub path: String,
+    pub path: OctreePath,
     pub depth: usize,
     pub obb_center: DVec3,
     /// Conservative radius for drawing — the largest OBB half-extent.
@@ -208,7 +208,7 @@ pub struct LodSnapshot {
     /// Per-node detail for everything either BFS visited.
     pub nodes: Vec<SnapshotNode>,
     /// Paths the physics BFS currently has colliders for.
-    pub physics_collider_paths: HashSet<String>,
+    pub physics_collider_paths: HashSet<OctreePath>,
     /// Aggregate counters.
     pub counters: SnapshotCounters,
 }
@@ -238,25 +238,25 @@ pub struct LoadedNodeData {
 #[derive(Resource, Default)]
 pub struct LodState {
     /// Paths of nodes that are currently being loaded.
-    loading_nodes: HashSet<String>,
+    loading_nodes: HashSet<OctreePath>,
     /// Paths of nodes that are currently loaded and rendered.
-    loaded_nodes: HashSet<String>,
+    loaded_nodes: HashSet<OctreePath>,
     /// Paths of bulks that are currently being loaded.
-    loading_bulks: HashSet<String>,
+    loading_bulks: HashSet<OctreePath>,
     /// Paths of bulks that failed to load (to avoid retrying).
-    failed_bulks: HashSet<String>,
+    failed_bulks: HashSet<OctreePath>,
     /// Cached bulk metadata by path.
-    bulks: HashMap<String, BulkMetadata>,
+    bulks: HashMap<OctreePath, BulkMetadata>,
     /// Node OBBs from bulk metadata, keyed by node path.
-    node_obbs: HashMap<String, OrientedBoundingBox>,
+    node_obbs: HashMap<OctreePath, OrientedBoundingBox>,
     /// Spawned entities per node path, for despawning on unload.
-    node_entities: HashMap<String, Vec<Entity>>,
+    node_entities: HashMap<OctreePath, Vec<Entity>>,
     /// Current view frustum (updated each frame).
     frustum: Option<Frustum>,
     /// Current LOD metrics (updated each frame).
     lod_metrics: Option<LodMetrics>,
     /// Cached node data for physics collider creation.
-    node_data: HashMap<String, LoadedNodeData>,
+    node_data: HashMap<OctreePath, LoadedNodeData>,
     /// Per-bulk node lookup index, keyed by bulk path. Maps a node's
     /// relative-within-bulk path to its position in `bulks[key].nodes`.
     ///
@@ -265,9 +265,9 @@ pub struct LodState {
     /// frontier expansion. With ~639 bulks × ~150 nodes/bulk and frontier
     /// sizes in the thousands per frame, this turns tens of thousands of
     /// per-frame HashMap inserts into amortised zero.
-    bulk_node_indices: HashMap<String, HashMap<String, usize>>,
+    bulk_node_indices: HashMap<OctreePath, HashMap<OctreePath, usize>>,
     /// Physics collider entities, keyed by node path.
-    physics_colliders: HashMap<String, Entity>,
+    physics_colliders: HashMap<OctreePath, Entity>,
     /// Paths the physics BFS selected as collider hosts this frame.
     ///
     /// Computed by [`physics_bfs_traversal`] in `update_lod_requests` and
@@ -275,14 +275,14 @@ pub struct LodState {
     /// trimesh entities. Stored on `LodState` rather than passed directly
     /// so the two systems can run as separate Bevy systems without a
     /// shared parameter.
-    physics_target_paths: HashSet<String>,
+    physics_target_paths: HashSet<OctreePath>,
     /// Elapsed-seconds timestamp of the last frame each node was in any
     /// BFS's potential set. Drives the unload grace period (see
     /// [`UNLOAD_GRACE_PERIOD_SECS`]).
-    node_last_seen: HashMap<String, f64>,
+    node_last_seen: HashMap<OctreePath, f64>,
     /// Elapsed-seconds timestamp of the last frame each bulk was in any
     /// BFS's potential set.
-    bulk_last_seen: HashMap<String, f64>,
+    bulk_last_seen: HashMap<OctreePath, f64>,
     /// Monotonic counter incremented every time a bulk is inserted into
     /// [`Self::bulks`]. Drives the "skip BFS if nothing changed"
     /// optimisation — if `bulks_version` matches the value at the last
@@ -298,8 +298,8 @@ pub struct LodState {
 impl LodState {
     /// Check if a node is currently loaded.
     #[must_use]
-    pub fn is_node_loaded(&self, path: &str) -> bool {
-        self.loaded_nodes.contains(path)
+    pub fn is_node_loaded(&self, path: OctreePath) -> bool {
+        self.loaded_nodes.contains(&path)
     }
 
     /// Get the number of active physics colliders.
@@ -312,10 +312,10 @@ impl LodState {
 /// Channels for receiving loaded data from background tasks.
 #[derive(Resource)]
 pub struct LodChannels {
-    bulk_rx: async_channel::Receiver<(String, Result<BulkMetadata, rocktree::Error>)>,
-    bulk_tx: async_channel::Sender<(String, Result<BulkMetadata, rocktree::Error>)>,
-    node_rx: async_channel::Receiver<(String, Result<Node, rocktree::Error>)>,
-    node_tx: async_channel::Sender<(String, Result<Node, rocktree::Error>)>,
+    bulk_rx: async_channel::Receiver<(OctreePath, Result<BulkMetadata, rocktree::Error>)>,
+    bulk_tx: async_channel::Sender<(OctreePath, Result<BulkMetadata, rocktree::Error>)>,
+    node_rx: async_channel::Receiver<(OctreePath, Result<Node, rocktree::Error>)>,
+    node_tx: async_channel::Sender<(OctreePath, Result<Node, rocktree::Error>)>,
 }
 
 impl Default for LodChannels {
@@ -338,13 +338,13 @@ struct BfsResult {
     /// Nodes that should be loaded (metadata + bulk path).
     nodes_to_load: Vec<NodeMetadata>,
     /// Bulks that should be loaded (full path + epoch).
-    bulks_to_load: Vec<(String, u32)>,
+    bulks_to_load: Vec<(OctreePath, u32)>,
     /// All node paths that the BFS considers potentially visible.
-    potential_nodes: HashSet<String>,
+    potential_nodes: HashSet<OctreePath>,
     /// All bulk paths that the BFS considers potentially needed.
-    potential_bulks: HashSet<String>,
+    potential_bulks: HashSet<OctreePath>,
     /// OBBs discovered during traversal, to be merged into `LodState`.
-    discovered_obbs: Vec<(String, OrientedBoundingBox)>,
+    discovered_obbs: Vec<(OctreePath, OrientedBoundingBox)>,
 }
 
 impl BfsResult {
@@ -369,18 +369,18 @@ struct PhysicsBfsResult {
     /// Paths that should currently host a terrain collider. One entry per
     /// "region" — the octree partitioning means colliders never overlap
     /// even though they may be at different depths.
-    collider_paths: HashSet<String>,
+    collider_paths: HashSet<OctreePath>,
     /// Nodes the physics BFS would like loaded.
     nodes_to_load: Vec<NodeMetadata>,
     /// Bulks the physics BFS needs (for traversal).
-    bulks_to_load: Vec<(String, u32)>,
+    bulks_to_load: Vec<(OctreePath, u32)>,
     /// All node paths the physics BFS considers needed — used for retention
     /// in [`unload_obsolete`].
-    potential_nodes: HashSet<String>,
+    potential_nodes: HashSet<OctreePath>,
     /// All bulk paths the physics BFS needs.
-    potential_bulks: HashSet<String>,
+    potential_bulks: HashSet<OctreePath>,
     /// OBBs discovered during traversal.
-    discovered_obbs: Vec<(String, OrientedBoundingBox)>,
+    discovered_obbs: Vec<(OctreePath, OrientedBoundingBox)>,
 }
 
 impl PhysicsBfsResult {
@@ -545,11 +545,11 @@ fn unified_bfs_traversal(
         lead,
     };
 
-    // The root bulk is always cached at key "" by `update_lod_requests`.
+    // The root bulk is always cached at OctreePath::ROOT by `update_lod_requests`.
     unified_walk(
         &ctx,
-        "",
-        "",
+        OctreePath::ROOT,
+        OctreePath::ROOT,
         None,
         &mut scratch.render_result,
         &mut scratch.physics_result,
@@ -565,38 +565,36 @@ fn unified_bfs_traversal(
 /// "best-available-ancestor" semantics).
 fn unified_walk(
     ctx: &UnifiedWalkCtx<'_>,
-    path: &str,
-    bulk_key: &str,
-    physics_best_ancestor: Option<&str>,
+    path: OctreePath,
+    bulk_key: OctreePath,
+    physics_best_ancestor: Option<OctreePath>,
     render_result: &mut BfsResult,
     physics_result: &mut PhysicsBfsResult,
 ) -> bool {
-    // Bulk boundary handling: every 4 path characters we cross into a
-    // new bulk. If we're at a boundary, switch the lookup key to `path`
-    // and ensure that bulk is loaded.
-    let effective_bulk_key: &str = if !path.is_empty() && path.len().is_multiple_of(4) {
-        let rel = &path[path.len() - 4..];
-        let Some(parent_bulk) = ctx.lod_state.bulks.get(bulk_key) else {
+    // Bulk boundary handling: every 4 octants we cross into a new bulk.
+    // If we're at a boundary, switch the lookup key to `path` and
+    // ensure that bulk is loaded.
+    let effective_bulk_key: OctreePath = if !path.is_root() && path.depth().is_multiple_of(4) {
+        let rel = path.tail(4).expect("depth >= 4 by guard above");
+        let Some(parent_bulk) = ctx.lod_state.bulks.get(&bulk_key) else {
             return false;
         };
-        let Some(&child_epoch) = parent_bulk.child_bulk_paths.get(rel) else {
+        let Some(&child_epoch) = parent_bulk.child_bulk_paths.get(&rel) else {
             return false;
         };
 
         // Either BFS walking through this bulk wants it retained.
-        render_result.potential_bulks.insert(path.to_string());
-        physics_result.potential_bulks.insert(path.to_string());
+        render_result.potential_bulks.insert(path);
+        physics_result.potential_bulks.insert(path);
 
-        if !ctx.lod_state.bulks.contains_key(path) {
-            if !ctx.lod_state.loading_bulks.contains(path)
-                && !ctx.lod_state.failed_bulks.contains(path)
+        if !ctx.lod_state.bulks.contains_key(&path) {
+            if !ctx.lod_state.loading_bulks.contains(&path)
+                && !ctx.lod_state.failed_bulks.contains(&path)
             {
                 // One side issues the load; the call-site dedupes both
                 // sides' load lists via a HashSet, so requesting from
                 // just `render_result` is enough to avoid double-fetch.
-                render_result
-                    .bulks_to_load
-                    .push((path.to_string(), child_epoch));
+                render_result.bulks_to_load.push((path, child_epoch));
             }
             return false;
         }
@@ -605,27 +603,24 @@ fn unified_walk(
         bulk_key
     };
 
-    let Some(bulk) = ctx.lod_state.bulks.get(effective_bulk_key) else {
+    let Some(bulk) = ctx.lod_state.bulks.get(&effective_bulk_key) else {
         return false;
     };
-    let Some(node_index) = ctx.lod_state.bulk_node_indices.get(effective_bulk_key) else {
+    let Some(node_index) = ctx.lod_state.bulk_node_indices.get(&effective_bulk_key) else {
         return false;
     };
-    render_result
-        .potential_bulks
-        .insert(effective_bulk_key.to_string());
-    physics_result
-        .potential_bulks
-        .insert(effective_bulk_key.to_string());
+    render_result.potential_bulks.insert(effective_bulk_key);
+    physics_result.potential_bulks.insert(effective_bulk_key);
 
     let mut any_physics_committed = false;
 
-    for octant in b'0'..=b'7' {
-        let mut child_path = path.to_string();
-        child_path.push(octant as char);
+    for octant in 0u8..=7 {
+        let child_path = path.push(octant);
 
-        let child_rel = &child_path[effective_bulk_key.len()..];
-        let Some(&child_idx) = node_index.get(child_rel) else {
+        let child_rel = child_path
+            .strip_prefix(effective_bulk_key)
+            .expect("effective_bulk_key is a prefix of child_path");
+        let Some(&child_idx) = node_index.get(&child_rel) else {
             // Empty octant — no terrain, no contribution.
             continue;
         };
@@ -645,7 +640,7 @@ fn unified_walk(
         let phys_dist = effective_distance(&child_node.obb, ctx.camera_pos, ctx.lead);
         let phys_target = desired_physics_depth(phys_dist);
         let physics_wants = phys_target.is_some();
-        let physics_should_refine = physics_wants && child_path.len() < phys_target.unwrap_or(0);
+        let physics_should_refine = physics_wants && child_path.depth() < phys_target.unwrap_or(0);
 
         // No consumer cares about this subtree.
         if !render_visible && !physics_wants {
@@ -656,17 +651,15 @@ fn unified_walk(
         if render_visible {
             render_result
                 .discovered_obbs
-                .push((child_node.path.clone(), child_node.obb));
+                .push((child_node.path, child_node.obb));
         }
         // Physics: OBB cache + potential set + always request data for
         // fallback chain.
         if physics_wants {
             physics_result
                 .discovered_obbs
-                .push((child_node.path.clone(), child_node.obb));
-            physics_result
-                .potential_nodes
-                .insert(child_node.path.clone());
+                .push((child_node.path, child_node.obb));
+            physics_result.potential_nodes.insert(child_node.path);
             if child_node.has_data
                 && !ctx.lod_state.loaded_nodes.contains(&child_node.path)
                 && !ctx.lod_state.loading_nodes.contains(&child_node.path)
@@ -677,9 +670,7 @@ fn unified_walk(
 
         // Render: when we descend, mark this node as a refinement parent.
         if render_should_refine && child_node.has_data {
-            render_result
-                .potential_nodes
-                .insert(child_node.path.clone());
+            render_result.potential_nodes.insert(child_node.path);
             if !ctx.lod_state.loaded_nodes.contains(&child_node.path)
                 && !ctx.lod_state.loading_nodes.contains(&child_node.path)
             {
@@ -690,19 +681,19 @@ fn unified_walk(
         // Physics best-ancestor chain for the recursive descent.
         let child_phys_loaded =
             child_node.has_data && ctx.lod_state.node_data.contains_key(&child_node.path);
-        let updated_phys_best: Option<String> = if child_phys_loaded {
-            Some(child_node.path.clone())
+        let updated_phys_best: Option<OctreePath> = if child_phys_loaded {
+            Some(child_node.path)
         } else {
-            physics_best_ancestor.map(String::from)
+            physics_best_ancestor
         };
 
         if render_should_refine || physics_should_refine {
             // Recurse — either consumer wants more detail.
             let descended = unified_walk(
                 ctx,
-                &child_path,
+                child_path,
                 effective_bulk_key,
-                updated_phys_best.as_deref(),
+                updated_phys_best,
                 render_result,
                 physics_result,
             );
@@ -711,9 +702,9 @@ fn unified_walk(
             // committed a collider, fall back at this depth.
             if physics_should_refine && !descended {
                 commit_physics_collider(
-                    &child_node.path,
+                    child_node.path,
                     child_phys_loaded,
-                    &updated_phys_best,
+                    updated_phys_best,
                     physics_result,
                 );
             }
@@ -723,9 +714,9 @@ fn unified_walk(
         } else if physics_wants {
             // No refinement wanted — physics commits its collider here.
             commit_physics_collider(
-                &child_node.path,
+                child_node.path,
                 child_phys_loaded,
-                &updated_phys_best,
+                updated_phys_best,
                 physics_result,
             );
             any_physics_committed = true;
@@ -738,15 +729,15 @@ fn unified_walk(
 /// Helper: commit a collider for a node, using the deepest loaded ancestor
 /// as a fallback if the node itself isn't loaded yet.
 fn commit_physics_collider(
-    node_path: &str,
+    node_path: OctreePath,
     node_loaded: bool,
-    best_ancestor: &Option<String>,
+    best_ancestor: Option<OctreePath>,
     result: &mut PhysicsBfsResult,
 ) {
     if node_loaded {
-        result.collider_paths.insert(node_path.to_string());
+        result.collider_paths.insert(node_path);
     } else if let Some(anc) = best_ancestor {
-        result.collider_paths.insert(anc.clone());
+        result.collider_paths.insert(anc);
     }
     // If no ancestor has data loaded either, we just have no collider in
     // this region for now. Will resolve once any ancestor finishes loading.
@@ -767,16 +758,16 @@ fn commit_physics_collider(
 fn unload_obsolete(
     lod_state: &mut LodState,
     commands: &mut Commands,
-    retained_nodes: &HashSet<String>,
-    retained_bulks: &HashSet<String>,
-    physics_collider_paths: &HashSet<String>,
+    retained_nodes: &HashSet<OctreePath>,
+    retained_bulks: &HashSet<OctreePath>,
+    physics_collider_paths: &HashSet<OctreePath>,
 ) {
     // Despawn render entities for nodes no longer in the retention set.
-    let obsolete_render_nodes: Vec<String> = lod_state
+    let obsolete_render_nodes: Vec<OctreePath> = lod_state
         .loaded_nodes
         .iter()
-        .filter(|p| !retained_nodes.contains(p.as_str()))
-        .cloned()
+        .filter(|p| !retained_nodes.contains(*p))
+        .copied()
         .collect();
     for path in &obsolete_render_nodes {
         lod_state.loaded_nodes.remove(path);
@@ -789,7 +780,7 @@ fn unload_obsolete(
 
     // Drop node_data for paths not retained AND not currently backing a
     // physics collider.
-    let stale_node_data: Vec<String> = lod_state
+    let stale_node_data: Vec<OctreePath> = lod_state
         .node_data
         .keys()
         .filter(|path| {
@@ -801,7 +792,7 @@ fn unload_obsolete(
             }
             true
         })
-        .cloned()
+        .copied()
         .collect();
     for path in stale_node_data {
         lod_state.node_data.remove(&path);
@@ -814,16 +805,16 @@ fn unload_obsolete(
     }
 
     // Bulks: retention set as computed above; never evict the root bulk.
-    let obsolete_bulks: Vec<String> = lod_state
+    let obsolete_bulks: Vec<OctreePath> = lod_state
         .bulks
         .keys()
-        .filter(|p: &&String| !p.is_empty() && !retained_bulks.contains(p.as_str()))
-        .cloned()
+        .filter(|p: &&OctreePath| !p.is_root() && !retained_bulks.contains(*p))
+        .copied()
         .collect();
     for path in obsolete_bulks {
         lod_state.bulks.remove(&path);
         lod_state.bulk_node_indices.remove(&path);
-        lod_state.node_obbs.retain(|k, _| !k.starts_with(&path));
+        lod_state.node_obbs.retain(|k, _| !k.starts_with(path));
         lod_state.failed_bulks.remove(&path);
     }
 }
@@ -930,10 +921,12 @@ fn update_lod_requests(
     };
 
     // Ensure root bulk + its node index are in the cache.
-    if !lod_state.bulks.contains_key("") {
-        let index = build_bulk_node_index("", root_bulk);
-        lod_state.bulks.insert(String::new(), root_bulk.clone());
-        lod_state.bulk_node_indices.insert(String::new(), index);
+    if let std::collections::hash_map::Entry::Vacant(entry) =
+        lod_state.bulks.entry(OctreePath::ROOT)
+    {
+        let index = build_bulk_node_index(OctreePath::ROOT, root_bulk);
+        entry.insert(root_bulk.clone());
+        lod_state.bulk_node_indices.insert(OctreePath::ROOT, index);
         lod_state.bulks_version = lod_state.bulks_version.wrapping_add(1);
     }
 
@@ -980,7 +973,7 @@ fn update_lod_requests(
             .iter()
             .chain(&physics_bfs.discovered_obbs)
         {
-            lod_state.node_obbs.entry(path.clone()).or_insert(*obb);
+            lod_state.node_obbs.entry(*path).or_insert(*obb);
         }
 
         // Refresh "last seen" timestamps for everything either BFS wants
@@ -994,14 +987,14 @@ fn update_lod_requests(
             .iter()
             .chain(&physics_bfs.potential_nodes)
         {
-            lod_state.node_last_seen.insert(path.clone(), now);
+            lod_state.node_last_seen.insert(*path, now);
         }
         for path in bfs
             .potential_bulks
             .iter()
             .chain(&physics_bfs.potential_bulks)
         {
-            lod_state.bulk_last_seen.insert(path.clone(), now);
+            lod_state.bulk_last_seen.insert(*path, now);
         }
 
         // Drop expired entries from the last-seen maps.
@@ -1030,9 +1023,10 @@ fn update_lod_requests(
 
     // Derive the retention sets: anything still inside the grace window.
     // Physics collider paths are also retained as defense in depth.
-    let mut retained_nodes: HashSet<String> = lod_state.node_last_seen.keys().cloned().collect();
-    retained_nodes.extend(scratch.physics_result.collider_paths.iter().cloned());
-    let retained_bulks: HashSet<String> = lod_state.bulk_last_seen.keys().cloned().collect();
+    let mut retained_nodes: HashSet<OctreePath> =
+        lod_state.node_last_seen.keys().copied().collect();
+    retained_nodes.extend(scratch.physics_result.collider_paths.iter().copied());
+    let retained_bulks: HashSet<OctreePath> = lod_state.bulk_last_seen.keys().copied().collect();
 
     unload_obsolete(
         &mut lod_state,
@@ -1056,12 +1050,12 @@ fn update_lod_requests(
         physics_result,
         ..
     } = &mut *scratch;
-    let mut seen_paths: HashSet<String> = HashSet::new();
+    let mut seen_paths: HashSet<OctreePath> = HashSet::new();
     let merged_nodes: Vec<NodeMetadata> = render_result
         .nodes_to_load
         .drain(..)
         .chain(physics_result.nodes_to_load.drain(..))
-        .filter(|n| seen_paths.insert(n.path.clone()))
+        .filter(|n| seen_paths.insert(n.path))
         .collect();
 
     for node_meta in merged_nodes {
@@ -1069,34 +1063,33 @@ fn update_lod_requests(
             break;
         }
 
-        let path = node_meta.path.clone();
-        lod_state.loading_nodes.insert(path.clone());
+        let path = node_meta.path;
+        lod_state.loading_nodes.insert(path);
 
         let client = Arc::clone(&loader_state.client);
         let request = NodeRequest::new(
-            node_meta.path.clone(),
+            path,
             node_meta.epoch,
             node_meta.texture_format,
             node_meta.imagery_epoch,
         );
 
         let tx = channels.node_tx.clone();
-        let path_clone = path.clone();
 
         spawner.spawn(async move {
             let result = client.fetch_node(&request).await;
-            let _ = tx.send((path_clone, result)).await;
+            let _ = tx.send((path, result)).await;
         });
     }
 
     // Merge bulk load requests, dedup similarly. `render_result` /
     // `physics_result` are the same disjoint borrows from above.
-    let mut seen_bulks: HashSet<String> = HashSet::new();
-    let merged_bulks: Vec<(String, u32)> = render_result
+    let mut seen_bulks: HashSet<OctreePath> = HashSet::new();
+    let merged_bulks: Vec<(OctreePath, u32)> = render_result
         .bulks_to_load
         .drain(..)
         .chain(physics_result.bulks_to_load.drain(..))
-        .filter(|(p, _)| seen_bulks.insert(p.clone()))
+        .filter(|(p, _)| seen_bulks.insert(*p))
         .collect();
 
     for (path, epoch) in merged_bulks {
@@ -1104,17 +1097,16 @@ fn update_lod_requests(
             break;
         }
 
-        lod_state.loading_bulks.insert(path.clone());
+        lod_state.loading_bulks.insert(path);
 
         let client = Arc::clone(&loader_state.client);
-        let request = BulkRequest::new(path.clone(), epoch);
+        let request = BulkRequest::new(path, epoch);
 
         let tx = channels.bulk_tx.clone();
-        let path_clone = path.clone();
 
         spawner.spawn(async move {
             let result = client.fetch_bulk(&request).await;
-            let _ = tx.send((path_clone, result)).await;
+            let _ = tx.send((path, result)).await;
         });
     }
 }
@@ -1131,8 +1123,8 @@ fn poll_lod_bulk_tasks(mut lod_state: ResMut<LodState>, channels: Res<LodChannel
                     bulk.path,
                     bulk.nodes.len()
                 );
-                let index = build_bulk_node_index(&path, &bulk);
-                lod_state.bulks.insert(path.clone(), bulk);
+                let index = build_bulk_node_index(path, &bulk);
+                lod_state.bulks.insert(path, bulk);
                 lod_state.bulk_node_indices.insert(path, index);
                 lod_state.bulks_version = lod_state.bulks_version.wrapping_add(1);
             }
@@ -1148,14 +1140,14 @@ fn poll_lod_bulk_tasks(mut lod_state: ResMut<LodState>, channels: Res<LodChannel
 ///
 /// `bulk_key` is the bulk's full path (used as the key in
 /// [`LodState::bulks`]); relative paths are stored without that prefix.
-fn build_bulk_node_index(bulk_key: &str, bulk: &BulkMetadata) -> HashMap<String, usize> {
+fn build_bulk_node_index(bulk_key: OctreePath, bulk: &BulkMetadata) -> HashMap<OctreePath, usize> {
     let mut index = HashMap::with_capacity(bulk.nodes.len());
     for (i, node) in bulk.nodes.iter().enumerate() {
         // Defensive: tolerate a node whose full path doesn't start with
         // the bulk key (shouldn't happen, but a corrupt server response
         // shouldn't panic the streaming system).
         if let Some(rel) = node.path.strip_prefix(bulk_key) {
-            index.insert(rel.to_string(), i);
+            index.insert(rel, i);
         }
     }
     index
@@ -1188,14 +1180,14 @@ fn poll_lod_node_tasks(
                     node.meshes.len(),
                 );
 
-                lod_state.loaded_nodes.insert(path.clone());
+                lod_state.loaded_nodes.insert(path);
 
                 let (world_position, transform) =
                     matrix_to_world_position_and_transform(&node.matrix_globe_from_mesh);
 
                 // Cache node data for physics collider creation.
                 lod_state.node_data.insert(
-                    path.clone(),
+                    path,
                     LoadedNodeData {
                         meshes: node.meshes.clone(),
                         transform,
@@ -1232,7 +1224,7 @@ fn poll_lod_node_tasks(
                             transform,
                             world_position.clone(),
                             RocktreeMeshMarker {
-                                path: node.path.clone(),
+                                path: node.path,
                                 obb,
                                 meters_per_texel: node.meters_per_texel,
                             },
@@ -1272,15 +1264,15 @@ fn cull_meshes(
     // Build octant masks: for each loaded node, track which of its children
     // are also loaded. When all 8 children are present (mask == 0xff), the
     // parent is fully covered and should be hidden entirely.
-    let mut octant_masks: HashMap<&str, u8> = HashMap::new();
+    let mut octant_masks: HashMap<OctreePath, u8> = HashMap::new();
     for path in &lod_state.loaded_nodes {
-        if !path.is_empty() {
-            let parent = &path[..path.len() - 1];
-            let octant = path.as_bytes()[path.len() - 1] - b'0';
-            if octant < 8 {
-                *octant_masks.entry(parent).or_default() |= 1 << octant;
-            }
-        }
+        let Some(parent) = path.parent() else {
+            continue;
+        };
+        let octant = path
+            .octant_at(path.depth() - 1)
+            .expect("path has a last octant when non-root");
+        *octant_masks.entry(parent).or_default() |= 1 << octant;
     }
 
     // Get camera position for proximity check.
@@ -1302,7 +1294,7 @@ fn cull_meshes(
             continue;
         }
 
-        let mask = octant_masks.get(marker.path.as_str()).copied().unwrap_or(0);
+        let mask = octant_masks.get(&marker.path).copied().unwrap_or(0);
 
         // Hide parent nodes that are fully covered by children.
         let desired = if mask == 0xff {
@@ -1394,26 +1386,26 @@ fn update_physics_colliders(
                 // reads GlobalTransform).
                 Transform::from_translation(physics_pos),
                 WorldPosition::from_dvec3(node_data.world_position),
-                TerrainCollider { path: path.clone() },
+                TerrainCollider { path: *path },
                 CollisionLayers::new([GameLayer::Ground], [GameLayer::Ground, GameLayer::Vehicle]),
                 DebugRender::default(),
             ))
             .id();
 
-        lod_state.physics_colliders.insert(path.clone(), entity);
+        lod_state.physics_colliders.insert(*path, entity);
         tracing::debug!(
             "Created physics collider for node '{}' (depth {})",
             path,
-            path.len()
+            path.depth()
         );
     }
 
     // Despawn colliders that are no longer in the target set.
-    let obsolete: Vec<String> = lod_state
+    let obsolete: Vec<OctreePath> = lod_state
         .physics_colliders
         .keys()
-        .filter(|p| !target_paths.contains(p.as_str()))
-        .cloned()
+        .filter(|p| !target_paths.contains(*p))
+        .copied()
         .collect();
 
     for path in obsolete {
@@ -1464,22 +1456,23 @@ fn populate_snapshot(
     counters.physics_loading_by_depth = vec![0; max_depth];
     counters.physics_colliders_by_depth = vec![0; max_depth];
 
-    let union: HashSet<&String> = render
+    let union: HashSet<OctreePath> = render
         .potential_nodes
         .iter()
         .chain(physics.potential_nodes.iter())
+        .copied()
         .collect();
 
     for path in union {
-        let depth = path.len();
+        let depth = path.depth();
         let sources = NodeSources {
-            render: render.potential_nodes.contains(path),
-            physics: physics.potential_nodes.contains(path),
+            render: render.potential_nodes.contains(&path),
+            physics: physics.potential_nodes.contains(&path),
         };
 
-        let state = if lod_state.node_data.contains_key(path) {
+        let state = if lod_state.node_data.contains_key(&path) {
             SnapshotNodeState::Loaded
-        } else if lod_state.loading_nodes.contains(path) {
+        } else if lod_state.loading_nodes.contains(&path) {
             SnapshotNodeState::Loading
         } else {
             SnapshotNodeState::Discovered
@@ -1502,13 +1495,13 @@ fn populate_snapshot(
             }
         }
 
-        let (obb_center, obb_radius) = match lod_state.node_obbs.get(path) {
+        let (obb_center, obb_radius) = match lod_state.node_obbs.get(&path) {
             Some(obb) => (obb.center, obb.extents.length()),
             None => continue, // No OBB cached — skip, can't draw it.
         };
 
         snapshot.nodes.push(SnapshotNode {
-            path: path.clone(),
+            path,
             depth,
             obb_center,
             obb_radius,
@@ -1518,7 +1511,7 @@ fn populate_snapshot(
     }
 
     for path in &physics.collider_paths {
-        let depth = path.len();
+        let depth = path.depth();
         if depth < counters.physics_colliders_by_depth.len() {
             counters.physics_colliders_by_depth[depth] += 1;
         }

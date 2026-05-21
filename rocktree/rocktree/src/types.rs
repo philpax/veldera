@@ -6,7 +6,7 @@
 use std::collections::HashMap;
 
 use glam::{DMat4, DVec3, Vec3};
-use rocktree_decode::{OrientedBoundingBox, UvTransform, Vertex};
+use rocktree_decode::{OctreePath, OrientedBoundingBox, UvTransform, Vertex};
 
 /// Texture format for mesh textures.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -49,8 +49,8 @@ pub struct Mesh {
 /// A decoded node containing one or more meshes.
 #[derive(Debug, Clone)]
 pub struct Node {
-    /// The octant path for this node (e.g., "01234567").
-    pub path: String,
+    /// The octant path for this node.
+    pub path: OctreePath,
     /// Transform from mesh-local to globe coordinates.
     pub matrix_globe_from_mesh: DMat4,
     /// Meters per texel (LOD metric).
@@ -65,7 +65,7 @@ pub struct Node {
 #[derive(Debug, Clone)]
 pub struct NodeMetadata {
     /// The octant path for this node.
-    pub path: String,
+    pub path: OctreePath,
     /// Meters per texel (LOD metric).
     pub meters_per_texel: f32,
     /// Oriented bounding box for frustum culling.
@@ -84,15 +84,15 @@ pub struct NodeMetadata {
 #[derive(Debug, Clone)]
 pub struct BulkMetadata {
     /// The octant path prefix for this bulk.
-    pub path: String,
+    pub path: OctreePath,
     /// Head node center position.
     pub head_node_center: Vec3,
     /// Meters per texel at each level.
     pub meters_per_texel: Vec<f32>,
     /// Node metadata within this bulk.
     pub nodes: Vec<NodeMetadata>,
-    /// Child bulk paths (4-character relative paths) mapped to their epochs.
-    pub child_bulk_paths: HashMap<String, u32>,
+    /// Child bulk paths (4-octant relative paths) mapped to their epochs.
+    pub child_bulk_paths: HashMap<OctreePath, u32>,
     /// Epoch for this bulk's metadata.
     pub epoch: u32,
 }
@@ -107,10 +107,10 @@ pub struct Planetoid {
 }
 
 /// Request parameters for fetching bulk metadata.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Copy)]
 pub struct BulkRequest {
-    /// The full octant path (e.g., "02301").
-    pub path: String,
+    /// The full octant path.
+    pub path: OctreePath,
     /// The epoch for this bulk.
     pub epoch: u32,
 }
@@ -118,7 +118,7 @@ pub struct BulkRequest {
 impl BulkRequest {
     /// Create a new bulk request.
     #[must_use]
-    pub fn new(path: String, epoch: u32) -> Self {
+    pub fn new(path: OctreePath, epoch: u32) -> Self {
         Self { path, epoch }
     }
 
@@ -126,17 +126,17 @@ impl BulkRequest {
     #[must_use]
     pub fn root(epoch: u32) -> Self {
         Self {
-            path: String::new(),
+            path: OctreePath::ROOT,
             epoch,
         }
     }
 }
 
 /// Request parameters for fetching node data.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Copy)]
 pub struct NodeRequest {
-    /// The full octant path (e.g., "023014567").
-    pub path: String,
+    /// The full octant path.
+    pub path: OctreePath,
     /// The epoch for this node.
     pub epoch: u32,
     /// Texture format to request.
@@ -148,7 +148,12 @@ pub struct NodeRequest {
 impl NodeRequest {
     /// Create a new node request.
     #[must_use]
-    pub fn new(path: String, epoch: u32, texture_format: i32, imagery_epoch: Option<u32>) -> Self {
+    pub fn new(
+        path: OctreePath,
+        epoch: u32,
+        texture_format: i32,
+        imagery_epoch: Option<u32>,
+    ) -> Self {
         Self {
             path,
             epoch,
@@ -293,21 +298,23 @@ mod tests {
     #[test]
     fn test_bulk_request_root() {
         let req = BulkRequest::root(123);
-        assert_eq!(req.path, "");
+        assert_eq!(req.path, OctreePath::ROOT);
         assert_eq!(req.epoch, 123);
     }
 
     #[test]
     fn test_bulk_request_new() {
-        let req = BulkRequest::new("02301".to_string(), 456);
-        assert_eq!(req.path, "02301");
+        let path = OctreePath::parse("02301").unwrap();
+        let req = BulkRequest::new(path, 456);
+        assert_eq!(req.path, path);
         assert_eq!(req.epoch, 456);
     }
 
     #[test]
     fn test_node_request_new() {
-        let req = NodeRequest::new("023014567".to_string(), 789, 1, Some(100));
-        assert_eq!(req.path, "023014567");
+        let path = OctreePath::parse("023014567").unwrap();
+        let req = NodeRequest::new(path, 789, 1, Some(100));
+        assert_eq!(req.path, path);
         assert_eq!(req.epoch, 789);
         assert_eq!(req.texture_format, 1);
         assert_eq!(req.imagery_epoch, Some(100));
