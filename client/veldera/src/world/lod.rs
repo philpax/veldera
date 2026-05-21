@@ -353,6 +353,10 @@ fn bfs_traversal(
     // OBBs discovered during traversal, to be merged into lod_state after.
     let mut discovered_obbs: Vec<(String, OrientedBoundingBox)> = Vec::new();
 
+    // Constant across the entire BFS — hoist out of the inner loop.
+    let camera_altitude = lod_metrics.camera_position.length() - EARTH_RADIUS_M_F64;
+    let is_low_altitude = camera_altitude <= PROXIMITY_LOADING_MAX_ALTITUDE;
+
     // BFS frontier: (node_path, bulk_key) pairs.
     // Start from root node with the root bulk.
     let mut valid: Vec<(String, String)> = vec![(String::new(), String::new())];
@@ -415,8 +419,6 @@ fn bfs_traversal(
                 // drop tiles you were just looking at — they stay in
                 // memory (still hidden by `cull_meshes`) ready to flip
                 // visible when they re-enter the frustum.
-                let camera_altitude = lod_metrics.camera_position.length() - EARTH_RADIUS_M_F64;
-                let is_low_altitude = camera_altitude <= PROXIMITY_LOADING_MAX_ALTITUDE;
                 let distance_to_node = lod_metrics.camera_position.distance(node.obb.center);
                 let is_nearby = distance_to_node <= tuning.keep_loaded_radius;
 
