@@ -93,6 +93,13 @@ pub struct CloudInspectCursor {
     /// write on this so the inspect buffer's last frame's values
     /// stay visible while you mouse over a panel.
     pub active: bool,
+    /// When `true`, the cursor is pinned to the screen centre
+    /// `(0.5, 0.5)` regardless of mouse position, and `active` is
+    /// forced on. Lets the user vary just camera pose (no mouse
+    /// motion) while watching the same notional pixel's values
+    /// change — much easier than chasing a cursor that drifts as
+    /// you orbit. Toggled from the inspector UI.
+    pub lock_to_centre: bool,
 }
 
 /// Handle to the `ShaderStorageBuffer` the shader writes the

@@ -76,7 +76,6 @@ enum DebugTab {
     Atmosphere,
     Streaming,
     Physics,
-    Inspector,
     Profiler,
 }
 
@@ -89,7 +88,6 @@ impl DebugTab {
             DebugTab::Atmosphere => "Atmosphere",
             DebugTab::Streaming => "Streaming",
             DebugTab::Physics => "Physics",
-            DebugTab::Inspector => "Inspector",
             DebugTab::Profiler => "Profiler",
         }
     }
@@ -118,7 +116,6 @@ impl Default for DebugUiState {
                 DebugTab::Atmosphere,
                 DebugTab::Streaming,
                 DebugTab::Physics,
-                DebugTab::Inspector,
                 DebugTab::Profiler,
             ]),
             atmosphere_subtab: clouds::AtmosphereSubTab::default(),
@@ -177,7 +174,7 @@ fn debug_ui_system(
     streaming_params: streaming::StreamingParams,
     mut physics_params: physics::PhysicsParams,
     mut vehicle_params: vehicle::VehicleParams,
-    inspector_params: inspector::InspectorParams,
+    mut inspector_params: inspector::InspectorParams,
     profiler_params: profiler::ProfilerParams,
     climate_assets: Res<crate::rendering::clouds::CloudClimateAssets>,
 ) -> Result {
@@ -249,6 +246,7 @@ fn debug_ui_system(
                 &mut clouds_params,
                 atmosphere_subtab,
                 &atmosphere_image_ids,
+                &mut inspector_params,
             );
         }
         DebugTab::Streaming => {
@@ -256,9 +254,6 @@ fn debug_ui_system(
         }
         DebugTab::Physics => {
             physics::render_physics_tab(ui, &mut physics_params);
-        }
-        DebugTab::Inspector => {
-            inspector::render_inspector_tab(ui, &inspector_params);
         }
         DebugTab::Profiler => {
             profiler::render_profiler_tab(ui, &profiler_params, profiler_subtab);

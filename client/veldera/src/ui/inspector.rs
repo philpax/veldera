@@ -15,11 +15,20 @@ use bevy_pbr_clouds_planet::inspect::{CloudInspectCursor, CloudInspectLatest};
 #[derive(SystemParam)]
 pub(super) struct InspectorParams<'w> {
     pub latest: Res<'w, CloudInspectLatest>,
-    pub cursor: Res<'w, CloudInspectCursor>,
+    pub cursor: ResMut<'w, CloudInspectCursor>,
 }
 
 /// Render the inspector tab content.
-pub(super) fn render_inspector_tab(ui: &mut egui::Ui, params: &InspectorParams) {
+pub(super) fn render_inspector_tab(ui: &mut egui::Ui, params: &mut InspectorParams) {
+    ui.checkbox(
+        &mut params.cursor.lock_to_centre,
+        "Lock cursor to screen centre",
+    )
+    .on_hover_text(
+        "Pins the inspect cursor at the centre of the window regardless of mouse position, so \
+             you can vary just camera pose and watch the same notional pixel's values change. Off \
+             = the cursor follows the mouse (and pauses while hovering an egui panel).",
+    );
     ui.label(format!(
         "Cursor UV: ({:.3}, {:.3}) — {}",
         params.cursor.cursor.x,
@@ -77,12 +86,19 @@ fn row(ui: &mut egui::Ui, label: &str, value: String) {
 /// Bevy system: feed the window cursor position into
 /// [`CloudInspectCursor`]. Marks `active = false` whenever the
 /// pointer is over any egui area, so hovering a panel doesn't trash
-/// the inspect values for the cloud pixel underneath.
+/// the inspect values for the cloud pixel underneath. When
+/// `lock_to_centre` is set, ignores the mouse and pins the cursor
+/// at the screen centre.
 pub(super) fn sync_inspect_cursor(
     windows: Query<&Window, With<PrimaryWindow>>,
     egui_wants: Res<EguiWantsInput>,
     mut cursor: ResMut<CloudInspectCursor>,
 ) {
+    if cursor.lock_to_centre {
+        cursor.cursor = Vec2::splat(0.5);
+        cursor.active = true;
+        return;
+    }
     let Ok(window) = windows.single() else {
         cursor.active = false;
         return;

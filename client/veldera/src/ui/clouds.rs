@@ -22,6 +22,7 @@ pub enum AtmosphereSubTab {
     Shadows,
     GodRays,
     Climate,
+    Inspector,
 }
 
 /// egui texture ids for images we want to preview inside the
@@ -41,6 +42,7 @@ impl AtmosphereSubTab {
             Self::Shadows => "Shadows",
             Self::GodRays => "God rays",
             Self::Climate => "Climate",
+            Self::Inspector => "Inspector",
         }
     }
 }
@@ -50,13 +52,10 @@ pub(super) fn render_atmosphere_tab(
     clouds: &mut CloudParams,
     subtab: &mut AtmosphereSubTab,
     image_ids: &AtmosphereImageIds,
+    inspector: &mut super::inspector::InspectorParams,
 ) {
-    let Ok(mut cloud) = clouds.cloud_query.single_mut() else {
-        ui.label("No CloudLayers found on any camera.");
-        return;
-    };
-
-    // Sub-tab bar.
+    // Sub-tab bar — visible even when there's no CloudLayers, so the
+    // user can still jump to e.g. the Inspector subtab in that case.
     ui.horizontal(|ui| {
         for tab in [
             AtmosphereSubTab::Overview,
@@ -64,6 +63,7 @@ pub(super) fn render_atmosphere_tab(
             AtmosphereSubTab::Shadows,
             AtmosphereSubTab::GodRays,
             AtmosphereSubTab::Climate,
+            AtmosphereSubTab::Inspector,
         ] {
             if ui.selectable_label(*subtab == tab, tab.label()).clicked() {
                 *subtab = tab;
@@ -72,12 +72,26 @@ pub(super) fn render_atmosphere_tab(
     });
     ui.separator();
 
+    // Inspector doesn't touch `CloudLayers`, so it can render even if
+    // the cloud component is missing. Handle it first to skip the
+    // cloud-query unwrap below.
+    if matches!(subtab, AtmosphereSubTab::Inspector) {
+        super::inspector::render_inspector_tab(ui, inspector);
+        return;
+    }
+
+    let Ok(mut cloud) = clouds.cloud_query.single_mut() else {
+        ui.label("No CloudLayers found on any camera.");
+        return;
+    };
+
     match subtab {
         AtmosphereSubTab::Overview => render_overview(ui, &mut cloud),
         AtmosphereSubTab::Layers => render_layers(ui, &mut cloud),
         AtmosphereSubTab::Shadows => render_shadows(ui, &mut cloud),
         AtmosphereSubTab::GodRays => render_god_rays(ui, &mut cloud),
         AtmosphereSubTab::Climate => render_climate(ui, &mut cloud, image_ids),
+        AtmosphereSubTab::Inspector => unreachable!("handled above"),
     }
 }
 
