@@ -193,9 +193,9 @@ pub struct SnapshotCounters {
 ///
 /// Populated by `update_lod_requests` once per frame *only* when
 /// [`LodSnapshotRequest::wanted`] is `true`. The UI sets the flag each
-/// frame the diagnostics sub-tab is rendered; this keeps the per-frame
-/// snapshot cost (a few hundred string clones) off the hot path when the
-/// tab isn't visible.
+/// frame the Streaming tab is rendered; this keeps the per-frame
+/// snapshot cost (a few hundred string clones) off the hot path when
+/// the tab isn't visible.
 #[derive(Resource, Default)]
 pub struct LodSnapshot {
     /// ECEF camera position at the moment the snapshot was taken.
@@ -276,18 +276,6 @@ pub struct LodState {
 }
 
 impl LodState {
-    /// Get the number of loaded nodes.
-    #[must_use]
-    pub fn loaded_node_count(&self) -> usize {
-        self.loaded_nodes.len()
-    }
-
-    /// Get the number of nodes currently being loaded.
-    #[must_use]
-    pub fn loading_node_count(&self) -> usize {
-        self.loading_nodes.len()
-    }
-
     /// Check if a node is currently loaded.
     #[must_use]
     pub fn is_node_loaded(&self, path: &str) -> bool {

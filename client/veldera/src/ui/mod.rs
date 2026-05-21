@@ -105,8 +105,6 @@ pub struct DebugUiState {
     pub atmosphere_subtab: clouds::AtmosphereSubTab,
     /// Currently selected sub-tab inside the Profiler tab.
     pub profiler_subtab: profiler::ProfilerSubTab,
-    /// Currently selected sub-tab inside the Streaming tab.
-    pub streaming_subtab: streaming::StreamingSubTab,
 }
 
 impl Default for DebugUiState {
@@ -123,7 +121,6 @@ impl Default for DebugUiState {
             ]),
             atmosphere_subtab: clouds::AtmosphereSubTab::default(),
             profiler_subtab: profiler::ProfilerSubTab::default(),
-            streaming_subtab: streaming::StreamingSubTab::default(),
         }
     }
 }
@@ -226,7 +223,6 @@ fn debug_ui_system(
         dock_state,
         atmosphere_subtab,
         profiler_subtab,
-        streaming_subtab,
     } = &mut *ui_state;
 
     // The dock viewer is a thin closure-backed shim. Each `SystemParam`
@@ -255,7 +251,7 @@ fn debug_ui_system(
             );
         }
         DebugTab::Streaming => {
-            streaming::render_streaming_tab(ui, &mut streaming_params, streaming_subtab);
+            streaming::render_streaming_tab(ui, &mut streaming_params);
         }
         DebugTab::Physics => {
             physics::render_physics_tab(ui, &mut physics_params);

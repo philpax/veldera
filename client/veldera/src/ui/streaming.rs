@@ -1,18 +1,14 @@
 //! Streaming tab for the debug UI.
 //!
-//! Two sub-tabs:
+//! Single view: a top-down map of the octree streaming state for both
+//! the render and physics BFSes, plus per-depth histogram, aggregate
+//! counters, and tuning sliders for the LoD system.
 //!
-//! - **Overview** — a compact counter readout (node + mesh counts).
-//! - **LoD diagnostics** — a top-down map of the octree streaming state
-//!   for both the render and physics BFSes, a per-depth histogram, and
-//!   aggregate counters / lead-vector readout.
-//!
-//! The diagnostics view consumes a per-frame [`LodSnapshot`] populated by
-//! the LoD system. Snapshot population is gated on this tab being
-//! visible: rendering the diagnostics sub-tab raises
-//! [`LodSnapshotRequest::wanted`], which is consumed by the next
-//! `update_lod_requests` and lowered again. If the tab isn't open, the
-//! snapshot stays empty and costs nothing.
+//! The view consumes a per-frame [`LodSnapshot`] populated by the LoD
+//! system. Snapshot population is gated on this tab being visible:
+//! rendering it raises [`LodSnapshotRequest::wanted`], which is consumed
+//! by the next `update_lod_requests` and lowered again. If the tab isn't
+//! open, the snapshot stays empty and costs nothing.
 
 use bevy::{ecs::system::SystemParam, prelude::*};
 use bevy_egui::egui;
@@ -22,32 +18,12 @@ use crate::{
     camera::RadialFrame,
     physics::{PHYSICS_DISTANCE_BANDS, PHYSICS_RANGE},
     rendering::mesh::RocktreeMeshMarker,
-    world::lod::{
-        LodSnapshot, LodSnapshotRequest, LodState, LodTuning, SnapshotNode, SnapshotNodeState,
-    },
+    world::lod::{LodSnapshot, LodSnapshotRequest, LodTuning, SnapshotNode, SnapshotNodeState},
 };
-
-/// Currently-selected sub-tab inside the Streaming panel.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-pub enum StreamingSubTab {
-    #[default]
-    Overview,
-    Diagnostics,
-}
-
-impl StreamingSubTab {
-    fn label(self) -> &'static str {
-        match self {
-            Self::Overview => "Overview",
-            Self::Diagnostics => "LoD diagnostics",
-        }
-    }
-}
 
 /// Resources for the streaming tab.
 #[derive(SystemParam)]
 pub(super) struct StreamingParams<'w, 's> {
-    pub lod_state: Res<'w, LodState>,
     pub mesh_query: Query<'w, 's, &'static RocktreeMeshMarker>,
     pub snapshot: Res<'w, LodSnapshot>,
     pub snapshot_request: ResMut<'w, LodSnapshotRequest>,
@@ -78,50 +54,15 @@ impl Default for DiagnosticsViewState {
 }
 
 /// Render the streaming tab content.
-pub(super) fn render_streaming_tab(
-    ui: &mut egui::Ui,
-    params: &mut StreamingParams,
-    subtab: &mut StreamingSubTab,
-) {
-    ui.horizontal(|ui| {
-        for tab in [StreamingSubTab::Overview, StreamingSubTab::Diagnostics] {
-            if ui.selectable_label(*subtab == tab, tab.label()).clicked() {
-                *subtab = tab;
-            }
-        }
-    });
-    ui.separator();
+pub(super) fn render_streaming_tab(ui: &mut egui::Ui, params: &mut StreamingParams) {
+    // Ask the LoD system to populate the snapshot on its next tick so
+    // the next frame's render sees fresh data.
+    params.snapshot_request.wanted = true;
 
-    match subtab {
-        StreamingSubTab::Overview => render_overview(ui, params),
-        StreamingSubTab::Diagnostics => {
-            // Ask the LoD system to populate the snapshot on its next
-            // tick so the next frame's render sees fresh data.
-            params.snapshot_request.wanted = true;
-            render_diagnostics(ui, params);
-        }
-    }
-}
-
-fn render_overview(ui: &mut egui::Ui, params: &StreamingParams) {
-    let loaded_nodes = params.lod_state.loaded_node_count();
-    let loading_nodes = params.lod_state.loading_node_count();
-    let mesh_count = params.mesh_query.iter().count();
-
-    ui.label(format!(
-        "Nodes: {loaded_nodes} loaded, {loading_nodes} loading"
-    ));
-    ui.label(format!("Meshes: {mesh_count}"));
-    ui.label(format!(
-        "Physics colliders: {}",
-        params.lod_state.physics_collider_count()
-    ));
-}
-
-fn render_diagnostics(ui: &mut egui::Ui, params: &mut StreamingParams) {
     let snapshot = &*params.snapshot;
     let view = &mut *params.diagnostics_state;
     let tuning = &mut *params.tuning;
+    let mesh_count = params.mesh_query.iter().count();
 
     if snapshot.camera_pos.is_none() {
         ui.label("Waiting for first snapshot…");
@@ -174,7 +115,7 @@ fn render_diagnostics(ui: &mut egui::Ui, params: &mut StreamingParams) {
     draw_per_depth_histogram(ui, snapshot);
 
     ui.separator();
-    draw_counters_panel(ui, snapshot);
+    draw_counters_panel(ui, snapshot, mesh_count);
 }
 
 // ============================================================================
@@ -464,11 +405,11 @@ fn draw_per_depth_histogram(ui: &mut egui::Ui, snapshot: &LodSnapshot) {
 // Counters / readout
 // ============================================================================
 
-fn draw_counters_panel(ui: &mut egui::Ui, snapshot: &LodSnapshot) {
+fn draw_counters_panel(ui: &mut egui::Ui, snapshot: &LodSnapshot, mesh_count: usize) {
     let c = &snapshot.counters;
     ui.monospace(format!(
-        "Render BFS   loaded {:>4}   loading {:>4}",
-        c.render_loaded, c.render_loading
+        "Render BFS   loaded {:>4}   loading {:>4}   meshes {:>4}",
+        c.render_loaded, c.render_loading, mesh_count,
     ));
     let (phys_min, phys_max) = collider_depth_range(snapshot);
     ui.monospace(format!(
