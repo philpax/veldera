@@ -283,6 +283,16 @@ pub struct LodState {
     /// Elapsed-seconds timestamp of the last frame each bulk was in any
     /// BFS's potential set.
     bulk_last_seen: HashMap<String, f64>,
+    /// Monotonic counter incremented every time a bulk is inserted into
+    /// [`Self::bulks`]. Drives the "skip BFS if nothing changed"
+    /// optimisation — if `bulks_version` matches the value at the last
+    /// BFS run, no new data is available and the cached BFS output is
+    /// still valid.
+    bulks_version: u64,
+    /// Camera forward direction (unit vector) updated each frame by
+    /// `update_frustum`. Used as the rotational component of the BFS
+    /// skip signature.
+    view_direction: Option<Vec3>,
 }
 
 impl LodState {
@@ -530,6 +540,55 @@ pub struct LodScratch {
     /// Internal frontier buffers for the render BFS (level-order walk).
     render_frontier: Vec<(String, String)>,
     render_next_frontier: Vec<(String, String)>,
+    /// Signature of the input state at the last BFS run, used to decide
+    /// whether the current frame's BFSes can be skipped entirely (camera
+    /// hasn't moved, view hasn't rotated, no new bulks loaded, etc.).
+    last_bfs_signature: Option<BfsSignature>,
+}
+
+/// Captures the inputs that determine BFS output. If two consecutive
+/// frames have matching signatures (within tolerance), the BFS results
+/// on `LodScratch` are still valid and we can skip the traversal.
+#[derive(Clone, Copy, Debug)]
+struct BfsSignature {
+    camera_pos: DVec3,
+    view_dir: Vec3,
+    /// Lead vector magnitude+direction matter because the physics BFS
+    /// shifts effective distances along it.
+    lead: DVec3,
+    /// Increments on every bulk insert — new data means the BFS may
+    /// produce different output even if the camera hasn't moved.
+    bulks_version: u64,
+    /// Render-BFS retention radius — slider changes invalidate.
+    keep_loaded_radius: f64,
+}
+
+impl BfsSignature {
+    /// Position threshold below which we treat the camera as stationary.
+    /// Half a step at human scale.
+    const POS_EPSILON: f64 = 0.5;
+    /// Rotational threshold (1° = cos ≈ 0.99985).
+    const VIEW_DIR_DOT_THRESHOLD: f32 = 0.999_85;
+    /// Lead-vector delta threshold in metres.
+    const LEAD_EPSILON: f64 = 1.0;
+
+    fn matches(&self, other: &Self) -> bool {
+        if self.bulks_version != other.bulks_version
+            || (self.keep_loaded_radius - other.keep_loaded_radius).abs() > 0.0
+        {
+            return false;
+        }
+        if self.camera_pos.distance(other.camera_pos) >= Self::POS_EPSILON {
+            return false;
+        }
+        if self.view_dir.dot(other.view_dir) < Self::VIEW_DIR_DOT_THRESHOLD {
+            return false;
+        }
+        if (self.lead - other.lead).length() >= Self::LEAD_EPSILON {
+            return false;
+        }
+        true
+    }
 }
 
 /// Effective distance from `camera_pos` to the nearest point of `obb`,
@@ -869,6 +928,11 @@ fn update_frustum(
     let vp = proj_d * view_d;
     lod_state.frustum = Some(Frustum::from_matrix(vp));
 
+    // Camera forward direction in world space. Bevy cameras look down
+    // -Z by convention. Used to detect "no rotation since last frame"
+    // for the BFS skip optimisation.
+    lod_state.view_direction = Some(rotation * Vec3::NEG_Z);
+
     // Update LOD metrics using high-precision camera position.
     let screen_height = windows
         .single()
@@ -918,19 +982,41 @@ fn update_lod_requests(
         let index = build_bulk_node_index("", root_bulk);
         lod_state.bulks.insert(String::new(), root_bulk.clone());
         lod_state.bulk_node_indices.insert(String::new(), index);
+        lod_state.bulks_version = lod_state.bulks_version.wrapping_add(1);
     }
 
-    // Render BFS — read-only access to lod_state, writes into scratch.
-    bfs_traversal(&lod_state, &mut scratch, &tuning, frustum, lod_metrics);
+    // Compute the BFS skip signature for this frame and compare against
+    // the last successful run. If everything that affects BFS output is
+    // unchanged within tolerance, the cached scratch results from the
+    // previous frame are still correct.
+    let current_signature = BfsSignature {
+        camera_pos: lod_metrics.camera_position,
+        view_dir: lod_state.view_direction.unwrap_or(Vec3::NEG_Z),
+        lead: motion.lead(),
+        bulks_version: lod_state.bulks_version,
+        keep_loaded_radius: tuning.keep_loaded_radius,
+    };
+    let can_skip_bfs = scratch
+        .last_bfs_signature
+        .as_ref()
+        .is_some_and(|last| last.matches(&current_signature));
 
-    // Physics BFS — independent of render frustum, uses distance-banded
-    // refinement biased forward along the smoothed velocity vector.
-    physics_bfs_traversal(
-        &lod_state,
-        &mut scratch,
-        lod_metrics.camera_position,
-        motion.lead(),
-    );
+    if !can_skip_bfs {
+        // Render BFS — read-only access to lod_state, writes into scratch.
+        bfs_traversal(&lod_state, &mut scratch, &tuning, frustum, lod_metrics);
+
+        // Physics BFS — independent of render frustum, uses
+        // distance-banded refinement biased forward along the smoothed
+        // velocity vector.
+        physics_bfs_traversal(
+            &lod_state,
+            &mut scratch,
+            lod_metrics.camera_position,
+            motion.lead(),
+        );
+
+        scratch.last_bfs_signature = Some(current_signature);
+    }
 
     // Merge discovered OBBs from both BFSes (immutable borrow scope).
     {
@@ -1095,6 +1181,7 @@ fn poll_lod_bulk_tasks(mut lod_state: ResMut<LodState>, channels: Res<LodChannel
                 let index = build_bulk_node_index(&path, &bulk);
                 lod_state.bulks.insert(path.clone(), bulk);
                 lod_state.bulk_node_indices.insert(path, index);
+                lod_state.bulks_version = lod_state.bulks_version.wrapping_add(1);
             }
             Err(e) => {
                 tracing::debug!("LOD: Failed to load bulk '{}': {}", path, e);
