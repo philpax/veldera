@@ -16,9 +16,11 @@
 //!
 //! Both BFSes share the same bulk + node caches. A path requested by one
 //! is visible to the other via the shared `loading_nodes` / `loaded_nodes`
-//! / `bulks` state, so no double-loading. Retention (`unload_obsolete`)
-//! takes the union of both BFSes' potential sets — a node stays alive as
-//! long as either consumer wants it.
+//! / `bulks` state, so no double-loading. Retention takes the union of
+//! both BFSes' potential sets *over a rolling grace window* (see
+//! [`UNLOAD_GRACE_PERIOD_SECS`]) — a node stays alive as long as either
+//! consumer asked for it within the last few seconds. The grace window
+//! prevents thrash when the view briefly turns away and back.
 //!
 //! Uses platform-agnostic `async_channel` for communication between async tasks
 //! and the main thread. Task spawning is handled by `TaskSpawner` from the
@@ -63,9 +65,32 @@ use crate::constants::EARTH_RADIUS_M_F64;
 /// Above this height, normal frustum culling is used for all nodes.
 const PROXIMITY_LOADING_MAX_ALTITUDE: f64 = 1000.0;
 
-/// Radius around camera where nodes are kept loaded regardless of frustum.
-/// Only applies when camera is within `PROXIMITY_LOADING_MAX_ALTITUDE`.
-const PROXIMITY_LOADING_RADIUS: f64 = 50.0;
+/// Radius around the camera where nodes are kept loaded by the render BFS
+/// regardless of frustum visibility.
+///
+/// Wide enough that turning the camera 360° doesn't drop tiles you were
+/// just looking at — they stay in memory ready to flip visible when they
+/// re-enter the frustum. They're still hidden by `cull_meshes` until then,
+/// so this only costs CPU memory, not GPU rendering.
+const KEEP_LOADED_RADIUS: f64 = 250.0;
+
+/// Radius around the camera within which loaded nodes are forced visible
+/// in `cull_meshes`, bypassing frustum culling.
+///
+/// Smaller than [`KEEP_LOADED_RADIUS`] on purpose: this only covers the
+/// ground right under the player as a safety net against frustum-culling
+/// edge cases. Anything wider would render nodes behind the camera for no
+/// visual benefit.
+const FORCE_VISIBLE_RADIUS: f64 = 50.0;
+
+/// Grace period before evicting a node/bulk that has dropped out of every
+/// BFS's potential set.
+///
+/// Without this, quickly tilting up or panning unloads tiles the moment
+/// they leave the frustum and reloads them when the view returns. The
+/// grace period lets the view settle: tiles last seen within this window
+/// are retained, so transient camera motion doesn't churn streaming.
+const UNLOAD_GRACE_PERIOD_SECS: f64 = 3.0;
 
 /// Plugin for LOD management and frustum culling.
 pub struct LodPlugin;
@@ -222,6 +247,13 @@ pub struct LodState {
     /// so the two systems can run as separate Bevy systems without a
     /// shared parameter.
     physics_target_paths: HashSet<String>,
+    /// Elapsed-seconds timestamp of the last frame each node was in any
+    /// BFS's potential set. Drives the unload grace period (see
+    /// [`UNLOAD_GRACE_PERIOD_SECS`]).
+    node_last_seen: HashMap<String, f64>,
+    /// Elapsed-seconds timestamp of the last frame each bulk was in any
+    /// BFS's potential set.
+    bulk_last_seen: HashMap<String, f64>,
 }
 
 impl LodState {
@@ -359,13 +391,16 @@ fn bfs_traversal(lod_state: &LodState, frustum: Frustum, lod_metrics: LodMetrics
                     continue;
                 };
 
-                // Frustum culling using the OBB, with proximity exception.
-                // When the camera is at low altitude, keep nodes within a small radius
-                // loaded regardless of frustum to ensure ground is always available.
+                // Frustum culling using the OBB, with a "keep loaded"
+                // exception for nodes near the camera at low altitude.
+                // The exception is wide enough that a 360° turn doesn't
+                // drop tiles you were just looking at — they stay in
+                // memory (still hidden by `cull_meshes`) ready to flip
+                // visible when they re-enter the frustum.
                 let camera_altitude = lod_metrics.camera_position.length() - EARTH_RADIUS_M_F64;
                 let is_low_altitude = camera_altitude <= PROXIMITY_LOADING_MAX_ALTITUDE;
                 let distance_to_node = lod_metrics.camera_position.distance(node.obb.center);
-                let is_nearby = distance_to_node <= PROXIMITY_LOADING_RADIUS;
+                let is_nearby = distance_to_node <= KEEP_LOADED_RADIUS;
 
                 let in_frustum = frustum.intersects_obb(&node.obb);
                 let force_load = is_low_altitude && is_nearby;
@@ -643,30 +678,30 @@ fn commit_physics_collider(
     // this region for now. Will resolve once any ancestor finishes loading.
 }
 
-/// Despawn entities for nodes no longer wanted by either consumer, and
-/// remove obsolete bulks from the cache.
+/// Despawn entities for nodes no longer in the retention set, and remove
+/// obsolete bulks.
 ///
-/// A node/bulk is retained as long as **either** the render BFS or the
-/// physics BFS lists it in its potential set, giving the two consumers
-/// independent lifetime contributions. `node_data` (CPU mesh data) is also
-/// retained for any path the physics BFS currently uses as a collider, so
-/// the collider creation step can read meshes without re-fetching.
+/// `retained_nodes` and `retained_bulks` are the precomputed union of:
+/// - paths the render BFS visited this frame
+/// - paths the physics BFS visited this frame
+/// - paths visited within the last [`UNLOAD_GRACE_PERIOD_SECS`]
+///
+/// `physics_collider_paths` is passed separately so we can also keep
+/// `node_data` alive for paths the physics system is currently using as a
+/// collider, even if their grace window happens to be expiring at the
+/// same instant.
 fn unload_obsolete(
     lod_state: &mut LodState,
     commands: &mut Commands,
-    render_potential_nodes: &HashSet<String>,
-    physics_potential_nodes: &HashSet<String>,
-    render_potential_bulks: &HashSet<String>,
-    physics_potential_bulks: &HashSet<String>,
+    retained_nodes: &HashSet<String>,
+    retained_bulks: &HashSet<String>,
     physics_collider_paths: &HashSet<String>,
 ) {
-    // Despawn render entities for nodes the render BFS no longer wants.
-    // (The mesh GPU entities are render-only; physics uses node_data
-    // directly.)
+    // Despawn render entities for nodes no longer in the retention set.
     let obsolete_render_nodes: Vec<String> = lod_state
         .loaded_nodes
         .iter()
-        .filter(|p| !render_potential_nodes.contains(p.as_str()))
+        .filter(|p| !retained_nodes.contains(p.as_str()))
         .cloned()
         .collect();
     for path in &obsolete_render_nodes {
@@ -678,8 +713,8 @@ fn unload_obsolete(
         }
     }
 
-    // Drop node_data for paths neither BFS wants AND that aren't currently
-    // backing a physics collider.
+    // Drop node_data for paths not retained AND not currently backing a
+    // physics collider.
     let stale_node_data: Vec<String> = lod_state
         .node_data
         .keys()
@@ -687,10 +722,7 @@ fn unload_obsolete(
             if lod_state.loaded_nodes.contains(*path) {
                 return false;
             }
-            if render_potential_nodes.contains(*path)
-                || physics_potential_nodes.contains(*path)
-                || physics_collider_paths.contains(*path)
-            {
+            if retained_nodes.contains(*path) || physics_collider_paths.contains(*path) {
                 return false;
             }
             true
@@ -700,23 +732,18 @@ fn unload_obsolete(
     for path in stale_node_data {
         lod_state.node_data.remove(&path);
         // If a physics collider was using this node_data, remove the
-        // collider entity too — it would point at no-longer-existent mesh
-        // data otherwise.
+        // collider entity too — it would point at no-longer-existent
+        // mesh data otherwise.
         if let Some(entity) = lod_state.physics_colliders.remove(&path) {
             commands.entity(entity).despawn();
         }
     }
 
-    // Bulks: union of render's and physics's potential sets, never evict
-    // the root bulk.
+    // Bulks: retention set as computed above; never evict the root bulk.
     let obsolete_bulks: Vec<String> = lod_state
         .bulks
         .keys()
-        .filter(|p: &&String| {
-            !p.is_empty()
-                && !render_potential_bulks.contains(p.as_str())
-                && !physics_potential_bulks.contains(p.as_str())
-        })
+        .filter(|p: &&String| !p.is_empty() && !retained_bulks.contains(p.as_str()))
         .cloned()
         .collect();
     for path in obsolete_bulks {
@@ -798,6 +825,7 @@ fn update_frustum(
 #[allow(clippy::too_many_arguments)]
 fn update_lod_requests(
     mut commands: Commands,
+    time: Res<Time>,
     loader_state: Res<LoaderState>,
     mut lod_state: ResMut<LodState>,
     channels: Res<LodChannels>,
@@ -840,15 +868,44 @@ fn update_lod_requests(
         lod_state.node_obbs.entry(path.clone()).or_insert(*obb);
     }
 
-    // Unload anything neither consumer wants. Physics collider paths are
-    // also retained so their backing node_data stays alive.
+    // Refresh "last seen" timestamps for everything either BFS wants
+    // right now. Anything not refreshed will fall outside the grace
+    // period after UNLOAD_GRACE_PERIOD_SECS and become eligible for
+    // eviction. Hysteresis turns a brief view shift (look up/down,
+    // glance sideways) into a no-op for streaming.
+    let now = time.elapsed_secs_f64();
+    for path in bfs
+        .potential_nodes
+        .iter()
+        .chain(&physics_bfs.potential_nodes)
+    {
+        lod_state.node_last_seen.insert(path.clone(), now);
+    }
+    for path in bfs
+        .potential_bulks
+        .iter()
+        .chain(&physics_bfs.potential_bulks)
+    {
+        lod_state.bulk_last_seen.insert(path.clone(), now);
+    }
+
+    // Drop expired entries from the last-seen maps so they don't grow
+    // unbounded as the camera roams.
+    let cutoff = now - UNLOAD_GRACE_PERIOD_SECS;
+    lod_state.node_last_seen.retain(|_, t| *t >= cutoff);
+    lod_state.bulk_last_seen.retain(|_, t| *t >= cutoff);
+
+    // Derive the retention sets: anything still inside the grace window.
+    // Physics collider paths are also kept retained as defense in depth.
+    let mut retained_nodes: HashSet<String> = lod_state.node_last_seen.keys().cloned().collect();
+    retained_nodes.extend(physics_bfs.collider_paths.iter().cloned());
+    let retained_bulks: HashSet<String> = lod_state.bulk_last_seen.keys().cloned().collect();
+
     unload_obsolete(
         &mut lod_state,
         &mut commands,
-        &bfs.potential_nodes,
-        &physics_bfs.potential_nodes,
-        &bfs.potential_bulks,
-        &physics_bfs.potential_bulks,
+        &retained_nodes,
+        &retained_bulks,
         &physics_bfs.collider_paths,
     );
 
@@ -1090,7 +1147,7 @@ fn cull_meshes(
         let force_visible = camera_pos.is_some_and(|cam_pos| {
             let altitude = cam_pos.length() - EARTH_RADIUS_M_F64;
             let distance = cam_pos.distance(marker.obb.center);
-            altitude <= PROXIMITY_LOADING_MAX_ALTITUDE && distance <= PROXIMITY_LOADING_RADIUS
+            altitude <= PROXIMITY_LOADING_MAX_ALTITUDE && distance <= FORCE_VISIBLE_RADIUS
         });
 
         if !in_frustum && !force_visible {
