@@ -74,6 +74,46 @@ pub struct CloudInspectData {
     pub first_hit_t: f32,
     /// Density at the first-hit sample.
     pub first_hit_density: f32,
+
+    /// Index of the cloud sub-layer the breakdown below applies to:
+    /// the enabled layer with the highest density at
+    /// `first_hit_pos`. `-1` if no enabled layer had non-zero
+    /// density there (shouldn't normally happen — the first-hit
+    /// threshold guarantees a contributing layer exists — but a
+    /// jittered sample landing on a per-frame shell boundary can
+    /// produce a recheck density of zero).
+    pub fh_layer_index: i32,
+    /// `length(first_hit_pos)` — the SHADER-side computed altitude,
+    /// not a re-derivation. Sensitive to f32 ULP at ECEF magnitude
+    /// (~0.5 m precision at 6.4×10⁶ m), so a leading-candidate
+    /// source of camera-position-dependent density flips.
+    pub fh_radius: f32,
+    /// `(fh_radius − inner_radius) / shell_thickness` for the chosen
+    /// layer, normalised altitude through the cloud shell. Goes into
+    /// the noise vertical axis (`shell_h * vertical_cycles`).
+    pub fh_shell_h: f32,
+    /// `v_profile` smoothstep gating on `shell_h` (zero at the top
+    /// and bottom of the shell, ramps up in the middle 60%).
+    pub fh_v_profile: f32,
+    /// Climate coverage at `first_hit_pos`. Latitude/ocean-bonus
+    /// driven; stable per world point.
+    pub fh_climate_base: f32,
+    /// Climate base modulated by the three-octave weather noise.
+    pub fh_regional_coverage: f32,
+    /// Raw `shape * v_profile` before the coverage smoothstep.
+    pub fh_raw: f32,
+    /// Lower bound of the density smoothstep (`regional_coverage −
+    /// 0.1`, clamped to ≥ 0).
+    pub fh_cov_lo: f32,
+    /// Upper bound of the density smoothstep.
+    pub fh_cov_hi: f32,
+    /// Re-derived density at `first_hit_pos` for the chosen layer.
+    /// Sanity-check for the inspect path: should match
+    /// `first_hit_density` to within sample-jitter — if it's wildly
+    /// different the inspect re-computation is bugged, or the wrong
+    /// layer was picked.
+    pub fh_density_recheck: f32,
+    pub _pad: [f32; 2],
 }
 
 /// Inspect-cursor input, set by the client UI from egui's pointer

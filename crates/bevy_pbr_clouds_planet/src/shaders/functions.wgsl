@@ -145,40 +145,34 @@ fn climate_coverage(world_pos: vec3<f32>, base_coverage: f32, layer_strength: f3
 // `layer.noise_uv_offset` (= `(camera_ecef / tile).fract()` in f64) so the
 // final noise UV is world-aligned with full precision — no 6.4×10⁶ m / 4 km
 // f32 division in the shader.
-fn sample_layer_density(
+/// Per-component breakdown of the layer-density math. The
+/// production [`sample_layer_density`] is a thin wrapper that calls
+/// this then returns `.density`, so there's a single source of
+/// truth for the formula. The inspect path (see `inspect.rs` and
+/// the raymarch shader's inspector write block) calls this directly
+/// for the cursor pixel's first-hit position to surface each
+/// intermediate as a separate value in the UI.
+struct LayerDensityBreakdown {
+    radius: f32,
+    shell_h: f32,
+    v_profile: f32,
+    climate_base: f32,
+    regional_coverage: f32,
+    raw: f32,
+    cov_lo: f32,
+    cov_hi: f32,
+    density: f32,
+}
+
+fn sample_layer_density_breakdown(
     layer_i: u32,
     world_pos: vec3<f32>,
     sample_pos_local: vec3<f32>,
     dt: f32,
-) -> f32 {
+) -> LayerDensityBreakdown {
+    var b: LayerDensityBreakdown;
     let layer = cloud.layers[layer_i];
-    if layer.enabled == 0u {
-        return 0.0;
-    }
-    // Mip LOD for the noise lookups. A texel in the noise texture
-    // covers `layer.noise_tile / 256` metres of world (256 = NOISE_RES);
-    // we want each step's noise sample to represent the entire `dt`-
-    // wide world region the step integrates over. log2 of the ratio
-    // gives the LOD; clamped so very small `dt` doesn't go negative
-    // (mip 0 is already the finest) and very large `dt` doesn't sample
-    // past the available mip count.
-    //
-    // `LOD_BIAS` shifts samples toward finer mips so that the noise
-    // field's filtered features sit at a much smaller spatial scale
-    // than the world-snapped sample grid spacing. Without enough
-    // bias, the mip's coarse voxel structure (e.g. mip 5 = 500 m
-    // texels for a 4 km tile) lines up with the 500 m step grid and
-    // creates visible Moiré ripples. Biasing down to ~mip 2 (60 m
-    // texels) leaves the regular sampling reading from a much finer
-    // field — the beat pattern between them collapses, and a per-
-    // pixel jitter (applied in `cloud_raymarch.wgsl` to `t_first`)
-    // breaks the remaining inter-pixel coherence.
-    let texel_world = max(layer.noise_tile / 256.0, 1e-3);
-    let lod = clamp(
-        log2(max(dt, texel_world) / texel_world) - cloud.raymarch_lod_bias,
-        0.0,
-        7.0,
-    );
+
     // Altitude above the layer's inner shell. We use `length(world_pos)`
     // directly — the paraboloidal Taylor approximation
     // `dot_up + perp²/(2r)` was tempting because the leading terms are
@@ -189,57 +183,84 @@ fn sample_layer_density(
     //
     // The precision concern with `length()` on a 6.4×10⁶ m vec (≈ 0.5 m
     // f32 jitter) translates to ≈ 0.04 noise-texels of `shell_h`
-    // jitter — invisible.
-    let altitude_above_inner = length(world_pos) - layer.inner_radius;
+    // jitter — invisible, but exposed as `radius` here for the
+    // inspector so we can confirm.
+    b.radius = length(world_pos);
+    let altitude_above_inner = b.radius - layer.inner_radius;
     let shell_thickness = layer.outer_radius - layer.inner_radius;
-    if altitude_above_inner < 0.0 || altitude_above_inner > shell_thickness {
-        return 0.0;
-    }
-    let shell_h = altitude_above_inner / max(shell_thickness, 1.0);
-    let v_profile = smoothstep(0.0, 0.2, shell_h) * (1.0 - smoothstep(0.6, 1.0, shell_h));
+    b.shell_h = altitude_above_inner / max(shell_thickness, 1.0);
+    b.v_profile = smoothstep(0.0, 0.2, b.shell_h)
+        * (1.0 - smoothstep(0.6, 1.0, b.shell_h));
 
-    // Domain warp — low-frequency noise at 4× the tile, perturbs the main
-    // noise lookup. Uses a SEPARATE `warp_uv_offset` (precomputed against
-    // warp_tile) so it wraps at warp-tile boundaries rather than popping
-    // 0.25 cycles every noise-tile boundary. Time modulates the warp
-    // slowly per the layer's evolution_rate.
+    // Mip LOD for the noise lookups. A texel in the noise texture
+    // covers `layer.noise_tile / 256` metres of world (256 = NOISE_RES);
+    // we want each step's noise sample to represent the entire `dt`-
+    // wide world region the step integrates over. log2 of the ratio
+    // gives the LOD; clamped so very small `dt` doesn't go negative
+    // (mip 0 is already the finest) and very large `dt` doesn't sample
+    // past the available mip count.
+    //
+    // `cloud.raymarch_lod_bias` shifts samples toward finer mips so
+    // that the noise field's filtered features sit at a much smaller
+    // spatial scale than the world-snapped sample grid spacing.
+    // Without enough bias, the mip's coarse voxel structure (e.g.
+    // mip 5 = 500 m texels for a 4 km tile) lines up with the 500 m
+    // step grid and creates visible Moiré ripples. Biasing down to
+    // ~mip 2 (60 m texels) leaves the regular sampling reading from
+    // a much finer field — the beat pattern between them collapses,
+    // and a per-pixel jitter (applied in `cloud_raymarch.wgsl` to
+    // `t_first`) breaks the remaining inter-pixel coherence.
+    let texel_world = max(layer.noise_tile / 256.0, 1e-3);
+    let lod = clamp(
+        log2(max(dt, texel_world) / texel_world) - cloud.raymarch_lod_bias,
+        0.0,
+        7.0,
+    );
+
+    // Domain warp — low-frequency noise at 4× the tile, perturbs the
+    // main noise lookup. Uses a SEPARATE `warp_uv_offset`
+    // (precomputed against warp_tile) so it wraps at warp-tile
+    // boundaries rather than popping 0.25 cycles every noise-tile
+    // boundary. Time modulates the warp slowly per the layer's
+    // evolution_rate.
     let warp_tile = layer.noise_tile * 4.0;
     var warp_uv = sample_pos_local / warp_tile + layer.warp_uv_offset;
     warp_uv += vec3<f32>(0.0, cloud.time_seconds * layer.evolution_rate, 0.0);
-    // Warp tile is 4× the noise tile, so a `dt` that maps to LOD `n` on
-    // the main noise maps to LOD `n - 2` on the warp. Clamped to 0.
+    // Warp tile is 4× the noise tile, so a `dt` that maps to LOD `n`
+    // on the main noise maps to LOD `n - 2` on the warp. Clamped to 0.
     let warp_lod = max(lod - 2.0, 0.0);
     let warp_n = textureSampleLevel(noise_3d, cloud_sampler, fract(warp_uv), warp_lod);
     let warp = (warp_n.gb - 0.5) * 0.4; // ±20 % of tile
 
     // Main noise lookup. Two-octave FBM-like sample.
     //
-    // The vertical noise axis uses `shell_h * vertical_cycles` instead of
-    // a world-position-derived value so we get multiple noise cycles
-    // WITHIN the shell regardless of layer thickness — without this, a
-    // 3.5 km shell sampled at a 4 km tile sees ~1 vertical noise cycle
-    // and the shape × v_profile interaction produces visible horizontal
-    // "decks" when the camera is inside the shell looking out.
+    // The vertical noise axis uses `shell_h * vertical_cycles` instead
+    // of a world-position-derived value so we get multiple noise
+    // cycles WITHIN the shell regardless of layer thickness — without
+    // this, a 3.5 km shell sampled at a 4 km tile sees ~1 vertical
+    // noise cycle and the shape × v_profile interaction produces
+    // visible horizontal "decks" when the camera is inside the shell
+    // looking out.
     let tile = layer.noise_tile;
     let vertical_cycles = 2.5;
     var noise_uv = vec3<f32>(
         layer.noise_uv_offset.x + sample_pos_local.x / tile + layer.wind_offset.x / tile + warp.x,
-        shell_h * vertical_cycles,
+        b.shell_h * vertical_cycles,
         layer.noise_uv_offset.z + sample_pos_local.z / tile + layer.wind_offset.y / tile + warp.y,
     );
     let n_lo = textureSampleLevel(noise_3d, cloud_sampler, fract(noise_uv), lod);
-    // Higher-frequency octave at different position so it doesn't align.
-    // 2.13× tighter spatial frequency means it represents finer detail;
-    // shift its LOD up by log2(2.13) ≈ 1.09 so an over-large dt also
-    // anti-aliases this octave (otherwise the hi octave shimmers in
-    // isolation even when the lo octave is properly mip-filtered).
+    // Higher-frequency octave at different position so it doesn't
+    // align. 2.13× tighter spatial frequency means it represents
+    // finer detail; shift its LOD up by log2(2.13) ≈ 1.09 so an
+    // over-large dt also anti-aliases this octave (otherwise the hi
+    // octave shimmers in isolation even when the lo octave is
+    // properly mip-filtered).
     let n_hi = textureSampleLevel(
         noise_3d, cloud_sampler,
         fract(noise_uv * 2.13 + vec3(0.37, 0.19, 0.71)),
         clamp(lod + 1.09, 0.0, 7.0),
     );
     let n = mix(n_lo, n_hi, 0.35);
-
     let base = n.r;
     let erosion = (n.g * 0.625 + n.b * 0.25);
     let shape = saturate(remap(base, erosion - 1.0, 1.0, 0.0, 1.0));
@@ -249,19 +270,20 @@ fn sample_layer_density(
     //   - continental (10× tile) — country-sized weather systems
     //   - planetary (40× tile) — visible cloud-vs-clear bands at orbit
     //
-    // Each octave scrolls along world X over time at its own rate, so
-    // weather systems visibly migrate at all scales (much slower than
-    // the per-cell wind). Numbers are picked so a 1× game-time second is
-    // a few metres of drift; cranking time speed in the UI makes the
-    // orbital-scale patterns visibly translate. The combined value is
-    // then biased through smoothstep so genuinely clear and genuinely
-    // overcast regions both occur, rather than the raw average
-    // converging to mid-range everywhere.
+    // Each octave scrolls along world X over time at its own rate,
+    // so weather systems visibly migrate at all scales (much slower
+    // than the per-cell wind). Numbers are picked so a 1× game-time
+    // second is a few metres of drift; cranking time speed in the UI
+    // makes the orbital-scale patterns visibly translate. The
+    // combined value is then biased through smoothstep so genuinely
+    // clear and genuinely overcast regions both occur, rather than
+    // the raw average converging to mid-range everywhere.
+    //
     // Per-layer base coverage, with the Earth-aware climate model
     // applied first so weather noise modulates a climatologically
     // sensible baseline rather than a flat global value.
-    let climate_base = climate_coverage(world_pos, layer.coverage, layer.climate_strength);
-    var regional_coverage = climate_base;
+    b.climate_base = climate_coverage(world_pos, layer.coverage, layer.climate_strength);
+    b.regional_coverage = b.climate_base;
     if layer.weather_tile > 0.0 && layer.weather_strength > 0.0 {
         let t = cloud.time_seconds;
         let r_drift = vec3<f32>(t * 2.0, 0.0, 0.0);
@@ -273,18 +295,41 @@ fn sample_layer_density(
         let r_n = textureSampleLevel(noise_3d, cloud_sampler, fract(r_uv), 0.0).r;
         let c_n = textureSampleLevel(noise_3d, cloud_sampler, fract(c_uv), 0.0).r;
         let p_n = textureSampleLevel(noise_3d, cloud_sampler, fract(p_uv), 0.0).r;
-
         let mixed = r_n * 0.20 + c_n * 0.30 + p_n * 0.50;
         let pushed = smoothstep(0.3, 0.7, mixed);
         let weather = (pushed - 0.5) * 2.0;
-        regional_coverage = saturate(climate_base - weather * layer.weather_strength);
+        b.regional_coverage = saturate(b.climate_base - weather * layer.weather_strength);
     }
 
-    let raw = shape * v_profile;
-    let cov_lo = max(regional_coverage - 0.1, 0.0);
-    let cov_hi = min(regional_coverage + 0.1, 1.0);
-    let density = smoothstep(cov_lo, cov_hi, raw);
-    return density * layer.density_scale;
+    b.raw = shape * b.v_profile;
+    b.cov_lo = max(b.regional_coverage - 0.1, 0.0);
+    b.cov_hi = min(b.regional_coverage + 0.1, 1.0);
+    b.density = smoothstep(b.cov_lo, b.cov_hi, b.raw) * layer.density_scale;
+    return b;
+}
+
+fn sample_layer_density(
+    layer_i: u32,
+    world_pos: vec3<f32>,
+    sample_pos_local: vec3<f32>,
+    dt: f32,
+) -> f32 {
+    // Thin wrapper over `sample_layer_density_breakdown` with cheap
+    // early-exits to skip the noise/weather/climate work in the
+    // common cases where the sample contributes zero density anyway.
+    // The actual math lives in the breakdown function so the
+    // inspector path can recompute the per-component intermediates
+    // without risk of drift.
+    let layer = cloud.layers[layer_i];
+    if layer.enabled == 0u {
+        return 0.0;
+    }
+    let altitude_above_inner = length(world_pos) - layer.inner_radius;
+    let shell_thickness = layer.outer_radius - layer.inner_radius;
+    if altitude_above_inner < 0.0 || altitude_above_inner > shell_thickness {
+        return 0.0;
+    }
+    return sample_layer_density_breakdown(layer_i, world_pos, sample_pos_local, dt).density;
 }
 
 // Total cloud density, summed across every enabled sub-layer. Takes both

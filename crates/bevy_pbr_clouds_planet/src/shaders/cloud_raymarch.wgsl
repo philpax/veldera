@@ -37,7 +37,7 @@ fn depth_to_camera_dist(uv: vec2<f32>, depth: f32) -> f32 {
     sample_transmittance, sample_aerial_inscattering, sample_sky_view,
     dual_henyey_greenstein_layer, dual_henyey_greenstein_layer_eccentric,
     sample_cloud_density, sample_layer_density, sample_light_optical_depth,
-    cloud_shell_segment,
+    cloud_shell_segment, sample_layer_density_breakdown, LayerDensityBreakdown,
 };
 #import bevy_pbr_clouds_planet::constants::{
     AERIAL_LUT_MAX_DISTANCE, AERIAL_LUT_FADE_RANGE,
@@ -555,6 +555,38 @@ fn main(@builtin(global_invocation_id) idx: vec3<u32>) {
         cloud_inspect_buffer.opacity = 1.0 - transmittance;
         cloud_inspect_buffer.first_hit_t = first_hit_t;
         cloud_inspect_buffer.first_hit_density = first_hit_density;
+
+        // Pick the sub-layer that actually contributed at
+        // `first_hit_pos`: iterate enabled layers, take the breakdown
+        // with the highest density. `sample_pos_local` is
+        // reconstructed as `first_hit_pos - cam_world` so the
+        // camera-relative noise lookups inside the breakdown function
+        // see the same UVs the main pass did.
+        let fh_pos_local = first_hit_pos - cam_world;
+        var best_breakdown: LayerDensityBreakdown;
+        var best_layer: i32 = -1;
+        var best_density: f32 = 0.0;
+        for (var li: u32 = 0u; li < cloud.layer_count; li = li + 1u) {
+            if cloud.layers[li].enabled == 0u {
+                continue;
+            }
+            let bd = sample_layer_density_breakdown(li, first_hit_pos, fh_pos_local, dt);
+            if bd.density > best_density {
+                best_density = bd.density;
+                best_breakdown = bd;
+                best_layer = i32(li);
+            }
+        }
+        cloud_inspect_buffer.fh_layer_index = best_layer;
+        cloud_inspect_buffer.fh_radius = best_breakdown.radius;
+        cloud_inspect_buffer.fh_shell_h = best_breakdown.shell_h;
+        cloud_inspect_buffer.fh_v_profile = best_breakdown.v_profile;
+        cloud_inspect_buffer.fh_climate_base = best_breakdown.climate_base;
+        cloud_inspect_buffer.fh_regional_coverage = best_breakdown.regional_coverage;
+        cloud_inspect_buffer.fh_raw = best_breakdown.raw;
+        cloud_inspect_buffer.fh_cov_lo = best_breakdown.cov_lo;
+        cloud_inspect_buffer.fh_cov_hi = best_breakdown.cov_hi;
+        cloud_inspect_buffer.fh_density_recheck = best_breakdown.density;
     }
 
     if cloud.debug_mode == DBG_OPACITY {

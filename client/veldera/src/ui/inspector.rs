@@ -75,6 +75,38 @@ pub(super) fn render_inspector_tab(ui: &mut egui::Ui, params: &mut InspectorPara
                 ),
             );
         });
+
+    ui.separator();
+    let layer_label = if data.fh_layer_index < 0 {
+        "(no contributing layer)".to_string()
+    } else {
+        format!("layer {}", data.fh_layer_index)
+    };
+    ui.label(format!(
+        "Density breakdown at first_hit_pos — {layer_label}:"
+    ));
+    egui::Grid::new("cloud_inspect_breakdown_grid")
+        .num_columns(2)
+        .striped(true)
+        .show(ui, |ui| {
+            row(ui, "radius", format!("{:.3} m", data.fh_radius));
+            row(ui, "shell_h", format!("{:.6}", data.fh_shell_h));
+            row(ui, "v_profile", format!("{:.6}", data.fh_v_profile));
+            row(ui, "climate_base", format!("{:.6}", data.fh_climate_base));
+            row(
+                ui,
+                "regional_coverage",
+                format!("{:.6}", data.fh_regional_coverage),
+            );
+            row(ui, "raw (shape × v_profile)", format!("{:.6}", data.fh_raw));
+            row(ui, "cov_lo", format!("{:.6}", data.fh_cov_lo));
+            row(ui, "cov_hi", format!("{:.6}", data.fh_cov_hi));
+            row(
+                ui,
+                "density (recheck)",
+                format!("{:.3e} m⁻¹", data.fh_density_recheck),
+            );
+        });
 }
 
 fn row(ui: &mut egui::Ui, label: &str, value: String) {

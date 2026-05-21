@@ -56,5 +56,25 @@ struct CloudInspectData {
     opacity: f32,
     first_hit_t: f32,
     first_hit_density: f32,
+
+    // Per-component breakdown of density at first_hit_pos for the
+    // sub-layer that actually contributed (= the enabled layer with
+    // highest density at that position, picked by iterating layers
+    // in the inspector write block). Recomputed once after the
+    // raymarch loop via `sample_layer_density_breakdown`; lets us
+    // see which input (altitude, climate, weather, shape) is the
+    // source of any camera-position-dependent density flips.
+    fh_layer_index: i32,
+    fh_radius: f32,
+    fh_shell_h: f32,
+    fh_v_profile: f32,
+    fh_climate_base: f32,
+    fh_regional_coverage: f32,
+    fh_raw: f32,
+    fh_cov_lo: f32,
+    fh_cov_hi: f32,
+    fh_density_recheck: f32,
+    _pad0: f32,
+    _pad1: f32,
 }
 @group(0) @binding(15) var<storage, read_write> cloud_inspect_buffer: CloudInspectData;
