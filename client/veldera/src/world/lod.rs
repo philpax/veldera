@@ -119,6 +119,7 @@ impl Plugin for LodPlugin {
             .init_resource::<LodChannels>()
             .init_resource::<LodSnapshot>()
             .init_resource::<LodSnapshotRequest>()
+            .init_resource::<LodScratch>()
             .init_resource::<LodTuning>()
             .add_systems(
                 Update,
@@ -322,6 +323,7 @@ impl Default for LodChannels {
 
 /// Result of the rendering BFS traversal — what's needed for what shows on
 /// screen. Physics has its own parallel traversal ([`PhysicsBfsResult`]).
+#[derive(Default)]
 struct BfsResult {
     /// Nodes that should be loaded (metadata + bulk path).
     nodes_to_load: Vec<NodeMetadata>,
@@ -335,36 +337,54 @@ struct BfsResult {
     discovered_obbs: Vec<(String, OrientedBoundingBox)>,
 }
 
+impl BfsResult {
+    /// Reset for reuse in the next BFS pass. Retains capacity to avoid
+    /// reallocation when the next frame's frontier is similarly sized.
+    fn clear(&mut self) {
+        self.nodes_to_load.clear();
+        self.bulks_to_load.clear();
+        self.potential_nodes.clear();
+        self.potential_bulks.clear();
+        self.discovered_obbs.clear();
+    }
+}
+
 /// Perform a BFS traversal from the root to determine which nodes and bulks
 /// are needed, matching the C++ reference algorithm.
 ///
-/// All access to `lod_state` during BFS is read-only. Mutations are collected
-/// into the returned `BfsResult` and applied by the caller.
+/// All access to `lod_state` during BFS is read-only. Mutations are
+/// written through `scratch`, whose buffers are reused across frames.
 fn bfs_traversal(
     lod_state: &LodState,
+    scratch: &mut LodScratch,
     tuning: &LodTuning,
     frustum: Frustum,
     lod_metrics: LodMetrics,
-) -> BfsResult {
-    let mut nodes_to_load: Vec<NodeMetadata> = Vec::new();
-    let mut bulks_to_load: Vec<(String, u32)> = Vec::new();
-    let mut potential_nodes: HashSet<String> = HashSet::new();
-    let mut potential_bulks: HashSet<String> = HashSet::new();
-    // OBBs discovered during traversal, to be merged into lod_state after.
-    let mut discovered_obbs: Vec<(String, OrientedBoundingBox)> = Vec::new();
+) {
+    // Destructure scratch to get disjoint mutable borrows of the fields
+    // we touch in the loop. Without this the borrow checker rejects the
+    // simultaneous `frontier.iter()` + `next_frontier.push()` + writes
+    // into `result`.
+    let LodScratch {
+        render_result: result,
+        render_frontier: frontier,
+        render_next_frontier: next_frontier,
+        ..
+    } = scratch;
+
+    result.clear();
+    frontier.clear();
+    next_frontier.clear();
+    frontier.push((String::new(), String::new()));
 
     // Constant across the entire BFS — hoist out of the inner loop.
     let camera_altitude = lod_metrics.camera_position.length() - EARTH_RADIUS_M_F64;
     let is_low_altitude = camera_altitude <= PROXIMITY_LOADING_MAX_ALTITUDE;
 
-    // BFS frontier: (node_path, bulk_key) pairs.
-    // Start from root node with the root bulk.
-    let mut valid: Vec<(String, String)> = vec![(String::new(), String::new())];
-
     loop {
-        let mut next_valid: Vec<(String, String)> = Vec::new();
+        next_frontier.clear();
 
-        for (path, original_bulk_key) in &valid {
+        for (path, original_bulk_key) in frontier.iter() {
             // At bulk boundaries (path length is a multiple of 4 and non-empty),
             // check if we need to switch to a child bulk.
             let effective_bulk_key = if !path.is_empty() && path.len() % 4 == 0 {
@@ -378,14 +398,14 @@ fn bfs_traversal(
                 };
 
                 // The full child bulk path is the path itself.
-                potential_bulks.insert(path.clone());
+                result.potential_bulks.insert(path.clone());
 
                 if !lod_state.bulks.contains_key(path) {
                     // Trigger download if not already loading or failed.
                     if !lod_state.loading_bulks.contains(path)
                         && !lod_state.failed_bulks.contains(path)
                     {
-                        bulks_to_load.push((path.clone(), child_epoch));
+                        result.bulks_to_load.push((path.clone(), child_epoch));
                     }
                     continue;
                 }
@@ -401,7 +421,9 @@ fn bfs_traversal(
             let Some(node_index) = lod_state.bulk_node_indices.get(effective_bulk_key) else {
                 continue;
             };
-            potential_bulks.insert(effective_bulk_key.to_string());
+            result
+                .potential_bulks
+                .insert(effective_bulk_key.to_string());
 
             for octant in b'0'..=b'7' {
                 let mut nxt = path.clone();
@@ -430,39 +452,31 @@ fn bfs_traversal(
                 }
 
                 // Cache the OBB for later use when spawning mesh entities.
-                discovered_obbs.push((node.path.clone(), node.obb));
+                result.discovered_obbs.push((node.path.clone(), node.obb));
 
                 // Level of detail check: only expand if the node needs more detail.
                 if !lod_metrics.should_refine(node.obb.center, node.meters_per_texel) {
                     continue;
                 }
 
-                next_valid.push((nxt, effective_bulk_key.to_string()));
+                next_frontier.push((nxt, effective_bulk_key.to_string()));
 
                 // Track this node as potentially visible and queue for loading.
                 if node.has_data {
-                    potential_nodes.insert(node.path.clone());
+                    result.potential_nodes.insert(node.path.clone());
                     if !lod_state.loaded_nodes.contains(&node.path)
                         && !lod_state.loading_nodes.contains(&node.path)
                     {
-                        nodes_to_load.push((*node).clone());
+                        result.nodes_to_load.push(node.clone());
                     }
                 }
             }
         }
 
-        if next_valid.is_empty() {
+        if next_frontier.is_empty() {
             break;
         }
-        valid = next_valid;
-    }
-
-    BfsResult {
-        nodes_to_load,
-        bulks_to_load,
-        potential_nodes,
-        potential_bulks,
-        discovered_obbs,
+        std::mem::swap(frontier, next_frontier);
     }
 }
 
@@ -471,6 +485,7 @@ fn bfs_traversal(
 // ============================================================================
 
 /// Result of the physics BFS traversal.
+#[derive(Default)]
 struct PhysicsBfsResult {
     /// Paths that should currently host a terrain collider. One entry per
     /// "region" — the octree partitioning means colliders never overlap
@@ -487,6 +502,34 @@ struct PhysicsBfsResult {
     potential_bulks: HashSet<String>,
     /// OBBs discovered during traversal.
     discovered_obbs: Vec<(String, OrientedBoundingBox)>,
+}
+
+impl PhysicsBfsResult {
+    /// Reset for reuse in the next BFS pass.
+    fn clear(&mut self) {
+        self.collider_paths.clear();
+        self.nodes_to_load.clear();
+        self.bulks_to_load.clear();
+        self.potential_nodes.clear();
+        self.potential_bulks.clear();
+        self.discovered_obbs.clear();
+    }
+}
+
+/// Working memory for the render and physics BFSes. Lives across frames
+/// so that buffer capacity (potential-node hashsets, frontier vecs, etc.)
+/// can be reused without reallocating every frame.
+///
+/// Kept as a separate resource from [`LodState`] so the BFS functions
+/// can hold `&LodState` immutable while writing scratch results through
+/// the borrow checker without RefCell gymnastics.
+#[derive(Resource, Default)]
+pub struct LodScratch {
+    render_result: BfsResult,
+    physics_result: PhysicsBfsResult,
+    /// Internal frontier buffers for the render BFS (level-order walk).
+    render_frontier: Vec<(String, String)>,
+    render_next_frontier: Vec<(String, String)>,
 }
 
 /// Effective distance from `camera_pos` to the nearest point of `obb`,
@@ -527,20 +570,23 @@ fn effective_distance(obb: &OrientedBoundingBox, camera_pos: DVec3, lead: DVec3)
 /// [`desired_physics_depth`]. If refinement is wanted but the next bulk /
 /// node isn't loaded yet, the deepest loaded ancestor with data is used as
 /// a fallback so the player can never fall through the ground.
-fn physics_bfs_traversal(lod_state: &LodState, camera_pos: DVec3, lead: DVec3) -> PhysicsBfsResult {
-    let mut result = PhysicsBfsResult {
-        collider_paths: HashSet::new(),
-        nodes_to_load: Vec::new(),
-        bulks_to_load: Vec::new(),
-        potential_nodes: HashSet::new(),
-        potential_bulks: HashSet::new(),
-        discovered_obbs: Vec::new(),
-    };
-
+fn physics_bfs_traversal(
+    lod_state: &LodState,
+    scratch: &mut LodScratch,
+    camera_pos: DVec3,
+    lead: DVec3,
+) {
+    scratch.physics_result.clear();
     // The root bulk is always cached at key "" by `update_lod_requests`.
-    physics_walk(lod_state, camera_pos, lead, "", "", None, &mut result);
-
-    result
+    physics_walk(
+        lod_state,
+        camera_pos,
+        lead,
+        "",
+        "",
+        None,
+        &mut scratch.physics_result,
+    );
 }
 
 /// Recursive worker for [`physics_bfs_traversal`].
@@ -846,6 +892,7 @@ fn update_lod_requests(
     time: Res<Time>,
     loader_state: Res<LoaderState>,
     mut lod_state: ResMut<LodState>,
+    mut scratch: ResMut<LodScratch>,
     channels: Res<LodChannels>,
     motion: Res<MotionTracker>,
     tuning: Res<LodTuning>,
@@ -873,53 +920,79 @@ fn update_lod_requests(
         lod_state.bulk_node_indices.insert(String::new(), index);
     }
 
-    // Render BFS (read-only access to lod_state).
-    let bfs = bfs_traversal(&lod_state, &tuning, frustum, lod_metrics);
+    // Render BFS — read-only access to lod_state, writes into scratch.
+    bfs_traversal(&lod_state, &mut scratch, &tuning, frustum, lod_metrics);
 
     // Physics BFS — independent of render frustum, uses distance-banded
     // refinement biased forward along the smoothed velocity vector.
-    let physics_bfs = physics_bfs_traversal(&lod_state, lod_metrics.camera_position, motion.lead());
+    physics_bfs_traversal(
+        &lod_state,
+        &mut scratch,
+        lod_metrics.camera_position,
+        motion.lead(),
+    );
 
-    // Merge discovered OBBs from both BFSes.
-    for (path, obb) in bfs
-        .discovered_obbs
-        .iter()
-        .chain(&physics_bfs.discovered_obbs)
+    // Merge discovered OBBs from both BFSes (immutable borrow scope).
     {
-        lod_state.node_obbs.entry(path.clone()).or_insert(*obb);
-    }
+        let bfs = &scratch.render_result;
+        let physics_bfs = &scratch.physics_result;
+        for (path, obb) in bfs
+            .discovered_obbs
+            .iter()
+            .chain(&physics_bfs.discovered_obbs)
+        {
+            lod_state.node_obbs.entry(path.clone()).or_insert(*obb);
+        }
 
-    // Refresh "last seen" timestamps for everything either BFS wants
-    // right now. Anything not refreshed will fall outside the grace
-    // period (LodTuning::unload_grace_period_secs) and become eligible
-    // for eviction. Hysteresis turns a brief view shift (look up/down,
-    // glance sideways) into a no-op for streaming.
-    let now = time.elapsed_secs_f64();
-    for path in bfs
-        .potential_nodes
-        .iter()
-        .chain(&physics_bfs.potential_nodes)
-    {
-        lod_state.node_last_seen.insert(path.clone(), now);
-    }
-    for path in bfs
-        .potential_bulks
-        .iter()
-        .chain(&physics_bfs.potential_bulks)
-    {
-        lod_state.bulk_last_seen.insert(path.clone(), now);
-    }
+        // Refresh "last seen" timestamps for everything either BFS wants
+        // right now. Anything not refreshed will fall outside the grace
+        // period (LodTuning::unload_grace_period_secs) and become
+        // eligible for eviction. Hysteresis turns a brief view shift
+        // (look up/down, glance sideways) into a no-op for streaming.
+        let now = time.elapsed_secs_f64();
+        for path in bfs
+            .potential_nodes
+            .iter()
+            .chain(&physics_bfs.potential_nodes)
+        {
+            lod_state.node_last_seen.insert(path.clone(), now);
+        }
+        for path in bfs
+            .potential_bulks
+            .iter()
+            .chain(&physics_bfs.potential_bulks)
+        {
+            lod_state.bulk_last_seen.insert(path.clone(), now);
+        }
 
-    // Drop expired entries from the last-seen maps so they don't grow
-    // unbounded as the camera roams.
-    let cutoff = now - tuning.unload_grace_period_secs;
-    lod_state.node_last_seen.retain(|_, t| *t >= cutoff);
-    lod_state.bulk_last_seen.retain(|_, t| *t >= cutoff);
+        // Drop expired entries from the last-seen maps.
+        let cutoff = now - tuning.unload_grace_period_secs;
+        lod_state.node_last_seen.retain(|_, t| *t >= cutoff);
+        lod_state.bulk_last_seen.retain(|_, t| *t >= cutoff);
+
+        // Populate the diagnostics snapshot while we still hold the
+        // immutable borrows.
+        if snapshot_request.wanted {
+            snapshot_request.wanted = false;
+            populate_snapshot(
+                &lod_state,
+                bfs,
+                physics_bfs,
+                &motion,
+                lod_metrics.camera_position,
+                &mut snapshot,
+            );
+        }
+
+        // Stash the latest physics collider selection for
+        // `update_physics_colliders`.
+        lod_state.physics_target_paths = physics_bfs.collider_paths.clone();
+    }
 
     // Derive the retention sets: anything still inside the grace window.
-    // Physics collider paths are also kept retained as defense in depth.
+    // Physics collider paths are also retained as defense in depth.
     let mut retained_nodes: HashSet<String> = lod_state.node_last_seen.keys().cloned().collect();
-    retained_nodes.extend(physics_bfs.collider_paths.iter().cloned());
+    retained_nodes.extend(scratch.physics_result.collider_paths.iter().cloned());
     let retained_bulks: HashSet<String> = lod_state.bulk_last_seen.keys().cloned().collect();
 
     unload_obsolete(
@@ -927,40 +1000,30 @@ fn update_lod_requests(
         &mut commands,
         &retained_nodes,
         &retained_bulks,
-        &physics_bfs.collider_paths,
+        &scratch.physics_result.collider_paths,
     );
-
-    // Stash the latest physics collider selection for `update_physics_colliders`.
-    lod_state.physics_target_paths = physics_bfs.collider_paths.clone();
-
-    // Populate the diagnostics snapshot if the UI is asking for it. The
-    // UI raises the flag each frame its sub-tab renders; we lower it here
-    // so a stale flag (UI was closed) only costs us one extra snapshot.
-    if snapshot_request.wanted {
-        snapshot_request.wanted = false;
-        populate_snapshot(
-            &lod_state,
-            &bfs,
-            &physics_bfs,
-            &motion,
-            lod_metrics.camera_position,
-            &mut snapshot,
-        );
-    }
 
     // Limit concurrent loads.
     let max_node_loads = 20;
     let max_bulk_loads = 10;
 
-    // Merge node load requests from both BFSes, dedup via `loading_nodes`
-    // (which is the in-flight set). HashSet semantics mean the same path
-    // requested by both BFSes only issues one HTTP fetch.
+    // Merge node load requests from both BFSes. Drain the scratch
+    // vectors so capacity is reused next frame; HashSet insert in the
+    // filter dedupes any duplicate path either BFS produced.
+    // Disjoint mutable borrows of the two BFS result fields via
+    // destructuring so chained drains compile.
+    let LodScratch {
+        render_result,
+        physics_result,
+        ..
+    } = &mut *scratch;
     let mut seen_paths: HashSet<String> = HashSet::new();
-    let merged_nodes = bfs
+    let merged_nodes: Vec<NodeMetadata> = render_result
         .nodes_to_load
-        .into_iter()
-        .chain(physics_bfs.nodes_to_load)
-        .filter(|n| seen_paths.insert(n.path.clone()));
+        .drain(..)
+        .chain(physics_result.nodes_to_load.drain(..))
+        .filter(|n| seen_paths.insert(n.path.clone()))
+        .collect();
 
     for node_meta in merged_nodes {
         if lod_state.loading_nodes.len() >= max_node_loads {
@@ -987,13 +1050,15 @@ fn update_lod_requests(
         });
     }
 
-    // Merge bulk load requests, dedup similarly.
+    // Merge bulk load requests, dedup similarly. `render_result` /
+    // `physics_result` are the same disjoint borrows from above.
     let mut seen_bulks: HashSet<String> = HashSet::new();
-    let merged_bulks = bfs
+    let merged_bulks: Vec<(String, u32)> = render_result
         .bulks_to_load
-        .into_iter()
-        .chain(physics_bfs.bulks_to_load)
-        .filter(|(p, _)| seen_bulks.insert(p.clone()));
+        .drain(..)
+        .chain(physics_result.bulks_to_load.drain(..))
+        .filter(|(p, _)| seen_bulks.insert(p.clone()))
+        .collect();
 
     for (path, epoch) in merged_bulks {
         if lod_state.loading_bulks.len() >= max_bulk_loads {
