@@ -3,20 +3,26 @@
 //! Manages which nodes to load based on camera distance and which meshes
 //! to show based on frustum visibility.
 //!
-//! Uses a BFS traversal from the root node (matching the C++ reference) to
-//! determine which nodes need loading. Only nodes whose LOD metric says they
-//! need more detail are expanded, avoiding wasted bandwidth on coarse nodes.
+//! Two independent BFS traversals run from the root each frame:
+//!
+//! - The **render BFS** refines on screen-space error and frustum-culls,
+//!   producing renderable nodes and the meshes shown on screen.
+//! - The **physics BFS** refines on distance-banded target depth (see
+//!   [`crate::physics::PHYSICS_DISTANCE_BANDS`]) with no frustum culling,
+//!   producing exactly one terrain collider per region within
+//!   [`crate::physics::PHYSICS_RANGE`]. If the target depth isn't available
+//!   the deepest loaded ancestor with data is used as a fallback so the
+//!   player can never fall through unloaded ground.
+//!
+//! Both BFSes share the same bulk + node caches. A path requested by one
+//! is visible to the other via the shared `loading_nodes` / `loaded_nodes`
+//! / `bulks` state, so no double-loading. Retention (`unload_obsolete`)
+//! takes the union of both BFSes' potential sets — a node stays alive as
+//! long as either consumer wants it.
 //!
 //! Uses platform-agnostic `async_channel` for communication between async tasks
 //! and the main thread. Task spawning is handled by `TaskSpawner` from the
 //! `async_runtime` module.
-//!
-//! ## Physics integration
-//!
-//! Physics colliders use a fixed LOD depth (`PHYSICS_LOD_DEPTH`), which is
-//! `MAX_LEVEL - PHYSICS_LOD_OFFSET`. All colliders are at this single depth
-//! to avoid overlapping geometry. Colliders are active within `PHYSICS_RANGE`
-//! of the camera.
 
 use std::{
     collections::{HashMap, HashSet},
@@ -44,7 +50,7 @@ use crate::{
 };
 
 use crate::{
-    physics::{PHYSICS_LOD_DEPTH, PHYSICS_RANGE, terrain::TerrainCollider},
+    physics::{MotionTracker, desired_physics_depth, terrain::TerrainCollider},
     vehicle::GameLayer,
     world::floating_origin::WorldPosition,
 };
@@ -122,6 +128,14 @@ pub struct LodState {
     node_data: HashMap<String, LoadedNodeData>,
     /// Physics collider entities, keyed by node path.
     physics_colliders: HashMap<String, Entity>,
+    /// Paths the physics BFS selected as collider hosts this frame.
+    ///
+    /// Computed by [`physics_bfs_traversal`] in `update_lod_requests` and
+    /// consumed by `update_physics_colliders` to spawn/despawn the actual
+    /// trimesh entities. Stored on `LodState` rather than passed directly
+    /// so the two systems can run as separate Bevy systems without a
+    /// shared parameter.
+    physics_target_paths: HashSet<String>,
 }
 
 impl LodState {
@@ -172,7 +186,8 @@ impl Default for LodChannels {
     }
 }
 
-/// Result of the BFS traversal, containing load requests and potential sets.
+/// Result of the rendering BFS traversal — what's needed for what shows on
+/// screen. Physics has its own parallel traversal ([`PhysicsBfsResult`]).
 struct BfsResult {
     /// Nodes that should be loaded (metadata + bulk path).
     nodes_to_load: Vec<NodeMetadata>,
@@ -184,8 +199,6 @@ struct BfsResult {
     potential_bulks: HashSet<String>,
     /// OBBs discovered during traversal, to be merged into `LodState`.
     discovered_obbs: Vec<(String, OrientedBoundingBox)>,
-    /// Nodes that should be loaded for physics colliders (at `PHYSICS_LOD_DEPTH` within range).
-    physics_nodes_to_load: Vec<NodeMetadata>,
 }
 
 /// Perform a BFS traversal from the root to determine which nodes and bulks
@@ -200,8 +213,6 @@ fn bfs_traversal(lod_state: &LodState, frustum: Frustum, lod_metrics: LodMetrics
     let mut potential_bulks: HashSet<String> = HashSet::new();
     // OBBs discovered during traversal, to be merged into lod_state after.
     let mut discovered_obbs: Vec<(String, OrientedBoundingBox)> = Vec::new();
-    // All visited nodes with their metadata, for physics eligibility check.
-    let mut visited_nodes: HashMap<String, NodeMetadata> = HashMap::new();
 
     // BFS frontier: (node_path, bulk_key) pairs.
     // Start from root node with the root bulk.
@@ -280,11 +291,6 @@ fn bfs_traversal(lod_state: &LodState, frustum: Frustum, lod_metrics: LodMetrics
                 // Cache the OBB for later use when spawning mesh entities.
                 discovered_obbs.push((node.path.clone(), node.obb));
 
-                // Track all visited nodes for physics eligibility check.
-                if node.has_data {
-                    visited_nodes.insert(node.path.clone(), (*node).clone());
-                }
-
                 // Level of detail check: only expand if the node needs more detail.
                 if !lod_metrics.should_refine(node.obb.center, node.meters_per_texel) {
                     continue;
@@ -310,87 +316,262 @@ fn bfs_traversal(lod_state: &LodState, frustum: Frustum, lod_metrics: LodMetrics
         valid = next_valid;
     }
 
-    // Identify physics-eligible nodes: nodes at exactly PHYSICS_LOD_DEPTH within range.
-    // These need to be loaded even if not needed for rendering.
-    let mut physics_nodes_to_load: Vec<NodeMetadata> = Vec::new();
-
-    for (path, node_meta) in &visited_nodes {
-        // Must be at exactly the physics depth.
-        if path.len() != PHYSICS_LOD_DEPTH {
-            continue;
-        }
-
-        // Skip if already loaded or loading.
-        if lod_state.loaded_nodes.contains(path)
-            || lod_state.loading_nodes.contains(path)
-            || lod_state.node_data.contains_key(path)
-        {
-            continue;
-        }
-
-        // Check if within physics range.
-        let distance = lod_metrics.camera_position.distance(node_meta.obb.center);
-        if distance > PHYSICS_RANGE {
-            continue;
-        }
-
-        physics_nodes_to_load.push(node_meta.clone());
-    }
-
     BfsResult {
         nodes_to_load,
         bulks_to_load,
         potential_nodes,
         potential_bulks,
         discovered_obbs,
-        physics_nodes_to_load,
     }
 }
 
-/// Despawn entities for nodes no longer in the potential set, and remove
-/// obsolete bulks from the cache.
+// ============================================================================
+// Physics BFS
+// ============================================================================
+
+/// Result of the physics BFS traversal.
+struct PhysicsBfsResult {
+    /// Paths that should currently host a terrain collider. One entry per
+    /// "region" — the octree partitioning means colliders never overlap
+    /// even though they may be at different depths.
+    collider_paths: HashSet<String>,
+    /// Nodes the physics BFS would like loaded.
+    nodes_to_load: Vec<NodeMetadata>,
+    /// Bulks the physics BFS needs (for traversal).
+    bulks_to_load: Vec<(String, u32)>,
+    /// All node paths the physics BFS considers needed — used for retention
+    /// in [`unload_obsolete`].
+    potential_nodes: HashSet<String>,
+    /// All bulk paths the physics BFS needs.
+    potential_bulks: HashSet<String>,
+    /// OBBs discovered during traversal.
+    discovered_obbs: Vec<(String, OrientedBoundingBox)>,
+}
+
+/// Effective distance from `camera_pos` to `target_pos` with directional
+/// motion compression. Nodes ahead of the player along `lead` appear closer
+/// (loaded at the next-finer band sooner); nodes behind appear further.
 ///
-/// Note: node_data is retained for physics-eligible nodes (nodes at
-/// `PHYSICS_LOD_DEPTH` within physics range). This data is cleaned up
-/// separately by `cleanup_physics_node_data`.
+/// `lead` is a vector whose length is the lead distance and whose direction
+/// is the smoothed velocity direction (see
+/// [`crate::physics::MotionTracker::lead`]).
+fn effective_distance(target_pos: DVec3, camera_pos: DVec3, lead: DVec3) -> f64 {
+    let to_target = target_pos - camera_pos;
+    let dist = to_target.length();
+    if dist < 1e-6 {
+        return 0.0;
+    }
+    let dir = to_target / dist;
+    let compression = lead.dot(dir);
+    (dist - compression).max(0.0)
+}
+
+/// Walk the octree to determine physics colliders.
+///
+/// Distance-banded refinement: each visited node decides whether to commit
+/// itself as a collider or refine into its children based on
+/// [`desired_physics_depth`]. If refinement is wanted but the next bulk /
+/// node isn't loaded yet, the deepest loaded ancestor with data is used as
+/// a fallback so the player can never fall through the ground.
+fn physics_bfs_traversal(lod_state: &LodState, camera_pos: DVec3, lead: DVec3) -> PhysicsBfsResult {
+    let mut result = PhysicsBfsResult {
+        collider_paths: HashSet::new(),
+        nodes_to_load: Vec::new(),
+        bulks_to_load: Vec::new(),
+        potential_nodes: HashSet::new(),
+        potential_bulks: HashSet::new(),
+        discovered_obbs: Vec::new(),
+    };
+
+    // The root bulk is always cached at key "" by `update_lod_requests`.
+    physics_walk(lod_state, camera_pos, lead, "", "", None, &mut result);
+
+    result
+}
+
+/// Recursive worker for [`physics_bfs_traversal`].
+///
+/// Returns `true` if any in-range octant of this node either committed a
+/// collider directly or led to a descendant doing so. The caller uses this
+/// to decide whether to fall back to its own ancestor when none of its
+/// children produced coverage.
+fn physics_walk(
+    lod_state: &LodState,
+    camera_pos: DVec3,
+    lead: DVec3,
+    path: &str,
+    bulk_key: &str,
+    best_ancestor: Option<&str>,
+    result: &mut PhysicsBfsResult,
+) -> bool {
+    // Bulk boundary handling: every 4 path characters we cross into a new
+    // bulk. If we're at a boundary, switch the lookup key to `path` and
+    // ensure that bulk is loaded.
+    let effective_bulk_key: &str = if !path.is_empty() && path.len().is_multiple_of(4) {
+        let rel = &path[path.len() - 4..];
+        let Some(parent_bulk) = lod_state.bulks.get(bulk_key) else {
+            return false;
+        };
+        let Some(&child_epoch) = parent_bulk.child_bulk_paths.get(rel) else {
+            return false;
+        };
+
+        result.potential_bulks.insert(path.to_string());
+
+        if !lod_state.bulks.contains_key(path) {
+            // Bulk not cached — kick off a load. Caller will commit a
+            // fallback collider for this octant.
+            if !lod_state.loading_bulks.contains(path) && !lod_state.failed_bulks.contains(path) {
+                result.bulks_to_load.push((path.to_string(), child_epoch));
+            }
+            return false;
+        }
+        path
+    } else {
+        bulk_key
+    };
+
+    let Some(bulk) = lod_state.bulks.get(effective_bulk_key) else {
+        return false;
+    };
+    result
+        .potential_bulks
+        .insert(effective_bulk_key.to_string());
+
+    // Build a relative-path → node index for this bulk's nodes.
+    let node_index: HashMap<&str, &NodeMetadata> = bulk
+        .nodes
+        .iter()
+        .map(|n| (&n.path[effective_bulk_key.len()..], n))
+        .collect();
+
+    let mut any_committed = false;
+
+    for octant in b'0'..=b'7' {
+        let mut child_path = path.to_string();
+        child_path.push(octant as char);
+
+        let child_rel = &child_path[effective_bulk_key.len()..];
+        let Some(child_node) = node_index.get(child_rel) else {
+            // Empty octant — no terrain here, no collider needed.
+            continue;
+        };
+
+        let dist = effective_distance(child_node.obb.center, camera_pos, lead);
+        let Some(target_depth) = desired_physics_depth(dist) else {
+            // Beyond the outermost band → no physics coverage needed in
+            // this subtree.
+            continue;
+        };
+
+        result.potential_nodes.insert(child_node.path.clone());
+        result
+            .discovered_obbs
+            .push((child_node.path.clone(), child_node.obb));
+
+        let child_has_data_cached =
+            child_node.has_data && lod_state.node_data.contains_key(&child_node.path);
+        let updated_best: Option<String> = if child_has_data_cached {
+            Some(child_node.path.clone())
+        } else {
+            best_ancestor.map(String::from)
+        };
+
+        // Always request data for has_data nodes we touch along the
+        // descent path — they may be needed as fallbacks before we reach
+        // the target depth.
+        if child_node.has_data
+            && !lod_state.loaded_nodes.contains(&child_node.path)
+            && !lod_state.loading_nodes.contains(&child_node.path)
+        {
+            result.nodes_to_load.push((*child_node).clone());
+        }
+
+        any_committed = true;
+
+        if child_path.len() >= target_depth {
+            // At target depth — commit either this node or the deepest
+            // loaded ancestor.
+            commit_physics_collider(
+                &child_node.path,
+                child_has_data_cached,
+                &updated_best,
+                result,
+            );
+            continue;
+        }
+
+        // Want to refine deeper.
+        let child_descended = physics_walk(
+            lod_state,
+            camera_pos,
+            lead,
+            &child_path,
+            effective_bulk_key,
+            updated_best.as_deref(),
+            result,
+        );
+
+        if !child_descended {
+            // Descent blocked (missing bulk, no further metadata, etc.)
+            // — commit a fallback so this region is covered.
+            commit_physics_collider(
+                &child_node.path,
+                child_has_data_cached,
+                &updated_best,
+                result,
+            );
+        }
+    }
+
+    any_committed
+}
+
+/// Helper: commit a collider for a node, using the deepest loaded ancestor
+/// as a fallback if the node itself isn't loaded yet.
+fn commit_physics_collider(
+    node_path: &str,
+    node_loaded: bool,
+    best_ancestor: &Option<String>,
+    result: &mut PhysicsBfsResult,
+) {
+    if node_loaded {
+        result.collider_paths.insert(node_path.to_string());
+    } else if let Some(anc) = best_ancestor {
+        result.collider_paths.insert(anc.clone());
+    }
+    // If no ancestor has data loaded either, we just have no collider in
+    // this region for now. Will resolve once any ancestor finishes loading.
+}
+
+/// Despawn entities for nodes no longer wanted by either consumer, and
+/// remove obsolete bulks from the cache.
+///
+/// A node/bulk is retained as long as **either** the render BFS or the
+/// physics BFS lists it in its potential set, giving the two consumers
+/// independent lifetime contributions. `node_data` (CPU mesh data) is also
+/// retained for any path the physics BFS currently uses as a collider, so
+/// the collider creation step can read meshes without re-fetching.
 fn unload_obsolete(
     lod_state: &mut LodState,
     commands: &mut Commands,
-    potential_nodes: &HashSet<String>,
-    potential_bulks: &HashSet<String>,
-    camera_pos: DVec3,
+    render_potential_nodes: &HashSet<String>,
+    physics_potential_nodes: &HashSet<String>,
+    render_potential_bulks: &HashSet<String>,
+    physics_potential_bulks: &HashSet<String>,
+    physics_collider_paths: &HashSet<String>,
 ) {
-    // Compute which nodes should be retained for physics: nodes at exactly
-    // PHYSICS_LOD_DEPTH that are within physics range.
-    let physics_retained: HashSet<String> = lod_state
-        .node_data
-        .iter()
-        .filter_map(|(path, node_data)| {
-            // Must be at exactly the physics depth.
-            if path.len() != PHYSICS_LOD_DEPTH {
-                return None;
-            }
-            // Check if within physics range.
-            if camera_pos.distance(node_data.world_position) > PHYSICS_RANGE {
-                return None;
-            }
-            Some(path.clone())
-        })
-        .collect();
-
-    // Despawn nodes no longer in the potential set.
-    let obsolete_nodes: Vec<String> = lod_state
+    // Despawn render entities for nodes the render BFS no longer wants.
+    // (The mesh GPU entities are render-only; physics uses node_data
+    // directly.)
+    let obsolete_render_nodes: Vec<String> = lod_state
         .loaded_nodes
         .iter()
-        .filter(|p| !potential_nodes.contains(p.as_str()))
+        .filter(|p| !render_potential_nodes.contains(p.as_str()))
         .cloned()
         .collect();
-    for path in &obsolete_nodes {
+    for path in &obsolete_render_nodes {
         lod_state.loaded_nodes.remove(path);
-        // Only remove node_data if not retained for physics.
-        if !physics_retained.contains(path) {
-            lod_state.node_data.remove(path);
-        }
         if let Some(entities) = lod_state.node_entities.remove(path) {
             for entity in entities {
                 commands.entity(entity).despawn();
@@ -398,44 +579,50 @@ fn unload_obsolete(
         }
     }
 
-    // Also clean up node_data that's no longer needed for physics.
-    // This handles the case where camera moved away from previously retained nodes.
+    // Drop node_data for paths neither BFS wants AND that aren't currently
+    // backing a physics collider.
     let stale_node_data: Vec<String> = lod_state
         .node_data
         .keys()
         .filter(|path| {
-            // Keep if it's a currently loaded node.
             if lod_state.loaded_nodes.contains(*path) {
                 return false;
             }
-            // Keep if it's retained for physics.
-            if physics_retained.contains(*path) {
+            if render_potential_nodes.contains(*path)
+                || physics_potential_nodes.contains(*path)
+                || physics_collider_paths.contains(*path)
+            {
                 return false;
             }
-            // Otherwise it's stale.
             true
         })
         .cloned()
         .collect();
     for path in stale_node_data {
         lod_state.node_data.remove(&path);
-        // Also remove any physics collider for this node.
+        // If a physics collider was using this node_data, remove the
+        // collider entity too — it would point at no-longer-existent mesh
+        // data otherwise.
         if let Some(entity) = lod_state.physics_colliders.remove(&path) {
             commands.entity(entity).despawn();
         }
     }
 
-    // Remove bulks no longer in the potential set (never remove the root bulk).
+    // Bulks: union of render's and physics's potential sets, never evict
+    // the root bulk.
     let obsolete_bulks: Vec<String> = lod_state
         .bulks
         .keys()
-        .filter(|p: &&String| !p.is_empty() && !potential_bulks.contains(p.as_str()))
+        .filter(|p: &&String| {
+            !p.is_empty()
+                && !render_potential_bulks.contains(p.as_str())
+                && !physics_potential_bulks.contains(p.as_str())
+        })
         .cloned()
         .collect();
     for path in obsolete_bulks {
         lod_state.bulks.remove(&path);
         lod_state.node_obbs.retain(|k, _| !k.starts_with(&path));
-        // Also clear any failed status so the bulk can be re-fetched if needed.
         lod_state.failed_bulks.remove(&path);
     }
 }
@@ -505,11 +692,16 @@ fn update_frustum(
 }
 
 /// Update LOD requests using BFS traversal from root.
+///
+/// Runs both the render BFS and the physics BFS over the same shared
+/// state, then unloads anything neither consumer wants. Load requests
+/// from the two BFSes are merged and deduplicated before being issued.
 fn update_lod_requests(
     mut commands: Commands,
     loader_state: Res<LoaderState>,
     mut lod_state: ResMut<LodState>,
     channels: Res<LodChannels>,
+    motion: Res<MotionTracker>,
     spawner: TaskSpawner,
 ) {
     if loader_state.planetoid.is_none() {
@@ -530,34 +722,52 @@ fn update_lod_requests(
         lod_state.bulks.insert(String::new(), root_bulk.clone());
     }
 
-    // BFS traversal (read-only access to lod_state).
+    // Render BFS (read-only access to lod_state).
     let bfs = bfs_traversal(&lod_state, frustum, lod_metrics);
 
-    // Merge discovered OBBs into lod_state.
-    for (path, obb) in &bfs.discovered_obbs {
+    // Physics BFS — independent of render frustum, uses distance-banded
+    // refinement biased forward along the smoothed velocity vector.
+    let physics_bfs = physics_bfs_traversal(&lod_state, lod_metrics.camera_position, motion.lead());
+
+    // Merge discovered OBBs from both BFSes.
+    for (path, obb) in bfs
+        .discovered_obbs
+        .iter()
+        .chain(&physics_bfs.discovered_obbs)
+    {
         lod_state.node_obbs.entry(path.clone()).or_insert(*obb);
     }
 
-    // Unload obsolete nodes and bulks.
+    // Unload anything neither consumer wants. Physics collider paths are
+    // also retained so their backing node_data stays alive.
     unload_obsolete(
         &mut lod_state,
         &mut commands,
         &bfs.potential_nodes,
+        &physics_bfs.potential_nodes,
         &bfs.potential_bulks,
-        lod_metrics.camera_position,
+        &physics_bfs.potential_bulks,
+        &physics_bfs.collider_paths,
     );
+
+    // Stash the latest physics collider selection for `update_physics_colliders`.
+    lod_state.physics_target_paths = physics_bfs.collider_paths;
 
     // Limit concurrent loads.
     let max_node_loads = 20;
     let max_bulk_loads = 10;
 
-    // Spawn node load tasks (rendering nodes first, then physics-only nodes).
-    let all_nodes_to_load = bfs
+    // Merge node load requests from both BFSes, dedup via `loading_nodes`
+    // (which is the in-flight set). HashSet semantics mean the same path
+    // requested by both BFSes only issues one HTTP fetch.
+    let mut seen_paths: HashSet<String> = HashSet::new();
+    let merged_nodes = bfs
         .nodes_to_load
         .into_iter()
-        .chain(bfs.physics_nodes_to_load);
+        .chain(physics_bfs.nodes_to_load)
+        .filter(|n| seen_paths.insert(n.path.clone()));
 
-    for node_meta in all_nodes_to_load {
+    for node_meta in merged_nodes {
         if lod_state.loading_nodes.len() >= max_node_loads {
             break;
         }
@@ -582,8 +792,15 @@ fn update_lod_requests(
         });
     }
 
-    // Spawn bulk load tasks.
-    for (path, epoch) in bfs.bulks_to_load {
+    // Merge bulk load requests, dedup similarly.
+    let mut seen_bulks: HashSet<String> = HashSet::new();
+    let merged_bulks = bfs
+        .bulks_to_load
+        .into_iter()
+        .chain(physics_bfs.bulks_to_load)
+        .filter(|(p, _)| seen_bulks.insert(p.clone()));
+
+    for (path, epoch) in merged_bulks {
         if lod_state.loading_bulks.len() >= max_bulk_loads {
             break;
         }
@@ -791,11 +1008,17 @@ fn cull_meshes(
     }
 }
 
-/// Update physics colliders based on LOD state.
+/// Update physics colliders to match the physics BFS's current selection.
 ///
-/// Physics colliders use a fixed LOD level (`PHYSICS_LOD_DEPTH`).
-/// All physics colliders are at the same depth to avoid overlapping geometry.
-/// Colliders are only active within `PHYSICS_RANGE` of the camera.
+/// The set of paths that should host colliders right now lives in
+/// `lod_state.physics_target_paths`, written by `update_lod_requests` after
+/// running the physics BFS. This system reconciles spawned collider
+/// entities against that target set: spawn for newly-selected paths,
+/// despawn for paths no longer selected.
+///
+/// Spawn happens before despawn so a region transitioning from depth N to
+/// depth N+1 (finer collider replacing coarser, or vice versa) never has
+/// a frame with no collider underneath the player.
 fn update_physics_colliders(
     mut commands: Commands,
     mut lod_state: ResMut<LodState>,
@@ -808,50 +1031,31 @@ fn update_physics_colliders(
     };
 
     let camera_pos = camera.position;
+    let target_paths = lod_state.physics_target_paths.clone();
 
-    // Find all nodes at exactly the physics depth that are within range.
-    let physics_eligible: HashSet<String> = lod_state
-        .node_data
-        .iter()
-        .filter_map(|(path, node_data)| {
-            // Must be at exactly the physics depth.
-            if path.len() != PHYSICS_LOD_DEPTH {
-                return None;
-            }
-
-            // Check distance from camera to node center.
-            let distance = camera_pos.distance(node_data.world_position);
-            if distance > PHYSICS_RANGE {
-                return None;
-            }
-
-            Some(path.clone())
-        })
-        .collect();
-
-    // Create colliders for newly eligible nodes.
-    for path in &physics_eligible {
+    // Spawn colliders for newly-selected paths.
+    for path in &target_paths {
         if lod_state.physics_colliders.contains_key(path) {
             continue;
         }
 
         let Some(node_data) = lod_state.node_data.get(path) else {
+            // BFS selected this path but data hasn't fully loaded yet;
+            // skip this frame, we'll catch it next frame.
             continue;
         };
 
-        // Create a collider for each mesh in the node.
-        // For simplicity, we'll just use the first mesh if there are multiple.
         let Some(first_mesh) = node_data.meshes.first() else {
             continue;
         };
 
-        // Skip if mesh data is invalid for physics.
         let Some(collider) = create_terrain_collider(first_mesh, &node_data.transform) else {
             tracing::debug!("Skipping invalid mesh for physics collider: '{}'", path);
             continue;
         };
 
-        // Physics position is camera-relative.
+        // Camera-relative position so the floating origin shift keeps it
+        // in f32 range.
         let relative_pos = node_data.world_position - camera_pos;
         let physics_pos = Vec3::new(
             relative_pos.x as f32,
@@ -864,15 +1068,15 @@ fn update_physics_colliders(
                 RigidBody::Static,
                 collider,
                 Position(physics_pos),
-                // Rotation is identity since we baked rotation into collider vertices.
+                // Rotation is identity since rotation is baked into the
+                // collider vertices.
                 Rotation::default(),
-                // Transform is needed for Avian's debug rendering (it reads GlobalTransform).
+                // Transform is needed for Avian's debug rendering (it
+                // reads GlobalTransform).
                 Transform::from_translation(physics_pos),
                 WorldPosition::from_dvec3(node_data.world_position),
                 TerrainCollider { path: path.clone() },
-                // Ground layer so vehicle hover raycast can detect terrain.
                 CollisionLayers::new([GameLayer::Ground], [GameLayer::Ground, GameLayer::Vehicle]),
-                // Enable debug rendering for this collider.
                 DebugRender::default(),
             ))
             .id();
@@ -881,19 +1085,19 @@ fn update_physics_colliders(
         tracing::debug!(
             "Created physics collider for node '{}' (depth {})",
             path,
-            PHYSICS_LOD_DEPTH
+            path.len()
         );
     }
 
-    // Remove colliders for nodes that are no longer eligible.
-    let obsolete_colliders: Vec<String> = lod_state
+    // Despawn colliders that are no longer in the target set.
+    let obsolete: Vec<String> = lod_state
         .physics_colliders
         .keys()
-        .filter(|path| !physics_eligible.contains(*path))
+        .filter(|p| !target_paths.contains(p.as_str()))
         .cloned()
         .collect();
 
-    for path in obsolete_colliders {
+    for path in obsolete {
         if let Some(entity) = lod_state.physics_colliders.remove(&path) {
             commands.entity(entity).despawn();
             tracing::debug!("Removed physics collider for node '{}'", path);

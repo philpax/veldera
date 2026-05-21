@@ -1,9 +1,18 @@
 //! Physics integration using Avian 3D.
 //!
-//! Integrates Avian physics with the rocktree LOD system. Physics colliders use
-//! a fixed absolute LOD level ([`PHYSICS_LOD_DEPTH`]). All physics colliders are
-//! at this single depth to avoid overlapping geometry. Physics is active within
-//! [`PHYSICS_RANGE`] of the camera.
+//! Integrates Avian physics with the rocktree LOD system. Physics colliders
+//! are loaded at a distance-banded target depth (see
+//! [`PHYSICS_DISTANCE_BANDS`]): the area immediately around the player gets
+//! the finest LoD ([`PHYSICS_FINEST_DEPTH`]), and the target depth steps
+//! down as distance grows. If the tree doesn't go that deep at a given
+//! location, or the data isn't loaded yet, the deepest available ancestor
+//! is used as a fallback so the player can never fall through the ground.
+//! The octree partitioning of space gives us non-overlapping colliders for
+//! free regardless of which depth each one ended up at.
+//!
+//! Under motion, distances along the velocity vector are compressed via
+//! [`MotionTracker::lead`] so colliders ahead of the player are loaded at
+//! the next-finer band before the player gets there.
 //!
 //! All physics runs in camera-relative space to handle floating origin.
 //! When the camera moves, all physics positions shift by -delta to maintain
@@ -23,6 +32,7 @@ use bevy::{
     gizmos::config::{GizmoConfig, GizmoConfigStore},
     prelude::*,
 };
+use glam::DVec3;
 
 use crate::{
     camera::{CameraModeTransitions, FollowEntityTarget},
@@ -38,19 +48,58 @@ pub use terrain::TerrainCollider;
 #[derive(Component, Default)]
 pub struct DespawnOutsidePhysicsRange;
 
-/// Physics range from camera in meters.
+/// Maximum distance from the camera at which terrain colliders are loaded.
 pub const PHYSICS_RANGE: f64 = 1000.0;
 
-/// Offset from max LOD level for physics colliders.
-const PHYSICS_LOD_OFFSET: usize = 2;
-
-/// Fixed LOD depth for physics colliders.
+/// Innermost (finest) physics LoD depth — one level coarser than
+/// [`rocktree_decode::MAX_LEVEL`].
 ///
-/// Physics colliders always use this exact depth level, which is
-/// `PHYSICS_LOD_OFFSET` levels coarser than the finest possible (MAX_LEVEL).
-/// All physics colliders are at this single depth, ensuring no overlapping
-/// geometry.
-pub const PHYSICS_LOD_DEPTH: usize = rocktree_decode::MAX_LEVEL - PHYSICS_LOD_OFFSET;
+/// The deepest tier carries small thin triangles from photogrammetry
+/// reconstruction that cause physics artifacts (objects catching on
+/// near-degenerate edges), so we bias one level back from the absolute
+/// maximum even at point-blank range.
+pub const PHYSICS_FINEST_DEPTH: usize = rocktree_decode::MAX_LEVEL - 1;
+
+/// Distance bands mapping effective camera distance to a target collider depth.
+///
+/// Each entry is `(max_distance_m, depth)`. The list is sorted by ascending
+/// distance; the first band that covers the queried distance wins. Anything
+/// beyond the last band gets no collider.
+///
+/// "Effective distance" is the raw distance with a directional compression
+/// applied via [`MotionTracker::lead`], so nodes ahead of the player are
+/// loaded at the next-finer band before the player gets there.
+pub const PHYSICS_DISTANCE_BANDS: &[(f64, usize)] = &[
+    (50.0, PHYSICS_FINEST_DEPTH),
+    (150.0, PHYSICS_FINEST_DEPTH - 1),
+    (400.0, PHYSICS_FINEST_DEPTH - 2),
+    (PHYSICS_RANGE, PHYSICS_FINEST_DEPTH - 3),
+];
+
+/// Lookahead time used when computing the lead vector (seconds).
+pub const PHYSICS_LEAD_TIME: f64 = 1.0;
+
+/// Cap on the lead distance so high-speed teleports / flycam runs don't push
+/// the prediction past [`PHYSICS_RANGE`] and starve the area under the player.
+pub const PHYSICS_MAX_LEAD: f64 = 200.0;
+
+/// Speed below which the lead vector is treated as zero (m/s). Avoids
+/// directional bias from accumulated EWMA jitter when the player is at rest.
+const LEAD_SPEED_EPSILON: f64 = 0.1;
+
+/// EWMA smoothing factor for [`MotionTracker`]. Roughly four-frame half-life
+/// at 60 Hz; high enough to suppress single-frame teleport spikes, low
+/// enough to track real motion almost immediately.
+const VELOCITY_SMOOTHING: f64 = 0.25;
+
+/// Return the target physics LoD depth for a node at `effective_distance_m`,
+/// or `None` if it's beyond the outermost band.
+pub fn desired_physics_depth(effective_distance_m: f64) -> Option<usize> {
+    PHYSICS_DISTANCE_BANDS
+        .iter()
+        .find(|(max_d, _)| effective_distance_m <= *max_d)
+        .map(|&(_, depth)| depth)
+}
 
 /// Plugin for physics integration with the rocktree LOD system.
 pub struct PhysicsIntegrationPlugin;
@@ -63,6 +112,7 @@ impl Plugin for PhysicsIntegrationPlugin {
             .add_plugins(PhysicsDebugPlugin)
             .insert_resource(Gravity(Vec3::ZERO))
             .init_resource::<PhysicsState>()
+            .init_resource::<MotionTracker>()
             .init_resource::<projectile::ProjectileFireState>()
             .add_systems(
                 Startup,
@@ -81,6 +131,7 @@ impl Plugin for PhysicsIntegrationPlugin {
             .add_systems(
                 Update,
                 (
+                    update_motion_tracker,
                     projectile::click_to_fire_system,
                     projectile::despawn_projectiles,
                     projectile::projectile_collision_sound,
@@ -95,6 +146,72 @@ impl Plugin for PhysicsIntegrationPlugin {
 pub struct PhysicsState {
     /// Last camera position for computing origin shift delta.
     last_camera_position: Option<glam::DVec3>,
+}
+
+/// Tracks camera velocity by EWMA-smoothing frame-to-frame ECEF deltas.
+///
+/// Used by the physics LoD system to bias collider loading along the
+/// direction of motion so the player can't outrun the streaming.
+///
+/// Lives separate from [`PhysicsState`]'s `last_camera_position` because
+/// the two are sampled in different schedules (PhysicsState is read by the
+/// fixed-step origin shift; this is read by the variable-rate LOD update).
+#[derive(Resource, Default)]
+pub struct MotionTracker {
+    last_camera_pos: Option<DVec3>,
+    last_camera_time: Option<f64>,
+    smoothed_velocity: DVec3,
+}
+
+impl MotionTracker {
+    /// EWMA-smoothed camera velocity (m/s, ECEF). Exposed for the
+    /// streaming diagnostics UI.
+    #[allow(dead_code)]
+    pub fn smoothed_velocity(&self) -> DVec3 {
+        self.smoothed_velocity
+    }
+
+    /// Lead vector: motion direction scaled by `speed * PHYSICS_LEAD_TIME`,
+    /// clamped at [`PHYSICS_MAX_LEAD`]. Returns zero below a small speed
+    /// threshold to avoid drift from accumulated noise at rest.
+    pub fn lead(&self) -> DVec3 {
+        let speed = self.smoothed_velocity.length();
+        if speed < LEAD_SPEED_EPSILON {
+            return DVec3::ZERO;
+        }
+        let lead_dist = (speed * PHYSICS_LEAD_TIME).min(PHYSICS_MAX_LEAD);
+        self.smoothed_velocity / speed * lead_dist
+    }
+}
+
+/// Update the motion tracker from the camera's current ECEF position.
+///
+/// Runs once per frame in [`Update`]. The smoothing constant
+/// [`VELOCITY_SMOOTHING`] is intentionally aggressive (~4-frame half-life
+/// at 60 Hz) so we follow real motion immediately but absorb single-frame
+/// teleport spikes via the [`PHYSICS_MAX_LEAD`] clamp downstream.
+fn update_motion_tracker(
+    time: Res<Time>,
+    mut tracker: ResMut<MotionTracker>,
+    camera_query: Query<&FloatingOriginCamera>,
+) {
+    let Ok(camera) = camera_query.single() else {
+        return;
+    };
+    let camera_pos = camera.position;
+    let now = time.elapsed_secs_f64();
+
+    if let (Some(last_pos), Some(last_time)) = (tracker.last_camera_pos, tracker.last_camera_time) {
+        let dt = now - last_time;
+        if dt > 0.0 {
+            let raw_vel = (camera_pos - last_pos) / dt;
+            tracker.smoothed_velocity = tracker.smoothed_velocity * (1.0 - VELOCITY_SMOOTHING)
+                + raw_vel * VELOCITY_SMOOTHING;
+        }
+    }
+
+    tracker.last_camera_pos = Some(camera_pos);
+    tracker.last_camera_time = Some(now);
 }
 
 /// Configure physics debug rendering on startup (disabled by default, user can toggle it on).
