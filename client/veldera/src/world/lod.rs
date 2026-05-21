@@ -434,22 +434,35 @@ struct PhysicsBfsResult {
     discovered_obbs: Vec<(String, OrientedBoundingBox)>,
 }
 
-/// Effective distance from `camera_pos` to `target_pos` with directional
-/// motion compression. Nodes ahead of the player along `lead` appear closer
-/// (loaded at the next-finer band sooner); nodes behind appear further.
+/// Effective distance from `camera_pos` to the nearest point of `obb`,
+/// with directional motion compression along `lead`.
 ///
-/// `lead` is a vector whose length is the lead distance and whose direction
-/// is the smoothed velocity direction (see
-/// [`crate::physics::MotionTracker::lead`]).
-fn effective_distance(target_pos: DVec3, camera_pos: DVec3, lead: DVec3) -> f64 {
-    let to_target = target_pos - camera_pos;
-    let dist = to_target.length();
-    if dist < 1e-6 {
-        return 0.0;
-    }
-    let dir = to_target / dist;
-    let compression = lead.dot(dir);
-    (dist - compression).max(0.0)
+/// Using the OBB's nearest point (not its centre) is critical for coarse
+/// nodes: a depth-1 node has a centre thousands of kilometres away but a
+/// volume that *contains* the camera, and we need to refine into it.
+/// Falling back to centre-distance would prune every coarse subtree.
+///
+/// The OBB-distance is approximated conservatively as
+/// `max(0, distance_to_centre − bounding_sphere_radius)`, where the
+/// bounding-sphere radius is the diagonal of the OBB's half-extents. This
+/// can read closer than the true OBB nearest-point when the camera is
+/// outside the OBB but inside its bounding sphere, which is fine — it
+/// just biases marginally toward refining, not against.
+///
+/// Motion compression: lateral and behind nodes are unaffected; nodes
+/// ahead along `lead` appear closer by `lead·direction_to_centre`.
+fn effective_distance(obb: &OrientedBoundingBox, camera_pos: DVec3, lead: DVec3) -> f64 {
+    let to_centre = obb.center - camera_pos;
+    let centre_dist = to_centre.length();
+    let compression = if centre_dist >= 1e-6 {
+        lead.dot(to_centre / centre_dist)
+    } else {
+        0.0
+    };
+    let compressed_centre_dist = (centre_dist - compression).max(0.0);
+    // Conservative bounding-sphere radius — diagonal of the half-extents.
+    let obb_radius = obb.extents.length();
+    (compressed_centre_dist - obb_radius).max(0.0)
 }
 
 /// Walk the octree to determine physics colliders.
@@ -543,7 +556,7 @@ fn physics_walk(
             continue;
         };
 
-        let dist = effective_distance(child_node.obb.center, camera_pos, lead);
+        let dist = effective_distance(&child_node.obb, camera_pos, lead);
         let Some(target_depth) = desired_physics_depth(dist) else {
             // Beyond the outermost band → no physics coverage needed in
             // this subtree.
