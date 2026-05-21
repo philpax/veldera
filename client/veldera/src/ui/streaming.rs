@@ -270,11 +270,15 @@ fn draw_top_down_map(
     );
 }
 
+/// Depth at which the colour gradient saturates to "warm orange".
+/// Anchored above the observed real-world max depth (~25) so the
+/// gradient spans the actual data range without bunching at the end.
+const COLOR_DEPTH_ANCHOR: f32 = 30.0;
+
 /// Map an octree depth to a color along a cool-→-warm gradient.
 fn depth_color(depth: usize) -> egui::Color32 {
-    // Anchor 0 → deep blue, MAX_LEVEL → warm orange.
-    let max = rocktree_decode::MAX_LEVEL as f32;
-    let t = (depth as f32 / max).clamp(0.0, 1.0);
+    // Anchor 0 → deep blue, COLOR_DEPTH_ANCHOR → warm orange.
+    let t = (depth as f32 / COLOR_DEPTH_ANCHOR).clamp(0.0, 1.0);
     // Simple piecewise gradient: blue → cyan → green → yellow → red.
     let (r, g, b) = if t < 0.25 {
         let k = t / 0.25;

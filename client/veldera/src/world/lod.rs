@@ -617,9 +617,17 @@ fn unified_walk(
     for octant in 0u8..=7 {
         let child_path = path.push(octant);
 
-        let child_rel = child_path
-            .strip_prefix(effective_bulk_key)
-            .expect("effective_bulk_key is a prefix of child_path");
+        let Some(child_rel) = child_path.strip_prefix(effective_bulk_key) else {
+            panic!(
+                "BFS invariant violation: effective_bulk_key '{effective_bulk_key}' \
+                 (depth {}) is not a prefix of child_path '{child_path}' (depth {}). \
+                 path='{path}' (depth {}), bulk_key='{bulk_key}' (depth {}), octant={octant}",
+                effective_bulk_key.depth(),
+                child_path.depth(),
+                path.depth(),
+                bulk_key.depth(),
+            );
+        };
         let Some(&child_idx) = node_index.get(&child_rel) else {
             // Empty octant — no terrain, no contribution.
             continue;
@@ -1449,7 +1457,10 @@ fn populate_snapshot(
         ..Default::default()
     };
 
-    let max_depth = rocktree_decode::MAX_LEVEL + 1;
+    // `MAX_LEVEL` is a typical-max guideline; the data goes deeper in
+    // practice. Size the per-depth counters to the OctreePath
+    // representation's hard maximum so we never index out of bounds.
+    let max_depth = OctreePath::MAX_DEPTH + 1;
     counters.render_loaded_by_depth = vec![0; max_depth];
     counters.render_loading_by_depth = vec![0; max_depth];
     counters.physics_loaded_by_depth = vec![0; max_depth];

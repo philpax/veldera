@@ -6,76 +6,107 @@
 //! heavily — every BFS visit allocated a new path string, every
 //! `potential_nodes.insert` cloned one, every HashMap lookup hashed one.
 //!
-//! [`OctreePath`] packs the same information into 3 bits per octant
-//! within a single `u64`, plus a separate depth byte. The whole value
-//! is 16 bytes and `Copy`, so paths can be passed by value through the
-//! BFS without allocation. The `Display` impl renders the canonical
-//! string form when one is needed (HTTP URLs, debug output).
+//! [`OctreePath`] packs the same information into a single `u128`,
+//! depth field included. The whole value is 16 bytes and `Copy`, so
+//! paths can be passed by value through the BFS without allocation.
+//! The `Display` impl renders the canonical string form when one is
+//! needed (HTTP URLs, debug output).
 //!
 //! ## Layout
 //!
-//! Octant `n` (0-indexed) occupies bits `n*3..n*3+3` of `bits`. The
-//! first octant is at the least-significant position. Up to
-//! [`OctreePath::MAX_DEPTH`] (= 21) octants fit before running out of
-//! the 63 usable bits. The rocktree tree itself only goes to depth 20,
-//! so the cap is comfortable.
+//! - Bits `0..120`: up to 40 octants, 3 bits each. Octant `n` is at
+//!   bits `n*3..n*3+3`, first octant at the least-significant end.
+//! - Bits `120..126`: depth (6 bits, max value
+//!   [`OctreePath::MAX_DEPTH`] = 40).
+//! - Bits `126..128`: reserved (always zero).
+//!
+//! Forty octants is much deeper than the rocktree's nominal max
+//! (`rocktree_decode::MAX_LEVEL = 20`); the data does go deeper than
+//! that constant in practice (~25 observed), so the headroom is
+//! intentional. Going past `MAX_DEPTH` is a hard assertion failure
+//! rather than the silent bit-wrap a `u64` backing suffered from when
+//! paths exceeded its 63-bit capacity.
 
 use std::fmt;
 
-/// A path through the octree, encoded as packed octant indices.
+/// Bit position where the depth field begins inside [`OctreePath::packed`].
+const DEPTH_SHIFT: u32 = 120;
+/// Mask covering just the octant bits.
+const OCTANT_MASK: u128 = (1u128 << DEPTH_SHIFT) - 1;
+
+/// A path through the octree, encoded as packed octant indices plus
+/// depth in a single `u128`.
 ///
 /// `Copy` and 16 bytes wide. Equality and hashing compare the canonical
 /// representation, so two paths with the same octants and depth are
 /// always identical regardless of how they were constructed.
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Default)]
 pub struct OctreePath {
-    bits: u64,
-    depth: u8,
+    /// Packed encoding — see the module-level layout docs.
+    packed: u128,
 }
 
 impl OctreePath {
     /// The root path, with zero octants.
-    pub const ROOT: Self = Self { bits: 0, depth: 0 };
+    pub const ROOT: Self = Self { packed: 0 };
 
-    /// Maximum number of octants representable. 21 × 3 = 63 bits, the
-    /// most that fit alongside an unused sign bit in a `u64`.
-    pub const MAX_DEPTH: usize = 21;
+    /// Maximum number of octants representable: 40 × 3 = 120 octant
+    /// bits, with the remaining 8 bits of `u128` housing the 6-bit
+    /// depth field (max 63, room to spare).
+    pub const MAX_DEPTH: usize = 40;
+
+    /// Construct from raw octant bits and depth without checking.
+    /// Internal — callers must guarantee `depth <= MAX_DEPTH` and
+    /// `octant_bits` has zeros above bit 119.
+    #[inline]
+    const fn from_raw(octant_bits: u128, depth: u8) -> Self {
+        Self {
+            packed: (octant_bits & OCTANT_MASK) | ((depth as u128) << DEPTH_SHIFT),
+        }
+    }
+
+    /// Just the octant bits (lower 120). Internal helper.
+    #[inline]
+    const fn octant_bits(self) -> u128 {
+        self.packed & OCTANT_MASK
+    }
 
     /// Number of octants in this path.
     #[inline]
     #[must_use]
     pub const fn depth(self) -> usize {
-        self.depth as usize
+        ((self.packed >> DEPTH_SHIFT) & 0x3F) as usize
     }
 
     /// True if this is the root path (zero octants).
     #[inline]
     #[must_use]
     pub const fn is_root(self) -> bool {
-        self.depth == 0
+        self.depth() == 0
     }
 
     /// Append an octant (`0`–`7`) to the path and return the new path.
     ///
-    /// # Panics (debug builds only)
+    /// # Panics
     ///
     /// Panics if `octant >= 8` or if the resulting path would exceed
-    /// [`MAX_DEPTH`](Self::MAX_DEPTH). Release builds produce a
-    /// well-defined but garbled path on overflow rather than panicking,
-    /// matching the cost model the rest of the LoD hot path expects.
+    /// [`MAX_DEPTH`](Self::MAX_DEPTH). The depth check is a hard
+    /// assertion (not `debug_assert`) — silently allowing a wrap would
+    /// corrupt the encoded path's lower octants in release builds.
     #[inline]
     #[must_use]
     pub fn push(self, octant: u8) -> Self {
-        debug_assert!(octant < 8, "octant must be 0-7, got {octant}");
-        debug_assert!(
-            (self.depth as usize) < Self::MAX_DEPTH,
-            "octree path overflow"
+        assert!(octant < 8, "octant must be 0-7, got {octant}");
+        let depth = self.depth();
+        assert!(
+            depth < Self::MAX_DEPTH,
+            "octree path overflow: depth {} reached MAX_DEPTH {}",
+            depth,
+            Self::MAX_DEPTH,
         );
-        let shift = u64::from(self.depth) * 3;
-        Self {
-            bits: self.bits | (u64::from(octant) << shift),
-            depth: self.depth + 1,
-        }
+        let shift = (depth as u32) * 3;
+        let new_bits = self.octant_bits() | (u128::from(octant) << shift);
+        Self::from_raw(new_bits, (depth + 1) as u8)
     }
 
     /// Octant at the given level (0-indexed). Returns `None` if `level`
@@ -83,25 +114,24 @@ impl OctreePath {
     #[inline]
     #[must_use]
     pub fn octant_at(self, level: usize) -> Option<u8> {
-        if level >= self.depth as usize {
+        if level >= self.depth() {
             return None;
         }
-        Some(((self.bits >> (level * 3)) & 0b111) as u8)
+        Some(((self.octant_bits() >> (level * 3)) & 0b111) as u8)
     }
 
     /// Parent path (one level shallower), or `None` if at root.
     #[inline]
     #[must_use]
     pub fn parent(self) -> Option<Self> {
-        if self.depth == 0 {
+        let depth = self.depth();
+        if depth == 0 {
             return None;
         }
-        let new_depth = self.depth - 1;
-        let shift = u64::from(new_depth) * 3;
-        Some(Self {
-            bits: self.bits & !(0b111u64 << shift),
-            depth: new_depth,
-        })
+        let new_depth = depth - 1;
+        let shift = (new_depth as u32) * 3;
+        let new_bits = self.octant_bits() & !(0b111u128 << shift);
+        Some(Self::from_raw(new_bits, new_depth as u8))
     }
 
     /// Truncate to the first `n` octants. If `n >= depth()`, returns
@@ -109,14 +139,12 @@ impl OctreePath {
     #[inline]
     #[must_use]
     pub fn truncated(self, n: usize) -> Self {
-        if n >= self.depth as usize {
+        let depth = self.depth();
+        if n >= depth {
             return self;
         }
-        let bits = self.bits & ((1u64 << (n * 3)) - 1);
-        Self {
-            bits,
-            depth: n as u8,
-        }
+        let new_bits = self.octant_bits() & ((1u128 << (n * 3)) - 1);
+        Self::from_raw(new_bits, n as u8)
     }
 
     /// Extract the last `n` octants as a path of depth `n`. Returns
@@ -124,19 +152,18 @@ impl OctreePath {
     #[inline]
     #[must_use]
     pub fn tail(self, n: usize) -> Option<Self> {
-        if n > self.depth as usize {
+        let depth = self.depth();
+        if n > depth {
             return None;
         }
         if n == 0 {
             return Some(Self::ROOT);
         }
-        let start = self.depth as usize - n;
-        let shift = start as u64 * 3;
-        let mask = (1u64 << (n * 3)) - 1;
-        Some(Self {
-            bits: (self.bits >> shift) & mask,
-            depth: n as u8,
-        })
+        let start = depth - n;
+        let shift = (start as u32) * 3;
+        let mask = (1u128 << (n * 3)) - 1;
+        let new_bits = (self.octant_bits() >> shift) & mask;
+        Some(Self::from_raw(new_bits, n as u8))
     }
 
     /// True if `prefix` is a prefix of `self`. The root is a prefix of
@@ -144,14 +171,15 @@ impl OctreePath {
     #[inline]
     #[must_use]
     pub fn starts_with(self, prefix: Self) -> bool {
-        if prefix.depth > self.depth {
+        let prefix_depth = prefix.depth();
+        if prefix_depth > self.depth() {
             return false;
         }
-        if prefix.depth == 0 {
+        if prefix_depth == 0 {
             return true;
         }
-        let mask = (1u64 << (u64::from(prefix.depth) * 3)) - 1;
-        (self.bits & mask) == prefix.bits
+        let mask = (1u128 << (prefix_depth as u32 * 3)) - 1;
+        (self.octant_bits() & mask) == prefix.octant_bits()
     }
 
     /// If `self` starts with `prefix`, return the remainder (the octants
@@ -163,32 +191,40 @@ impl OctreePath {
         if !self.starts_with(prefix) {
             return None;
         }
-        let shift = u64::from(prefix.depth) * 3;
-        Some(Self {
-            bits: self.bits >> shift,
-            depth: self.depth - prefix.depth,
-        })
+        let prefix_depth = prefix.depth();
+        let new_depth = self.depth() - prefix_depth;
+        let shift = (prefix_depth as u32) * 3;
+        let new_bits = self.octant_bits() >> shift;
+        Some(Self::from_raw(new_bits, new_depth as u8))
     }
 
     /// Concatenate two paths: `self` followed by `other`.
     ///
-    /// # Panics (debug builds only)
+    /// # Panics
     ///
     /// Panics if the combined depth would exceed [`MAX_DEPTH`](Self::MAX_DEPTH).
     #[inline]
     #[must_use]
     pub fn extend(self, other: Self) -> Self {
-        debug_assert!(self.depth as usize + other.depth as usize <= Self::MAX_DEPTH);
-        let shift = u64::from(self.depth) * 3;
-        Self {
-            bits: self.bits | (other.bits << shift),
-            depth: self.depth + other.depth,
-        }
+        let self_depth = self.depth();
+        let other_depth = other.depth();
+        assert!(
+            self_depth + other_depth <= Self::MAX_DEPTH,
+            "octree path extend overflow: {} + {} > MAX_DEPTH {}",
+            self_depth,
+            other_depth,
+            Self::MAX_DEPTH,
+        );
+        let shift = (self_depth as u32) * 3;
+        let new_bits = self.octant_bits() | (other.octant_bits() << shift);
+        Self::from_raw(new_bits, (self_depth + other_depth) as u8)
     }
 
     /// Iterate octants in order from first to last.
     pub fn octants(self) -> impl Iterator<Item = u8> {
-        (0..self.depth as usize).map(move |i| ((self.bits >> (i * 3)) & 0b111) as u8)
+        let depth = self.depth();
+        let bits = self.octant_bits();
+        (0..depth).map(move |i| ((bits >> (i * 3)) & 0b111) as u8)
     }
 
     /// Parse a path from a string of octant digits (`"0".."7"`).
@@ -216,8 +252,10 @@ impl OctreePath {
 impl fmt::Display for OctreePath {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         use std::fmt::Write;
-        for i in 0..self.depth as usize {
-            let octant = ((self.bits >> (i * 3)) & 0b111) as u8;
+        let depth = self.depth();
+        let bits = self.octant_bits();
+        for i in 0..depth {
+            let octant = ((bits >> (i * 3)) & 0b111) as u8;
             f.write_char((b'0' + octant) as char)?;
         }
         Ok(())
@@ -375,7 +413,8 @@ mod tests {
 
     #[test]
     fn is_copy_and_small() {
-        // Catches a regression if the layout grows unexpectedly.
-        assert!(std::mem::size_of::<OctreePath>() <= 16);
+        // 16 bytes — a single u128 with depth packed into the high
+        // bits. Catches a regression if the layout grows unexpectedly.
+        assert_eq!(std::mem::size_of::<OctreePath>(), 16);
     }
 }
