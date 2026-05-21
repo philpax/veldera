@@ -32,3 +32,29 @@
 // frame by the `climate_bake` compute pass — the runtime never
 // recomputes climate physics per density tap, it just samples here.
 @group(0) @binding(14) var climate_map: texture_2d<f32>;
+
+// Pixel inspector. The raymarch shader writes a `CloudInspectData`
+// entry for the single pixel matching `cloud.inspect_cursor` when
+// `cloud.inspect_active != 0u`. Bevy's `GpuReadbackPlugin` copies
+// the buffer to a CPU staging buffer each frame, and the egui
+// inspector panel surfaces the values as text. See `inspect.rs`.
+//
+// Layout matches the Rust `CloudInspectData` struct: vec3 first to
+// sidestep std430 trailing-pad issues, then twelve f32/i32/u32
+// scalars in 64 bytes total.
+struct CloudInspectData {
+    first_hit_pos: vec3<f32>,
+    cam_proj: f32,
+    t_start: f32,
+    t_end: f32,
+    chord_length: f32,
+    k_first: i32,
+    k_last: i32,
+    iter_count: u32,
+    max_iter: u32,
+    transmittance: f32,
+    opacity: f32,
+    first_hit_t: f32,
+    first_hit_density: f32,
+}
+@group(0) @binding(15) var<storage, read_write> cloud_inspect_buffer: CloudInspectData;

@@ -4,6 +4,7 @@
 
 mod camera;
 mod clouds;
+mod inspector;
 mod location;
 mod physics;
 mod profiler;
@@ -55,7 +56,7 @@ impl Plugin for DebugUiPlugin {
             .init_resource::<VehicleRightRequest>()
             .init_resource::<VehicleTabOpen>()
             .init_resource::<UiVisible>()
-            .add_systems(Update, toggle_ui_visible)
+            .add_systems(Update, (toggle_ui_visible, inspector::sync_inspect_cursor))
             .add_systems(
                 EguiPrimaryContextPass,
                 (
@@ -75,6 +76,7 @@ enum DebugTab {
     Atmosphere,
     Streaming,
     Physics,
+    Inspector,
     Profiler,
 }
 
@@ -87,6 +89,7 @@ impl DebugTab {
             DebugTab::Atmosphere => "Atmosphere",
             DebugTab::Streaming => "Streaming",
             DebugTab::Physics => "Physics",
+            DebugTab::Inspector => "Inspector",
             DebugTab::Profiler => "Profiler",
         }
     }
@@ -115,6 +118,7 @@ impl Default for DebugUiState {
                 DebugTab::Atmosphere,
                 DebugTab::Streaming,
                 DebugTab::Physics,
+                DebugTab::Inspector,
                 DebugTab::Profiler,
             ]),
             atmosphere_subtab: clouds::AtmosphereSubTab::default(),
@@ -173,6 +177,7 @@ fn debug_ui_system(
     streaming_params: streaming::StreamingParams,
     mut physics_params: physics::PhysicsParams,
     mut vehicle_params: vehicle::VehicleParams,
+    inspector_params: inspector::InspectorParams,
     profiler_params: profiler::ProfilerParams,
     climate_assets: Res<crate::rendering::clouds::CloudClimateAssets>,
 ) -> Result {
@@ -251,6 +256,9 @@ fn debug_ui_system(
         }
         DebugTab::Physics => {
             physics::render_physics_tab(ui, &mut physics_params);
+        }
+        DebugTab::Inspector => {
+            inspector::render_inspector_tab(ui, &inspector_params);
         }
         DebugTab::Profiler => {
             profiler::render_profiler_tab(ui, &profiler_params, profiler_subtab);

@@ -134,6 +134,16 @@ pub struct GpuCloudUniform {
     /// Driven by [`crate::CloudLayers::primary_step_world_m`].
     pub primary_step_world_m: f32,
 
+    /// Inspector cursor: normalised window UV at which to dump
+    /// per-pixel diagnostic values into the inspect storage buffer.
+    /// The shader converts to a raymarch buffer pixel index via
+    /// `vec2<i32>(cursor * buffer_size)`. When `inspect_active == 0`
+    /// the shader skips the write (and the inspect buffer keeps its
+    /// last frame's content).
+    pub inspect_cursor: Vec2,
+    pub inspect_active: u32,
+    pub pad_inspect: u32,
+
     /// Previous frame's `clip_from_world` matrix. Used by the temporal
     /// pass to reproject each pixel into the previous frame's screen
     /// position so we can sample the history buffer there.
@@ -520,6 +530,17 @@ impl FromWorld for CloudBindGroupLayouts {
                     // multisampled because the app's camera defaults to
                     // MSAA=4; we read `sample_index = 0`.
                     (11, texture_depth_2d_multisampled()),
+                    // Pixel-inspector storage buffer. The shader writes
+                    // raymarch diagnostic state (`cam_proj`, `t_start`,
+                    // `t_end`, sample-grid indices, transmittance, etc.)
+                    // for the single pixel matching `cloud.inspect_cursor`
+                    // when `cloud.inspect_active != 0`. Read back to the
+                    // CPU each frame via `GpuReadbackPlugin` and surfaced
+                    // in the egui inspector panel. See `inspect.rs`.
+                    (
+                        15,
+                        storage_buffer::<crate::inspect::CloudInspectData>(false),
+                    ),
                 ),
             ),
         );
@@ -1134,6 +1155,7 @@ pub struct CloudPrevFrame {
 pub(super) fn prepare_cloud_uniforms(
     mut commands: Commands,
     atmosphere_lights: Res<ExtractedAtmosphereLights>,
+    inspect_cursor: Res<crate::inspect::CloudInspectCursor>,
     layers: Query<(
         Entity,
         &CloudLayers,
@@ -1448,6 +1470,9 @@ pub(super) fn prepare_cloud_uniforms(
             raymarch_jitter_temporal_rotation: u32::from(cloud.raymarch_jitter_temporal_rotation),
             raymarch_lod_bias: cloud.raymarch_lod_bias,
             primary_step_world_m: cloud.primary_step_world_m.max(1.0),
+            inspect_cursor: inspect_cursor.cursor,
+            inspect_active: u32::from(inspect_cursor.active),
+            pad_inspect: 0,
             prev_clip_from_world: prev.clip_from_world,
             prev_camera_ecef: prev.camera_ecef,
             frame_index: prev.frame_index.wrapping_add(1),
@@ -1782,6 +1807,7 @@ pub(super) fn prepare_cloud_bind_groups(
     lights: Res<LightMeta>,
     gpu_images: Res<bevy::render::render_asset::RenderAssets<bevy::render::texture::GpuImage>>,
     fallback_image: Res<bevy::render::texture::FallbackImage>,
+    inspect: crate::inspect::CloudInspectBindParams,
 ) -> Result<(), BevyError> {
     if layers.iter().next().is_none() {
         return Ok(());
@@ -1872,6 +1898,14 @@ pub(super) fn prepare_cloud_bind_groups(
             climate_view
         };
 
+        let Some(inspect_buffer) = inspect.resolve() else {
+            // The inspect buffer asset has not finished uploading yet
+            // (first frame, typically). Skip binding-group creation
+            // for this view — `prepare_cloud_bind_groups` already
+            // runs every frame, so we'll pick it up next frame.
+            continue;
+        };
+
         let raymarch = render_device.create_bind_group(
             "cloud_raymarch_bind_group",
             &pipeline_cache.get_bind_group_layout(&layouts.raymarch),
@@ -1891,6 +1925,7 @@ pub(super) fn prepare_cloud_bind_groups(
                 (10, &cloud_tex.raymarch.default_view),
                 (11, depth_texture.view()),
                 (14, runtime_climate_view),
+                (15, inspect_buffer.buffer.as_entire_buffer_binding()),
             )),
         );
 

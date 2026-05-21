@@ -27,6 +27,7 @@
 //! [`CloudLayers`] component.
 
 pub mod constants;
+pub mod inspect;
 mod node;
 mod noise;
 mod resources;
@@ -111,6 +112,7 @@ impl Plugin for CloudsPlanetPlugin {
             ExtractComponentPlugin::<CloudClimateMap>::default(),
             ExtractComponentPlugin::<CloudSimStatePreview>::default(),
             UniformComponentPlugin::<GpuCloudUniform>::default(),
+            inspect::CloudInspectPlugin,
         ));
     }
 

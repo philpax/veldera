@@ -20,6 +20,7 @@
     cloud, atmosphere, atmosphere_transforms, atmosphere_lights, view,
     cloud_sampler, noise_3d,
     cloud_raymarch_out, depth_texture,
+    cloud_inspect_buffer,
 };
 
 // Convert a UV + depth value to camera-to-pixel distance, in metres.
@@ -437,6 +438,15 @@ fn main(@builtin(global_invocation_id) idx: vec3<u32>) {
     var transmittance: f32 = 1.0;
     var inscattering = vec3<f32>(0.0);
     var iter: u32 = 0u;
+    // Inspect tracking. `first_hit_t == 0.0` is the "not yet hit"
+    // sentinel; first sample to cross the density threshold latches
+    // its position/density/t and they stay frozen for the rest of
+    // the loop. Always tracked so the inspect write at the end can
+    // surface them; the cost is a couple of f32 writes per pixel.
+    var first_hit_t: f32 = 0.0;
+    var first_hit_density: f32 = 0.0;
+    var first_hit_pos: vec3<f32> = vec3<f32>(0.0);
+    var iter_count: u32 = 0u;
 
     loop {
         if iter >= max_iter {
@@ -474,6 +484,15 @@ fn main(@builtin(global_invocation_id) idx: vec3<u32>) {
         // 1e-7 is safely below any realistic density_scale × normalised
         // density so we don't accidentally drop visible clouds.
         if density > 1e-7 {
+            // First-hit tracking for the inspector. The sentinel is
+            // `first_hit_t == 0.0`, which is unreachable (t > t_start
+            // > 0 inside the chord), so the first hit latches the
+            // values and they stay frozen.
+            if first_hit_t == 0.0 {
+                first_hit_t = t;
+                first_hit_density = density;
+                first_hit_pos = sample_pos;
+            }
             // Per-sample shading. Choose the model from this sample's
             // distance from the camera: pure full close-in (cone
             // shadow + Wrenninge octaves resolve per-cell detail),
@@ -514,7 +533,28 @@ fn main(@builtin(global_invocation_id) idx: vec3<u32>) {
             }
         }
 
+        iter_count = iter_count + 1u;
         iter = iter + 1u;
+    }
+
+    // Inspector write. One pixel per frame; gated on the cursor
+    // active flag and pixel match. The buffer keeps its previous
+    // frame's content for every non-cursor pixel.
+    let cursor_pixel = vec2<i32>(cloud.inspect_cursor * vec2<f32>(cloud.buffer_size));
+    if cloud.inspect_active != 0u && all(vec2<i32>(idx.xy) == cursor_pixel) {
+        cloud_inspect_buffer.first_hit_pos = first_hit_pos;
+        cloud_inspect_buffer.cam_proj = cam_proj;
+        cloud_inspect_buffer.t_start = t_start;
+        cloud_inspect_buffer.t_end = t_end;
+        cloud_inspect_buffer.chord_length = max(t_end - t_start, 0.0);
+        cloud_inspect_buffer.k_first = k_first;
+        cloud_inspect_buffer.k_last = k_last;
+        cloud_inspect_buffer.iter_count = iter_count;
+        cloud_inspect_buffer.max_iter = max_iter;
+        cloud_inspect_buffer.transmittance = transmittance;
+        cloud_inspect_buffer.opacity = 1.0 - transmittance;
+        cloud_inspect_buffer.first_hit_t = first_hit_t;
+        cloud_inspect_buffer.first_hit_density = first_hit_density;
     }
 
     if cloud.debug_mode == DBG_OPACITY {

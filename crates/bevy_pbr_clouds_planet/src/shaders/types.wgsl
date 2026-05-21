@@ -67,6 +67,16 @@ struct CloudUniform {
     // `CloudLayers::primary_step_world_m`.
     primary_step_world_m: f32,
 
+    // Pixel inspector. The raymarch writes a `CloudInspectData`
+    // entry to the inspect storage buffer when `inspect_active == 1u`
+    // and the current pixel matches the cursor mapped into buffer
+    // space (`vec2<i32>(inspect_cursor * buffer_size)`). See
+    // `inspect.rs` and the `cloud_inspect_buffer` binding in
+    // `bindings.wgsl`.
+    inspect_cursor: vec2<f32>,
+    inspect_active: u32,
+    pad_inspect: u32,
+
     prev_clip_from_world: mat4x4<f32>,
 
     prev_camera_ecef: vec3<f32>,
