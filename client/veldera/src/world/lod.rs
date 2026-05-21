@@ -3,24 +3,24 @@
 //! Manages which nodes to load based on camera distance and which meshes
 //! to show based on frustum visibility.
 //!
-//! Two independent BFS traversals run from the root each frame:
+//! A single octree walk per frame ([`unified_bfs_traversal`]) evaluates
+//! both refinement rules per node:
 //!
-//! - The **render BFS** refines on screen-space error and frustum-culls,
+//! - **Render rule** refines on screen-space error and frustum-culls,
 //!   producing renderable nodes and the meshes shown on screen.
-//! - The **physics BFS** refines on distance-banded target depth (see
+//! - **Physics rule** refines on distance-banded target depth (see
 //!   [`crate::physics::PHYSICS_DISTANCE_BANDS`]) with no frustum culling,
 //!   producing exactly one terrain collider per region within
 //!   [`crate::physics::PHYSICS_RANGE`]. If the target depth isn't available
 //!   the deepest loaded ancestor with data is used as a fallback so the
 //!   player can never fall through unloaded ground.
 //!
-//! Both BFSes share the same bulk + node caches. A path requested by one
-//! is visible to the other via the shared `loading_nodes` / `loaded_nodes`
-//! / `bulks` state, so no double-loading. Retention takes the union of
-//! both BFSes' potential sets *over a rolling grace window* (see
-//! [`LodTuning::unload_grace_period_secs`]) — a node stays alive as long
-//! as either consumer asked for it within the last few seconds. The grace
-//! window prevents thrash when the view briefly turns away and back.
+//! Both rules share the same bulk + node caches. Retention takes the
+//! union of both rules' potential sets *over a rolling grace window*
+//! (see [`LodTuning::unload_grace_period_secs`]) — a node stays alive
+//! as long as either consumer asked for it within the last few seconds.
+//! The grace window prevents thrash when the view briefly turns away
+//! and back.
 //!
 //! Uses platform-agnostic `async_channel` for communication between async tasks
 //! and the main thread. Task spawning is handled by `TaskSpawner` from the
@@ -359,137 +359,6 @@ impl BfsResult {
     }
 }
 
-/// Perform a BFS traversal from the root to determine which nodes and bulks
-/// are needed, matching the C++ reference algorithm.
-///
-/// All access to `lod_state` during BFS is read-only. Mutations are
-/// written through `scratch`, whose buffers are reused across frames.
-fn bfs_traversal(
-    lod_state: &LodState,
-    scratch: &mut LodScratch,
-    tuning: &LodTuning,
-    frustum: Frustum,
-    lod_metrics: LodMetrics,
-) {
-    // Destructure scratch to get disjoint mutable borrows of the fields
-    // we touch in the loop. Without this the borrow checker rejects the
-    // simultaneous `frontier.iter()` + `next_frontier.push()` + writes
-    // into `result`.
-    let LodScratch {
-        render_result: result,
-        render_frontier: frontier,
-        render_next_frontier: next_frontier,
-        ..
-    } = scratch;
-
-    result.clear();
-    frontier.clear();
-    next_frontier.clear();
-    frontier.push((String::new(), String::new()));
-
-    // Constant across the entire BFS — hoist out of the inner loop.
-    let camera_altitude = lod_metrics.camera_position.length() - EARTH_RADIUS_M_F64;
-    let is_low_altitude = camera_altitude <= PROXIMITY_LOADING_MAX_ALTITUDE;
-
-    loop {
-        next_frontier.clear();
-
-        for (path, original_bulk_key) in frontier.iter() {
-            // At bulk boundaries (path length is a multiple of 4 and non-empty),
-            // check if we need to switch to a child bulk.
-            let effective_bulk_key = if !path.is_empty() && path.len() % 4 == 0 {
-                // The last 4 characters are the child bulk's relative path.
-                let rel = &path[path.len() - 4..];
-                let Some(bulk) = lod_state.bulks.get(original_bulk_key.as_str()) else {
-                    continue;
-                };
-                let Some(&child_epoch) = bulk.child_bulk_paths.get(rel) else {
-                    continue;
-                };
-
-                // The full child bulk path is the path itself.
-                result.potential_bulks.insert(path.clone());
-
-                if !lod_state.bulks.contains_key(path) {
-                    // Trigger download if not already loading or failed.
-                    if !lod_state.loading_bulks.contains(path)
-                        && !lod_state.failed_bulks.contains(path)
-                    {
-                        result.bulks_to_load.push((path.clone(), child_epoch));
-                    }
-                    continue;
-                }
-                // Switch to the child bulk for node lookups.
-                path.as_str()
-            } else {
-                original_bulk_key.as_str()
-            };
-
-            let Some(bulk) = lod_state.bulks.get(effective_bulk_key) else {
-                continue;
-            };
-            let Some(node_index) = lod_state.bulk_node_indices.get(effective_bulk_key) else {
-                continue;
-            };
-            result
-                .potential_bulks
-                .insert(effective_bulk_key.to_string());
-
-            for octant in b'0'..=b'7' {
-                let mut nxt = path.clone();
-                nxt.push(octant as char);
-
-                let nxt_rel = &nxt[effective_bulk_key.len()..];
-                let Some(&node_idx) = node_index.get(nxt_rel) else {
-                    continue;
-                };
-                let node = &bulk.nodes[node_idx];
-
-                // Frustum culling using the OBB, with a "keep loaded"
-                // exception for nodes near the camera at low altitude.
-                // The exception is wide enough that a 360° turn doesn't
-                // drop tiles you were just looking at — they stay in
-                // memory (still hidden by `cull_meshes`) ready to flip
-                // visible when they re-enter the frustum.
-                let distance_to_node = lod_metrics.camera_position.distance(node.obb.center);
-                let is_nearby = distance_to_node <= tuning.keep_loaded_radius;
-
-                let in_frustum = frustum.intersects_obb(&node.obb);
-                let force_load = is_low_altitude && is_nearby;
-
-                if !in_frustum && !force_load {
-                    continue;
-                }
-
-                // Cache the OBB for later use when spawning mesh entities.
-                result.discovered_obbs.push((node.path.clone(), node.obb));
-
-                // Level of detail check: only expand if the node needs more detail.
-                if !lod_metrics.should_refine(node.obb.center, node.meters_per_texel) {
-                    continue;
-                }
-
-                next_frontier.push((nxt, effective_bulk_key.to_string()));
-
-                // Track this node as potentially visible and queue for loading.
-                if node.has_data {
-                    result.potential_nodes.insert(node.path.clone());
-                    if !lod_state.loaded_nodes.contains(&node.path)
-                        && !lod_state.loading_nodes.contains(&node.path)
-                    {
-                        result.nodes_to_load.push(node.clone());
-                    }
-                }
-            }
-        }
-
-        if next_frontier.is_empty() {
-            break;
-        }
-        std::mem::swap(frontier, next_frontier);
-    }
-}
-
 // ============================================================================
 // Physics BFS
 // ============================================================================
@@ -526,9 +395,9 @@ impl PhysicsBfsResult {
     }
 }
 
-/// Working memory for the render and physics BFSes. Lives across frames
-/// so that buffer capacity (potential-node hashsets, frontier vecs, etc.)
-/// can be reused without reallocating every frame.
+/// Working memory for the unified BFS. Lives across frames so that
+/// buffer capacity (potential-node hashsets, etc.) is reused without
+/// reallocating every frame.
 ///
 /// Kept as a separate resource from [`LodState`] so the BFS functions
 /// can hold `&LodState` immutable while writing scratch results through
@@ -537,11 +406,8 @@ impl PhysicsBfsResult {
 pub struct LodScratch {
     render_result: BfsResult,
     physics_result: PhysicsBfsResult,
-    /// Internal frontier buffers for the render BFS (level-order walk).
-    render_frontier: Vec<(String, String)>,
-    render_next_frontier: Vec<(String, String)>,
     /// Signature of the input state at the last BFS run, used to decide
-    /// whether the current frame's BFSes can be skipped entirely (camera
+    /// whether the current frame's BFS can be skipped entirely (camera
     /// hasn't moved, view hasn't rotated, no new bulks loaded, etc.).
     last_bfs_signature: Option<BfsSignature>,
 }
@@ -622,66 +488,115 @@ fn effective_distance(obb: &OrientedBoundingBox, camera_pos: DVec3, lead: DVec3)
     (compressed_centre_dist - obb_radius).max(0.0)
 }
 
-/// Walk the octree to determine physics colliders.
+/// Inputs that don't change across recursive calls of [`unified_walk`].
+/// Bundled into a struct so the walker has only one positional parameter
+/// for "context" and one for per-call state.
+struct UnifiedWalkCtx<'a> {
+    lod_state: &'a LodState,
+    tuning: &'a LodTuning,
+    frustum: Frustum,
+    lod_metrics: LodMetrics,
+    is_low_altitude: bool,
+    camera_pos: DVec3,
+    lead: DVec3,
+}
+
+/// Walk the octree once, evaluating both the render and physics
+/// refinement rules per node. Replaces the two independent BFSes
+/// (render's level-order frontier + physics's recursive walker), which
+/// did heavily overlapping work near the camera.
 ///
-/// Distance-banded refinement: each visited node decides whether to commit
-/// itself as a collider or refine into its children based on
-/// [`desired_physics_depth`]. If refinement is wanted but the next bulk /
-/// node isn't loaded yet, the deepest loaded ancestor with data is used as
-/// a fallback so the player can never fall through the ground.
-fn physics_bfs_traversal(
+/// Output decisions per node:
+///
+/// - **Render contribution.** Visible if in frustum or within
+///   `keep_loaded_radius`. Caches the OBB. If `should_refine`, marks the
+///   node as a refinement parent (potential_nodes + nodes_to_load).
+/// - **Physics contribution.** Wanted if its OBB-distance is within the
+///   outermost band. Visited nodes get added to `potential_nodes` and
+///   their data is requested as a possible fallback. A collider commit
+///   happens at either the target depth or as a fallback when descent
+///   can't proceed.
+///
+/// We descend if either rule wants to. Refining for one consumer
+/// effectively gives the other a free walk through that subtree, which
+/// is exactly the redundancy the unified walker eliminates.
+fn unified_bfs_traversal(
     lod_state: &LodState,
     scratch: &mut LodScratch,
+    tuning: &LodTuning,
+    frustum: Frustum,
+    lod_metrics: LodMetrics,
     camera_pos: DVec3,
     lead: DVec3,
 ) {
+    scratch.render_result.clear();
     scratch.physics_result.clear();
-    // The root bulk is always cached at key "" by `update_lod_requests`.
-    physics_walk(
+
+    let camera_altitude = lod_metrics.camera_position.length() - EARTH_RADIUS_M_F64;
+    let is_low_altitude = camera_altitude <= PROXIMITY_LOADING_MAX_ALTITUDE;
+
+    let ctx = UnifiedWalkCtx {
         lod_state,
+        tuning,
+        frustum,
+        lod_metrics,
+        is_low_altitude,
         camera_pos,
         lead,
+    };
+
+    // The root bulk is always cached at key "" by `update_lod_requests`.
+    unified_walk(
+        &ctx,
         "",
         "",
         None,
+        &mut scratch.render_result,
         &mut scratch.physics_result,
     );
 }
 
-/// Recursive worker for [`physics_bfs_traversal`].
+/// Recursive worker for [`unified_bfs_traversal`].
 ///
 /// Returns `true` if any in-range octant of this node either committed a
-/// collider directly or led to a descendant doing so. The caller uses this
-/// to decide whether to fall back to its own ancestor when none of its
-/// children produced coverage.
-fn physics_walk(
-    lod_state: &LodState,
-    camera_pos: DVec3,
-    lead: DVec3,
+/// physics collider directly or led to a descendant doing so. The caller
+/// uses this to decide whether to fall back to its own ancestor when
+/// none of its children produced coverage (preserving the physics BFS's
+/// "best-available-ancestor" semantics).
+fn unified_walk(
+    ctx: &UnifiedWalkCtx<'_>,
     path: &str,
     bulk_key: &str,
-    best_ancestor: Option<&str>,
-    result: &mut PhysicsBfsResult,
+    physics_best_ancestor: Option<&str>,
+    render_result: &mut BfsResult,
+    physics_result: &mut PhysicsBfsResult,
 ) -> bool {
-    // Bulk boundary handling: every 4 path characters we cross into a new
-    // bulk. If we're at a boundary, switch the lookup key to `path` and
-    // ensure that bulk is loaded.
+    // Bulk boundary handling: every 4 path characters we cross into a
+    // new bulk. If we're at a boundary, switch the lookup key to `path`
+    // and ensure that bulk is loaded.
     let effective_bulk_key: &str = if !path.is_empty() && path.len().is_multiple_of(4) {
         let rel = &path[path.len() - 4..];
-        let Some(parent_bulk) = lod_state.bulks.get(bulk_key) else {
+        let Some(parent_bulk) = ctx.lod_state.bulks.get(bulk_key) else {
             return false;
         };
         let Some(&child_epoch) = parent_bulk.child_bulk_paths.get(rel) else {
             return false;
         };
 
-        result.potential_bulks.insert(path.to_string());
+        // Either BFS walking through this bulk wants it retained.
+        render_result.potential_bulks.insert(path.to_string());
+        physics_result.potential_bulks.insert(path.to_string());
 
-        if !lod_state.bulks.contains_key(path) {
-            // Bulk not cached — kick off a load. Caller will commit a
-            // fallback collider for this octant.
-            if !lod_state.loading_bulks.contains(path) && !lod_state.failed_bulks.contains(path) {
-                result.bulks_to_load.push((path.to_string(), child_epoch));
+        if !ctx.lod_state.bulks.contains_key(path) {
+            if !ctx.lod_state.loading_bulks.contains(path)
+                && !ctx.lod_state.failed_bulks.contains(path)
+            {
+                // One side issues the load; the call-site dedupes both
+                // sides' load lists via a HashSet, so requesting from
+                // just `render_result` is enough to avoid double-fetch.
+                render_result
+                    .bulks_to_load
+                    .push((path.to_string(), child_epoch));
             }
             return false;
         }
@@ -690,17 +605,20 @@ fn physics_walk(
         bulk_key
     };
 
-    let Some(bulk) = lod_state.bulks.get(effective_bulk_key) else {
+    let Some(bulk) = ctx.lod_state.bulks.get(effective_bulk_key) else {
         return false;
     };
-    let Some(node_index) = lod_state.bulk_node_indices.get(effective_bulk_key) else {
+    let Some(node_index) = ctx.lod_state.bulk_node_indices.get(effective_bulk_key) else {
         return false;
     };
-    result
+    render_result
+        .potential_bulks
+        .insert(effective_bulk_key.to_string());
+    physics_result
         .potential_bulks
         .insert(effective_bulk_key.to_string());
 
-    let mut any_committed = false;
+    let mut any_physics_committed = false;
 
     for octant in b'0'..=b'7' {
         let mut child_path = path.to_string();
@@ -708,79 +626,113 @@ fn physics_walk(
 
         let child_rel = &child_path[effective_bulk_key.len()..];
         let Some(&child_idx) = node_index.get(child_rel) else {
-            // Empty octant — no terrain here, no collider needed.
+            // Empty octant — no terrain, no contribution.
             continue;
         };
         let child_node = &bulk.nodes[child_idx];
 
-        let dist = effective_distance(&child_node.obb, camera_pos, lead);
-        let Some(target_depth) = desired_physics_depth(dist) else {
-            // Beyond the outermost band → no physics coverage needed in
-            // this subtree.
+        // -------- render-side decision --------
+        let centre_dist = ctx.camera_pos.distance(child_node.obb.center);
+        let is_nearby_render = centre_dist <= ctx.tuning.keep_loaded_radius;
+        let in_frustum = ctx.frustum.intersects_obb(&child_node.obb);
+        let render_visible = in_frustum || (ctx.is_low_altitude && is_nearby_render);
+        let render_should_refine = render_visible
+            && ctx
+                .lod_metrics
+                .should_refine(child_node.obb.center, child_node.meters_per_texel);
+
+        // -------- physics-side decision --------
+        let phys_dist = effective_distance(&child_node.obb, ctx.camera_pos, ctx.lead);
+        let phys_target = desired_physics_depth(phys_dist);
+        let physics_wants = phys_target.is_some();
+        let physics_should_refine = physics_wants && child_path.len() < phys_target.unwrap_or(0);
+
+        // No consumer cares about this subtree.
+        if !render_visible && !physics_wants {
             continue;
-        };
+        }
 
-        result.potential_nodes.insert(child_node.path.clone());
-        result
-            .discovered_obbs
-            .push((child_node.path.clone(), child_node.obb));
+        // Render: OBB cache for visible nodes.
+        if render_visible {
+            render_result
+                .discovered_obbs
+                .push((child_node.path.clone(), child_node.obb));
+        }
+        // Physics: OBB cache + potential set + always request data for
+        // fallback chain.
+        if physics_wants {
+            physics_result
+                .discovered_obbs
+                .push((child_node.path.clone(), child_node.obb));
+            physics_result
+                .potential_nodes
+                .insert(child_node.path.clone());
+            if child_node.has_data
+                && !ctx.lod_state.loaded_nodes.contains(&child_node.path)
+                && !ctx.lod_state.loading_nodes.contains(&child_node.path)
+            {
+                physics_result.nodes_to_load.push(child_node.clone());
+            }
+        }
 
-        let child_has_data_cached =
-            child_node.has_data && lod_state.node_data.contains_key(&child_node.path);
-        let updated_best: Option<String> = if child_has_data_cached {
+        // Render: when we descend, mark this node as a refinement parent.
+        if render_should_refine && child_node.has_data {
+            render_result
+                .potential_nodes
+                .insert(child_node.path.clone());
+            if !ctx.lod_state.loaded_nodes.contains(&child_node.path)
+                && !ctx.lod_state.loading_nodes.contains(&child_node.path)
+            {
+                render_result.nodes_to_load.push(child_node.clone());
+            }
+        }
+
+        // Physics best-ancestor chain for the recursive descent.
+        let child_phys_loaded =
+            child_node.has_data && ctx.lod_state.node_data.contains_key(&child_node.path);
+        let updated_phys_best: Option<String> = if child_phys_loaded {
             Some(child_node.path.clone())
         } else {
-            best_ancestor.map(String::from)
+            physics_best_ancestor.map(String::from)
         };
 
-        // Always request data for has_data nodes we touch along the
-        // descent path — they may be needed as fallbacks before we reach
-        // the target depth.
-        if child_node.has_data
-            && !lod_state.loaded_nodes.contains(&child_node.path)
-            && !lod_state.loading_nodes.contains(&child_node.path)
-        {
-            result.nodes_to_load.push((*child_node).clone());
-        }
+        if render_should_refine || physics_should_refine {
+            // Recurse — either consumer wants more detail.
+            let descended = unified_walk(
+                ctx,
+                &child_path,
+                effective_bulk_key,
+                updated_phys_best.as_deref(),
+                render_result,
+                physics_result,
+            );
 
-        any_committed = true;
-
-        if child_path.len() >= target_depth {
-            // At target depth — commit either this node or the deepest
-            // loaded ancestor.
+            // Physics: if we wanted to refine but no descendant
+            // committed a collider, fall back at this depth.
+            if physics_should_refine && !descended {
+                commit_physics_collider(
+                    &child_node.path,
+                    child_phys_loaded,
+                    &updated_phys_best,
+                    physics_result,
+                );
+            }
+            if physics_wants {
+                any_physics_committed = true;
+            }
+        } else if physics_wants {
+            // No refinement wanted — physics commits its collider here.
             commit_physics_collider(
                 &child_node.path,
-                child_has_data_cached,
-                &updated_best,
-                result,
+                child_phys_loaded,
+                &updated_phys_best,
+                physics_result,
             );
-            continue;
-        }
-
-        // Want to refine deeper.
-        let child_descended = physics_walk(
-            lod_state,
-            camera_pos,
-            lead,
-            &child_path,
-            effective_bulk_key,
-            updated_best.as_deref(),
-            result,
-        );
-
-        if !child_descended {
-            // Descent blocked (missing bulk, no further metadata, etc.)
-            // — commit a fallback so this region is covered.
-            commit_physics_collider(
-                &child_node.path,
-                child_has_data_cached,
-                &updated_best,
-                result,
-            );
+            any_physics_committed = true;
         }
     }
 
-    any_committed
+    any_physics_committed
 }
 
 /// Helper: commit a collider for a node, using the deepest loaded ancestor
@@ -1002,15 +954,16 @@ fn update_lod_requests(
         .is_some_and(|last| last.matches(&current_signature));
 
     if !can_skip_bfs {
-        // Render BFS — read-only access to lod_state, writes into scratch.
-        bfs_traversal(&lod_state, &mut scratch, &tuning, frustum, lod_metrics);
-
-        // Physics BFS — independent of render frustum, uses
-        // distance-banded refinement biased forward along the smoothed
-        // velocity vector.
-        physics_bfs_traversal(
+        // Single walk that evaluates render's screen-space-error
+        // refinement and physics's distance-banded refinement per node,
+        // descending if either wants to. Halves the per-frame traversal
+        // cost compared to the previous independent BFSes.
+        unified_bfs_traversal(
             &lod_state,
             &mut scratch,
+            &tuning,
+            frustum,
+            lod_metrics,
             lod_metrics.camera_position,
             motion.lead(),
         );
