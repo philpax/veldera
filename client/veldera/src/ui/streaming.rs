@@ -1,21 +1,106 @@
 //! Streaming tab for the debug UI.
 //!
-//! Displays LOD node counts and loaded mesh stats.
+//! Two sub-tabs:
+//!
+//! - **Overview** — a compact counter readout (node + mesh counts).
+//! - **LoD diagnostics** — a top-down map of the octree streaming state
+//!   for both the render and physics BFSes, a per-depth histogram, and
+//!   aggregate counters / lead-vector readout.
+//!
+//! The diagnostics view consumes a per-frame [`LodSnapshot`] populated by
+//! the LoD system. Snapshot population is gated on this tab being
+//! visible: rendering the diagnostics sub-tab raises
+//! [`LodSnapshotRequest::wanted`], which is consumed by the next
+//! `update_lod_requests` and lowered again. If the tab isn't open, the
+//! snapshot stays empty and costs nothing.
 
 use bevy::{ecs::system::SystemParam, prelude::*};
 use bevy_egui::egui;
+use glam::DVec3;
 
-use crate::{rendering::mesh::RocktreeMeshMarker, world::lod::LodState};
+use crate::{
+    camera::RadialFrame,
+    physics::{PHYSICS_DISTANCE_BANDS, PHYSICS_RANGE},
+    rendering::mesh::RocktreeMeshMarker,
+    world::lod::{LodSnapshot, LodSnapshotRequest, LodState, SnapshotNode, SnapshotNodeState},
+};
+
+/// Currently-selected sub-tab inside the Streaming panel.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum StreamingSubTab {
+    #[default]
+    Overview,
+    Diagnostics,
+}
+
+impl StreamingSubTab {
+    fn label(self) -> &'static str {
+        match self {
+            Self::Overview => "Overview",
+            Self::Diagnostics => "LoD diagnostics",
+        }
+    }
+}
 
 /// Resources for the streaming tab.
 #[derive(SystemParam)]
 pub(super) struct StreamingParams<'w, 's> {
     pub lod_state: Res<'w, LodState>,
     pub mesh_query: Query<'w, 's, &'static RocktreeMeshMarker>,
+    pub snapshot: Res<'w, LodSnapshot>,
+    pub snapshot_request: ResMut<'w, LodSnapshotRequest>,
+    pub diagnostics_state: ResMut<'w, DiagnosticsViewState>,
+}
+
+/// Per-frame UI state for the diagnostics map (zoom, layer toggles).
+#[derive(Resource)]
+pub struct DiagnosticsViewState {
+    /// Half-side of the map area in meters. 1200 m gives a comfortable
+    /// margin around [`PHYSICS_RANGE`] (1000 m).
+    pub map_radius_m: f32,
+    /// Show render-BFS overlay.
+    pub show_render: bool,
+    /// Show physics-BFS overlay.
+    pub show_physics: bool,
+}
+
+impl Default for DiagnosticsViewState {
+    fn default() -> Self {
+        Self {
+            map_radius_m: 1200.0,
+            show_render: true,
+            show_physics: true,
+        }
+    }
 }
 
 /// Render the streaming tab content.
-pub(super) fn render_streaming_tab(ui: &mut egui::Ui, params: &StreamingParams) {
+pub(super) fn render_streaming_tab(
+    ui: &mut egui::Ui,
+    params: &mut StreamingParams,
+    subtab: &mut StreamingSubTab,
+) {
+    ui.horizontal(|ui| {
+        for tab in [StreamingSubTab::Overview, StreamingSubTab::Diagnostics] {
+            if ui.selectable_label(*subtab == tab, tab.label()).clicked() {
+                *subtab = tab;
+            }
+        }
+    });
+    ui.separator();
+
+    match subtab {
+        StreamingSubTab::Overview => render_overview(ui, params),
+        StreamingSubTab::Diagnostics => {
+            // Ask the LoD system to populate the snapshot on its next
+            // tick so the next frame's render sees fresh data.
+            params.snapshot_request.wanted = true;
+            render_diagnostics(ui, params);
+        }
+    }
+}
+
+fn render_overview(ui: &mut egui::Ui, params: &StreamingParams) {
     let loaded_nodes = params.lod_state.loaded_node_count();
     let loading_nodes = params.lod_state.loading_node_count();
     let mesh_count = params.mesh_query.iter().count();
@@ -24,4 +109,342 @@ pub(super) fn render_streaming_tab(ui: &mut egui::Ui, params: &StreamingParams) 
         "Nodes: {loaded_nodes} loaded, {loading_nodes} loading"
     ));
     ui.label(format!("Meshes: {mesh_count}"));
+    ui.label(format!(
+        "Physics colliders: {}",
+        params.lod_state.physics_collider_count()
+    ));
+}
+
+fn render_diagnostics(ui: &mut egui::Ui, params: &mut StreamingParams) {
+    let snapshot = &*params.snapshot;
+    let view = &mut *params.diagnostics_state;
+
+    if snapshot.camera_pos.is_none() {
+        ui.label("Waiting for first snapshot…");
+        return;
+    }
+
+    // Layer toggles + zoom.
+    ui.horizontal(|ui| {
+        ui.checkbox(&mut view.show_render, "Render BFS");
+        ui.checkbox(&mut view.show_physics, "Physics BFS");
+        ui.separator();
+        ui.label("Map radius:");
+        ui.add(
+            egui::Slider::new(&mut view.map_radius_m, 200.0..=5000.0)
+                .logarithmic(true)
+                .suffix(" m"),
+        );
+    });
+
+    draw_top_down_map(ui, snapshot, view);
+
+    ui.separator();
+    draw_per_depth_histogram(ui, snapshot);
+
+    ui.separator();
+    draw_counters_panel(ui, snapshot);
+}
+
+// ============================================================================
+// Top-down map
+// ============================================================================
+
+fn draw_top_down_map(ui: &mut egui::Ui, snapshot: &LodSnapshot, view: &DiagnosticsViewState) {
+    let Some(camera_pos) = snapshot.camera_pos else {
+        return;
+    };
+    let frame = RadialFrame::from_ecef_position(camera_pos);
+
+    // Square map area. The egui painter clips to the allocated rect.
+    let size = egui::Vec2::splat(360.0);
+    let (rect, _response) = ui.allocate_exact_size(size, egui::Sense::hover());
+    let painter = ui.painter_at(rect);
+
+    // Background.
+    painter.rect_filled(rect, 4.0, egui::Color32::from_rgb(15, 18, 24));
+
+    let center = rect.center();
+    // Pixels per meter on the map.
+    let pixels_per_m = (rect.width().min(rect.height()) * 0.5) / view.map_radius_m;
+
+    let world_to_screen = |world: DVec3| -> egui::Pos2 {
+        let delta = world - camera_pos;
+        let east = delta.dot(frame.east.as_dvec3()) as f32;
+        let north = delta.dot(frame.north.as_dvec3()) as f32;
+        // North up on screen → invert Y (egui Y points down).
+        egui::pos2(
+            center.x + east * pixels_per_m,
+            center.y - north * pixels_per_m,
+        )
+    };
+
+    // Distance band rings.
+    for (max_d, _) in PHYSICS_DISTANCE_BANDS {
+        let r_px = *max_d as f32 * pixels_per_m;
+        if r_px > 1.0 && r_px < rect.width() {
+            painter.circle_stroke(
+                center,
+                r_px,
+                egui::Stroke::new(1.0, egui::Color32::from_rgba_unmultiplied(70, 80, 95, 180)),
+            );
+        }
+    }
+    // Outer PHYSICS_RANGE ring (heavier).
+    let outer_r = PHYSICS_RANGE as f32 * pixels_per_m;
+    if outer_r > 1.0 && outer_r < rect.width() {
+        painter.circle_stroke(
+            center,
+            outer_r,
+            egui::Stroke::new(1.5, egui::Color32::from_rgba_unmultiplied(140, 80, 60, 220)),
+        );
+    }
+
+    // Draw each node. Render BFS as filled circles, physics BFS as
+    // outlined squares. Nodes in both get both glyphs (square outline +
+    // filled circle), which makes "in both BFSes" visually distinct.
+    // Sort by depth so deeper nodes (smaller in world space) draw on top.
+    let mut sorted: Vec<&SnapshotNode> = snapshot.nodes.iter().collect();
+    sorted.sort_by_key(|n| n.depth);
+    for node in sorted {
+        let screen_pos = world_to_screen(node.obb_center);
+        let r_px = (node.obb_radius as f32 * pixels_per_m).clamp(2.0, 24.0);
+
+        let color = depth_color(node.depth);
+        let alpha: u8 = match node.state {
+            SnapshotNodeState::Loaded => 230,
+            SnapshotNodeState::Loading => 130,
+            SnapshotNodeState::Discovered => 70,
+        };
+        let fill = color.gamma_multiply((f32::from(alpha) / 255.0) * 0.6);
+
+        if view.show_physics && node.sources.physics {
+            let stroke_color = if snapshot.physics_collider_paths.contains(&node.path) {
+                // Active collider — thicker, brighter outline.
+                color
+            } else {
+                color.gamma_multiply(0.5)
+            };
+            let stroke_width = if snapshot.physics_collider_paths.contains(&node.path) {
+                2.0
+            } else {
+                1.0
+            };
+            painter.rect_stroke(
+                egui::Rect::from_center_size(screen_pos, egui::Vec2::splat(r_px * 2.0)),
+                0.0,
+                egui::Stroke::new(stroke_width, stroke_color),
+                egui::StrokeKind::Outside,
+            );
+        }
+        if view.show_render && node.sources.render {
+            painter.circle_filled(screen_pos, r_px, fill);
+            if matches!(node.state, SnapshotNodeState::Loading) {
+                painter.circle_stroke(
+                    screen_pos,
+                    r_px,
+                    egui::Stroke::new(1.0, color.gamma_multiply(0.9)),
+                );
+            }
+        }
+    }
+
+    // Lead vector (only if non-trivial).
+    if snapshot.lead.length() > 0.5 {
+        let lead_end = camera_pos + snapshot.lead;
+        let end_pos = world_to_screen(lead_end);
+        painter.line_segment(
+            [center, end_pos],
+            egui::Stroke::new(2.0, egui::Color32::from_rgb(255, 180, 80)),
+        );
+        painter.circle_filled(end_pos, 3.0, egui::Color32::from_rgb(255, 180, 80));
+    }
+
+    // Player marker.
+    painter.circle_filled(center, 4.5, egui::Color32::WHITE);
+    painter.circle_stroke(
+        center,
+        4.5,
+        egui::Stroke::new(1.0, egui::Color32::from_rgb(20, 20, 20)),
+    );
+
+    // North label.
+    painter.text(
+        egui::pos2(center.x, rect.top() + 12.0),
+        egui::Align2::CENTER_CENTER,
+        "N",
+        egui::FontId::proportional(13.0),
+        egui::Color32::from_rgba_unmultiplied(180, 180, 200, 200),
+    );
+}
+
+/// Map an octree depth to a color along a cool-→-warm gradient.
+fn depth_color(depth: usize) -> egui::Color32 {
+    // Anchor 0 → deep blue, MAX_LEVEL → warm orange.
+    let max = rocktree_decode::MAX_LEVEL as f32;
+    let t = (depth as f32 / max).clamp(0.0, 1.0);
+    // Simple piecewise gradient: blue → cyan → green → yellow → red.
+    let (r, g, b) = if t < 0.25 {
+        let k = t / 0.25;
+        (60.0, 60.0 + k * 195.0, 220.0)
+    } else if t < 0.5 {
+        let k = (t - 0.25) / 0.25;
+        (60.0, 255.0, 220.0 - k * 220.0)
+    } else if t < 0.75 {
+        let k = (t - 0.5) / 0.25;
+        (60.0 + k * 195.0, 255.0, 0.0)
+    } else {
+        let k = (t - 0.75) / 0.25;
+        (255.0, 255.0 - k * 175.0, 0.0)
+    };
+    egui::Color32::from_rgb(r as u8, g as u8, b as u8)
+}
+
+// ============================================================================
+// Histogram
+// ============================================================================
+
+fn draw_per_depth_histogram(ui: &mut egui::Ui, snapshot: &LodSnapshot) {
+    ui.label("Nodes per depth (render | physics, loaded ▓ loading ░):");
+
+    let counters = &snapshot.counters;
+    let max_count = counters
+        .render_loaded_by_depth
+        .iter()
+        .chain(counters.render_loading_by_depth.iter())
+        .chain(counters.physics_loaded_by_depth.iter())
+        .chain(counters.physics_loading_by_depth.iter())
+        .copied()
+        .max()
+        .unwrap_or(0);
+
+    if max_count == 0 {
+        ui.weak("(no nodes in current snapshot)");
+        return;
+    }
+
+    let depth_count = counters.render_loaded_by_depth.len();
+    let (rect, _) = ui.allocate_exact_size(
+        egui::vec2(ui.available_width().min(360.0), 110.0),
+        egui::Sense::hover(),
+    );
+    let painter = ui.painter_at(rect);
+    painter.rect_filled(rect, 2.0, egui::Color32::from_rgb(18, 20, 26));
+
+    let bar_w = rect.width() / depth_count as f32;
+    let half_w = bar_w * 0.45;
+
+    for depth in 0..depth_count {
+        let x = rect.left() + (depth as f32 + 0.5) * bar_w;
+        // Left half: render. Right half: physics.
+        let render_loaded = counters.render_loaded_by_depth[depth] as f32;
+        let render_loading = counters.render_loading_by_depth[depth] as f32;
+        let physics_loaded = counters.physics_loaded_by_depth[depth] as f32;
+        let physics_loading = counters.physics_loading_by_depth[depth] as f32;
+
+        let h_for = |count: f32| count / max_count as f32 * (rect.height() - 14.0);
+
+        let color = depth_color(depth);
+
+        let bottom = rect.bottom() - 12.0;
+
+        // Render side (left half).
+        let render_total_h = h_for(render_loaded + render_loading);
+        let render_loading_h = h_for(render_loading);
+        if render_total_h > 0.5 {
+            painter.rect_filled(
+                egui::Rect::from_min_max(
+                    egui::pos2(x - half_w, bottom - render_total_h),
+                    egui::pos2(x - 1.0, bottom),
+                ),
+                0.0,
+                color.gamma_multiply(0.85),
+            );
+            if render_loading_h > 0.5 {
+                painter.rect_filled(
+                    egui::Rect::from_min_max(
+                        egui::pos2(x - half_w, bottom - render_total_h),
+                        egui::pos2(x - 1.0, bottom - render_total_h + render_loading_h),
+                    ),
+                    0.0,
+                    color.gamma_multiply(0.45),
+                );
+            }
+        }
+
+        // Physics side (right half).
+        let physics_total_h = h_for(physics_loaded + physics_loading);
+        let physics_loading_h = h_for(physics_loading);
+        if physics_total_h > 0.5 {
+            painter.rect_filled(
+                egui::Rect::from_min_max(
+                    egui::pos2(x + 1.0, bottom - physics_total_h),
+                    egui::pos2(x + half_w, bottom),
+                ),
+                0.0,
+                color.gamma_multiply(0.85),
+            );
+            if physics_loading_h > 0.5 {
+                painter.rect_filled(
+                    egui::Rect::from_min_max(
+                        egui::pos2(x + 1.0, bottom - physics_total_h),
+                        egui::pos2(x + half_w, bottom - physics_total_h + physics_loading_h),
+                    ),
+                    0.0,
+                    color.gamma_multiply(0.45),
+                );
+            }
+        }
+
+        // Depth label below each bar that has any data.
+        if render_total_h > 0.5 || physics_total_h > 0.5 {
+            painter.text(
+                egui::pos2(x, rect.bottom() - 2.0),
+                egui::Align2::CENTER_BOTTOM,
+                format!("{depth}"),
+                egui::FontId::monospace(9.0),
+                egui::Color32::from_rgba_unmultiplied(180, 180, 200, 200),
+            );
+        }
+    }
+}
+
+// ============================================================================
+// Counters / readout
+// ============================================================================
+
+fn draw_counters_panel(ui: &mut egui::Ui, snapshot: &LodSnapshot) {
+    let c = &snapshot.counters;
+    ui.monospace(format!(
+        "Render BFS   loaded {:>4}   loading {:>4}",
+        c.render_loaded, c.render_loading
+    ));
+    let (phys_min, phys_max) = collider_depth_range(snapshot);
+    ui.monospace(format!(
+        "Physics BFS  colliders {:>4}   depth {}..{}",
+        c.physics_colliders,
+        phys_min.map_or("—".to_string(), |d| d.to_string()),
+        phys_max.map_or("—".to_string(), |d| d.to_string()),
+    ));
+    ui.monospace(format!(
+        "Bulks        cached {:>4}   loading {:>4}   failed {:>4}",
+        c.bulks_cached, c.bulks_loading, c.bulks_failed
+    ));
+    let speed = snapshot.velocity.length();
+    let lead = snapshot.lead.length();
+    ui.monospace(format!(
+        "Motion       speed {:>6.2} m/s   lead {:>5.1} m",
+        speed, lead
+    ));
+}
+
+fn collider_depth_range(snapshot: &LodSnapshot) -> (Option<usize>, Option<usize>) {
+    let mut min = None;
+    let mut max = None;
+    for path in &snapshot.physics_collider_paths {
+        let d = path.len();
+        min = Some(min.map_or(d, |m: usize| m.min(d)));
+        max = Some(max.map_or(d, |m: usize| m.max(d)));
+    }
+    (min, max)
 }

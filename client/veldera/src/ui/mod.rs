@@ -55,6 +55,7 @@ impl Plugin for DebugUiPlugin {
             .init_resource::<vehicle::VehicleHistory>()
             .init_resource::<VehicleRightRequest>()
             .init_resource::<VehicleTabOpen>()
+            .init_resource::<streaming::DiagnosticsViewState>()
             .init_resource::<UiVisible>()
             .add_systems(Update, (toggle_ui_visible, inspector::sync_inspect_cursor))
             .add_systems(
@@ -104,6 +105,8 @@ pub struct DebugUiState {
     pub atmosphere_subtab: clouds::AtmosphereSubTab,
     /// Currently selected sub-tab inside the Profiler tab.
     pub profiler_subtab: profiler::ProfilerSubTab,
+    /// Currently selected sub-tab inside the Streaming tab.
+    pub streaming_subtab: streaming::StreamingSubTab,
 }
 
 impl Default for DebugUiState {
@@ -120,6 +123,7 @@ impl Default for DebugUiState {
             ]),
             atmosphere_subtab: clouds::AtmosphereSubTab::default(),
             profiler_subtab: profiler::ProfilerSubTab::default(),
+            streaming_subtab: streaming::StreamingSubTab::default(),
         }
     }
 }
@@ -171,7 +175,7 @@ fn debug_ui_system(
     mut location_params: location::LocationParams,
     mut camera_params: camera::CameraParams,
     mut clouds_params: clouds::CloudParams,
-    streaming_params: streaming::StreamingParams,
+    mut streaming_params: streaming::StreamingParams,
     mut physics_params: physics::PhysicsParams,
     mut vehicle_params: vehicle::VehicleParams,
     mut inspector_params: inspector::InspectorParams,
@@ -222,6 +226,7 @@ fn debug_ui_system(
         dock_state,
         atmosphere_subtab,
         profiler_subtab,
+        streaming_subtab,
     } = &mut *ui_state;
 
     // The dock viewer is a thin closure-backed shim. Each `SystemParam`
@@ -250,7 +255,7 @@ fn debug_ui_system(
             );
         }
         DebugTab::Streaming => {
-            streaming::render_streaming_tab(ui, &streaming_params);
+            streaming::render_streaming_tab(ui, &mut streaming_params, streaming_subtab);
         }
         DebugTab::Physics => {
             physics::render_physics_tab(ui, &mut physics_params);

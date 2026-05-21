@@ -74,6 +74,8 @@ impl Plugin for LodPlugin {
     fn build(&self, app: &mut App) {
         app.init_resource::<LodState>()
             .init_resource::<LodChannels>()
+            .init_resource::<LodSnapshot>()
+            .init_resource::<LodSnapshotRequest>()
             .add_systems(
                 Update,
                 (
@@ -87,6 +89,90 @@ impl Plugin for LodPlugin {
             )
             .add_systems(Update, update_physics_colliders.after(poll_lod_node_tasks));
     }
+}
+
+// ============================================================================
+// Snapshot (diagnostics)
+// ============================================================================
+
+/// Per-frame source flags for a node in [`LodSnapshot`].
+#[derive(Default, Clone, Copy, Debug, PartialEq, Eq)]
+pub struct NodeSources {
+    /// The render BFS visited this node.
+    pub render: bool,
+    /// The physics BFS visited this node.
+    pub physics: bool,
+}
+
+/// Loading state of a node when the snapshot was taken.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SnapshotNodeState {
+    /// Metadata is known (the bulk listing it is cached) but the node
+    /// itself either has no data or hasn't been requested.
+    Discovered,
+    /// A load request is in flight.
+    Loading,
+    /// Node data is available in the cache.
+    Loaded,
+}
+
+/// One node entry in a [`LodSnapshot`].
+#[derive(Clone, Debug)]
+pub struct SnapshotNode {
+    pub path: String,
+    pub depth: usize,
+    pub obb_center: DVec3,
+    /// Conservative radius for drawing — the largest OBB half-extent.
+    pub obb_radius: f64,
+    pub state: SnapshotNodeState,
+    pub sources: NodeSources,
+}
+
+/// Aggregate counters captured alongside the per-node detail.
+#[derive(Default, Clone, Debug)]
+pub struct SnapshotCounters {
+    pub render_loaded: usize,
+    pub render_loading: usize,
+    pub physics_colliders: usize,
+    pub bulks_cached: usize,
+    pub bulks_loading: usize,
+    pub bulks_failed: usize,
+    /// Per-depth counts across the captured snapshot, indexed by depth.
+    pub render_loaded_by_depth: Vec<usize>,
+    pub render_loading_by_depth: Vec<usize>,
+    pub physics_loaded_by_depth: Vec<usize>,
+    pub physics_loading_by_depth: Vec<usize>,
+    pub physics_colliders_by_depth: Vec<usize>,
+}
+
+/// Snapshot of the LOD streaming state for the diagnostics UI.
+///
+/// Populated by `update_lod_requests` once per frame *only* when
+/// [`LodSnapshotRequest::wanted`] is `true`. The UI sets the flag each
+/// frame the diagnostics sub-tab is rendered; this keeps the per-frame
+/// snapshot cost (a few hundred string clones) off the hot path when the
+/// tab isn't visible.
+#[derive(Resource, Default)]
+pub struct LodSnapshot {
+    /// ECEF camera position at the moment the snapshot was taken.
+    pub camera_pos: Option<DVec3>,
+    /// Lead vector used by the physics BFS this frame.
+    pub lead: DVec3,
+    /// Smoothed camera velocity in m/s.
+    pub velocity: DVec3,
+    /// Per-node detail for everything either BFS visited.
+    pub nodes: Vec<SnapshotNode>,
+    /// Paths the physics BFS currently has colliders for.
+    pub physics_collider_paths: HashSet<String>,
+    /// Aggregate counters.
+    pub counters: SnapshotCounters,
+}
+
+/// UI → streaming-system request channel: when `wanted` is true, the next
+/// `update_lod_requests` populates [`LodSnapshot`].
+#[derive(Resource, Default)]
+pub struct LodSnapshotRequest {
+    pub wanted: bool,
 }
 
 /// Cached data for a loaded node, used for physics collider creation.
@@ -696,12 +782,15 @@ fn update_frustum(
 /// Runs both the render BFS and the physics BFS over the same shared
 /// state, then unloads anything neither consumer wants. Load requests
 /// from the two BFSes are merged and deduplicated before being issued.
+#[allow(clippy::too_many_arguments)]
 fn update_lod_requests(
     mut commands: Commands,
     loader_state: Res<LoaderState>,
     mut lod_state: ResMut<LodState>,
     channels: Res<LodChannels>,
     motion: Res<MotionTracker>,
+    mut snapshot_request: ResMut<LodSnapshotRequest>,
+    mut snapshot: ResMut<LodSnapshot>,
     spawner: TaskSpawner,
 ) {
     if loader_state.planetoid.is_none() {
@@ -751,7 +840,22 @@ fn update_lod_requests(
     );
 
     // Stash the latest physics collider selection for `update_physics_colliders`.
-    lod_state.physics_target_paths = physics_bfs.collider_paths;
+    lod_state.physics_target_paths = physics_bfs.collider_paths.clone();
+
+    // Populate the diagnostics snapshot if the UI is asking for it. The
+    // UI raises the flag each frame its sub-tab renders; we lower it here
+    // so a stale flag (UI was closed) only costs us one extra snapshot.
+    if snapshot_request.wanted {
+        snapshot_request.wanted = false;
+        populate_snapshot(
+            &lod_state,
+            &bfs,
+            &physics_bfs,
+            &motion,
+            lod_metrics.camera_position,
+            &mut snapshot,
+        );
+    }
 
     // Limit concurrent loads.
     let max_node_loads = 20;
@@ -1103,4 +1207,110 @@ fn update_physics_colliders(
             tracing::debug!("Removed physics collider for node '{}'", path);
         }
     }
+}
+
+// ============================================================================
+// Snapshot population
+// ============================================================================
+
+/// Build a [`LodSnapshot`] from both BFSes' results and the current LoD state.
+///
+/// Walks the union of the two `potential_nodes` sets, classifies each node
+/// by source and load state, and accumulates per-depth and aggregate
+/// counters. Cost is roughly `O(union)` string-clones — small enough at
+/// typical BFS sizes (a few hundred entries) that running this every frame
+/// the diagnostics tab is open isn't a measurable hit.
+fn populate_snapshot(
+    lod_state: &LodState,
+    render: &BfsResult,
+    physics: &PhysicsBfsResult,
+    motion: &MotionTracker,
+    camera_pos: DVec3,
+    snapshot: &mut LodSnapshot,
+) {
+    snapshot.nodes.clear();
+    snapshot.camera_pos = Some(camera_pos);
+    snapshot.lead = motion.lead();
+    snapshot.velocity = motion.smoothed_velocity();
+    snapshot.physics_collider_paths = physics.collider_paths.clone();
+
+    let mut counters = SnapshotCounters {
+        bulks_cached: lod_state.bulks.len(),
+        bulks_loading: lod_state.loading_bulks.len(),
+        bulks_failed: lod_state.failed_bulks.len(),
+        physics_colliders: lod_state.physics_colliders.len(),
+        ..Default::default()
+    };
+
+    let max_depth = rocktree_decode::MAX_LEVEL + 1;
+    counters.render_loaded_by_depth = vec![0; max_depth];
+    counters.render_loading_by_depth = vec![0; max_depth];
+    counters.physics_loaded_by_depth = vec![0; max_depth];
+    counters.physics_loading_by_depth = vec![0; max_depth];
+    counters.physics_colliders_by_depth = vec![0; max_depth];
+
+    let union: HashSet<&String> = render
+        .potential_nodes
+        .iter()
+        .chain(physics.potential_nodes.iter())
+        .collect();
+
+    for path in union {
+        let depth = path.len();
+        let sources = NodeSources {
+            render: render.potential_nodes.contains(path),
+            physics: physics.potential_nodes.contains(path),
+        };
+
+        let state = if lod_state.node_data.contains_key(path) {
+            SnapshotNodeState::Loaded
+        } else if lod_state.loading_nodes.contains(path) {
+            SnapshotNodeState::Loading
+        } else {
+            SnapshotNodeState::Discovered
+        };
+
+        if depth < counters.render_loaded_by_depth.len() {
+            if sources.render {
+                match state {
+                    SnapshotNodeState::Loaded => counters.render_loaded_by_depth[depth] += 1,
+                    SnapshotNodeState::Loading => counters.render_loading_by_depth[depth] += 1,
+                    SnapshotNodeState::Discovered => {}
+                }
+            }
+            if sources.physics {
+                match state {
+                    SnapshotNodeState::Loaded => counters.physics_loaded_by_depth[depth] += 1,
+                    SnapshotNodeState::Loading => counters.physics_loading_by_depth[depth] += 1,
+                    SnapshotNodeState::Discovered => {}
+                }
+            }
+        }
+
+        let (obb_center, obb_radius) = match lod_state.node_obbs.get(path) {
+            Some(obb) => (obb.center, obb.extents.length()),
+            None => continue, // No OBB cached — skip, can't draw it.
+        };
+
+        snapshot.nodes.push(SnapshotNode {
+            path: path.clone(),
+            depth,
+            obb_center,
+            obb_radius,
+            state,
+            sources,
+        });
+    }
+
+    for path in &physics.collider_paths {
+        let depth = path.len();
+        if depth < counters.physics_colliders_by_depth.len() {
+            counters.physics_colliders_by_depth[depth] += 1;
+        }
+    }
+
+    counters.render_loaded = lod_state.loaded_nodes.len();
+    counters.render_loading = lod_state.loading_nodes.len();
+
+    snapshot.counters = counters;
 }
