@@ -90,9 +90,10 @@ struct CloudUniform {
     denoise_variance_strength: f32,
     // Half-width of the per-layer density smoothstep band. Density
     // goes from 0 at `coverage - half_width` to 1 at
-    // `coverage + half_width`. See `CloudLayers::density_band_half_width`.
+    // `coverage + half_width`. Completes the 16-byte block with
+    // the three denoise scalars above. See
+    // `CloudLayers::density_band_half_width`.
     density_band_half_width: f32,
-    pad_density_band: vec3<u32>,
 
     layers: array<CloudSubLayer, MAX_CLOUD_LAYERS>,
 
