@@ -256,6 +256,15 @@ pub struct LodState {
     lod_metrics: Option<LodMetrics>,
     /// Cached node data for physics collider creation.
     node_data: HashMap<String, LoadedNodeData>,
+    /// Per-bulk node lookup index, keyed by bulk path. Maps a node's
+    /// relative-within-bulk path to its position in `bulks[key].nodes`.
+    ///
+    /// Built once when each bulk is inserted into [`Self::bulks`], reused
+    /// by every BFS visit instead of rebuilding the same HashMap on every
+    /// frontier expansion. With ~639 bulks × ~150 nodes/bulk and frontier
+    /// sizes in the thousands per frame, this turns tens of thousands of
+    /// per-frame HashMap inserts into amortised zero.
+    bulk_node_indices: HashMap<String, HashMap<String, usize>>,
     /// Physics collider entities, keyed by node path.
     physics_colliders: HashMap<String, Entity>,
     /// Paths the physics BFS selected as collider hosts this frame.
@@ -385,23 +394,20 @@ fn bfs_traversal(
             let Some(bulk) = lod_state.bulks.get(effective_bulk_key) else {
                 continue;
             };
+            let Some(node_index) = lod_state.bulk_node_indices.get(effective_bulk_key) else {
+                continue;
+            };
             potential_bulks.insert(effective_bulk_key.to_string());
-
-            // Build a temporary index of nodes in this bulk by relative path.
-            let node_index: HashMap<&str, &NodeMetadata> = bulk
-                .nodes
-                .iter()
-                .map(|n| (&n.path[effective_bulk_key.len()..], n))
-                .collect();
 
             for octant in b'0'..=b'7' {
                 let mut nxt = path.clone();
                 nxt.push(octant as char);
 
                 let nxt_rel = &nxt[effective_bulk_key.len()..];
-                let Some(node) = node_index.get(nxt_rel) else {
+                let Some(&node_idx) = node_index.get(nxt_rel) else {
                     continue;
                 };
+                let node = &bulk.nodes[node_idx];
 
                 // Frustum culling using the OBB, with a "keep loaded"
                 // exception for nodes near the camera at low altitude.
@@ -580,16 +586,12 @@ fn physics_walk(
     let Some(bulk) = lod_state.bulks.get(effective_bulk_key) else {
         return false;
     };
+    let Some(node_index) = lod_state.bulk_node_indices.get(effective_bulk_key) else {
+        return false;
+    };
     result
         .potential_bulks
         .insert(effective_bulk_key.to_string());
-
-    // Build a relative-path → node index for this bulk's nodes.
-    let node_index: HashMap<&str, &NodeMetadata> = bulk
-        .nodes
-        .iter()
-        .map(|n| (&n.path[effective_bulk_key.len()..], n))
-        .collect();
 
     let mut any_committed = false;
 
@@ -598,10 +600,11 @@ fn physics_walk(
         child_path.push(octant as char);
 
         let child_rel = &child_path[effective_bulk_key.len()..];
-        let Some(child_node) = node_index.get(child_rel) else {
+        let Some(&child_idx) = node_index.get(child_rel) else {
             // Empty octant — no terrain here, no collider needed.
             continue;
         };
+        let child_node = &bulk.nodes[child_idx];
 
         let dist = effective_distance(&child_node.obb, camera_pos, lead);
         let Some(target_depth) = desired_physics_depth(dist) else {
@@ -760,6 +763,7 @@ fn unload_obsolete(
         .collect();
     for path in obsolete_bulks {
         lod_state.bulks.remove(&path);
+        lod_state.bulk_node_indices.remove(&path);
         lod_state.node_obbs.retain(|k, _| !k.starts_with(&path));
         lod_state.failed_bulks.remove(&path);
     }
@@ -860,9 +864,11 @@ fn update_lod_requests(
         return;
     };
 
-    // Ensure root bulk is in the cache.
+    // Ensure root bulk + its node index are in the cache.
     if !lod_state.bulks.contains_key("") {
+        let index = build_bulk_node_index("", root_bulk);
         lod_state.bulks.insert(String::new(), root_bulk.clone());
+        lod_state.bulk_node_indices.insert(String::new(), index);
     }
 
     // Render BFS (read-only access to lod_state).
@@ -1019,7 +1025,9 @@ fn poll_lod_bulk_tasks(mut lod_state: ResMut<LodState>, channels: Res<LodChannel
                     bulk.path,
                     bulk.nodes.len()
                 );
-                lod_state.bulks.insert(path, bulk);
+                let index = build_bulk_node_index(&path, &bulk);
+                lod_state.bulks.insert(path.clone(), bulk);
+                lod_state.bulk_node_indices.insert(path, index);
             }
             Err(e) => {
                 tracing::debug!("LOD: Failed to load bulk '{}': {}", path, e);
@@ -1027,6 +1035,23 @@ fn poll_lod_bulk_tasks(mut lod_state: ResMut<LodState>, channels: Res<LodChannel
             }
         }
     }
+}
+
+/// Build the relative-path → node-index lookup for a freshly loaded bulk.
+///
+/// `bulk_key` is the bulk's full path (used as the key in
+/// [`LodState::bulks`]); relative paths are stored without that prefix.
+fn build_bulk_node_index(bulk_key: &str, bulk: &BulkMetadata) -> HashMap<String, usize> {
+    let mut index = HashMap::with_capacity(bulk.nodes.len());
+    for (i, node) in bulk.nodes.iter().enumerate() {
+        // Defensive: tolerate a node whose full path doesn't start with
+        // the bulk key (shouldn't happen, but a corrupt server response
+        // shouldn't panic the streaming system).
+        if let Some(rel) = node.path.strip_prefix(bulk_key) {
+            index.insert(rel.to_string(), i);
+        }
+    }
+    index
 }
 
 /// Poll node loading results from channel and spawn meshes.
