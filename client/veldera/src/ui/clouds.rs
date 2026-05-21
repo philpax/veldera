@@ -164,6 +164,16 @@ fn render_overview(ui: &mut egui::Ui, cloud: &mut CloudLayers) {
          smoother opacity integration = less morphing under motion, but proportionally more \
          raymarch cost. Default 500 m.",
     );
+    ui.add(
+        egui::Slider::new(&mut cloud.density_band_half_width, 0.02..=0.5)
+            .text("density band half-width"),
+    )
+    .on_hover_text(
+        "Half-width of the density smoothstep around per-layer `coverage`. Narrow (~0.05) = \
+         sharp silhouettes but lateral camera motion produces visible structural transitions \
+         where samples crossing the steep part of the smoothstep flip together. Wide (~0.3) = \
+         fuzzier silhouettes but stable substructure under motion. Default 0.1.",
+    );
     ui.checkbox(
         &mut cloud.raymarch_jitter_temporal_rotation,
         "Per-frame hash rotation",

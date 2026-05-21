@@ -302,8 +302,9 @@ fn sample_layer_density_breakdown(
     }
 
     b.raw = shape * b.v_profile;
-    b.cov_lo = max(b.regional_coverage - 0.1, 0.0);
-    b.cov_hi = min(b.regional_coverage + 0.1, 1.0);
+    let band = max(cloud.density_band_half_width, 1e-3);
+    b.cov_lo = max(b.regional_coverage - band, 0.0);
+    b.cov_hi = min(b.regional_coverage + band, 1.0);
     b.density = smoothstep(b.cov_lo, b.cov_hi, b.raw) * layer.density_scale;
     return b;
 }

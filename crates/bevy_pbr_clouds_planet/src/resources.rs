@@ -173,6 +173,10 @@ pub struct GpuCloudUniform {
     /// SVGF variance-modulation strength. Driven by
     /// [`crate::CloudLayers::denoise_variance_strength`].
     pub denoise_variance_strength: f32,
+    /// Density smoothstep half-width. Driven by
+    /// [`crate::CloudLayers::density_band_half_width`].
+    pub density_band_half_width: f32,
+    pub pad_density_band: [f32; 3],
 
     pub layers: [GpuCloudSubLayer; MAX_CLOUD_LAYERS],
 
@@ -1480,6 +1484,8 @@ pub(super) fn prepare_cloud_uniforms(
             denoise_sigma_transmittance: cloud.denoise_sigma_transmittance,
             denoise_sigma_color: cloud.denoise_sigma_color,
             denoise_variance_strength: cloud.denoise_variance_strength,
+            density_band_half_width: cloud.density_band_half_width.max(1e-3),
+            pad_density_band: [0.0; 3],
             layers: gpu_layers,
             shadow_from_world,
             shadow_footprint: footprint,

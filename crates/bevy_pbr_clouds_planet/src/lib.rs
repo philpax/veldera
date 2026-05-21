@@ -588,6 +588,15 @@ pub struct CloudLayers {
     /// not an integration-undersampling issue); pick a value that
     /// trades fidelity for perf to taste. Default `800.0`.
     pub primary_step_world_m: f32,
+    /// Half-width of the density smoothstep band around per-layer
+    /// `coverage`: density goes from 0 at `coverage − half_width` to
+    /// 1 at `coverage + half_width`. Narrow band = sharp cloud
+    /// silhouettes but lateral camera motion produces visible
+    /// "structural transitions" where samples crossing the steep
+    /// part of the smoothstep flip together; wide band = fuzzier
+    /// silhouettes but stable shape under motion. Default `0.1`
+    /// (full band width 0.2).
+    pub density_band_half_width: f32,
     /// If true, the per-pixel `t_first` sub-grid hash is rotated by
     /// the golden ratio each frame (Cranley-Patterson rotation), so
     /// every pixel sees a different sub-step offset every frame.
@@ -868,6 +877,7 @@ impl CloudLayers {
             raymarch_taa_jitter_magnitude: 1.0,
             raymarch_lod_bias: 3.0,
             primary_step_world_m: 800.0,
+            density_band_half_width: 0.1,
             raymarch_jitter_temporal_rotation: true,
             denoise: true,
             denoise_iterations: 1,
@@ -893,6 +903,7 @@ impl CloudLayers {
             raymarch_taa_jitter_magnitude: 1.0,
             raymarch_lod_bias: 3.0,
             primary_step_world_m: 800.0,
+            density_band_half_width: 0.1,
             raymarch_jitter_temporal_rotation: true,
             denoise: true,
             denoise_iterations: 1,
@@ -924,6 +935,7 @@ impl CloudLayers {
             raymarch_taa_jitter_magnitude: 1.0,
             raymarch_lod_bias: 3.0,
             primary_step_world_m: 800.0,
+            density_band_half_width: 0.1,
             raymarch_jitter_temporal_rotation: true,
             denoise: true,
             denoise_iterations: 1,

@@ -88,6 +88,11 @@ struct CloudUniform {
     // SVGF variance-modulation strength. Effective transmittance
     // sigma is `denoise_sigma_transmittance + denoise_variance_strength * stddev`.
     denoise_variance_strength: f32,
+    // Half-width of the per-layer density smoothstep band. Density
+    // goes from 0 at `coverage - half_width` to 1 at
+    // `coverage + half_width`. See `CloudLayers::density_band_half_width`.
+    density_band_half_width: f32,
+    pad_density_band: vec3<u32>,
 
     layers: array<CloudSubLayer, MAX_CLOUD_LAYERS>,
 
