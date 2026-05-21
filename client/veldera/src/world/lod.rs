@@ -18,9 +18,9 @@
 //! is visible to the other via the shared `loading_nodes` / `loaded_nodes`
 //! / `bulks` state, so no double-loading. Retention takes the union of
 //! both BFSes' potential sets *over a rolling grace window* (see
-//! [`UNLOAD_GRACE_PERIOD_SECS`]) — a node stays alive as long as either
-//! consumer asked for it within the last few seconds. The grace window
-//! prevents thrash when the view briefly turns away and back.
+//! [`LodTuning::unload_grace_period_secs`]) — a node stays alive as long
+//! as either consumer asked for it within the last few seconds. The grace
+//! window prevents thrash when the view briefly turns away and back.
 //!
 //! Uses platform-agnostic `async_channel` for communication between async tasks
 //! and the main thread. Task spawning is handled by `TaskSpawner` from the
@@ -65,32 +65,50 @@ use crate::constants::EARTH_RADIUS_M_F64;
 /// Above this height, normal frustum culling is used for all nodes.
 const PROXIMITY_LOADING_MAX_ALTITUDE: f64 = 1000.0;
 
-/// Radius around the camera where nodes are kept loaded by the render BFS
-/// regardless of frustum visibility.
-///
-/// Wide enough that turning the camera 360° doesn't drop tiles you were
-/// just looking at — they stay in memory ready to flip visible when they
-/// re-enter the frustum. They're still hidden by `cull_meshes` until then,
-/// so this only costs CPU memory, not GPU rendering.
-const KEEP_LOADED_RADIUS: f64 = 250.0;
+/// Default keep-loaded radius (m). See [`LodTuning::keep_loaded_radius`].
+const DEFAULT_KEEP_LOADED_RADIUS: f64 = 250.0;
+
+/// Default unload grace period (seconds). See
+/// [`LodTuning::unload_grace_period_secs`].
+const DEFAULT_UNLOAD_GRACE_PERIOD_SECS: f64 = 3.0;
 
 /// Radius around the camera within which loaded nodes are forced visible
 /// in `cull_meshes`, bypassing frustum culling.
 ///
-/// Smaller than [`KEEP_LOADED_RADIUS`] on purpose: this only covers the
-/// ground right under the player as a safety net against frustum-culling
-/// edge cases. Anything wider would render nodes behind the camera for no
-/// visual benefit.
+/// Smaller than [`LodTuning::keep_loaded_radius`] on purpose: this only
+/// covers the ground right under the player as a safety net against
+/// frustum-culling edge cases. Anything wider would render nodes behind
+/// the camera for no visual benefit. Not exposed as a slider because the
+/// "right" value here is "as small as possible while keeping the ground
+/// reliable" — there's nothing to tune at runtime.
 const FORCE_VISIBLE_RADIUS: f64 = 50.0;
 
-/// Grace period before evicting a node/bulk that has dropped out of every
-/// BFS's potential set.
+/// Runtime-tunable LoD streaming parameters exposed in the diagnostics UI.
 ///
-/// Without this, quickly tilting up or panning unloads tiles the moment
-/// they leave the frustum and reloads them when the view returns. The
-/// grace period lets the view settle: tiles last seen within this window
-/// are retained, so transient camera motion doesn't churn streaming.
-const UNLOAD_GRACE_PERIOD_SECS: f64 = 3.0;
+/// Both knobs trade memory pressure for view-churn resilience:
+///
+/// - **`keep_loaded_radius`** keeps nearby tiles loaded even when frustum-
+///   culled, so a 360° rotation doesn't drop tiles you were just looking
+///   at. They stay in memory hidden by `cull_meshes` until they re-enter
+///   the frustum — wider means more CPU memory, less reload pop-in.
+/// - **`unload_grace_period_secs`** delays eviction of tiles that have
+///   left every BFS's potential set. Longer means transient camera moves
+///   (look up/down briefly) don't churn streaming, but stale tiles
+///   linger in memory.
+#[derive(Resource, Debug, Clone, Copy)]
+pub struct LodTuning {
+    pub keep_loaded_radius: f64,
+    pub unload_grace_period_secs: f64,
+}
+
+impl Default for LodTuning {
+    fn default() -> Self {
+        Self {
+            keep_loaded_radius: DEFAULT_KEEP_LOADED_RADIUS,
+            unload_grace_period_secs: DEFAULT_UNLOAD_GRACE_PERIOD_SECS,
+        }
+    }
+}
 
 /// Plugin for LOD management and frustum culling.
 pub struct LodPlugin;
@@ -101,6 +119,7 @@ impl Plugin for LodPlugin {
             .init_resource::<LodChannels>()
             .init_resource::<LodSnapshot>()
             .init_resource::<LodSnapshotRequest>()
+            .init_resource::<LodTuning>()
             .add_systems(
                 Update,
                 (
@@ -324,7 +343,12 @@ struct BfsResult {
 ///
 /// All access to `lod_state` during BFS is read-only. Mutations are collected
 /// into the returned `BfsResult` and applied by the caller.
-fn bfs_traversal(lod_state: &LodState, frustum: Frustum, lod_metrics: LodMetrics) -> BfsResult {
+fn bfs_traversal(
+    lod_state: &LodState,
+    tuning: &LodTuning,
+    frustum: Frustum,
+    lod_metrics: LodMetrics,
+) -> BfsResult {
     let mut nodes_to_load: Vec<NodeMetadata> = Vec::new();
     let mut bulks_to_load: Vec<(String, u32)> = Vec::new();
     let mut potential_nodes: HashSet<String> = HashSet::new();
@@ -400,7 +424,7 @@ fn bfs_traversal(lod_state: &LodState, frustum: Frustum, lod_metrics: LodMetrics
                 let camera_altitude = lod_metrics.camera_position.length() - EARTH_RADIUS_M_F64;
                 let is_low_altitude = camera_altitude <= PROXIMITY_LOADING_MAX_ALTITUDE;
                 let distance_to_node = lod_metrics.camera_position.distance(node.obb.center);
-                let is_nearby = distance_to_node <= KEEP_LOADED_RADIUS;
+                let is_nearby = distance_to_node <= tuning.keep_loaded_radius;
 
                 let in_frustum = frustum.intersects_obb(&node.obb);
                 let force_load = is_low_altitude && is_nearby;
@@ -684,7 +708,7 @@ fn commit_physics_collider(
 /// `retained_nodes` and `retained_bulks` are the precomputed union of:
 /// - paths the render BFS visited this frame
 /// - paths the physics BFS visited this frame
-/// - paths visited within the last [`UNLOAD_GRACE_PERIOD_SECS`]
+/// - paths visited within the last [`LodTuning::unload_grace_period_secs`]
 ///
 /// `physics_collider_paths` is passed separately so we can also keep
 /// `node_data` alive for paths the physics system is currently using as a
@@ -830,6 +854,7 @@ fn update_lod_requests(
     mut lod_state: ResMut<LodState>,
     channels: Res<LodChannels>,
     motion: Res<MotionTracker>,
+    tuning: Res<LodTuning>,
     mut snapshot_request: ResMut<LodSnapshotRequest>,
     mut snapshot: ResMut<LodSnapshot>,
     spawner: TaskSpawner,
@@ -853,7 +878,7 @@ fn update_lod_requests(
     }
 
     // Render BFS (read-only access to lod_state).
-    let bfs = bfs_traversal(&lod_state, frustum, lod_metrics);
+    let bfs = bfs_traversal(&lod_state, &tuning, frustum, lod_metrics);
 
     // Physics BFS — independent of render frustum, uses distance-banded
     // refinement biased forward along the smoothed velocity vector.
@@ -870,8 +895,8 @@ fn update_lod_requests(
 
     // Refresh "last seen" timestamps for everything either BFS wants
     // right now. Anything not refreshed will fall outside the grace
-    // period after UNLOAD_GRACE_PERIOD_SECS and become eligible for
-    // eviction. Hysteresis turns a brief view shift (look up/down,
+    // period (LodTuning::unload_grace_period_secs) and become eligible
+    // for eviction. Hysteresis turns a brief view shift (look up/down,
     // glance sideways) into a no-op for streaming.
     let now = time.elapsed_secs_f64();
     for path in bfs
@@ -891,7 +916,7 @@ fn update_lod_requests(
 
     // Drop expired entries from the last-seen maps so they don't grow
     // unbounded as the camera roams.
-    let cutoff = now - UNLOAD_GRACE_PERIOD_SECS;
+    let cutoff = now - tuning.unload_grace_period_secs;
     lod_state.node_last_seen.retain(|_, t| *t >= cutoff);
     lod_state.bulk_last_seen.retain(|_, t| *t >= cutoff);
 

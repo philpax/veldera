@@ -22,7 +22,9 @@ use crate::{
     camera::RadialFrame,
     physics::{PHYSICS_DISTANCE_BANDS, PHYSICS_RANGE},
     rendering::mesh::RocktreeMeshMarker,
-    world::lod::{LodSnapshot, LodSnapshotRequest, LodState, SnapshotNode, SnapshotNodeState},
+    world::lod::{
+        LodSnapshot, LodSnapshotRequest, LodState, LodTuning, SnapshotNode, SnapshotNodeState,
+    },
 };
 
 /// Currently-selected sub-tab inside the Streaming panel.
@@ -50,6 +52,7 @@ pub(super) struct StreamingParams<'w, 's> {
     pub snapshot: Res<'w, LodSnapshot>,
     pub snapshot_request: ResMut<'w, LodSnapshotRequest>,
     pub diagnostics_state: ResMut<'w, DiagnosticsViewState>,
+    pub tuning: ResMut<'w, LodTuning>,
 }
 
 /// Per-frame UI state for the diagnostics map (zoom, layer toggles).
@@ -118,6 +121,7 @@ fn render_overview(ui: &mut egui::Ui, params: &StreamingParams) {
 fn render_diagnostics(ui: &mut egui::Ui, params: &mut StreamingParams) {
     let snapshot = &*params.snapshot;
     let view = &mut *params.diagnostics_state;
+    let tuning = &mut *params.tuning;
 
     if snapshot.camera_pos.is_none() {
         ui.label("Waiting for first snapshot…");
@@ -137,7 +141,34 @@ fn render_diagnostics(ui: &mut egui::Ui, params: &mut StreamingParams) {
         );
     });
 
-    draw_top_down_map(ui, snapshot, view);
+    // Streaming tuning sliders. Both knobs feed `LodTuning`, read by
+    // `update_lod_requests` on the next tick.
+    ui.horizontal(|ui| {
+        ui.label("Keep-loaded radius:");
+        ui.add(
+            egui::Slider::new(&mut tuning.keep_loaded_radius, 50.0..=2000.0)
+                .logarithmic(true)
+                .suffix(" m"),
+        )
+        .on_hover_text(
+            "Render-BFS bypass radius for frustum culling. Wider \
+             = fewer tile reloads when turning, more memory.",
+        );
+    });
+    ui.horizontal(|ui| {
+        ui.label("Unload grace:");
+        ui.add(
+            egui::Slider::new(&mut tuning.unload_grace_period_secs, 0.0..=15.0)
+                .step_by(0.1)
+                .suffix(" s"),
+        )
+        .on_hover_text(
+            "Seconds a tile stays loaded after dropping out of \
+             every BFS. Longer = less churn on quick view shifts.",
+        );
+    });
+
+    draw_top_down_map(ui, snapshot, view, tuning);
 
     ui.separator();
     draw_per_depth_histogram(ui, snapshot);
@@ -150,7 +181,12 @@ fn render_diagnostics(ui: &mut egui::Ui, params: &mut StreamingParams) {
 // Top-down map
 // ============================================================================
 
-fn draw_top_down_map(ui: &mut egui::Ui, snapshot: &LodSnapshot, view: &DiagnosticsViewState) {
+fn draw_top_down_map(
+    ui: &mut egui::Ui,
+    snapshot: &LodSnapshot,
+    view: &DiagnosticsViewState,
+    tuning: &LodTuning,
+) {
     let Some(camera_pos) = snapshot.camera_pos else {
         return;
     };
@@ -190,13 +226,28 @@ fn draw_top_down_map(ui: &mut egui::Ui, snapshot: &LodSnapshot, view: &Diagnosti
             );
         }
     }
-    // Outer PHYSICS_RANGE ring (heavier).
+    // Outer PHYSICS_RANGE ring (heavier, warm tint).
     let outer_r = PHYSICS_RANGE as f32 * pixels_per_m;
     if outer_r > 1.0 && outer_r < rect.width() {
         painter.circle_stroke(
             center,
             outer_r,
             egui::Stroke::new(1.5, egui::Color32::from_rgba_unmultiplied(140, 80, 60, 220)),
+        );
+    }
+
+    // Keep-loaded radius (render-BFS proximity bypass), dashed-feel
+    // green so it visually reads as "this is a retention boundary,
+    // not a physics one".
+    let keep_r = tuning.keep_loaded_radius as f32 * pixels_per_m;
+    if keep_r > 1.0 && keep_r < rect.width() {
+        painter.circle_stroke(
+            center,
+            keep_r,
+            egui::Stroke::new(
+                1.5,
+                egui::Color32::from_rgba_unmultiplied(90, 160, 100, 200),
+            ),
         );
     }
 
