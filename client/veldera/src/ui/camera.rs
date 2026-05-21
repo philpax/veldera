@@ -7,8 +7,9 @@ use bevy_egui::egui;
 
 use crate::{
     camera::{
-        CameraMode, CameraModeState, CameraSettings, FlightCamera, FollowCameraConfig,
-        FollowEntityTarget, MAX_SPEED, MIN_SPEED, TeleportAnimationMode,
+        CameraMode, CameraModeState, CameraSettings, FPS_PLAYER_MAX_RADIUS_RATIO,
+        FPS_PLAYER_MIN_RADIUS_RATIO, FlightCamera, FollowCameraConfig, FollowEntityTarget,
+        FpsPlayerConfig, MAX_SPEED, MIN_SPEED, TeleportAnimationMode,
     },
     world::floating_origin::FloatingOriginCamera,
 };
@@ -18,6 +19,7 @@ use crate::{
 pub(super) struct CameraParams<'w, 's> {
     pub settings: ResMut<'w, CameraSettings>,
     pub camera_mode: Res<'w, CameraModeState>,
+    pub player_config: ResMut<'w, FpsPlayerConfig>,
     pub camera_query: Query<
         'w,
         's,
@@ -57,6 +59,12 @@ pub(super) fn render_camera_tab(ui: &mut egui::Ui, camera: &mut CameraParams) {
         ui.separator();
     }
 
+    // Player size config (only meaningful in FPS mode).
+    if camera.camera_mode.is_fps_controller() {
+        render_player_size_config(ui, camera);
+        ui.separator();
+    }
+
     // Follow camera config (only in follow entity mode).
     if camera.camera_mode.is_follow_entity() {
         render_follow_camera_config(ui, camera);
@@ -84,6 +92,39 @@ pub(super) fn render_camera_tab(ui: &mut egui::Ui, camera: &mut CameraParams) {
                     "Horizon",
                 );
             });
+    });
+}
+
+/// Render FPS player size sliders.
+///
+/// Both knobs feed `FpsPlayerConfig`, which `fps_controller_prepare`
+/// re-reads each tick, so the collider and the eye height update live.
+fn render_player_size_config(ui: &mut egui::Ui, camera: &mut CameraParams) {
+    let config = &mut *camera.player_config;
+    ui.collapsing("Player size", |ui| {
+        ui.horizontal(|ui| {
+            ui.label("Height:");
+            ui.add(
+                egui::Slider::new(&mut config.height, 0.5..=3.0)
+                    .step_by(0.05)
+                    .suffix(" m"),
+            );
+        });
+        ui.horizontal(|ui| {
+            ui.label("Radius / height:");
+            ui.add(
+                egui::Slider::new(
+                    &mut config.radius_ratio,
+                    FPS_PLAYER_MIN_RADIUS_RATIO..=FPS_PLAYER_MAX_RADIUS_RATIO,
+                )
+                .step_by(0.01),
+            );
+        });
+        ui.label(format!(
+            "Capsule radius: {:.2} m, eye height: {:.2} m",
+            config.radius(),
+            config.height
+        ));
     });
 }
 

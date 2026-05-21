@@ -1,5 +1,4 @@
 - [ ] refactor into multiple crates, engine / game
-- [ ] figure out what's going on with scale
 - [ ] physics should use the target tile size, or the best available if no better is available
 - [ ] light pollution map?
 - [ ] optimise update_lod_requests

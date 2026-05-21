@@ -11,8 +11,8 @@ use serde::Deserialize;
 use crate::{
     async_runtime::TaskSpawner,
     camera::{
-        CameraMode, CameraModeState, CameraSettings, FlightCamera, LogicalPlayer, RadialFrame,
-        RenderPlayer, TeleportAnimationMode, direction_to_yaw_pitch, spawn_fps_player,
+        CameraMode, CameraModeState, CameraSettings, FlightCamera, FpsPlayerConfig, LogicalPlayer,
+        RadialFrame, RenderPlayer, TeleportAnimationMode, direction_to_yaw_pitch, spawn_fps_player,
     },
     world::{
         coords::{lat_lon_to_ecef, slerp_dvec3, smootherstep},
@@ -907,6 +907,7 @@ fn update_teleport_animation(
     time: Res<Time>,
     mut animation: ResMut<TeleportAnimation>,
     spatial_query: SpatialQuery,
+    player_config: Res<FpsPlayerConfig>,
     mut camera_query: Query<(
         Entity,
         &mut FloatingOriginCamera,
@@ -998,7 +999,12 @@ fn update_teleport_animation(
             // Check for timeout.
             if phase.elapsed - started_at >= PHYSICS_WAIT_TIMEOUT {
                 tracing::warn!("Physics wait timeout ({PHYSICS_WAIT_TIMEOUT}s), spawning anyway");
-                complete_teleport_animation(&mut commands, &mut animation, &camera_query);
+                complete_teleport_animation(
+                    &mut commands,
+                    &player_config,
+                    &mut animation,
+                    &camera_query,
+                );
                 return;
             }
 
@@ -1040,7 +1046,12 @@ fn update_teleport_animation(
                         ground_hit: latest_hit,
                     };
                 }
-                complete_teleport_animation(&mut commands, &mut animation, &camera_query);
+                complete_teleport_animation(
+                    &mut commands,
+                    &player_config,
+                    &mut animation,
+                    &camera_query,
+                );
             }
         }
     }
@@ -1097,6 +1108,7 @@ fn find_ground_underneath(
 /// Complete the teleport animation and return control to the player.
 fn complete_teleport_animation(
     commands: &mut Commands,
+    player_config: &FpsPlayerConfig,
     animation: &mut ResMut<TeleportAnimation>,
     camera_query: &Query<(
         Entity,
@@ -1135,7 +1147,8 @@ fn complete_teleport_animation(
         let (yaw, pitch) = direction_to_yaw_pitch(flight_camera.direction, spawn_ecef);
 
         // Spawn new logical player at position above ground.
-        let logical_entity = spawn_fps_player(commands, spawn_ecef, physics_pos, yaw, pitch);
+        let logical_entity =
+            spawn_fps_player(commands, player_config, spawn_ecef, physics_pos, yaw, pitch);
 
         // Add RenderPlayer to camera.
         commands

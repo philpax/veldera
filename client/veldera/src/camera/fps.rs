@@ -71,6 +71,7 @@ impl Plugin for FpsControllerPlugin {
     fn build(&self, app: &mut App) {
         app.init_resource::<DidFixedTimestepRunThisFrame>()
             .init_resource::<PreservedFpsState>()
+            .init_resource::<FpsPlayerConfig>()
             .add_systems(PreUpdate, clear_fixed_timestep_flag)
             .add_systems(
                 FixedPreUpdate,
@@ -134,10 +135,61 @@ pub struct RenderPlayer {
     pub logical_entity: Entity,
 }
 
-/// Camera configuration for the FPS controller.
-#[derive(Component)]
-pub struct CameraConfig {
-    pub height_offset: f32,
+/// Player size configuration for the FPS controller.
+///
+/// Single source of truth for capsule dimensions. Read each tick by
+/// `fps_controller_prepare`, which resizes the collider and updates
+/// `FpsController::upright_height`/`crouch_height` from these values.
+///
+/// `radius_ratio` is the capsule radius as a fraction of total height;
+/// it must stay strictly below `0.5` so the capsule has a non-empty
+/// cylindrical segment between its hemispheres.
+#[derive(Resource, Debug, Clone, Copy)]
+pub struct FpsPlayerConfig {
+    /// Total player height in meters (bottom of feet to top of head).
+    pub height: f32,
+    /// Capsule radius as a fraction of `height`.
+    pub radius_ratio: f32,
+}
+
+/// Crouched height as a fraction of upright `FpsPlayerConfig::height`.
+///
+/// Chosen to match the previous hard-coded ratio of `1.0 / 1.8`, so the
+/// crouch animation feels the same at the default player size.
+const CROUCH_HEIGHT_RATIO: f32 = 1.0 / 1.8;
+
+/// Maximum allowed `radius_ratio`. A capsule needs `radius < height / 2`
+/// or the hemispheres overlap and the cylinder segment vanishes; clamp
+/// slightly under `0.5` so we always have a non-degenerate capsule.
+pub const FPS_PLAYER_MAX_RADIUS_RATIO: f32 = 0.49;
+
+/// Minimum allowed `radius_ratio`. A very thin capsule is fine
+/// geometrically but causes the controller to wedge into collision
+/// gaps; pick a sensible floor for the slider.
+pub const FPS_PLAYER_MIN_RADIUS_RATIO: f32 = 0.05;
+
+impl Default for FpsPlayerConfig {
+    fn default() -> Self {
+        Self {
+            height: 1.8,
+            radius_ratio: 0.5 / 1.8,
+        }
+    }
+}
+
+impl FpsPlayerConfig {
+    /// Capsule radius derived from `height` and `radius_ratio`.
+    pub fn radius(&self) -> f32 {
+        self.height
+            * self
+                .radius_ratio
+                .clamp(FPS_PLAYER_MIN_RADIUS_RATIO, FPS_PLAYER_MAX_RADIUS_RATIO)
+    }
+
+    /// Crouched capsule height derived from upright `height`.
+    pub fn crouch_height(&self) -> f32 {
+        self.height * CROUCH_HEIGHT_RATIO
+    }
 }
 
 #[derive(Component, Default)]
@@ -231,20 +283,32 @@ pub(super) struct PreservedFpsState {
 }
 
 /// Spawn the FPS player entity at the given ECEF position.
+///
+/// Capsule dimensions and the controller's height fields are initialised
+/// from `config` so the player size matches whatever the UI shows at
+/// spawn time. `fps_controller_prepare` re-syncs these every tick, so
+/// later edits to the resource take effect on the next frame.
 pub fn spawn_fps_player(
     commands: &mut Commands,
+    config: &FpsPlayerConfig,
     ecef_pos: DVec3,
     physics_pos: Vec3,
     yaw: f32,
     pitch: f32,
 ) -> Entity {
+    let height = config.height;
+    let radius = config.radius();
+    // Capsule "length" in Avian is the sphere-to-sphere distance, so
+    // total height = length + 2 * radius. Solve for length.
+    let length = (height - 2.0 * radius).max(0.0);
+
     commands
         .spawn((
             LogicalPlayer,
             Transform::from_translation(physics_pos),
             WorldPosition::from_dvec3(ecef_pos),
             RigidBody::Kinematic,
-            Collider::capsule(0.5, 1.0),
+            Collider::capsule(radius, length),
             Position(physics_pos),
             CustomPositionIntegration,
             LinearVelocity::default(),
@@ -252,6 +316,9 @@ pub fn spawn_fps_player(
             FpsController {
                 yaw,
                 pitch,
+                height,
+                upright_height: height,
+                crouch_height: config.crouch_height(),
                 ..Default::default()
             },
             FpsControllerInput {
@@ -259,7 +326,6 @@ pub fn spawn_fps_player(
                 pitch,
                 ..Default::default()
             },
-            CameraConfig { height_offset: 0.5 },
         ))
         .id()
 }
@@ -297,6 +363,7 @@ pub(super) fn yaw_pitch_to_direction(yaw: f32, pitch: f32, ecef_pos: DVec3) -> V
 /// Set up FPS mode from Flycam: spawn logical player at camera position.
 pub(super) fn setup_from_flycam(
     commands: &mut Commands,
+    config: &FpsPlayerConfig,
     camera_entity: Entity,
     camera: &FloatingOriginCamera,
     flight_camera: Option<&FlightCamera>,
@@ -308,7 +375,7 @@ pub(super) fn setup_from_flycam(
         (0.0, 0.0)
     };
 
-    let logical_entity = spawn_fps_player(commands, camera_ecef, Vec3::ZERO, yaw, pitch);
+    let logical_entity = spawn_fps_player(commands, config, camera_ecef, Vec3::ZERO, yaw, pitch);
 
     commands
         .entity(camera_entity)
@@ -318,6 +385,7 @@ pub(super) fn setup_from_flycam(
 /// Set up FPS mode from FollowEntity: spawn logical player at camera position with preserved angles.
 pub(super) fn setup_from_follow_entity(
     commands: &mut Commands,
+    config: &FpsPlayerConfig,
     preserved_fps: &mut PreservedFpsState,
     camera_entity: Entity,
     camera: &FloatingOriginCamera,
@@ -326,7 +394,7 @@ pub(super) fn setup_from_follow_entity(
     let yaw = preserved_fps.yaw;
     let pitch = preserved_fps.pitch;
 
-    let logical_entity = spawn_fps_player(commands, camera_ecef, Vec3::ZERO, yaw, pitch);
+    let logical_entity = spawn_fps_player(commands, config, camera_ecef, Vec3::ZERO, yaw, pitch);
 
     commands
         .entity(camera_entity)
@@ -458,9 +526,14 @@ fn fps_controller_look(mut query: Query<(&mut FpsController, &FpsControllerInput
 ///
 /// Computes wish direction, applies gravity, friction, acceleration, crouch resizing.
 /// Runs before `fps_controller_slide` so that the collider and velocity are ready.
+///
+/// Also re-syncs the controller's height bounds and the collider radius
+/// from `FpsPlayerConfig` every tick, so changes from the UI take effect
+/// immediately.
 #[allow(clippy::type_complexity)]
 fn fps_controller_prepare(
     time: Res<Time<Fixed>>,
+    player_config: Res<FpsPlayerConfig>,
     camera_query: Query<&FloatingOriginCamera>,
     mut query: Query<
         (
@@ -566,6 +639,13 @@ fn fps_controller_prepare(
             }
         }
 
+        // Sync height bounds from the central config so UI edits take
+        // effect immediately. `controller.height` is the animated
+        // current height (between crouch and upright); the bounds come
+        // from the config.
+        controller.upright_height = player_config.height;
+        controller.crouch_height = player_config.crouch_height();
+
         // Update crouch height.
         let crouch_speed = if input.crouch {
             -controller.crouch_speed
@@ -577,13 +657,14 @@ fn fps_controller_prepare(
             .height
             .clamp(controller.crouch_height, controller.upright_height);
 
-        // Resize collider to match current height.
-        if let Some(capsule) = collider.shape().as_capsule() {
-            let radius = capsule.radius;
-            let half = local_up * (controller.height * 0.5 - radius);
+        // Resize collider to match current height. Radius is taken
+        // from the central config so changing the radius slider
+        // updates the live collider too.
+        let radius = player_config.radius();
+        if collider.shape().as_capsule().is_some() {
+            let half = local_up * (controller.height * 0.5 - radius).max(0.0);
             collider.set_shape(SharedShape::capsule(-half, half, radius));
-        } else if let Some(cylinder) = collider.shape().as_cylinder() {
-            let radius = cylinder.radius;
+        } else if collider.shape().as_cylinder().is_some() {
             collider.set_shape(SharedShape::cylinder(controller.height * 0.5, radius));
         } else {
             panic!("Controller must use a cylinder or capsule collider")
@@ -708,7 +789,6 @@ fn fps_controller_render(
             &Transform,
             &Collider,
             &FpsController,
-            &CameraConfig,
             &Position,
             &WorldPosition,
         ),
@@ -718,7 +798,7 @@ fn fps_controller_render(
     let t = fixed_time.overstep_fraction();
 
     for (mut render_transform, render_player) in render_query.iter_mut() {
-        if let Ok((logical_transform, collider, controller, camera_config, _position, world_pos)) =
+        if let Ok((logical_transform, collider, controller, _position, world_pos)) =
             logical_query.get(render_player.logical_entity)
         {
             let previous = controller.previous_translation;
@@ -729,8 +809,10 @@ fn fps_controller_render(
             let frame = RadialFrame::from_ecef_position(ecef_pos);
             let local_up = frame.up;
 
+            // Eye sits at the top of the capsule (top of the player's head).
+            // No extra camera offset above the head — that previously put the
+            // eye ~0.5 m above the head, making the player feel oversized.
             let collider_offset = collider_y_offset(collider, local_up);
-            let camera_offset = local_up * camera_config.height_offset;
 
             render_transform.translation = Vec3::ZERO;
 
@@ -741,7 +823,7 @@ fn fps_controller_render(
             render_transform.look_to(look_direction, local_up);
 
             if let Ok(mut floating_camera) = camera_query.single_mut() {
-                let offset_local = collider_offset + camera_offset;
+                let offset_local = collider_offset;
                 let offset_world = DVec3::new(
                     f64::from(offset_local.x + interpolated.x - current.x),
                     f64::from(offset_local.y + interpolated.y - current.y),

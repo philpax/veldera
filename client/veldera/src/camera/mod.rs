@@ -40,8 +40,8 @@ use crate::{
 
 pub use follow::{FollowCameraConfig, FollowEntityTarget, FollowedEntity};
 pub use fps::{
-    FpsController, LogicalPlayer, RadialFrame, RenderPlayer, direction_to_yaw_pitch,
-    spawn_fps_player,
+    FPS_PLAYER_MAX_RADIUS_RATIO, FPS_PLAYER_MIN_RADIUS_RATIO, FpsController, FpsPlayerConfig,
+    LogicalPlayer, RadialFrame, RenderPlayer, direction_to_yaw_pitch, spawn_fps_player,
 };
 
 // ============================================================================
@@ -317,6 +317,7 @@ fn process_mode_transitions(
     mut transitions: ResMut<CameraModeTransitions>,
     mut state: ResMut<CameraModeState>,
     mut preserved_fps: ResMut<fps::PreservedFpsState>,
+    player_config: Res<fps::FpsPlayerConfig>,
     camera_query: Query<(Entity, &FloatingOriginCamera, Option<&FlightCamera>)>,
     logical_player_query: Query<
         (Entity, &WorldPosition, &fps::FpsController),
@@ -339,6 +340,7 @@ fn process_mode_transitions(
                     &mut commands,
                     &mut state,
                     &mut preserved_fps,
+                    &player_config,
                     &camera_query,
                 );
             }
@@ -357,6 +359,7 @@ fn process_mode_transitions(
                     &mut commands,
                     &mut state,
                     &mut preserved_fps,
+                    &player_config,
                     &camera_query,
                     &logical_player_query,
                 );
@@ -405,12 +408,19 @@ fn transition_to_fps_controller(
     commands: &mut Commands,
     state: &mut ResMut<CameraModeState>,
     preserved_fps: &mut ResMut<fps::PreservedFpsState>,
+    player_config: &fps::FpsPlayerConfig,
     camera_query: &Query<(Entity, &FloatingOriginCamera, Option<&FlightCamera>)>,
 ) {
     match state.current {
         CameraMode::Flycam => {
             if let Ok((camera_entity, camera, flight_camera)) = camera_query.single() {
-                fps::setup_from_flycam(commands, camera_entity, camera, flight_camera);
+                fps::setup_from_flycam(
+                    commands,
+                    player_config,
+                    camera_entity,
+                    camera,
+                    flight_camera,
+                );
             }
         }
         CameraMode::FpsController => {
@@ -419,7 +429,13 @@ fn transition_to_fps_controller(
         CameraMode::FollowEntity => {
             if let Ok((camera_entity, camera, _)) = camera_query.single() {
                 follow::cleanup(commands, camera_entity, camera);
-                fps::setup_from_follow_entity(commands, preserved_fps, camera_entity, camera);
+                fps::setup_from_follow_entity(
+                    commands,
+                    player_config,
+                    preserved_fps,
+                    camera_entity,
+                    camera,
+                );
             }
         }
     }
@@ -483,6 +499,7 @@ fn exit_current_mode(
     commands: &mut Commands,
     state: &mut ResMut<CameraModeState>,
     preserved_fps: &mut ResMut<fps::PreservedFpsState>,
+    player_config: &fps::FpsPlayerConfig,
     camera_query: &Query<(Entity, &FloatingOriginCamera, Option<&FlightCamera>)>,
     logical_player_query: &Query<
         (Entity, &WorldPosition, &fps::FpsController),
@@ -515,7 +532,13 @@ fn exit_current_mode(
                     );
                 }
                 CameraMode::FpsController => {
-                    transition_to_fps_controller(commands, state, preserved_fps, camera_query);
+                    transition_to_fps_controller(
+                        commands,
+                        state,
+                        preserved_fps,
+                        player_config,
+                        camera_query,
+                    );
                 }
                 CameraMode::FollowEntity => {
                     // Shouldn't happen, fall back to Flycam.
