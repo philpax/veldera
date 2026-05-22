@@ -289,6 +289,11 @@ pub struct LodState {
     /// BFS run, no new data is available and the cached BFS output is
     /// still valid.
     bulks_version: u64,
+    /// Monotonic counter incremented on every node load completion
+    /// (success or failure). Also drives the BFS skip check: when nodes
+    /// finish loading, the BFS must re-run so any requests previously
+    /// dropped by the concurrency cap get re-queued.
+    nodes_completed_version: u64,
     /// Camera forward direction (unit vector) updated each frame by
     /// `update_frustum`. Used as the rotational component of the BFS
     /// skip signature.
@@ -425,6 +430,13 @@ struct BfsSignature {
     /// Increments on every bulk insert — new data means the BFS may
     /// produce different output even if the camera hasn't moved.
     bulks_version: u64,
+    /// Increments on every node load completion. Without this, requests
+    /// dropped by the per-frame concurrency cap would never be retried
+    /// while the camera was stationary — the BFS would skip, the
+    /// completion would free up a load slot, but no new request would
+    /// be queued. With this in the signature, every completion
+    /// re-runs the BFS to refill the queue from the dropped excess.
+    nodes_completed_version: u64,
     /// Render-BFS retention radius — slider changes invalidate.
     keep_loaded_radius: f64,
 }
@@ -440,6 +452,7 @@ impl BfsSignature {
 
     fn matches(&self, other: &Self) -> bool {
         if self.bulks_version != other.bulks_version
+            || self.nodes_completed_version != other.nodes_completed_version
             || (self.keep_loaded_radius - other.keep_loaded_radius).abs() > 0.0
         {
             return false;
@@ -975,6 +988,7 @@ fn update_lod_requests(
         view_dir: lod_state.view_direction.unwrap_or(Vec3::NEG_Z),
         lead: motion.lead(),
         bulks_version: lod_state.bulks_version,
+        nodes_completed_version: lod_state.nodes_completed_version,
         keep_loaded_radius: tuning.keep_loaded_radius,
     };
     let can_skip_bfs = scratch
@@ -1072,9 +1086,13 @@ fn update_lod_requests(
         &scratch.physics_result.collider_paths,
     );
 
-    // Limit concurrent loads.
-    let max_node_loads = 20;
-    let max_bulk_loads = 10;
+    // Limit concurrent loads. Bumped from the original 20 to absorb a
+    // BFS frame's worth of fine-LoD requests in one pass — at 20 we
+    // routinely dropped 40+ excess requests per frame, and only
+    // recovered them through the `nodes_completed_version` BFS re-run
+    // path which trickles in slowly.
+    let max_node_loads = 64;
+    let max_bulk_loads = 16;
 
     // Merge node load requests from both BFSes. Drain the scratch
     // vectors so capacity is reused next frame; HashSet insert in the
@@ -1200,6 +1218,10 @@ fn poll_lod_node_tasks(
 ) {
     while let Ok((path, result)) = channels.node_rx.try_recv() {
         lod_state.loading_nodes.remove(&path);
+        // Invalidates the BFS skip signature so requests previously
+        // dropped by the per-frame cap get re-queued on the next BFS
+        // run.
+        lod_state.nodes_completed_version = lod_state.nodes_completed_version.wrapping_add(1);
 
         match result {
             Ok(node) => {
