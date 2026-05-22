@@ -551,6 +551,7 @@ fn unified_bfs_traversal(
         OctreePath::ROOT,
         OctreePath::ROOT,
         None,
+        false, // physics_committed_above
         &mut scratch.render_result,
         &mut scratch.physics_result,
     );
@@ -558,16 +559,22 @@ fn unified_bfs_traversal(
 
 /// Recursive worker for [`unified_bfs_traversal`].
 ///
-/// Returns `true` if any in-range octant of this node either committed a
-/// physics collider directly or led to a descendant doing so. The caller
-/// uses this to decide whether to fall back to its own ancestor when
-/// none of its children produced coverage (preserving the physics BFS's
-/// "best-available-ancestor" semantics).
+/// Returns `true` if this subtree has been "handled" by physics — either
+/// a collider was committed somewhere within it, or an ancestor's commit
+/// already covers it. The caller uses this to decide whether to fall
+/// back at its own depth when no descendant produced coverage.
+///
+/// `physics_committed_above` is the key invariant for preventing
+/// overlapping commits when render wants to descend past the physics
+/// target depth: once a node has committed, all its descendants are
+/// already covered and must not commit again.
+#[allow(clippy::too_many_arguments)]
 fn unified_walk(
     ctx: &UnifiedWalkCtx<'_>,
     path: OctreePath,
     bulk_key: OctreePath,
     physics_best_ancestor: Option<OctreePath>,
+    physics_committed_above: bool,
     render_result: &mut BfsResult,
     physics_result: &mut PhysicsBfsResult,
 ) -> bool {
@@ -612,7 +619,7 @@ fn unified_walk(
     render_result.potential_bulks.insert(effective_bulk_key);
     physics_result.potential_bulks.insert(effective_bulk_key);
 
-    let mut any_physics_committed = false;
+    let mut any_physics_handled = false;
 
     for octant in 0u8..=7 {
         let child_path = path.push(octant);
@@ -647,11 +654,14 @@ fn unified_walk(
         // -------- physics-side decision --------
         let phys_dist = effective_distance(&child_node.obb, ctx.camera_pos, ctx.lead);
         let phys_target = desired_physics_depth(phys_dist);
-        let physics_wants = phys_target.is_some();
-        let physics_should_refine = physics_wants && child_path.depth() < phys_target.unwrap_or(0);
+        let physics_in_range = phys_target.is_some();
+        let physics_at_or_past_target =
+            physics_in_range && phys_target.is_some_and(|t| child_path.depth() >= t);
+        // Physics wants to refine if it's in range AND not yet at target.
+        let physics_should_refine = physics_in_range && !physics_at_or_past_target;
 
         // No consumer cares about this subtree.
-        if !render_visible && !physics_wants {
+        if !render_visible && !physics_in_range {
             continue;
         }
 
@@ -662,8 +672,8 @@ fn unified_walk(
                 .push((child_node.path, child_node.obb));
         }
         // Physics: OBB cache + potential set + always request data for
-        // fallback chain.
-        if physics_wants {
+        // the fallback chain.
+        if physics_in_range {
             physics_result
                 .discovered_obbs
                 .push((child_node.path, child_node.obb));
@@ -695,43 +705,61 @@ fn unified_walk(
             physics_best_ancestor
         };
 
-        if render_should_refine || physics_should_refine {
-            // Recurse — either consumer wants more detail.
-            let descended = unified_walk(
-                ctx,
-                child_path,
-                effective_bulk_key,
-                updated_phys_best,
-                render_result,
-                physics_result,
-            );
+        // Has this region's physics already been handled by either an
+        // ancestor's commit or one we make right here? Tracked per
+        // octant so descendants of THIS octant know not to re-commit.
+        let mut octant_handled = physics_committed_above;
 
-            // Physics: if we wanted to refine but no descendant
-            // committed a collider, fall back at this depth.
-            if physics_should_refine && !descended {
-                commit_physics_collider(
-                    child_node.path,
-                    child_phys_loaded,
-                    updated_phys_best,
-                    physics_result,
-                );
-            }
-            if physics_wants {
-                any_physics_committed = true;
-            }
-        } else if physics_wants {
-            // No refinement wanted — physics commits its collider here.
+        // Commit at this depth if we're in range, at target, and no
+        // ancestor has already committed for our region. This is the
+        // primary commit site — at the physics target depth.
+        if physics_in_range && !octant_handled && physics_at_or_past_target {
             commit_physics_collider(
                 child_node.path,
                 child_phys_loaded,
                 updated_phys_best,
                 physics_result,
             );
-            any_physics_committed = true;
+            octant_handled = true;
+        }
+
+        // Recurse if either consumer needs more detail. Physics only
+        // needs to descend if it hasn't been handled yet.
+        let need_recurse = render_should_refine || (physics_in_range && !octant_handled);
+        if need_recurse {
+            let descended_handled = unified_walk(
+                ctx,
+                child_path,
+                effective_bulk_key,
+                updated_phys_best,
+                octant_handled,
+                render_result,
+                physics_result,
+            );
+            if descended_handled {
+                octant_handled = true;
+            }
+
+            // Fallback: physics wanted to refine but the recursion
+            // didn't commit anywhere. Commit at this depth so the
+            // region has some coverage.
+            if physics_in_range && physics_should_refine && !octant_handled {
+                commit_physics_collider(
+                    child_node.path,
+                    child_phys_loaded,
+                    updated_phys_best,
+                    physics_result,
+                );
+                octant_handled = true;
+            }
+        }
+
+        if physics_in_range && octant_handled {
+            any_physics_handled = true;
         }
     }
 
-    any_physics_committed
+    any_physics_handled
 }
 
 /// Helper: commit a collider for a node, using the deepest loaded ancestor
