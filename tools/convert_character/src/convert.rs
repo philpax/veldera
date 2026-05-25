@@ -864,17 +864,20 @@ fn extract_animations(
 
             if !bn.translation_keys.is_empty() {
                 let is_hips = Some(joint_index) == hips_joint_index;
-                let (times, values): (Vec<f32>, Vec<[f32; 3]>) = if is_hips {
+                let translation_data: Option<(Vec<f32>, Vec<[f32; 3]>)> = if is_hips {
                     // Root-motion strip: pin Hips translation to its first
                     // frame value. We keep two keyframes so the channel
                     // covers the full clip duration cleanly.
                     let first = bn.translation_keys.first().expect("just checked non-empty");
                     let last = bn.translation_keys.last().expect("just checked non-empty");
                     let v = vec3_to_f32(first.value);
-                    (vec![first.time as f32, last.time as f32], vec![v, v])
+                    Some((vec![first.time as f32, last.time as f32], vec![v, v]))
                 } else if bn.constant_translation {
-                    let first = bn.translation_keys.first().expect("just checked non-empty");
-                    (vec![first.time as f32], vec![vec3_to_f32(first.value)])
+                    // Constant non-Hips translation is redundant with the
+                    // node's bind-pose `local_translation`. Emitting it
+                    // would just clobber any runtime tweaks to that
+                    // bone's transform. Skip.
+                    None
                 } else {
                     let times = bn.translation_keys.iter().map(|k| k.time as f32).collect();
                     let values = bn
@@ -882,17 +885,24 @@ fn extract_animations(
                         .iter()
                         .map(|k| vec3_to_f32(k.value))
                         .collect();
-                    (times, values)
+                    Some((times, values))
                 };
-                channels.push(AnimChannel {
-                    joint_index,
-                    property: AnimProp::Translation,
-                    times,
-                    values: AnimValues::Vec3(values),
-                });
+                if let Some((times, values)) = translation_data {
+                    channels.push(AnimChannel {
+                        joint_index,
+                        property: AnimProp::Translation,
+                        times,
+                        values: AnimValues::Vec3(values),
+                    });
+                }
             }
 
-            if !bn.scale_keys.is_empty() {
+            // Mixamo rigs don't animate bone scale; ufbx still bakes a
+            // constant `(1, 1, 1)` track per bone. Skipping those is
+            // critical for the head-bone-zero-scale hide trick — emitted
+            // constant scale tracks override our runtime `scale = 0`
+            // every frame, popping the head mesh back to full size.
+            if !bn.scale_keys.is_empty() && !bn.constant_scale {
                 let times: Vec<f32> = bn.scale_keys.iter().map(|k| k.time as f32).collect();
                 let values: Vec<[f32; 3]> =
                     bn.scale_keys.iter().map(|k| vec3_to_f32(k.value)).collect();

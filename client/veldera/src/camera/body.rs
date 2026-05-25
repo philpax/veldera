@@ -13,8 +13,9 @@
 //! switch from flycam (eye = capsule top, ~0.9 m above the player position)
 //! to body-anchored eye doesn't snap.
 
-use std::collections::HashMap;
+use std::{collections::HashMap, f32::consts::PI};
 
+use avian3d::prelude::*;
 use bevy::{animation::graph::AnimationNodeIndex, gltf::Gltf, prelude::*, scene::SceneRoot};
 use glam::DVec3;
 use serde::Deserialize;
@@ -24,10 +25,10 @@ use crate::{
         CameraModeState,
         fps::{
             FPS_PLAYER_MAX_RADIUS_RATIO, FPS_PLAYER_MIN_RADIUS_RATIO, FpsController,
-            FpsPlayerConfig, LogicalPlayer, RadialFrame, RenderPlayer,
+            FpsPlayerConfig, LogicalPlayer, RadialFrame,
         },
     },
-    world::floating_origin::{FloatingOrigin, WorldPosition},
+    world::floating_origin::WorldPosition,
 };
 
 /// Path to the character glTF, relative to the asset root.
@@ -44,6 +45,29 @@ pub const MAX_EYE_LERP_DURATION_S: f32 = 2.0;
 pub const EYE_HEIGHT_SLIDER_RANGE: std::ops::RangeInclusive<f32> = -0.5..=3.0;
 /// Slider bounds for tweaking the forward eye offset.
 pub const EYE_FORWARD_OFFSET_SLIDER_RANGE: std::ops::RangeInclusive<f32> = -0.5..=0.5;
+
+// ----------------------------------------------------------------------------
+// Locomotion blend tuning. All speeds are in metres per second.
+// ----------------------------------------------------------------------------
+
+/// Speeds below this are treated as "idle" — no directional locomotion
+/// clip contributes. Above the deadzone we blend in walk/run/sprint.
+pub const LOCOMOTION_DEADZONE_M_S: f32 = 0.3;
+/// Reference horizontal speed for the `walk *` clips. Below this we
+/// crossfade idle → walk; above this we crossfade walk → run.
+pub const LOCOMOTION_WALK_REF_M_S: f32 = 3.0;
+/// Reference horizontal speed for the `run *` clips. Crossfaded with
+/// walk below and sprint above.
+pub const LOCOMOTION_RUN_REF_M_S: f32 = 8.0;
+/// Reference horizontal speed for the `sprint *` clips. Anything faster
+/// stays pinned to sprint.
+pub const LOCOMOTION_SPRINT_REF_M_S: f32 = 13.0;
+/// Vertical speed (m/s) above which the body switches to the airborne
+/// pose. We use vertical velocity rather than `FpsController::ground_tick`
+/// because the latter loses ground contact for a single tick whenever
+/// the player crests an uneven surface, which would otherwise spam the
+/// jump-loop pose during normal walking.
+pub const LOCOMOTION_AIRBORNE_VERTICAL_M_S: f32 = 2.0;
 
 // ============================================================================
 // Public types
@@ -100,8 +124,16 @@ pub struct BodyVisual {
     pub logical_entity: Entity,
     /// Set true once we've successfully shrunk the head bone.
     pub head_hidden: bool,
-    /// Set true once we've installed an `AnimationPlayer` + graph.
-    pub animation_installed: bool,
+    /// Set true once we've hidden the head-attached submeshes (hair,
+    /// eyelashes) that shouldn't appear in first-person view.
+    pub head_meshes_hidden: bool,
+    /// The descendant entity carrying the `AnimationPlayer`. Bevy's glTF
+    /// loader auto-inserts the player on the scene-root entity that's an
+    /// animation root (a *descendant* of this `BodyVisual` entity), and
+    /// every bone's `AnimationTarget` points back to it. We need to drive
+    /// that specific player; a fresh one on `BodyVisual` itself would be
+    /// ignored. Populated by [`install_animation_player`].
+    pub animation_player: Option<Entity>,
 }
 
 pub struct BodyPlugin;
@@ -120,7 +152,9 @@ impl Plugin for BodyPlugin {
                     spawn_body_on_fps_enter,
                     despawn_body_on_fps_exit,
                     hide_head_bone,
+                    hide_head_attached_meshes,
                     install_animation_player,
+                    update_locomotion_blend,
                 )
                     .chain(),
             )
@@ -326,7 +360,8 @@ fn spawn_body_on_fps_enter(
         BodyVisual {
             logical_entity,
             head_hidden: false,
-            animation_installed: false,
+            head_meshes_hidden: false,
+            animation_player: None,
         },
         SceneRoot(scene_handle.clone()),
         WorldPosition::from_dvec3(world_pos.position),
@@ -414,6 +449,50 @@ fn find_descendant_by_name(
     None
 }
 
+/// Name substrings (case-insensitive) of submeshes to hide for the
+/// first-person body. Mixamo's hair and eyelash meshes are skinned to a
+/// mix of head + neck bones, so the head-bone-scale-to-zero trick can't
+/// fully collapse them; we hide the whole submesh instead.
+const FIRST_PERSON_HIDE_PATTERNS: &[&str] = &["hair", "eyelash"];
+
+/// Walk the spawned scene and hide every entity whose `Name` matches
+/// one of [`FIRST_PERSON_HIDE_PATTERNS`]. Runs each frame until success
+/// — the scene populates asynchronously after `SceneRoot` is inserted.
+fn hide_head_attached_meshes(
+    mut body_query: Query<(Entity, &mut BodyVisual)>,
+    children: Query<&Children>,
+    names: Query<&Name>,
+    mut visibility: Query<&mut Visibility>,
+) {
+    for (entity, mut body) in &mut body_query {
+        if body.head_meshes_hidden {
+            continue;
+        }
+        let mut hidden_any = false;
+        let mut stack: Vec<Entity> = vec![entity];
+        while let Some(e) = stack.pop() {
+            if let Ok(name) = names.get(e) {
+                let lower = name.as_str().to_ascii_lowercase();
+                if FIRST_PERSON_HIDE_PATTERNS.iter().any(|p| lower.contains(p))
+                    && let Ok(mut vis) = visibility.get_mut(e)
+                {
+                    *vis = Visibility::Hidden;
+                    hidden_any = true;
+                    tracing::info!("Hid first-person submesh '{}'", name.as_str());
+                }
+            }
+            if let Ok(child_list) = children.get(e) {
+                stack.extend(child_list.iter());
+            }
+        }
+        // Wait until at least one match has been hidden before we stop
+        // walking; scene children may still be spawning.
+        if hidden_any {
+            body.head_meshes_hidden = true;
+        }
+    }
+}
+
 // ============================================================================
 // Animation: install AnimationPlayer once the scene has spawned
 // ============================================================================
@@ -423,6 +502,8 @@ fn install_animation_player(
     body_assets: Res<BodyAssets>,
     mut body_query: Query<(Entity, &mut BodyVisual)>,
     children: Query<&Children>,
+    has_player: Query<(), With<AnimationPlayer>>,
+    mut player_query: Query<&mut AnimationPlayer>,
 ) {
     let Some(graph) = body_assets.animation_graph.as_ref() else {
         return;
@@ -436,35 +517,62 @@ fn install_animation_player(
         .map(|(name, node)| (name.clone(), *node));
 
     for (entity, mut body) in &mut body_query {
-        if body.animation_installed {
+        if body.animation_player.is_some() {
             continue;
         }
-        // The animation player needs to live on (or above) every animated
-        // bone. We install it on the body root; Bevy's gltf loader has
-        // already attached `AnimationTarget` components to each animated
-        // bone, pointing back at whichever ancestor carries the
-        // `AnimationPlayer`.
-        //
-        // Scene children may not exist yet on the same frame the body was
-        // spawned; wait until at least one child exists.
+        // Scene children may not exist yet on the same frame the body
+        // was spawned; wait until at least one child exists.
         if children.get(entity).map(|c| c.is_empty()).unwrap_or(true) {
             continue;
         }
 
-        let mut player = AnimationPlayer::default();
-        if let Some((_, node)) = &default_node {
+        // Bevy's glTF loader auto-inserts an `AnimationPlayer` on the
+        // spawned entity that corresponds to the glTF scene's animation
+        // root node — a descendant of this body entity. That's the one
+        // `AnimationTarget` references on every bone, so it's the one we
+        // must drive; a player on `BodyVisual` itself would be ignored.
+        let Some(player_entity) =
+            find_descendant_with(entity, &children, |e| has_player.contains(e))
+        else {
+            continue;
+        };
+
+        commands
+            .entity(player_entity)
+            .insert(AnimationGraphHandle(graph.clone()));
+
+        // Pre-fire the default clip so the body isn't stuck in T-pose
+        // for the one frame before `update_locomotion_blend` runs.
+        if let Some((_, node)) = &default_node
+            && let Ok(mut player) = player_query.get_mut(player_entity)
+        {
             player.play(*node).repeat();
         }
 
-        commands
-            .entity(entity)
-            .insert((player, AnimationGraphHandle(graph.clone())));
-        body.animation_installed = true;
+        body.animation_player = Some(player_entity);
         tracing::info!(
-            "Installed AnimationPlayer (default clip: {:?})",
+            "Wired AnimationPlayer on descendant {:?} (default clip: {:?})",
+            player_entity,
             default_node.as_ref().map(|(n, _)| n.as_str())
         );
     }
+}
+
+fn find_descendant_with<F: Fn(Entity) -> bool>(
+    root: Entity,
+    children: &Query<&Children>,
+    predicate: F,
+) -> Option<Entity> {
+    let mut stack: Vec<Entity> = vec![root];
+    while let Some(entity) = stack.pop() {
+        if predicate(entity) {
+            return Some(entity);
+        }
+        if let Ok(child_list) = children.get(entity) {
+            stack.extend(child_list.iter());
+        }
+    }
+    None
 }
 
 // ============================================================================
@@ -613,6 +721,265 @@ impl EyeOffsetCtx<'_> {
     }
 }
 
-// Silence the unused-resource warning during the early-build phase.
-#[allow(dead_code)]
-fn _floating_origin_lint_shim(_: Res<FloatingOrigin>, _: Query<&RenderPlayer>) {}
+// ============================================================================
+// Locomotion blend
+// ============================================================================
+
+/// Eight-way direction labels — match the clip names from the Mixamo
+/// "Rifle 8-Way Locomotion Pack". Ordered counter-clockwise starting at
+/// forward, so `index * 45°` is the body-local heading of each.
+const DIRECTION_NAMES: [&str; 8] = [
+    "forward",        // +Z
+    "forward left",   // +Z, -X
+    "left",           // -X
+    "backward left",  // -Z, -X
+    "backward",       // -Z
+    "backward right", // -Z, +X
+    "right",          // +X
+    "forward right",  // +Z, +X
+];
+
+/// Recompute every relevant clip's weight from the controller state and
+/// drive `AnimationPlayer` accordingly.
+///
+/// The blend tree is conceptually:
+///
+/// ```text
+///     ┌── idle (1−speed)  ────────────┐
+///     │                                ├── (1 − crouch) ── standing output
+/// gait├── walk (8-way blend) ─────────┤
+///     │                                │
+///     ├── run  (8-way blend) ─────────┤
+///     │                                │
+///     ├── sprint (8-way blend) ───────┘
+///     │
+///     └── airborne: jump loop @ 1
+///
+///     ┌── idle crouching (1−speed) ───┐
+/// gait├── walk crouching (8-way) ─────┴── crouch_amount  ── crouching output
+/// ```
+///
+/// All weights are set every frame; clips not in the target set have
+/// their playback weight driven to 0 so they fall out of the mix without
+/// us having to `stop()` them (avoids one-frame pops when transitioning
+/// back).
+fn update_locomotion_blend(
+    config: Res<FpsPlayerConfig>,
+    body_assets: Res<BodyAssets>,
+    logical_query: Query<
+        (&FpsController, &LinearVelocity, &Transform, &WorldPosition),
+        With<LogicalPlayer>,
+    >,
+    body_query: Query<&BodyVisual>,
+    mut player_query: Query<&mut AnimationPlayer>,
+) {
+    if body_assets.animation_nodes.is_empty() {
+        return;
+    }
+
+    for body in &body_query {
+        let Some(player_entity) = body.animation_player else {
+            continue;
+        };
+        let Ok(mut player) = player_query.get_mut(player_entity) else {
+            continue;
+        };
+        let Ok((controller, velocity, _xform, world_pos)) = logical_query.get(body.logical_entity)
+        else {
+            continue;
+        };
+
+        let frame = RadialFrame::from_ecef_position(world_pos.position);
+        let local_up = frame.up;
+        let forward =
+            (frame.north * controller.yaw.cos() - frame.east * controller.yaw.sin()).normalize();
+        let right = local_up.cross(forward).normalize();
+
+        let vertical_speed = velocity.0.dot(local_up);
+        let horizontal_vel = velocity.0 - local_up * vertical_speed;
+        let fwd_speed = horizontal_vel.dot(forward);
+        let side_speed = horizontal_vel.dot(right);
+        let speed = (fwd_speed * fwd_speed + side_speed * side_speed).sqrt();
+
+        // Use vertical-velocity-based "airborne" detection rather than
+        // the FPS controller's ground tick — see the docs on
+        // `LOCOMOTION_AIRBORNE_VERTICAL_M_S` for why.
+        let airborne = vertical_speed.abs() > LOCOMOTION_AIRBORNE_VERTICAL_M_S;
+        let crouch_amount = if controller.upright_height > controller.crouch_height {
+            ((controller.upright_height - controller.height)
+                / (controller.upright_height - controller.crouch_height))
+                .clamp(0.0, 1.0)
+        } else {
+            0.0
+        };
+
+        let target_weights =
+            compute_locomotion_weights(speed, fwd_speed, side_speed, airborne, crouch_amount);
+
+        apply_locomotion_weights(&mut player, &body_assets.animation_nodes, &target_weights);
+
+        let _ = config;
+    }
+}
+
+/// Build the `clip name → weight` map for one tick. Pure / testable; no
+/// ECS access.
+fn compute_locomotion_weights(
+    speed: f32,
+    fwd_speed: f32,
+    side_speed: f32,
+    airborne: bool,
+    crouch_amount: f32,
+) -> HashMap<String, f32> {
+    let mut weights: HashMap<String, f32> = HashMap::new();
+
+    if airborne {
+        // Sustained vertical motion: play the loop pose. Jump up/down
+        // phases would require event-based state tracking — punt for v1.
+        weights.insert("jump loop".to_string(), 1.0);
+        return weights;
+    }
+
+    // Gait blend: pick the two adjacent reference speeds and lerp.
+    let (idle_w, walk_w, run_w, sprint_w) = gait_blend(speed);
+
+    // 8-way direction blend (zero contribution while idle).
+    let dir_blend = if speed > LOCOMOTION_DEADZONE_M_S {
+        Some(direction_8way_blend(fwd_speed, side_speed))
+    } else {
+        None
+    };
+
+    let standing_w = (1.0 - crouch_amount).clamp(0.0, 1.0);
+    let crouching_w = crouch_amount.clamp(0.0, 1.0);
+
+    // Idle: standing vs crouching, scaled by the idle gait weight.
+    if idle_w * standing_w > 0.0 {
+        add_weight(&mut weights, "idle", idle_w * standing_w);
+    }
+    if idle_w * crouching_w > 0.0 {
+        add_weight(&mut weights, "idle crouching", idle_w * crouching_w);
+    }
+
+    if let Some(dir_blend) = dir_blend {
+        for (dir_idx, dir_w) in dir_blend {
+            let dir_name = DIRECTION_NAMES[dir_idx];
+
+            // Standing locomotion: split between walk / run / sprint.
+            if walk_w * standing_w > 0.0 {
+                add_weight(
+                    &mut weights,
+                    &format!("walk {dir_name}"),
+                    walk_w * dir_w * standing_w,
+                );
+            }
+            if run_w * standing_w > 0.0 {
+                add_weight(
+                    &mut weights,
+                    &format!("run {dir_name}"),
+                    run_w * dir_w * standing_w,
+                );
+            }
+            if sprint_w * standing_w > 0.0 {
+                add_weight(
+                    &mut weights,
+                    &format!("sprint {dir_name}"),
+                    sprint_w * dir_w * standing_w,
+                );
+            }
+
+            // Crouching only has walk variants; route walk/run/sprint
+            // contribution into walk-crouching when we're crouched.
+            let crouch_loco_w = (walk_w + run_w + sprint_w) * crouching_w;
+            if crouch_loco_w > 0.0 {
+                add_weight(
+                    &mut weights,
+                    &format!("walk crouching {dir_name}"),
+                    crouch_loco_w * dir_w,
+                );
+            }
+        }
+    }
+
+    weights
+}
+
+/// Gait blend weights as a 4-tuple `(idle, walk, run, sprint)` that sums
+/// to 1. Crossfades between the two adjacent reference speeds.
+fn gait_blend(speed: f32) -> (f32, f32, f32, f32) {
+    if speed <= LOCOMOTION_DEADZONE_M_S {
+        return (1.0, 0.0, 0.0, 0.0);
+    }
+    if speed < LOCOMOTION_WALK_REF_M_S {
+        let t = ((speed - LOCOMOTION_DEADZONE_M_S)
+            / (LOCOMOTION_WALK_REF_M_S - LOCOMOTION_DEADZONE_M_S))
+            .clamp(0.0, 1.0);
+        return (1.0 - t, t, 0.0, 0.0);
+    }
+    if speed < LOCOMOTION_RUN_REF_M_S {
+        let t = ((speed - LOCOMOTION_WALK_REF_M_S)
+            / (LOCOMOTION_RUN_REF_M_S - LOCOMOTION_WALK_REF_M_S))
+            .clamp(0.0, 1.0);
+        return (0.0, 1.0 - t, t, 0.0);
+    }
+    if speed < LOCOMOTION_SPRINT_REF_M_S {
+        let t = ((speed - LOCOMOTION_RUN_REF_M_S)
+            / (LOCOMOTION_SPRINT_REF_M_S - LOCOMOTION_RUN_REF_M_S))
+            .clamp(0.0, 1.0);
+        return (0.0, 0.0, 1.0 - t, t);
+    }
+    (0.0, 0.0, 0.0, 1.0)
+}
+
+/// Map body-local velocity to up to two adjacent 8-way directions with
+/// barycentric-style weights. Returns `(direction_index, weight)` pairs
+/// whose weights sum to 1.
+fn direction_8way_blend(fwd_speed: f32, side_speed: f32) -> [(usize, f32); 2] {
+    // atan2(-side, fwd):
+    //   fwd>0, side=0  → 0          (forward)
+    //   fwd=0, side<0  → +π/2       (left)
+    //   fwd<0, side=0  → +π         (backward)
+    //   fwd=0, side>0  → -π/2       (right, wraps to 3π/2 below)
+    //
+    // We use -side so positive theta rotates counter-clockwise, which
+    // matches the `DIRECTION_NAMES` ordering (forward, forward-left, …).
+    let theta = (-side_speed).atan2(fwd_speed);
+    // Normalise to [0, 2π) then scale so each direction occupies 1 unit.
+    let normalised = (theta.rem_euclid(2.0 * PI)) / (PI / 4.0);
+    let lower = normalised.floor() as usize % 8;
+    let upper = (lower + 1) % 8;
+    let t = normalised - normalised.floor();
+    [(lower, 1.0 - t), (upper, t)]
+}
+
+fn add_weight(weights: &mut HashMap<String, f32>, name: &str, w: f32) {
+    *weights.entry(name.to_string()).or_insert(0.0) += w;
+}
+
+/// Walk every clip in the graph and push its target weight into the
+/// player. Clips not in `target_weights` get weight 0 so they smoothly
+/// fall out of the mix.
+///
+/// We only call `play()` the first time a clip needs a non-zero weight
+/// — afterwards we mutate the existing `ActiveAnimation` directly. Every
+/// frame `play()` would re-invoke `.repeat()` and reset `completions`,
+/// which can confuse Bevy's animation tick.
+fn apply_locomotion_weights(
+    player: &mut AnimationPlayer,
+    nodes: &HashMap<String, AnimationNodeIndex>,
+    target_weights: &HashMap<String, f32>,
+) {
+    for (name, node) in nodes {
+        let weight = target_weights.get(name).copied().unwrap_or(0.0);
+        match player.animation_mut(*node) {
+            Some(active) => {
+                active.set_weight(weight);
+            }
+            None => {
+                if weight > 0.0 {
+                    player.play(*node).set_weight(weight).repeat();
+                }
+            }
+        }
+    }
+}
