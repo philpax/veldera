@@ -25,6 +25,7 @@
 //!
 //! When entering FollowEntity mode, the previous mode is stored and restored on exit.
 
+mod body;
 mod flycam;
 mod follow;
 mod fps;
@@ -38,6 +39,10 @@ use crate::{
     world::floating_origin::{FloatingOriginCamera, WorldPosition},
 };
 
+pub use body::{
+    BodyTuning, CharacterMetrics, EYE_FORWARD_OFFSET_SLIDER_RANGE, EYE_HEIGHT_SLIDER_RANGE,
+    MAX_EYE_LERP_DURATION_S,
+};
 pub use follow::{FollowCameraConfig, FollowEntityTarget, FollowedEntity};
 pub use fps::{
     FPS_PLAYER_MAX_RADIUS_RATIO, FPS_PLAYER_MIN_RADIUS_RATIO, FpsController, FpsPlayerConfig,
@@ -52,6 +57,16 @@ pub use fps::{
 pub const MIN_SPEED: f32 = 10.0;
 /// Maximum base speed in meters per second.
 pub const MAX_SPEED: f32 = 25_000.0;
+
+/// Default vertical field of view, in degrees. ~75° vertical gives ~100°
+/// horizontal at 16:9 — slightly wider than 90° horizontal Quake-style,
+/// keeps the first-person body from feeling oppressively large.
+pub const DEFAULT_FOV_DEG: f32 = 75.0;
+/// Minimum vertical FoV slider value, in degrees.
+pub const MIN_FOV_DEG: f32 = 30.0;
+/// Maximum vertical FoV slider value, in degrees. Beyond this fish-eye
+/// distortion gets unpleasant in a 3D scene.
+pub const MAX_FOV_DEG: f32 = 120.0;
 
 // ============================================================================
 // Camera mode
@@ -201,6 +216,10 @@ pub struct CameraSettings {
     pub boost_multiplier: f32,
     /// Mouse sensitivity for look rotation.
     pub mouse_sensitivity: f32,
+    /// Vertical field of view, in radians. Applied to every
+    /// `Projection::Perspective` on entities carrying
+    /// `FloatingOriginCamera` each frame `CameraSettings` is changed.
+    pub fov_radians: f32,
     /// Which teleport animation style to use.
     pub teleport_animation_mode: TeleportAnimationMode,
 }
@@ -211,6 +230,7 @@ impl Default for CameraSettings {
             base_speed: 1000.0,
             boost_multiplier: 5.0,
             mouse_sensitivity: 0.001,
+            fov_radians: DEFAULT_FOV_DEG.to_radians(),
             teleport_animation_mode: TeleportAnimationMode::default(),
         }
     }
@@ -273,12 +293,35 @@ impl Plugin for CameraControllerPlugin {
                 fps::FpsControllerPlugin,
                 follow::FollowCameraPlugin,
                 input::CameraInputPlugin,
+                body::BodyPlugin,
             ))
             .add_systems(PostStartup, apply_initial_camera_mode)
             .add_systems(
                 Update,
-                (process_mode_transitions, process_altitude_request).chain(),
+                (
+                    process_mode_transitions,
+                    process_altitude_request,
+                    sync_camera_fov,
+                )
+                    .chain(),
             );
+    }
+}
+
+/// Push `CameraSettings::fov_radians` into the floating-origin camera's
+/// `Projection::Perspective` whenever the settings change. Lets the UI
+/// FoV slider take effect on the live camera.
+fn sync_camera_fov(
+    settings: Res<CameraSettings>,
+    mut query: Query<&mut Projection, With<FloatingOriginCamera>>,
+) {
+    if !settings.is_changed() {
+        return;
+    }
+    for mut proj in &mut query {
+        if let Projection::Perspective(p) = &mut *proj {
+            p.fov = settings.fov_radians;
+        }
     }
 }
 

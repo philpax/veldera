@@ -1,0 +1,18 @@
+[package]
+name = "convert-character"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Convert a directory of Mixamo FBX files into a single skinned glTF binary with embedded animations"
+
+[dependencies]
+ufbx = "0.11"
+gltf-json = { version = "1.4", features = ["names", "extras"] }
+gltf = { version = "1.4", default-features = false, features = ["names", "utils", "import", "extras"] }
+serde_json = "1"
+image = { version = "0.25", default-features = false, features = ["png", "jpeg"] }
+serde = { version = "1", features = ["derive"] }
+
+[lints]
+workspace = true

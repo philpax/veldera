@@ -27,7 +27,7 @@ use bevy::{
     prelude::*,
     render::view::Hdr,
 };
-use camera::{CameraControllerPlugin, FlightCamera};
+use camera::{CameraControllerPlugin, DEFAULT_FOV_DEG, FlightCamera};
 use input::InputPlugin;
 use launch_params::LaunchParams;
 use rendering::{
@@ -118,7 +118,11 @@ fn setup_scene(
         Camera::default(),
         Transform::from_translation(Vec3::ZERO).looking_to(start_direction, up),
         Projection::Perspective(PerspectiveProjection {
-            fov: std::f32::consts::FRAC_PI_4,
+            // Initial FoV; `sync_camera_fov` continuously copies the
+            // `CameraSettings` value here, so the Camera tab slider
+            // (under `client/veldera/src/ui/camera.rs`) takes effect
+            // live without rebuilding the camera entity.
+            fov: DEFAULT_FOV_DEG.to_radians(),
             near: 1.0,
             far: 100_000_000.0, // 100,000 km to see the whole Earth.
             ..Default::default()

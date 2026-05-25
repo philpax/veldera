@@ -782,6 +782,8 @@ fn acceleration(
 #[allow(clippy::type_complexity)]
 fn fps_controller_render(
     fixed_time: Res<Time<Fixed>>,
+    real_time: Res<Time>,
+    mut eye_ctx: super::body::EyeOffsetCtx,
     mut camera_query: Query<&mut FloatingOriginCamera>,
     mut render_query: Query<(&mut Transform, &RenderPlayer), With<RenderPlayer>>,
     logical_query: Query<
@@ -796,6 +798,7 @@ fn fps_controller_render(
     >,
 ) {
     let t = fixed_time.overstep_fraction();
+    let dt = real_time.delta_secs();
 
     for (mut render_transform, render_player) in render_query.iter_mut() {
         if let Ok((logical_transform, collider, controller, _position, world_pos)) =
@@ -809,11 +812,6 @@ fn fps_controller_render(
             let frame = RadialFrame::from_ecef_position(ecef_pos);
             let local_up = frame.up;
 
-            // Eye sits at the top of the capsule (top of the player's head).
-            // No extra camera offset above the head — that previously put the
-            // eye ~0.5 m above the head, making the player feel oversized.
-            let collider_offset = collider_y_offset(collider, local_up);
-
             render_transform.translation = Vec3::ZERO;
 
             let forward = frame.north * controller.yaw.cos() - frame.east * controller.yaw.sin();
@@ -822,8 +820,20 @@ fn fps_controller_render(
 
             render_transform.look_to(look_direction, local_up);
 
+            // Eye position: prefer the model-derived eye placement (with
+            // the entry cross-fade applied), fall back to the historical
+            // top-of-capsule offset when the character glTF isn't loaded
+            // yet. The model places the eye both up (eye height) and
+            // forward (out toward the front of the face) — without the
+            // forward push the camera sits at the spine column and
+            // looking down stares into the chest.
+            let eye_offset_local = match eye_ctx.compute(controller, dt) {
+                Some(o) => local_up * o.up_m + forward * o.forward_m,
+                None => collider_y_offset(collider, local_up),
+            };
+
             if let Ok(mut floating_camera) = camera_query.single_mut() {
-                let offset_local = collider_offset;
+                let offset_local = eye_offset_local;
                 let offset_world = DVec3::new(
                     f64::from(offset_local.x + interpolated.x - current.x),
                     f64::from(offset_local.y + interpolated.y - current.y),

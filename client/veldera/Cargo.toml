@@ -18,6 +18,7 @@ async-channel = "2"
 avian3d = "0.6"
 # Base Bevy features that work on both native and WASM.
 bevy = { version = "0.18.0", default-features = false, features = [
+  "bevy_animation",
   "bevy_asset",
   "bevy_core_pipeline",
   "bevy_gizmos",
@@ -29,6 +30,8 @@ bevy = { version = "0.18.0", default-features = false, features = [
   "bevy_render",
   "bevy_window",
   "bevy_winit",
+  "gltf_animation",
+  "jpeg",
   "mp3",
   "png",
   "reflect_auto_register",
@@ -52,8 +55,9 @@ leafwing-input-manager = "0.20"
 rand = "0.9"
 rocktree = { path = "../../rocktree/rocktree" }
 rocktree-decode = { path = "../../rocktree/rocktree-decode" }
-# For geocoding API responses.
+# For geocoding API responses and character metric extras parsing.
 serde = { version = "1", features = ["derive"] }
+serde_json = "1"
 tracing = "0.1"
 # For URL encoding geocoding queries.
 urlencoding = "2"
@@ -63,6 +67,7 @@ web-time = "1"
 # Native: Additional Bevy features and Tokio runtime.
 [target.'cfg(not(target_family = "wasm"))'.dependencies]
 bevy = { version = "0.18.0", default-features = false, features = [
+  "bevy_animation",
   "bevy_asset",
   "bevy_core_pipeline",
   "bevy_gizmos",
@@ -73,6 +78,8 @@ bevy = { version = "0.18.0", default-features = false, features = [
   "bevy_render",
   "bevy_window",
   "bevy_winit",
+  "gltf_animation",
+  "jpeg",
   "multi_threaded",
   "tonemapping_luts",
   # Enables `tracing` spans on every Bevy system; the in-game CPU

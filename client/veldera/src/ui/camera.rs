@@ -7,9 +7,11 @@ use bevy_egui::egui;
 
 use crate::{
     camera::{
-        CameraMode, CameraModeState, CameraSettings, FPS_PLAYER_MAX_RADIUS_RATIO,
+        BodyTuning, CameraMode, CameraModeState, CameraSettings, CharacterMetrics,
+        EYE_FORWARD_OFFSET_SLIDER_RANGE, EYE_HEIGHT_SLIDER_RANGE, FPS_PLAYER_MAX_RADIUS_RATIO,
         FPS_PLAYER_MIN_RADIUS_RATIO, FlightCamera, FollowCameraConfig, FollowEntityTarget,
-        FpsPlayerConfig, MAX_SPEED, MIN_SPEED, TeleportAnimationMode,
+        FpsPlayerConfig, MAX_EYE_LERP_DURATION_S, MAX_FOV_DEG, MAX_SPEED, MIN_FOV_DEG, MIN_SPEED,
+        TeleportAnimationMode,
     },
     world::floating_origin::FloatingOriginCamera,
 };
@@ -20,6 +22,8 @@ pub(super) struct CameraParams<'w, 's> {
     pub settings: ResMut<'w, CameraSettings>,
     pub camera_mode: Res<'w, CameraModeState>,
     pub player_config: ResMut<'w, FpsPlayerConfig>,
+    pub body_tuning: ResMut<'w, BodyTuning>,
+    pub character_metrics: Res<'w, CharacterMetrics>,
     pub camera_query: Query<
         'w,
         's,
@@ -45,6 +49,11 @@ pub(super) fn render_camera_tab(ui: &mut egui::Ui, camera: &mut CameraParams) {
 
     ui.separator();
 
+    // Field of view: always editable regardless of mode.
+    render_fov_slider(ui, camera);
+
+    ui.separator();
+
     // Speed slider (only in flycam mode).
     if camera.camera_mode.is_flycam() {
         ui.horizontal(|ui| {
@@ -62,6 +71,8 @@ pub(super) fn render_camera_tab(ui: &mut egui::Ui, camera: &mut CameraParams) {
     // Player size config (only meaningful in FPS mode).
     if camera.camera_mode.is_fps_controller() {
         render_player_size_config(ui, camera);
+        ui.separator();
+        render_body_tuning(ui, camera);
         ui.separator();
     }
 
@@ -92,6 +103,96 @@ pub(super) fn render_camera_tab(ui: &mut egui::Ui, camera: &mut CameraParams) {
                     "Horizon",
                 );
             });
+    });
+}
+
+/// Render vertical FoV slider. The slider operates in degrees because
+/// that's how everyone thinks about FoV; the camera resource stores
+/// radians.
+fn render_fov_slider(ui: &mut egui::Ui, camera: &mut CameraParams) {
+    let mut fov_deg = camera.settings.fov_radians.to_degrees();
+    ui.horizontal(|ui| {
+        ui.label("FoV:");
+        let response = ui.add(
+            egui::Slider::new(&mut fov_deg, MIN_FOV_DEG..=MAX_FOV_DEG)
+                .step_by(1.0)
+                .suffix("\u{00b0}"),
+        );
+        if response.changed() {
+            camera.settings.fov_radians = fov_deg.to_radians();
+        }
+    });
+}
+
+/// Render the first-person body tuning sliders (eye height, forward
+/// offset, lerp duration). Each lets the user audition values without
+/// re-running the converter; a "Reset" button restores the model-derived
+/// values from `CharacterMetrics`.
+fn render_body_tuning(ui: &mut egui::Ui, camera: &mut CameraParams) {
+    let tuning = &mut *camera.body_tuning;
+    let model = camera.character_metrics.resolved.as_ref();
+
+    ui.collapsing("Body tuning", |ui| {
+        if model.is_none() {
+            ui.label("(character model not loaded yet)");
+            return;
+        }
+
+        ui.horizontal(|ui| {
+            ui.label("Eye height:");
+            ui.add(
+                egui::Slider::new(&mut tuning.eye_height_m, EYE_HEIGHT_SLIDER_RANGE)
+                    .step_by(0.01)
+                    .suffix(" m"),
+            );
+            if let Some(m) = model
+                && ui
+                    .button("\u{21bb}")
+                    .on_hover_text("Reset to model default")
+                    .clicked()
+            {
+                tuning.eye_height_m = m.eye_height_m;
+            }
+        });
+
+        ui.horizontal(|ui| {
+            ui.label("Eye forward:");
+            ui.add(
+                egui::Slider::new(
+                    &mut tuning.eye_forward_offset_m,
+                    EYE_FORWARD_OFFSET_SLIDER_RANGE,
+                )
+                .step_by(0.005)
+                .suffix(" m"),
+            );
+            if let Some(m) = model
+                && ui
+                    .button("\u{21bb}")
+                    .on_hover_text("Reset to model default")
+                    .clicked()
+            {
+                tuning.eye_forward_offset_m = m.eye_forward_offset_m;
+            }
+        });
+
+        ui.horizontal(|ui| {
+            ui.label("Eye lerp duration:");
+            ui.add(
+                egui::Slider::new(
+                    &mut tuning.eye_lerp_duration_s,
+                    0.0..=MAX_EYE_LERP_DURATION_S,
+                )
+                .step_by(0.05)
+                .suffix(" s"),
+            );
+        });
+
+        if let Some(m) = model {
+            ui.label(format!(
+                "Model: stand={:.3} m, eye={:.3} m, fwd={:.3} m",
+                m.stand_height_m, m.eye_height_m, m.eye_forward_offset_m,
+            ));
+        }
     });
 }
 
