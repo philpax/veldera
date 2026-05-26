@@ -24,6 +24,10 @@ pub const BONE_HEAD_TOP_END: &str = "HeadTop_End";
 pub const BONE_RIGHT_ARM: &str = "RightArm";
 pub const BONE_RIGHT_FORE_ARM: &str = "RightForeArm";
 pub const BONE_RIGHT_HAND: &str = "RightHand";
+/// Prefix shared by the right-hand index finger phalange bones —
+/// `RightHandIndex1` (proximal) through `RightHandIndex4` (tip
+/// marker). Used to straighten the finger for the pointing gesture.
+pub const BONE_RIGHT_HAND_INDEX_PREFIX: &str = "RightHandIndex";
 /// Neck bone. Used by the upper-body mask classifier.
 pub const BONE_NECK: &str = "Neck";
 

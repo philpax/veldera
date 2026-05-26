@@ -169,6 +169,12 @@ pub struct BodyVisual {
     /// camera's look direction in the upper arm's parent space, this
     /// gives the from-to rotation that points the arm at the target.
     pub right_arm_hand_offset_bind: Vec3,
+    /// Descendant entities of the right-hand index finger chain
+    /// (`mixamorig*:RightHandIndex1..4`), in proximal-to-distal order.
+    /// While pointing, each is rotated toward `Quat::IDENTITY` so the
+    /// finger straightens — Mixamo's bind pose has them slightly
+    /// curled.
+    pub right_index_bones: Vec<Entity>,
     /// `0..1` blend amount for the point-arm pose. Lerped toward `1`
     /// while the [`Point`](crate::input::CameraAction::Point) action
     /// is held and toward `0` when released. The IK rotation is mixed
@@ -466,6 +472,7 @@ fn spawn_body_on_fps_enter(
             head_lock_delta: Vec3::ZERO,
             right_arm_entity: None,
             right_arm_hand_offset_bind: Vec3::ZERO,
+            right_index_bones: Vec::new(),
             point_amount: 0.0,
             charge_seconds: 0.0,
             yeet_cooldown_s: 0.0,

@@ -33,7 +33,10 @@ use leafwing_input_manager::prelude::*;
 
 use super::{
     BodyVisual,
-    bones::{BONE_RIGHT_ARM, BONE_RIGHT_FORE_ARM, BONE_RIGHT_HAND, bone_stem},
+    bones::{
+        BONE_RIGHT_ARM, BONE_RIGHT_FORE_ARM, BONE_RIGHT_HAND, BONE_RIGHT_HAND_INDEX_PREFIX,
+        bone_stem,
+    },
 };
 use crate::{
     camera::fps::{FpsController, LogicalPlayer, RadialFrame},
@@ -72,6 +75,14 @@ const YEET_GROUND_DETACH_M_S: f32 = 3.0;
 /// nudge (player is aiming steeply downward and probably wants the
 /// downward velocity preserved).
 const YEET_DOWNWARD_DETACH_THRESHOLD: f32 = -0.5;
+
+/// Distance (metres) ahead of the camera that the right arm aims at
+/// while pointing. The finger line passes through this point on the
+/// look ray, so the gesture reads as "aiming at the crosshair" even
+/// though the hand stays at its natural off-centre position. Further
+/// out → arm closer to parallel-with-look (less visible aim toward
+/// the centre); closer → more exaggerated convergence.
+const POINT_AIM_DISTANCE_M: f32 = 10.0;
 
 /// Path to the whoosh asset (looked up via `AssetServer`).
 const WHOOSH_ASSET_PATH: &str = "855844__sadiquecat__whoosh-long-bamboo-stick-os-st-13.wav";
@@ -234,15 +245,49 @@ pub(super) fn cache_right_arm(
         };
         let offset = forearm_t.translation + forearm_t.rotation * hand_t.translation;
 
+        // Collect right-hand index finger phalanges in proximal →
+        // distal order so the straighten-on-point pass can iterate
+        // them deterministically.
+        let mut index_bones = collect_index_finger_bones(right_hand, &children, &names);
+        index_bones.sort_by_key(|&e| {
+            names
+                .get(e)
+                .ok()
+                .map(|n| bone_stem(n.as_str()).to_owned())
+                .unwrap_or_default()
+        });
+
         body.right_arm_entity = Some(right_arm);
         body.right_arm_hand_offset_bind = offset;
+        body.right_index_bones = index_bones;
         tracing::info!(
-            "Cached right-arm IK: hand offset in upper-arm space = ({:.3}, {:.3}, {:.3})",
+            "Cached right-arm IK: hand offset = ({:.3}, {:.3}, {:.3}), index bones = {}",
             offset.x,
             offset.y,
             offset.z,
+            body.right_index_bones.len(),
         );
     }
+}
+
+fn collect_index_finger_bones(
+    hand: Entity,
+    children: &Query<&Children>,
+    names: &Query<&Name>,
+) -> Vec<Entity> {
+    let mut out = Vec::new();
+    let mut stack: Vec<Entity> = vec![hand];
+    while let Some(entity) = stack.pop() {
+        if let Ok(name) = names.get(entity)
+            && bone_stem(name.as_str()).starts_with(BONE_RIGHT_HAND_INDEX_PREFIX)
+        {
+            out.push(entity);
+        }
+        if let Ok(child_list) = children.get(entity) {
+            stack.extend(child_list.iter());
+        }
+    }
+    out
 }
 
 fn find_descendant_by_bone_stem(
@@ -350,20 +395,62 @@ pub(super) fn apply_arm_pointing(
         let Ok(parent_global) = global_transforms.get(arm_parent.parent()) else {
             continue;
         };
+        let Ok(arm_global) = global_transforms.get(right_arm) else {
+            continue;
+        };
         let (_, parent_rot, _) = parent_global.to_scale_rotation_translation();
 
-        // Look direction expressed in the arm's parent's local frame.
-        let look_dir_local = parent_rot.inverse() * look_dir;
+        // Aim the arm at a finite forward target on the look ray
+        // (rather than parallel to it). The resulting arm direction
+        // points from the shoulder toward `camera + AIM_DISTANCE *
+        // look_dir`, so the *line through the finger* passes through
+        // that target — which is on the look ray and therefore
+        // projects to the screen centre. The fingertip itself stays
+        // at the natural off-centre position (shoulder + arm_length
+        // along that direction), so the gesture reads as "pointing
+        // at the crosshair" rather than "hand teleported to the
+        // crosshair".
+        //
+        // Parallel pointing (target at infinity) would leave the
+        // finger line parallel to the look ray and never converging
+        // on screen — the original behaviour the user flagged. A
+        // finite target gives the slight inward angle that makes the
+        // aim read correctly.
         let bind_dir = body.right_arm_hand_offset_bind.normalize_or_zero();
         if bind_dir == Vec3::ZERO {
             continue;
         }
-        let target_rotation = Quat::from_rotation_arc(bind_dir, look_dir_local.normalize());
+
+        // Camera sits at the render-space origin (`fps_controller_render`
+        // pins the camera Transform to `Vec3::ZERO`), so the shoulder's
+        // `GlobalTransform` translation is its position relative to
+        // the camera, and the aim target is just `look_dir * AIM`.
+        let shoulder_to_cam = arm_global.translation();
+        let target_world = look_dir * POINT_AIM_DISTANCE_M;
+        let arm_direction_world = (target_world - shoulder_to_cam).normalize_or_zero();
+        if arm_direction_world == Vec3::ZERO {
+            continue;
+        }
+
+        let arm_direction_local = parent_rot.inverse() * arm_direction_world;
+        let target_rotation = Quat::from_rotation_arc(bind_dir, arm_direction_local.normalize());
 
         if let Ok(mut arm_transform) = transforms.get_mut(right_arm) {
             arm_transform.rotation = arm_transform
                 .rotation
                 .slerp(target_rotation, body.point_amount);
+        }
+
+        // Splay the index finger: Mixamo's bind pose curls the finger
+        // joints, but a pointing gesture wants them straight. Slerp
+        // each phalange's local rotation toward identity so the
+        // finger extends along its parent's axis.
+        for &finger in &body.right_index_bones {
+            if let Ok(mut finger_transform) = transforms.get_mut(finger) {
+                finger_transform.rotation = finger_transform
+                    .rotation
+                    .slerp(Quat::IDENTITY, body.point_amount);
+            }
         }
     }
 }
