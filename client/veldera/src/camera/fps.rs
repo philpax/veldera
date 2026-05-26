@@ -168,6 +168,15 @@ pub const RAGDOLL_AIRBORNE_THRESHOLD_S: f32 = 1.5;
 /// transient (e.g. a single-tick ground hit during tumbling).
 pub const RAGDOLL_GROUND_RECOVERY_S: f32 = 0.3;
 
+/// Maximum yaw rotation (radians) the player can apply on top of the
+/// head-bone orientation while ragdolling. Roughly natural head-turn
+/// range (~60°). Symmetric around 0.
+pub const HEAD_LOOK_YAW_RANGE_RAD: f32 = 60.0 / 180.0 * PI;
+
+/// Maximum pitch rotation (radians) the player can apply on top of
+/// the head-bone orientation while ragdolling (~45° each way).
+pub const HEAD_LOOK_PITCH_RANGE_RAD: f32 = 45.0 / 180.0 * PI;
+
 /// Player size configuration for the FPS controller.
 ///
 /// Single source of truth for capsule dimensions. Read each tick by
@@ -283,6 +292,14 @@ pub struct FpsController {
     /// tick. Triggers the recovery transition once it crosses
     /// [`RAGDOLL_GROUND_RECOVERY_S`].
     pub grounded_time_s: f32,
+    /// Player-controlled yaw offset applied on top of the head-bone
+    /// orientation while ragdolling. Clamped to
+    /// `±HEAD_LOOK_YAW_RANGE_RAD`. Reset to `0` on each ragdoll
+    /// transition so subsequent ragdolls start centred.
+    pub head_look_yaw: f32,
+    /// Pitch counterpart of [`head_look_yaw`](Self::head_look_yaw),
+    /// clamped to `±HEAD_LOOK_PITCH_RANGE_RAD`.
+    pub head_look_pitch: f32,
 }
 
 impl Default for FpsController {
@@ -325,6 +342,8 @@ impl Default for FpsController {
             ragdoll_state: RagdollState::Active,
             airborne_time_s: 0.0,
             grounded_time_s: 0.0,
+            head_look_yaw: 0.0,
+            head_look_pitch: 0.0,
         }
     }
 }
@@ -548,23 +567,34 @@ fn clear_input(mut query: Query<&mut FpsControllerInput>) {
 fn fps_controller_input(
     action_query: Query<&ActionState<CameraAction>>,
     settings: Res<CameraSettings>,
-    mut query: Query<(&FpsController, &mut FpsControllerInput)>,
+    mut query: Query<(&mut FpsController, &mut FpsControllerInput)>,
 ) {
     let Ok(action_state) = action_query.single() else {
         return;
     };
 
-    for (_controller, mut input) in query
+    for (mut controller, mut input) in query
         .iter_mut()
         .filter(|(controller, _)| controller.enable_input)
     {
         let mouse_delta = action_state.axis_pair(&CameraAction::Look) * settings.mouse_sensitivity;
 
-        input.pitch = (input.pitch - mouse_delta.y)
-            .clamp(-FRAC_PI_2 + ANGLE_EPSILON, FRAC_PI_2 - ANGLE_EPSILON);
-        input.yaw -= mouse_delta.x;
-        if input.yaw.abs() > PI {
-            input.yaw = input.yaw.rem_euclid(TAU);
+        if controller.ragdoll_state == RagdollState::Ragdolling {
+            // Route mouse to the clamped head-rotation offset rather
+            // than the body yaw/pitch. `input.pitch` / `input.yaw`
+            // stay frozen so on recovery the camera snaps back to
+            // the pre-ragdoll look direction.
+            controller.head_look_pitch = (controller.head_look_pitch - mouse_delta.y)
+                .clamp(-HEAD_LOOK_PITCH_RANGE_RAD, HEAD_LOOK_PITCH_RANGE_RAD);
+            controller.head_look_yaw = (controller.head_look_yaw - mouse_delta.x)
+                .clamp(-HEAD_LOOK_YAW_RANGE_RAD, HEAD_LOOK_YAW_RANGE_RAD);
+        } else {
+            input.pitch = (input.pitch - mouse_delta.y)
+                .clamp(-FRAC_PI_2 + ANGLE_EPSILON, FRAC_PI_2 - ANGLE_EPSILON);
+            input.yaw -= mouse_delta.x;
+            if input.yaw.abs() > PI {
+                input.yaw = input.yaw.rem_euclid(TAU);
+            }
         }
 
         let move_input = action_state.clamped_axis_pair(&CameraAction::Move);
@@ -818,6 +848,12 @@ fn fps_controller_slide(
             RagdollState::Active => {
                 if controller.airborne_time_s >= RAGDOLL_AIRBORNE_THRESHOLD_S {
                     controller.ragdoll_state = RagdollState::Ragdolling;
+                    // Start the head-look offset centred on the head's
+                    // natural orientation so the camera doesn't jump
+                    // to a stale offset accumulated from a previous
+                    // ragdoll.
+                    controller.head_look_yaw = 0.0;
+                    controller.head_look_pitch = 0.0;
                     tracing::info!(
                         "Entering ragdoll after {:.2}s airborne",
                         controller.airborne_time_s
@@ -879,7 +915,7 @@ fn acceleration(
 // Render system
 // ============================================================================
 
-#[allow(clippy::type_complexity)]
+#[allow(clippy::type_complexity, clippy::too_many_arguments)]
 fn fps_controller_render(
     fixed_time: Res<Time<Fixed>>,
     real_time: Res<Time>,
@@ -896,51 +932,89 @@ fn fps_controller_render(
         ),
         (With<LogicalPlayer>, Without<RenderPlayer>),
     >,
+    body_query: Query<(&super::body::BodyVisual, &GlobalTransform)>,
+    head_transforms: Query<&GlobalTransform, Without<super::body::BodyVisual>>,
 ) {
     let t = fixed_time.overstep_fraction();
     let dt = real_time.delta_secs();
 
     for (mut render_transform, render_player) in render_query.iter_mut() {
-        if let Ok((logical_transform, collider, controller, _position, world_pos)) =
+        let Ok((logical_transform, collider, controller, _position, world_pos)) =
             logical_query.get(render_player.logical_entity)
+        else {
+            continue;
+        };
+
+        let ecef_pos = world_pos.position;
+        let frame = RadialFrame::from_ecef_position(ecef_pos);
+        let local_up = frame.up;
+
+        render_transform.translation = Vec3::ZERO;
+
+        // Ragdoll: camera position rides the head bone in world
+        // space, rotation is the body's tumble orientation with the
+        // player's clamped head-look offset applied. Falls through
+        // to the normal path if the body / head bone isn't loaded
+        // yet.
+        if controller.ragdoll_state == RagdollState::Ragdolling
+            && let Some((body, body_global)) = body_query
+                .iter()
+                .find(|(b, _)| b.logical_entity == render_player.logical_entity)
+            && let Some(head_entity) = body.head_bone_entity
+            && let Ok(head_global) = head_transforms.get(head_entity)
+            && let Ok(mut floating_camera) = camera_query.single_mut()
         {
-            let previous = controller.previous_translation;
-            let current = logical_transform.translation;
-            let interpolated = previous.unwrap_or(current).lerp(current, t);
+            let head_render = head_global.translation();
+            let logical_render = logical_transform.translation;
+            let head_offset = (head_render - logical_render).as_dvec3();
+            floating_camera.position = world_pos.position + head_offset;
 
-            let ecef_pos = world_pos.position;
-            let frame = RadialFrame::from_ecef_position(ecef_pos);
-            let local_up = frame.up;
+            // Compose the camera basis off the body's current world
+            // orientation (which the body-ragdoll system will tumble
+            // in Phase C/D). Mouse look adds yaw around the body's
+            // local up + pitch around the body's local right,
+            // clamped to a head-rotation cone in
+            // `fps_controller_input`.
+            let body_rotation = body_global.rotation();
+            let head_basis = body_rotation
+                * Quat::from_rotation_y(controller.head_look_yaw)
+                * Quat::from_rotation_x(controller.head_look_pitch);
+            let look_dir = head_basis * Vec3::Z;
+            let cam_up = head_basis * Vec3::Y;
+            render_transform.look_to(look_dir, cam_up);
+            continue;
+        }
 
-            render_transform.translation = Vec3::ZERO;
+        let previous = controller.previous_translation;
+        let current = logical_transform.translation;
+        let interpolated = previous.unwrap_or(current).lerp(current, t);
 
-            let forward = frame.north * controller.yaw.cos() - frame.east * controller.yaw.sin();
-            let look_direction =
-                forward * controller.pitch.cos() + local_up * controller.pitch.sin();
+        let forward = frame.north * controller.yaw.cos() - frame.east * controller.yaw.sin();
+        let look_direction =
+            forward * controller.pitch.cos() + local_up * controller.pitch.sin();
 
-            render_transform.look_to(look_direction, local_up);
+        render_transform.look_to(look_direction, local_up);
 
-            // Eye position: prefer the model-derived eye placement (with
-            // the entry cross-fade applied), fall back to the historical
-            // top-of-capsule offset when the character glTF isn't loaded
-            // yet. The model places the eye both up (eye height) and
-            // forward (out toward the front of the face) — without the
-            // forward push the camera sits at the spine column and
-            // looking down stares into the chest.
-            let eye_offset_local = match eye_ctx.compute(controller, dt) {
-                Some(o) => local_up * o.up_m + forward * o.forward_m,
-                None => collider_y_offset(collider, local_up),
-            };
+        // Eye position: prefer the model-derived eye placement (with
+        // the entry cross-fade applied), fall back to the historical
+        // top-of-capsule offset when the character glTF isn't loaded
+        // yet. The model places the eye both up (eye height) and
+        // forward (out toward the front of the face) — without the
+        // forward push the camera sits at the spine column and
+        // looking down stares into the chest.
+        let eye_offset_local = match eye_ctx.compute(controller, dt) {
+            Some(o) => local_up * o.up_m + forward * o.forward_m,
+            None => collider_y_offset(collider, local_up),
+        };
 
-            if let Ok(mut floating_camera) = camera_query.single_mut() {
-                let offset_local = eye_offset_local;
-                let offset_world = DVec3::new(
-                    f64::from(offset_local.x + interpolated.x - current.x),
-                    f64::from(offset_local.y + interpolated.y - current.y),
-                    f64::from(offset_local.z + interpolated.z - current.z),
-                );
-                floating_camera.position = world_pos.position + offset_world;
-            }
+        if let Ok(mut floating_camera) = camera_query.single_mut() {
+            let offset_local = eye_offset_local;
+            let offset_world = DVec3::new(
+                f64::from(offset_local.x + interpolated.x - current.x),
+                f64::from(offset_local.y + interpolated.y - current.y),
+                f64::from(offset_local.z + interpolated.z - current.z),
+            );
+            floating_camera.position = world_pos.position + offset_world;
         }
     }
 }
