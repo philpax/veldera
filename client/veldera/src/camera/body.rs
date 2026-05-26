@@ -23,6 +23,7 @@ use bevy::{
     scene::SceneRoot,
 };
 use glam::DVec3;
+use leafwing_input_manager::prelude::*;
 use serde::Deserialize;
 
 use crate::{
@@ -33,6 +34,7 @@ use crate::{
             FpsPlayerConfig, LogicalPlayer, RadialFrame,
         },
     },
+    input::CameraAction,
     world::floating_origin::WorldPosition,
 };
 
@@ -70,6 +72,59 @@ pub const LOCOMOTION_RUN_REF_M_S: f32 = 8.0;
 /// the player crests an uneven surface, which would otherwise spam the
 /// jump-loop pose during normal walking.
 pub const LOCOMOTION_AIRBORNE_VERTICAL_M_S: f32 = 2.0;
+
+/// Speed (m/s) the player is launched at when releasing the
+/// [`Point`](crate::input::CameraAction::Point) hold.
+pub const YEET_SPEED_M_S: f32 = 20.0;
+
+/// Rate (per second) at which the point-arm-amount lerps toward its
+/// target (0 or 1). Higher = snappier raise/lower; this maps to a
+/// roughly 200 ms ease.
+pub const POINT_RAMP_PER_SEC: f32 = 5.0;
+
+// ----------------------------------------------------------------------------
+// Mixamo bone stem names (the part of each bone name after `mixamorig*:`).
+// Centralised here so a future rig change touches one block; every
+// bone-name match in this module routes through these constants or the
+// [`bone_mask_group`] / `is_finger` helpers.
+// ----------------------------------------------------------------------------
+
+/// Pelvis bone — root of the lower-body chain. Hips translation is the
+/// only one our converter preserves (everything else gets stripped to
+/// remove root motion).
+pub const BONE_HIPS: &str = "Hips";
+/// Base of the skull. Animation rotates this with the spine; in
+/// first-person we hide its mesh by zeroing the scale.
+pub const BONE_HEAD: &str = "Head";
+/// Top-of-skull marker bone. Together with [`BONE_HEAD`] it defines
+/// the head's bind-pose vertical extent (head-height heuristic for
+/// the eye position).
+pub const BONE_HEAD_TOP_END: &str = "HeadTop_End";
+/// Right-arm chain bones used by the point-IK system.
+pub const BONE_RIGHT_ARM: &str = "RightArm";
+pub const BONE_RIGHT_FORE_ARM: &str = "RightForeArm";
+pub const BONE_RIGHT_HAND: &str = "RightHand";
+
+/// Suffix patterns that mark a bone as part of the lower body
+/// (everything from the hips down — pelvis, thighs, calves, feet, toes).
+const LOWER_BODY_BONE_SUFFIXES: &[&str] = &["UpLeg", "Leg", "Foot", "ToeBase", "Toe_End"];
+
+/// Suffix patterns that mark a bone as part of the upper body (arms
+/// + hands, not counting fingers which are matched by substring below).
+const UPPER_BODY_BONE_SUFFIXES: &[&str] = &["Shoulder", "Arm", "Hand"];
+
+/// Substring patterns for finger bones (Mixamo names them
+/// `…HandThumb1`, `…HandIndex2`, etc.).
+const FINGER_BONE_PATTERNS: &[&str] = &[
+    "HandThumb",
+    "HandIndex",
+    "HandMiddle",
+    "HandRing",
+    "HandPinky",
+];
+
+/// Bone-stem prefix for the spine column (`Spine`, `Spine1`, `Spine2`).
+const SPINE_BONE_PREFIX: &str = "Spine";
 
 // ----------------------------------------------------------------------------
 // Mixamo pack prefixes (matching `tools/convert_character`'s subfolder
@@ -171,6 +226,19 @@ pub struct BodyVisual {
     /// of the body animates around it. One-frame stale (we read the
     /// animated head in `PostUpdate`, apply on the next tick).
     pub head_lock_delta: Vec3,
+    /// Cached descendant entity of the right upper-arm bone
+    /// (`mixamorig*:RightArm`). Populated by [`cache_right_arm`].
+    pub right_arm_entity: Option<Entity>,
+    /// Bind-pose offset from the right upper-arm origin to the right
+    /// hand origin, in the upper arm's local frame. Combined with the
+    /// camera's look direction in the upper arm's parent space, this
+    /// gives the from-to rotation that points the arm at the target.
+    pub right_arm_hand_offset_bind: Vec3,
+    /// `0..1` blend amount for the point-arm pose. Lerped toward `1`
+    /// while the [`Point`](crate::input::CameraAction::Point) action
+    /// is held and toward `0` when released. The IK rotation is mixed
+    /// in by this factor so the arm raises and lowers smoothly.
+    pub point_amount: f32,
 }
 
 pub struct BodyPlugin;
@@ -192,13 +260,25 @@ impl Plugin for BodyPlugin {
                     hide_head_attached_meshes,
                     populate_bone_mask_groups,
                     install_animation_player,
+                    cache_right_arm,
                     update_locomotion_blend,
+                    handle_yeet,
                 )
                     .chain(),
             )
             .add_systems(
                 bevy::app::RunFixedMainLoop,
                 sync_body_transform.in_set(bevy::app::RunFixedMainLoopSystems::AfterFixedMainLoop),
+            )
+            // Arm-pointing IK runs in PostUpdate AFTER `animate_targets`
+            // writes bone poses (so we can stomp the right arm) but
+            // BEFORE transform propagation builds GlobalTransforms (so
+            // the head-lock and rendering see our override).
+            .add_systems(
+                PostUpdate,
+                apply_arm_pointing
+                    .after(bevy::app::AnimationSystems)
+                    .before(bevy::transform::TransformSystems::Propagate),
             )
             // Head-lock runs in PostUpdate AFTER transform propagation so
             // the head bone's GlobalTransform reflects the animated pose
@@ -437,6 +517,9 @@ fn spawn_body_on_fps_enter(
             animation_player: None,
             head_bone_entity: None,
             head_lock_delta: Vec3::ZERO,
+            right_arm_entity: None,
+            right_arm_hand_offset_bind: Vec3::ZERO,
+            point_amount: 0.0,
         },
         SceneRoot(scene_handle.clone()),
         WorldPosition::from_dvec3(world_pos.position),
@@ -579,30 +662,15 @@ fn hide_head_attached_meshes(
 /// mask group. Hips and below → `LOWER_BODY_MASK`; Spine and above →
 /// `UPPER_BODY_MASK`. Unknown bones return `0` (animated by every clip).
 fn bone_mask_group(stem: &str) -> u64 {
-    // Lower body: pelvis, legs, feet, toes.
-    if stem == "Hips"
-        || stem.ends_with("UpLeg")
-        || stem.ends_with("Leg")
-        || stem.ends_with("Foot")
-        || stem.ends_with("ToeBase")
-        || stem.ends_with("Toe_End")
-    {
+    if stem == BONE_HIPS || LOWER_BODY_BONE_SUFFIXES.iter().any(|s| stem.ends_with(s)) {
         return LOWER_BODY_MASK;
     }
-    // Upper body: torso, neck, head, shoulders, arms, hands (and
-    // fingers — Mixamo finger bones are named `…HandThumb1`, etc.).
-    if stem.starts_with("Spine")
+    if stem.starts_with(SPINE_BONE_PREFIX)
         || stem == "Neck"
-        || stem == "Head"
-        || stem == "HeadTop_End"
-        || stem.ends_with("Shoulder")
-        || stem.ends_with("Arm")
-        || stem.ends_with("Hand")
-        || stem.contains("HandThumb")
-        || stem.contains("HandIndex")
-        || stem.contains("HandMiddle")
-        || stem.contains("HandRing")
-        || stem.contains("HandPinky")
+        || stem == BONE_HEAD
+        || stem == BONE_HEAD_TOP_END
+        || UPPER_BODY_BONE_SUFFIXES.iter().any(|s| stem.ends_with(s))
+        || FINGER_BONE_PATTERNS.iter().any(|p| stem.contains(p))
     {
         return UPPER_BODY_MASK;
     }
@@ -1351,5 +1419,181 @@ fn update_head_lock_delta(
             delta = delta.normalize_or_zero() * HEAD_LOCK_MAX_DELTA_M;
         }
         body.head_lock_delta = delta;
+    }
+}
+
+// ============================================================================
+// Right-arm point + yeet
+// ============================================================================
+
+/// Walk the body's bones once to find `mixamorig*:RightArm` and
+/// compute the bind-pose offset from there to `mixamorig*:RightHand`.
+/// Stored on the [`BodyVisual`] so the per-frame IK system doesn't have
+/// to re-resolve the chain each tick.
+///
+/// Run in `Update` (before any animation evaluation in PostUpdate)
+/// because we need bind-pose values from the bones' `Transform`
+/// components — animation may have overwritten them by PostUpdate.
+fn cache_right_arm(
+    mut body_query: Query<(Entity, &mut BodyVisual)>,
+    children: Query<&Children>,
+    names: Query<&Name>,
+    transforms: Query<&Transform>,
+) {
+    for (entity, mut body) in &mut body_query {
+        if body.right_arm_entity.is_some() {
+            continue;
+        }
+        let Some(right_arm) =
+            find_descendant_by_bone_stem(entity, BONE_RIGHT_ARM, &children, &names)
+        else {
+            continue;
+        };
+        let Some(right_forearm) =
+            find_descendant_by_bone_stem(entity, BONE_RIGHT_FORE_ARM, &children, &names)
+        else {
+            continue;
+        };
+        let Some(right_hand) =
+            find_descendant_by_bone_stem(entity, BONE_RIGHT_HAND, &children, &names)
+        else {
+            continue;
+        };
+
+        // Hand position in the upper arm's local frame at bind pose:
+        // forearm.local_translation + forearm.local_rotation * hand.local_translation.
+        let Ok(forearm_t) = transforms.get(right_forearm) else {
+            continue;
+        };
+        let Ok(hand_t) = transforms.get(right_hand) else {
+            continue;
+        };
+        let offset = forearm_t.translation + forearm_t.rotation * hand_t.translation;
+
+        body.right_arm_entity = Some(right_arm);
+        body.right_arm_hand_offset_bind = offset;
+        tracing::info!(
+            "Cached right-arm IK: hand offset in upper-arm space = ({:.3}, {:.3}, {:.3})",
+            offset.x,
+            offset.y,
+            offset.z,
+        );
+    }
+}
+
+fn find_descendant_by_bone_stem(
+    root: Entity,
+    target_stem: &str,
+    children: &Query<&Children>,
+    names: &Query<&Name>,
+) -> Option<Entity> {
+    let mut stack: Vec<Entity> = vec![root];
+    while let Some(entity) = stack.pop() {
+        if let Ok(name) = names.get(entity)
+            && bone_stem(name.as_str()) == target_stem
+        {
+            return Some(entity);
+        }
+        if let Ok(child_list) = children.get(entity) {
+            stack.extend(child_list.iter());
+        }
+    }
+    None
+}
+
+/// Override the right upper-arm's local rotation each frame, slerped in
+/// by `point_amount`, so the bind-pose hand offset aligns with the
+/// camera's look direction. Effectively a single-bone "look-at" — the
+/// elbow doesn't bend, the whole straight arm rotates from the shoulder.
+/// Good enough for a pointing gesture without a real IK solver.
+#[allow(clippy::type_complexity)]
+fn apply_arm_pointing(
+    time: Res<Time>,
+    actions: Query<&ActionState<CameraAction>>,
+    logical_query: Query<(&FpsController, &WorldPosition), With<LogicalPlayer>>,
+    parents: Query<&ChildOf>,
+    global_transforms: Query<&GlobalTransform>,
+    mut body_query: Query<&mut BodyVisual>,
+    mut transforms: Query<&mut Transform, Without<LogicalPlayer>>,
+) {
+    let action_state = actions.single().ok();
+    let pointing = action_state.is_some_and(|s| s.pressed(&CameraAction::Point));
+    let dt = time.delta_secs();
+
+    for mut body in &mut body_query {
+        let target = if pointing { 1.0 } else { 0.0 };
+        let step = (POINT_RAMP_PER_SEC * dt).min(1.0);
+        body.point_amount = body.point_amount + (target - body.point_amount) * step;
+
+        if body.point_amount < 1e-3 {
+            continue;
+        }
+        let Some(right_arm) = body.right_arm_entity else {
+            continue;
+        };
+        let Ok((controller, world_pos)) = logical_query.get(body.logical_entity) else {
+            continue;
+        };
+
+        let frame = RadialFrame::from_ecef_position(world_pos.position);
+        let forward_horizontal =
+            (frame.north * controller.yaw.cos() - frame.east * controller.yaw.sin()).normalize();
+        let look_dir =
+            forward_horizontal * controller.pitch.cos() + frame.up * controller.pitch.sin();
+
+        let Ok(arm_parent) = parents.get(right_arm) else {
+            continue;
+        };
+        let Ok(parent_global) = global_transforms.get(arm_parent.parent()) else {
+            continue;
+        };
+        let (_, parent_rot, _) = parent_global.to_scale_rotation_translation();
+
+        // Look direction expressed in the arm's parent's local frame.
+        let look_dir_local = parent_rot.inverse() * look_dir;
+        let bind_dir = body.right_arm_hand_offset_bind.normalize_or_zero();
+        if bind_dir == Vec3::ZERO {
+            continue;
+        }
+        let target_rotation = Quat::from_rotation_arc(bind_dir, look_dir_local.normalize());
+
+        if let Ok(mut arm_transform) = transforms.get_mut(right_arm) {
+            arm_transform.rotation = arm_transform
+                .rotation
+                .slerp(target_rotation, body.point_amount);
+        }
+    }
+}
+
+/// On release of the [`Point`](CameraAction::Point) action, set the
+/// logical player's linear velocity to the camera's look direction
+/// scaled by [`YEET_SPEED_M_S`]. Simple, replaces existing momentum —
+/// no impulse accumulation, no charge-up. Tunable via the constant.
+fn handle_yeet(
+    actions: Query<&ActionState<CameraAction>>,
+    body_query: Query<&BodyVisual>,
+    mut logical_query: Query<
+        (&FpsController, &WorldPosition, &mut LinearVelocity),
+        With<LogicalPlayer>,
+    >,
+) {
+    let Ok(action_state) = actions.single() else {
+        return;
+    };
+    if !action_state.just_released(&CameraAction::Point) {
+        return;
+    }
+
+    for body in &body_query {
+        let Ok((controller, world_pos, mut velocity)) = logical_query.get_mut(body.logical_entity)
+        else {
+            continue;
+        };
+        let frame = RadialFrame::from_ecef_position(world_pos.position);
+        let forward_horizontal =
+            (frame.north * controller.yaw.cos() - frame.east * controller.yaw.sin()).normalize();
+        let look_dir =
+            forward_horizontal * controller.pitch.cos() + frame.up * controller.pitch.sin();
+        velocity.0 = look_dir * YEET_SPEED_M_S;
     }
 }

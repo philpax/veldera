@@ -47,6 +47,10 @@ pub enum CameraAction {
     InteractVehicle,
     /// Fire projectile (left click).
     Fire,
+    /// Raise right arm to point at the look direction (right mouse,
+    /// held). Releasing the button yeets the player along the look
+    /// direction at [`YEET_SPEED_M_S`](crate::camera::YEET_SPEED_M_S).
+    Point,
 }
 
 /// Actions for vehicle control.
@@ -78,6 +82,7 @@ pub fn default_camera_input_map() -> InputMap<CameraAction> {
         .with_axis(CameraAction::AdjustSpeed, MouseScrollAxis::Y)
         .with(CameraAction::InteractVehicle, KeyCode::KeyE)
         .with(CameraAction::Fire, MouseButton::Left)
+        .with(CameraAction::Point, MouseButton::Right)
         .with(CameraAction::GrabCursor, MouseButton::Left)
         .with(CameraAction::ReleaseCursor, KeyCode::Escape)
 }
@@ -153,6 +158,7 @@ const MOUSE_ACTIONS: &[CameraAction] = &[
     CameraAction::Look,
     CameraAction::AdjustSpeed,
     CameraAction::Fire,
+    CameraAction::Point,
 ];
 
 /// All gameplay actions (keyboard + mouse). Disabled when cursor is not grabbed.
@@ -168,6 +174,7 @@ const GAMEPLAY_ACTIONS: &[CameraAction] = &[
     CameraAction::Look,
     CameraAction::AdjustSpeed,
     CameraAction::Fire,
+    CameraAction::Point,
 ];
 
 fn set_actions(
