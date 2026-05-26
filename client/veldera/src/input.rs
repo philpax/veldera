@@ -8,7 +8,7 @@ use bevy::{
     prelude::*,
     window::{CursorGrabMode, CursorOptions},
 };
-use bevy_egui::EguiContexts;
+use bevy_egui::{EguiContexts, EguiGlobalSettings, EguiInputSystemSettings};
 use leafwing_input_manager::{plugin::InputManagerSystem, prelude::*};
 
 // ============================================================================
@@ -195,11 +195,15 @@ fn set_actions(
 ///
 /// Disables keyboard-bound camera actions when egui wants keyboard input,
 /// and disables gameplay actions when the cursor is not grabbed.
-/// `ToggleUi` is always kept enabled.
+/// `ToggleUi` is always kept enabled. Also gates `bevy_egui`'s own
+/// input intake — while the cursor is grabbed, egui's pointer and
+/// keyboard systems are turned off so a hidden cursor sitting over a
+/// debug window can't drag it or click buttons.
 fn manage_input_focus(
     mut camera_query: Query<&mut ActionState<CameraAction>>,
     mut vehicle_query: Query<&mut ActionState<VehicleAction>>,
     mut contexts: EguiContexts,
+    mut egui_settings: ResMut<EguiGlobalSettings>,
     cursor: Single<&CursorOptions>,
 ) {
     let egui_wants_kb = contexts
@@ -211,6 +215,37 @@ fn manage_input_focus(
         cursor.grab_mode,
         CursorGrabMode::Locked | CursorGrabMode::Confined
     );
+
+    // Turn off egui's pointer + keyboard input intake while the
+    // cursor is grabbed. Without this, a hidden cursor lingering over
+    // a debug window still drags / clicks it on Bevy mouse events.
+    //
+    // bevy_egui's documented input-gating helpers
+    // (`egui_wants_any_pointer_input`, `enable_absorb_bevy_input_system`)
+    // go the opposite direction — "skip gameplay when egui is busy"
+    // / "let egui absorb input first" — so they don't help here.
+    // The per-system toggles in `input_system_settings` are the
+    // documented mechanism for "force egui to ignore input"; flip
+    // them based on cursor-grab state.
+    let desired_input_settings = if is_grabbed {
+        EguiInputSystemSettings {
+            run_write_modifiers_keys_state_system: false,
+            run_write_window_pointer_moved_messages_system: false,
+            run_write_pointer_button_messages_system: false,
+            run_write_window_touch_messages_system: false,
+            run_write_non_window_pointer_moved_messages_system: false,
+            run_write_mouse_wheel_messages_system: false,
+            run_write_non_window_touch_messages_system: false,
+            run_write_keyboard_input_messages_system: false,
+            run_write_ime_messages_system: false,
+            run_write_file_dnd_messages_system: false,
+        }
+    } else {
+        EguiInputSystemSettings::default()
+    };
+    if egui_settings.input_system_settings != desired_input_settings {
+        egui_settings.input_system_settings = desired_input_settings;
+    }
 
     for mut action_state in &mut camera_query {
         // ToggleUi is always available.
