@@ -135,6 +135,22 @@ pub struct RenderPlayer {
     pub logical_entity: Entity,
 }
 
+/// Master compile-time switch for the ragdoll feature.
+///
+/// `false` (current) → [`fps_controller_slide`] never flips the
+/// state to [`RagdollState::Ragdolling`]; all the other ragdoll
+/// branches (head-locked camera, input/yeet gating, body tumble,
+/// head-lock skip in `sync_body_transform`) key off that state,
+/// so they all skip their ragdoll paths. Effectively reverts to
+/// pre-ragdoll behaviour: normal locomotion, no tumble, no
+/// camera-on-head, even at terminal velocity.
+///
+/// `true` → the full state machine + whole-body tumble run. The
+/// per-bone skeletal rig is a separate flag —
+/// [`ENABLE_SKELETAL_RAGDOLL`](super::body::ragdoll) — and stays
+/// off independently while the joint chain is being tuned.
+pub const ENABLE_RAGDOLL: bool = false;
+
 /// Ragdoll state machine for the FPS player.
 ///
 /// The player enters [`Ragdolling`](Self::Ragdolling) after sustained
@@ -878,28 +894,30 @@ fn fps_controller_slide(
             controller.grounded_time_s = 0.0;
         }
 
-        match controller.ragdoll_state {
-            RagdollState::Active => {
-                if controller.airborne_time_s >= RAGDOLL_AIRBORNE_THRESHOLD_S {
-                    controller.ragdoll_state = RagdollState::Ragdolling;
-                    // Start the head-look offset centred on the head's
-                    // natural orientation so the camera doesn't jump
-                    // to a stale offset accumulated from a previous
-                    // ragdoll.
-                    controller.head_look_yaw = 0.0;
-                    controller.head_look_pitch = 0.0;
-                    tracing::info!(
-                        "Entering ragdoll after {:.2}s airborne",
-                        controller.airborne_time_s
-                    );
+        if ENABLE_RAGDOLL {
+            match controller.ragdoll_state {
+                RagdollState::Active => {
+                    if controller.airborne_time_s >= RAGDOLL_AIRBORNE_THRESHOLD_S {
+                        controller.ragdoll_state = RagdollState::Ragdolling;
+                        // Start the head-look offset centred on the head's
+                        // natural orientation so the camera doesn't jump
+                        // to a stale offset accumulated from a previous
+                        // ragdoll.
+                        controller.head_look_yaw = 0.0;
+                        controller.head_look_pitch = 0.0;
+                        tracing::info!(
+                            "Entering ragdoll after {:.2}s airborne",
+                            controller.airborne_time_s
+                        );
+                    }
                 }
-            }
-            RagdollState::Ragdolling => {
-                if controller.grounded_time_s >= RAGDOLL_GROUND_RECOVERY_S {
-                    controller.ragdoll_state = RagdollState::Active;
-                    controller.airborne_time_s = 0.0;
-                    controller.grounded_time_s = 0.0;
-                    tracing::info!("Exiting ragdoll; recovering to standing");
+                RagdollState::Ragdolling => {
+                    if controller.grounded_time_s >= RAGDOLL_GROUND_RECOVERY_S {
+                        controller.ragdoll_state = RagdollState::Active;
+                        controller.airborne_time_s = 0.0;
+                        controller.grounded_time_s = 0.0;
+                        tracing::info!("Exiting ragdoll; recovering to standing");
+                    }
                 }
             }
         }
