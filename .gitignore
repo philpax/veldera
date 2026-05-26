@@ -27,4 +27,4 @@ build/
 telemetry.csv
 
 # On-disk source assets that are too large to commit into Git.
-source_assets/
+source_assets/ETOPO*.tif
