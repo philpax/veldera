@@ -16,7 +16,12 @@
 use std::{collections::HashMap, f32::consts::PI};
 
 use avian3d::prelude::*;
-use bevy::{animation::graph::AnimationNodeIndex, gltf::Gltf, prelude::*, scene::SceneRoot};
+use bevy::{
+    animation::{AnimationTargetId, graph::AnimationNodeIndex},
+    gltf::Gltf,
+    prelude::*,
+    scene::SceneRoot,
+};
 use glam::DVec3;
 use serde::Deserialize;
 
@@ -51,23 +56,40 @@ pub const EYE_FORWARD_OFFSET_SLIDER_RANGE: std::ops::RangeInclusive<f32> = -0.5.
 // ----------------------------------------------------------------------------
 
 /// Speeds below this are treated as "idle" — no directional locomotion
-/// clip contributes. Above the deadzone we blend in walk/run/sprint.
+/// clip contributes. Above the deadzone we blend in walking/running.
 pub const LOCOMOTION_DEADZONE_M_S: f32 = 0.3;
-/// Reference horizontal speed for the `walk *` clips. Below this we
-/// crossfade idle → walk; above this we crossfade walk → run.
+/// Reference horizontal speed for the `locomotion/walking` clip.
+/// Crossfaded from idle below and to `locomotion/running` above.
 pub const LOCOMOTION_WALK_REF_M_S: f32 = 3.0;
-/// Reference horizontal speed for the `run *` clips. Crossfaded with
-/// walk below and sprint above.
+/// Reference horizontal speed for the `locomotion/running` clip.
+/// Anything faster stays pinned to running.
 pub const LOCOMOTION_RUN_REF_M_S: f32 = 8.0;
-/// Reference horizontal speed for the `sprint *` clips. Anything faster
-/// stays pinned to sprint.
-pub const LOCOMOTION_SPRINT_REF_M_S: f32 = 13.0;
 /// Vertical speed (m/s) above which the body switches to the airborne
 /// pose. We use vertical velocity rather than `FpsController::ground_tick`
 /// because the latter loses ground contact for a single tick whenever
 /// the player crests an uneven surface, which would otherwise spam the
 /// jump-loop pose during normal walking.
 pub const LOCOMOTION_AIRBORNE_VERTICAL_M_S: f32 = 2.0;
+
+// ----------------------------------------------------------------------------
+// Mixamo pack prefixes (matching `tools/convert_character`'s subfolder
+// naming). The locomotion pack has hands-by-side poses we use for
+// standing locomotion; the rifle-8-way pack has 8-way directional clips
+// and crouching clips, but its hands hold an invisible rifle in front,
+// so we use it only for crouching with the upper body masked out.
+// ----------------------------------------------------------------------------
+
+const PACK_RIFLE_PREFIX: &str = "rifle-8-way/";
+const LOCOMOTION_IDLE_CLIP: &str = "locomotion/idle";
+
+/// Animation mask bit for upper-body bones (Spine and above: torso,
+/// neck, head, shoulders, arms, hands). A clip with this bit set in its
+/// `mask` field skips upper-body bones entirely.
+pub const UPPER_BODY_MASK: u64 = 1 << 0;
+/// Animation mask bit for lower-body bones (Hips and below: pelvis,
+/// legs, feet, toes). A clip with this bit set in its `mask` field skips
+/// lower-body bones entirely.
+pub const LOWER_BODY_MASK: u64 = 1 << 1;
 
 // ============================================================================
 // Public types
@@ -127,6 +149,9 @@ pub struct BodyVisual {
     /// Set true once we've hidden the head-attached submeshes (hair,
     /// eyelashes) that shouldn't appear in first-person view.
     pub head_meshes_hidden: bool,
+    /// Set true once we've populated the animation graph's
+    /// `mask_groups` from this scene's bone-name layout.
+    pub masks_populated: bool,
     /// The descendant entity carrying the `AnimationPlayer`. Bevy's glTF
     /// loader auto-inserts the player on the scene-root entity that's an
     /// animation root (a *descendant* of this `BodyVisual` entity), and
@@ -153,6 +178,7 @@ impl Plugin for BodyPlugin {
                     despawn_body_on_fps_exit,
                     hide_head_bone,
                     hide_head_attached_meshes,
+                    populate_bone_mask_groups,
                     install_animation_player,
                     update_locomotion_blend,
                 )
@@ -175,8 +201,14 @@ struct BodyAssets {
     gltf: Handle<Gltf>,
     scene: Option<Handle<Scene>>,
     animation_graph: Option<Handle<AnimationGraph>>,
-    /// Animation node indices keyed by clip name (e.g. "idle", "walking").
+    /// Animation node indices keyed by clip name (e.g.
+    /// `locomotion/idle`, `rifle-8-way/walk crouching forward`).
     animation_nodes: HashMap<String, AnimationNodeIndex>,
+    /// Extra graph node referring to `locomotion/idle` but with mask
+    /// `LOWER_BODY_MASK`, used to apply a hands-by-side upper-body pose
+    /// on top of a rifle-pack crouching clip (whose upper body has the
+    /// rifle-holding pose we want to hide).
+    idle_upper_body_node: Option<AnimationNodeIndex>,
 }
 
 /// Schema for the JSON we emit from `tools/convert_character`.
@@ -299,19 +331,36 @@ fn consume_loaded_metrics(
             .clone()
             .or_else(|| gltf.scenes.first().cloned());
 
-        // Build an AnimationGraph with every animation as a node off the
-        // root. Record each node index by clip name so we can pick a
-        // default ("idle") once an AnimationPlayer is installed.
+        // Build an AnimationGraph with every animation as a node off
+        // the root. Rifle-8-way clips get an upper-body mask so only
+        // their lower body contributes — the user wants those clips for
+        // crouching only, and only for the legs, since the rifle pose
+        // in the upper body would look odd without a visible rifle.
+        // A separate "idle (upper body only)" node referring to the
+        // locomotion idle clip is what we layer on top during crouch.
         if !gltf.animations.is_empty() {
             let mut graph = AnimationGraph::new();
             let root = graph.root;
             let mut nodes: HashMap<String, AnimationNodeIndex> = HashMap::new();
             for (name, clip) in &gltf.named_animations {
                 let node = graph.add_clip(clip.clone(), 1.0, root);
+                if name.starts_with(PACK_RIFLE_PREFIX) {
+                    graph[node].mask = UPPER_BODY_MASK;
+                }
                 nodes.insert(name.to_string(), node);
             }
+            let idle_upper = gltf
+                .named_animations
+                .iter()
+                .find(|(k, _)| k.as_ref() == LOCOMOTION_IDLE_CLIP)
+                .map(|(_, clip)| {
+                    let n = graph.add_clip(clip.clone(), 1.0, root);
+                    graph[n].mask = LOWER_BODY_MASK;
+                    n
+                });
             body_assets.animation_graph = Some(anim_graphs.add(graph));
             body_assets.animation_nodes = nodes;
+            body_assets.idle_upper_body_node = idle_upper;
         }
     }
 }
@@ -361,6 +410,7 @@ fn spawn_body_on_fps_enter(
             logical_entity,
             head_hidden: false,
             head_meshes_hidden: false,
+            masks_populated: false,
             animation_player: None,
         },
         SceneRoot(scene_handle.clone()),
@@ -494,6 +544,100 @@ fn hide_head_attached_meshes(
 }
 
 // ============================================================================
+// Bone mask groups
+// ============================================================================
+
+/// Classify a Mixamo bone stem (the part after `mixamorig*:`) into a
+/// mask group. Hips and below → `LOWER_BODY_MASK`; Spine and above →
+/// `UPPER_BODY_MASK`. Unknown bones return `0` (animated by every clip).
+fn bone_mask_group(stem: &str) -> u64 {
+    // Lower body: pelvis, legs, feet, toes.
+    if stem == "Hips"
+        || stem.ends_with("UpLeg")
+        || stem.ends_with("Leg")
+        || stem.ends_with("Foot")
+        || stem.ends_with("ToeBase")
+        || stem.ends_with("Toe_End")
+    {
+        return LOWER_BODY_MASK;
+    }
+    // Upper body: torso, neck, head, shoulders, arms, hands (and
+    // fingers — Mixamo finger bones are named `…HandThumb1`, etc.).
+    if stem.starts_with("Spine")
+        || stem == "Neck"
+        || stem == "Head"
+        || stem == "HeadTop_End"
+        || stem.ends_with("Shoulder")
+        || stem.ends_with("Arm")
+        || stem.ends_with("Hand")
+        || stem.contains("HandThumb")
+        || stem.contains("HandIndex")
+        || stem.contains("HandMiddle")
+        || stem.contains("HandRing")
+        || stem.contains("HandPinky")
+    {
+        return UPPER_BODY_MASK;
+    }
+    0
+}
+
+/// Populate `AnimationGraph::mask_groups` by walking the scene to find
+/// the `AnimationTarget` on each animated bone, classifying it by name,
+/// and recording the bit in the graph asset. Runs once per body — the
+/// graph is shared across all bodies but the bone names are stable.
+fn populate_bone_mask_groups(
+    body_assets: Res<BodyAssets>,
+    mut graphs: ResMut<Assets<AnimationGraph>>,
+    mut body_query: Query<(Entity, &mut BodyVisual)>,
+    children: Query<&Children>,
+    names: Query<&Name>,
+    target_ids: Query<&AnimationTargetId>,
+) {
+    let Some(graph_handle) = body_assets.animation_graph.as_ref() else {
+        return;
+    };
+    let Some(graph) = graphs.get_mut(graph_handle.id()) else {
+        return;
+    };
+
+    for (entity, mut body) in &mut body_query {
+        if body.masks_populated {
+            continue;
+        }
+        let mut any = false;
+        let mut stack: Vec<Entity> = vec![entity];
+        while let Some(e) = stack.pop() {
+            if let Ok(name) = names.get(e)
+                && let Ok(target_id) = target_ids.get(e)
+            {
+                let mask = bone_mask_group(bone_stem(name.as_str()));
+                if mask != 0 {
+                    graph.mask_groups.insert(*target_id, mask);
+                    any = true;
+                }
+            }
+            if let Ok(child_list) = children.get(e) {
+                stack.extend(child_list.iter());
+            }
+        }
+        if any {
+            body.masks_populated = true;
+            tracing::info!(
+                "Populated {} mask group entries on the animation graph",
+                graph.mask_groups.len()
+            );
+        }
+    }
+}
+
+fn bone_stem(name: &str) -> &str {
+    match name.rfind(':') {
+        Some(i) => &name[i + 1..],
+        None => name,
+    }
+}
+
+// ============================================================================
 // Animation: install AnimationPlayer once the scene has spawned
 // ============================================================================
 
@@ -508,11 +652,20 @@ fn install_animation_player(
     let Some(graph) = body_assets.animation_graph.as_ref() else {
         return;
     };
-    // Default clip: case-insensitive "idle" if it exists, else any clip.
+    // Default clip: prefer the locomotion-pack idle if present, fall
+    // back to any clip called "idle", then to the first clip in the
+    // graph. The pre-fire just avoids one frame of T-pose; the
+    // locomotion blender takes over on the next tick.
     let default_node = body_assets
         .animation_nodes
         .iter()
-        .find(|(k, _)| k.eq_ignore_ascii_case("idle"))
+        .find(|(k, _)| k.as_str() == "locomotion/idle")
+        .or_else(|| {
+            body_assets
+                .animation_nodes
+                .iter()
+                .find(|(k, _)| k.eq_ignore_ascii_case("idle"))
+        })
         .or_else(|| body_assets.animation_nodes.iter().next())
         .map(|(name, node)| (name.clone(), *node));
 
@@ -813,122 +966,229 @@ fn update_locomotion_blend(
             0.0
         };
 
-        let target_weights =
+        let targets =
             compute_locomotion_weights(speed, fwd_speed, side_speed, airborne, crouch_amount);
 
-        apply_locomotion_weights(&mut player, &body_assets.animation_nodes, &target_weights);
+        apply_locomotion_weights(
+            &mut player,
+            &body_assets.animation_nodes,
+            body_assets.idle_upper_body_node,
+            &targets,
+        );
 
         let _ = config;
     }
 }
 
-/// Build the `clip name → weight` map for one tick. Pure / testable; no
+/// Target weights for one tick, decomposed into named clips plus the
+/// special "upper-body idle" node that's layered on top during crouch.
+struct LocomotionTargets {
+    /// Named clip weights, keyed by the `pack/stem` glTF animation name.
+    clips: HashMap<String, f32>,
+    /// Weight for the masked `locomotion/idle` node that supplies the
+    /// upper-body pose during crouch (zero when not crouching).
+    idle_upper_body: f32,
+}
+
+/// Build the per-clip target weights for one tick. Pure / testable; no
 /// ECS access.
+///
+/// Strategy:
+/// - **Standing**: locomotion pack (hands by side) for the forward and
+///   strafe axes; rifle-8-way `walk/run backward[ left|right]` for the
+///   backward axis (with their upper bodies masked off + the masked
+///   locomotion idle layered on top so the rifle pose doesn't bleed
+///   through). Pure-side movement stays on the locomotion strafe clips.
+/// - **Crouching**: rifle-8-way pack drives the legs and hips via the
+///   `walk crouching *` 8-way clips (or `idle crouching` when still),
+///   with the upper-body-masked `locomotion/idle` node layered on top.
+/// - **Airborne**: `locomotion/jump`, full body.
 fn compute_locomotion_weights(
     speed: f32,
     fwd_speed: f32,
     side_speed: f32,
     airborne: bool,
     crouch_amount: f32,
-) -> HashMap<String, f32> {
-    let mut weights: HashMap<String, f32> = HashMap::new();
+) -> LocomotionTargets {
+    let mut clips: HashMap<String, f32> = HashMap::new();
 
     if airborne {
-        // Sustained vertical motion: play the loop pose. Jump up/down
-        // phases would require event-based state tracking — punt for v1.
-        weights.insert("jump loop".to_string(), 1.0);
-        return weights;
+        clips.insert("locomotion/jump".to_string(), 1.0);
+        return LocomotionTargets {
+            clips,
+            idle_upper_body: 0.0,
+        };
     }
-
-    // Gait blend: pick the two adjacent reference speeds and lerp.
-    let (idle_w, walk_w, run_w, sprint_w) = gait_blend(speed);
-
-    // 8-way direction blend (zero contribution while idle).
-    let dir_blend = if speed > LOCOMOTION_DEADZONE_M_S {
-        Some(direction_8way_blend(fwd_speed, side_speed))
-    } else {
-        None
-    };
 
     let standing_w = (1.0 - crouch_amount).clamp(0.0, 1.0);
     let crouching_w = crouch_amount.clamp(0.0, 1.0);
 
-    // Idle: standing vs crouching, scaled by the idle gait weight.
-    if idle_w * standing_w > 0.0 {
-        add_weight(&mut weights, "idle", idle_w * standing_w);
+    let mut idle_upper_body = 0.0;
+    if standing_w > 0.0 {
+        idle_upper_body +=
+            write_standing_weights(&mut clips, speed, fwd_speed, side_speed, standing_w);
     }
-    if idle_w * crouching_w > 0.0 {
-        add_weight(&mut weights, "idle crouching", idle_w * crouching_w);
-    }
-
-    if let Some(dir_blend) = dir_blend {
-        for (dir_idx, dir_w) in dir_blend {
-            let dir_name = DIRECTION_NAMES[dir_idx];
-
-            // Standing locomotion: split between walk / run / sprint.
-            if walk_w * standing_w > 0.0 {
-                add_weight(
-                    &mut weights,
-                    &format!("walk {dir_name}"),
-                    walk_w * dir_w * standing_w,
-                );
-            }
-            if run_w * standing_w > 0.0 {
-                add_weight(
-                    &mut weights,
-                    &format!("run {dir_name}"),
-                    run_w * dir_w * standing_w,
-                );
-            }
-            if sprint_w * standing_w > 0.0 {
-                add_weight(
-                    &mut weights,
-                    &format!("sprint {dir_name}"),
-                    sprint_w * dir_w * standing_w,
-                );
-            }
-
-            // Crouching only has walk variants; route walk/run/sprint
-            // contribution into walk-crouching when we're crouched.
-            let crouch_loco_w = (walk_w + run_w + sprint_w) * crouching_w;
-            if crouch_loco_w > 0.0 {
-                add_weight(
-                    &mut weights,
-                    &format!("walk crouching {dir_name}"),
-                    crouch_loco_w * dir_w,
-                );
-            }
-        }
+    if crouching_w > 0.0 {
+        write_crouching_weights(&mut clips, speed, fwd_speed, side_speed, crouching_w);
+        idle_upper_body += crouching_w;
     }
 
-    weights
+    LocomotionTargets {
+        clips,
+        idle_upper_body,
+    }
 }
 
-/// Gait blend weights as a 4-tuple `(idle, walk, run, sprint)` that sums
-/// to 1. Crossfades between the two adjacent reference speeds.
-fn gait_blend(speed: f32) -> (f32, f32, f32, f32) {
+/// Locomotion-pack 3-gait blend (idle / walking / running) summing to 1.
+fn locomotion_gait_blend(speed: f32) -> (f32, f32, f32) {
     if speed <= LOCOMOTION_DEADZONE_M_S {
-        return (1.0, 0.0, 0.0, 0.0);
+        return (1.0, 0.0, 0.0);
     }
     if speed < LOCOMOTION_WALK_REF_M_S {
         let t = ((speed - LOCOMOTION_DEADZONE_M_S)
             / (LOCOMOTION_WALK_REF_M_S - LOCOMOTION_DEADZONE_M_S))
             .clamp(0.0, 1.0);
-        return (1.0 - t, t, 0.0, 0.0);
+        return (1.0 - t, t, 0.0);
     }
     if speed < LOCOMOTION_RUN_REF_M_S {
         let t = ((speed - LOCOMOTION_WALK_REF_M_S)
             / (LOCOMOTION_RUN_REF_M_S - LOCOMOTION_WALK_REF_M_S))
             .clamp(0.0, 1.0);
-        return (0.0, 1.0 - t, t, 0.0);
+        return (0.0, 1.0 - t, t);
     }
-    if speed < LOCOMOTION_SPRINT_REF_M_S {
-        let t = ((speed - LOCOMOTION_RUN_REF_M_S)
-            / (LOCOMOTION_SPRINT_REF_M_S - LOCOMOTION_RUN_REF_M_S))
-            .clamp(0.0, 1.0);
-        return (0.0, 0.0, 1.0 - t, t);
+    (0.0, 0.0, 1.0)
+}
+
+/// Returns the additional `idle_upper_body` weight contribution from
+/// the rifle-pack backward clips used in this standing tick.
+fn write_standing_weights(
+    clips: &mut HashMap<String, f32>,
+    speed: f32,
+    fwd_speed: f32,
+    side_speed: f32,
+    standing_w: f32,
+) -> f32 {
+    let (idle_g, walk_g, run_g) = locomotion_gait_blend(speed);
+
+    if speed <= LOCOMOTION_DEADZONE_M_S {
+        add_weight(clips, "locomotion/idle", standing_w);
+        return 0.0;
     }
-    (0.0, 0.0, 0.0, 1.0)
+
+    // Signed forward axis [-1, 1]: positive is "into the locomotion
+    // pack's forward-locomotion territory"; negative drives the rifle
+    // pack's backward clips for the lower body.
+    let dir_fwd_signed = fwd_speed / speed;
+    let dir_fwd = dir_fwd_signed.max(0.0);
+    let dir_back = (-dir_fwd_signed).max(0.0);
+    let dir_side = (side_speed / speed).abs();
+    let side_name = if side_speed < 0.0 { "left" } else { "right" };
+
+    // Forward + strafe: locomotion pack.
+    if dir_fwd > 0.0 {
+        if walk_g > 0.0 {
+            add_weight(clips, "locomotion/walking", standing_w * walk_g * dir_fwd);
+        }
+        if run_g > 0.0 {
+            add_weight(clips, "locomotion/running", standing_w * run_g * dir_fwd);
+        }
+    }
+    if dir_side > 0.0 {
+        if walk_g > 0.0 {
+            add_weight(
+                clips,
+                &format!("locomotion/{side_name} strafe walking"),
+                standing_w * walk_g * dir_side,
+            );
+        }
+        if run_g > 0.0 {
+            add_weight(
+                clips,
+                &format!("locomotion/{side_name} strafe"),
+                standing_w * run_g * dir_side,
+            );
+        }
+    }
+
+    // Backward: rifle pack. Split between pure-backward and diagonal
+    // backward by the side-axis magnitude. Cardinal-side movement
+    // (dir_side = 1 with dir_back = 0) bypasses this entirely.
+    if dir_back > 0.0 {
+        let back_pure = (dir_back * (1.0 - dir_side)).max(0.0);
+        let back_side = dir_back * dir_side;
+        if walk_g > 0.0 {
+            if back_pure > 0.0 {
+                add_weight(
+                    clips,
+                    "rifle-8-way/walk backward",
+                    standing_w * walk_g * back_pure,
+                );
+            }
+            if back_side > 0.0 {
+                add_weight(
+                    clips,
+                    &format!("rifle-8-way/walk backward {side_name}"),
+                    standing_w * walk_g * back_side,
+                );
+            }
+        }
+        if run_g > 0.0 {
+            if back_pure > 0.0 {
+                add_weight(
+                    clips,
+                    "rifle-8-way/run backward",
+                    standing_w * run_g * back_pure,
+                );
+            }
+            if back_side > 0.0 {
+                add_weight(
+                    clips,
+                    &format!("rifle-8-way/run backward {side_name}"),
+                    standing_w * run_g * back_side,
+                );
+            }
+        }
+    }
+
+    // Idle takes the gait-idle bucket plus any "leftover" weight that
+    // didn't go to a directional clip (e.g. diagonals beyond unit
+    // magnitude).
+    let consumed = dir_fwd + dir_back + dir_side;
+    let leftover = (1.0 - consumed).max(0.0);
+    add_weight(
+        clips,
+        "locomotion/idle",
+        standing_w * (idle_g + (walk_g + run_g) * leftover),
+    );
+
+    // Upper-body idle weight matches how much of the standing lower
+    // body comes from rifle clips this tick; both fade in together.
+    standing_w * dir_back * (walk_g + run_g)
+}
+
+fn write_crouching_weights(
+    clips: &mut HashMap<String, f32>,
+    speed: f32,
+    fwd_speed: f32,
+    side_speed: f32,
+    crouching_w: f32,
+) {
+    if speed <= LOCOMOTION_DEADZONE_M_S {
+        add_weight(clips, "rifle-8-way/idle crouching", crouching_w);
+        return;
+    }
+    // 8-way blend across the rifle-pack crouching clips. The clip mask
+    // (set at graph-build time) limits these to the lower body; the
+    // upper body comes from the layered idle-upper node in
+    // `LocomotionTargets::idle_upper_body`.
+    for (dir_idx, dir_w) in direction_8way_blend(fwd_speed, side_speed) {
+        let dir = DIRECTION_NAMES[dir_idx];
+        add_weight(
+            clips,
+            &format!("rifle-8-way/walk crouching {dir}"),
+            crouching_w * dir_w,
+        );
+    }
 }
 
 /// Map body-local velocity to up to two adjacent 8-way directions with
@@ -957,8 +1217,7 @@ fn add_weight(weights: &mut HashMap<String, f32>, name: &str, w: f32) {
 }
 
 /// Walk every clip in the graph and push its target weight into the
-/// player. Clips not in `target_weights` get weight 0 so they smoothly
-/// fall out of the mix.
+/// player, plus the special idle-upper-body node used in crouching.
 ///
 /// We only call `play()` the first time a clip needs a non-zero weight
 /// — afterwards we mutate the existing `ActiveAnimation` directly. Every
@@ -967,18 +1226,26 @@ fn add_weight(weights: &mut HashMap<String, f32>, name: &str, w: f32) {
 fn apply_locomotion_weights(
     player: &mut AnimationPlayer,
     nodes: &HashMap<String, AnimationNodeIndex>,
-    target_weights: &HashMap<String, f32>,
+    idle_upper_node: Option<AnimationNodeIndex>,
+    targets: &LocomotionTargets,
 ) {
     for (name, node) in nodes {
-        let weight = target_weights.get(name).copied().unwrap_or(0.0);
-        match player.animation_mut(*node) {
-            Some(active) => {
-                active.set_weight(weight);
-            }
-            None => {
-                if weight > 0.0 {
-                    player.play(*node).set_weight(weight).repeat();
-                }
+        let weight = targets.clips.get(name).copied().unwrap_or(0.0);
+        set_node_weight(player, *node, weight);
+    }
+    if let Some(node) = idle_upper_node {
+        set_node_weight(player, node, targets.idle_upper_body);
+    }
+}
+
+fn set_node_weight(player: &mut AnimationPlayer, node: AnimationNodeIndex, weight: f32) {
+    match player.animation_mut(node) {
+        Some(active) => {
+            active.set_weight(weight);
+        }
+        None => {
+            if weight > 0.0 {
+                player.play(node).set_weight(weight).repeat();
             }
         }
     }

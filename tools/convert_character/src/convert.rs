@@ -50,7 +50,7 @@ pub fn convert(input_dir: &Path, output_path: &Path) -> Result<(), Box<dyn Error
 
     let mut base: Option<ufbx::SceneRoot> = None;
     let mut anims: Vec<(String, ufbx::SceneRoot)> = Vec::new();
-    for path in &fbx_files {
+    for (name, path) in &fbx_files {
         let scene = ufbx::load_file(path.to_str().unwrap(), load_opts())
             .map_err(|e| format!("failed to load {}: {}", path.display(), e.description))?;
         if !scene.skin_clusters.is_empty() {
@@ -64,12 +64,7 @@ pub fn convert(input_dir: &Path, output_path: &Path) -> Result<(), Box<dyn Error
             }
             base = Some(scene);
         } else {
-            let stem = path
-                .file_stem()
-                .unwrap_or_default()
-                .to_string_lossy()
-                .to_string();
-            anims.push((stem, scene));
+            anims.push((name.clone(), scene));
         }
     }
     let base_scene = base.ok_or("no base FBX (none had skin clusters)")?;
@@ -268,21 +263,44 @@ enum AnimValues {
 // Loading
 // ============================================================================
 
-fn list_fbx_files(dir: &Path) -> Result<Vec<std::path::PathBuf>, Box<dyn Error>> {
+/// Recursively walk the input directory for FBX files. Returns
+/// `(name, path)` pairs where `name` is the file's path relative to the
+/// input root with the `.fbx` extension stripped, e.g.
+/// `locomotion/idle` or `Ch31_nonPBR`. Forward slashes regardless of OS.
+fn list_fbx_files(dir: &Path) -> Result<Vec<(String, std::path::PathBuf)>, Box<dyn Error>> {
     let mut out = Vec::new();
+    collect_fbx_recursive(dir, dir, &mut out)?;
+    out.sort_by(|a, b| a.0.cmp(&b.0));
+    Ok(out)
+}
+
+fn collect_fbx_recursive(
+    root: &Path,
+    dir: &Path,
+    out: &mut Vec<(String, std::path::PathBuf)>,
+) -> Result<(), Box<dyn Error>> {
     for entry in std::fs::read_dir(dir)? {
         let entry = entry?;
         let path = entry.path();
-        if path
+        let file_type = entry.file_type()?;
+        if file_type.is_dir() {
+            collect_fbx_recursive(root, &path, out)?;
+        } else if path
             .extension()
             .and_then(std::ffi::OsStr::to_str)
             .is_some_and(|e| e.eq_ignore_ascii_case("fbx"))
         {
-            out.push(path);
+            let rel = path.strip_prefix(root).unwrap_or(&path);
+            let name = rel
+                .with_extension("")
+                .components()
+                .map(|c| c.as_os_str().to_string_lossy().into_owned())
+                .collect::<Vec<_>>()
+                .join("/");
+            out.push((name, path));
         }
     }
-    out.sort();
-    Ok(out)
+    Ok(())
 }
 
 fn load_opts() -> ufbx::LoadOpts<'static> {
