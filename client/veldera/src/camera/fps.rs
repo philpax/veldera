@@ -240,14 +240,17 @@ pub struct FpsController {
 impl Default for FpsController {
     fn default() -> Self {
         Self {
-            walk_speed: 9.0,
-            run_speed: 14.0,
+            // Realistic-ish locomotion speeds chosen to roughly match
+            // Mixamo's reference clip paces (so the feet plant cleanly
+            // rather than ice-skating or motorboating).
+            walk_speed: 3.0,
+            run_speed: 8.0,
             forward_speed: 30.0,
             side_speed: 30.0,
             air_speed_cap: 2.0,
             air_acceleration: 20.0,
             max_air_speed: 15.0,
-            crouched_speed: 5.0,
+            crouched_speed: 2.0,
             crouch_speed: 6.0,
             uncrouch_speed: 8.0,
             height: 1.8,
