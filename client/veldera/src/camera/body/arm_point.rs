@@ -39,7 +39,7 @@ use super::{
     },
 };
 use crate::{
-    camera::fps::{FpsController, LogicalPlayer, RadialFrame},
+    camera::fps::{FpsController, LogicalPlayer, RadialFrame, RagdollState},
     input::CameraAction,
     world::floating_origin::WorldPosition,
 };
@@ -334,10 +334,19 @@ pub(super) fn apply_arm_pointing(
     mut transforms: Query<&mut Transform, Without<LogicalPlayer>>,
 ) {
     let action_state = actions.single().ok();
-    let input_pressed = action_state.is_some_and(|s| s.pressed(&CameraAction::Point));
+    let raw_input_pressed = action_state.is_some_and(|s| s.pressed(&CameraAction::Point));
     let dt = time.delta_secs();
 
     for mut body in &mut body_query {
+        // Ignore the Point input entirely while ragdolling — no
+        // pointing pose, no charge, no rumble. The arm goes limp with
+        // the rest of the ragdolled body, and the yeet handler sees a
+        // synthetic no-release.
+        let is_ragdolling = logical_query
+            .get(body.logical_entity)
+            .map(|(c, _)| c.ragdoll_state == RagdollState::Ragdolling)
+            .unwrap_or(false);
+        let input_pressed = raw_input_pressed && !is_ragdolling;
         // Tick the cooldown regardless of input.
         if body.yeet_cooldown_s > 0.0 {
             body.yeet_cooldown_s = (body.yeet_cooldown_s - dt).max(0.0);
@@ -539,6 +548,12 @@ pub(super) fn handle_yeet(
         else {
             continue;
         };
+        // No yeeting while ragdolling. The Point action is already
+        // gated in `apply_arm_pointing` so `charge_seconds` should be
+        // zero here, but defend against state-toggling races.
+        if controller.ragdoll_state == RagdollState::Ragdolling {
+            continue;
+        }
 
         let charge_ratio = (body.charge_seconds / MAX_CHARGE_DURATION_S).clamp(0.0, 1.0);
         let speed = lerp(MIN_YEET_SPEED_M_S, MAX_YEET_SPEED_M_S, charge_ratio);

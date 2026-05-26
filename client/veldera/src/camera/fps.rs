@@ -135,6 +135,39 @@ pub struct RenderPlayer {
     pub logical_entity: Entity,
 }
 
+/// Ragdoll state machine for the FPS player.
+///
+/// The player enters [`Ragdolling`](Self::Ragdolling) after sustained
+/// airtime (yeeting, falling off a building) and exits it once
+/// they've been grounded for a short recovery window.
+///
+/// State transitions are driven by [`fps_controller_slide`] from the
+/// airborne/grounded timers; the rest of the FPS pipeline reads this
+/// to gate input, locomotion, and yeet.
+#[derive(Default, Clone, Copy, PartialEq, Eq, Debug)]
+pub enum RagdollState {
+    /// Normal play. Input drives movement; yeet is available.
+    #[default]
+    Active,
+    /// Player is airborne and tumbling. Input is ignored except for
+    /// limited head-turn yaw/pitch (camera-relative, clamped); yeet
+    /// is suppressed. Gravity + collision still apply.
+    Ragdolling,
+}
+
+/// Seconds of continuous airtime before the player ragdolls.
+///
+/// Tuned so normal jumps (~0.8 s of airtime) never trigger ragdoll,
+/// but yeets and falls off rooftops do. Lower → more sensitive,
+/// higher → harder to ragdoll.
+pub const RAGDOLL_AIRBORNE_THRESHOLD_S: f32 = 1.5;
+
+/// Seconds of continuous ground contact required to exit ragdoll.
+///
+/// A short delay prevents instant unragdolling on a bouncy collision
+/// transient (e.g. a single-tick ground hit during tumbling).
+pub const RAGDOLL_GROUND_RECOVERY_S: f32 = 0.3;
+
 /// Player size configuration for the FPS controller.
 ///
 /// Single source of truth for capsule dimensions. Read each tick by
@@ -235,6 +268,21 @@ pub struct FpsController {
     pub enable_input: bool,
 
     pub previous_translation: Option<Vec3>,
+
+    /// Current ragdoll state. Driven by airborne/grounded timers in
+    /// [`fps_controller_slide`]; read by [`fps_controller_prepare`],
+    /// [`fps_controller_render`], the body locomotion system, and the
+    /// arm-point yeet handler.
+    pub ragdoll_state: RagdollState,
+    /// Seconds of continuous airtime, reset on every grounded tick.
+    /// Triggers the [`Active`](RagdollState::Active) →
+    /// [`Ragdolling`](RagdollState::Ragdolling) transition when it
+    /// crosses [`RAGDOLL_AIRBORNE_THRESHOLD_S`].
+    pub airborne_time_s: f32,
+    /// Seconds of continuous ground contact, reset on every airborne
+    /// tick. Triggers the recovery transition once it crosses
+    /// [`RAGDOLL_GROUND_RECOVERY_S`].
+    pub grounded_time_s: f32,
 }
 
 impl Default for FpsController {
@@ -273,6 +321,10 @@ impl Default for FpsController {
             enable_input: true,
 
             previous_translation: None,
+
+            ragdoll_state: RagdollState::Active,
+            airborne_time_s: 0.0,
+            grounded_time_s: 0.0,
         }
     }
 }
@@ -591,6 +643,16 @@ fn fps_controller_prepare(
         let gravity_dir = -local_up;
         velocity.0 += gravity_dir * crate::constants::GRAVITY * dt;
 
+        // During ragdoll, skip the entire controller logic — no
+        // friction, no input acceleration, no jump, no crouch height
+        // update. Gravity (already applied above) and collision (run
+        // in `fps_controller_slide`) are the only forces on the
+        // capsule. The visual body tumbles independently via the
+        // body ragdoll system.
+        if controller.ragdoll_state == RagdollState::Ragdolling {
+            continue;
+        }
+
         // Determine grounded state and apply friction/acceleration before move_and_slide.
         let is_grounded = controller.ground_tick >= 1;
 
@@ -740,6 +802,36 @@ fn fps_controller_slide(
             controller.ground_tick = controller.ground_tick.saturating_add(1);
         } else {
             controller.ground_tick = 0;
+        }
+
+        // Track airborne / grounded time for ragdoll state transitions.
+        let dt = time.delta_secs();
+        if controller.ground_tick >= 1 {
+            controller.grounded_time_s += dt;
+            controller.airborne_time_s = 0.0;
+        } else {
+            controller.airborne_time_s += dt;
+            controller.grounded_time_s = 0.0;
+        }
+
+        match controller.ragdoll_state {
+            RagdollState::Active => {
+                if controller.airborne_time_s >= RAGDOLL_AIRBORNE_THRESHOLD_S {
+                    controller.ragdoll_state = RagdollState::Ragdolling;
+                    tracing::info!(
+                        "Entering ragdoll after {:.2}s airborne",
+                        controller.airborne_time_s
+                    );
+                }
+            }
+            RagdollState::Ragdolling => {
+                if controller.grounded_time_s >= RAGDOLL_GROUND_RECOVERY_S {
+                    controller.ragdoll_state = RagdollState::Active;
+                    controller.airborne_time_s = 0.0;
+                    controller.grounded_time_s = 0.0;
+                    tracing::info!("Exiting ragdoll; recovering to standing");
+                }
+            }
         }
     }
 }
