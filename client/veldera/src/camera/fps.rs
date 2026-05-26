@@ -990,8 +990,7 @@ fn fps_controller_render(
         let interpolated = previous.unwrap_or(current).lerp(current, t);
 
         let forward = frame.north * controller.yaw.cos() - frame.east * controller.yaw.sin();
-        let look_direction =
-            forward * controller.pitch.cos() + local_up * controller.pitch.sin();
+        let look_direction = forward * controller.pitch.cos() + local_up * controller.pitch.sin();
 
         render_transform.look_to(look_direction, local_up);
 

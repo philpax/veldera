@@ -216,6 +216,12 @@ pub struct BodyVisual {
     /// and exit so the body snaps back to upright cleanly on
     /// recovery.
     pub ragdoll_rotation_accum: Quat,
+    /// Per-bone ragdoll rig owned by this body. `None` outside
+    /// ragdoll; `Some` while ragdolling and the rig was assembled
+    /// successfully (Hips bone found). Built by
+    /// [`ragdoll::manage_ragdoll_skeleton`] and consumed by
+    /// [`ragdoll::sync_bones_from_physics`].
+    pub ragdoll_graph: Option<ragdoll::RagdollGraph>,
 }
 
 pub struct BodyPlugin;
@@ -242,6 +248,7 @@ impl Plugin for BodyPlugin {
                     locomotion::update_locomotion_blend,
                     arm_point::handle_yeet,
                     ragdoll::apply_body_ragdoll,
+                    ragdoll::manage_ragdoll_skeleton,
                 )
                     .chain(),
             )
@@ -255,7 +262,11 @@ impl Plugin for BodyPlugin {
             // the head-lock and rendering see our override).
             .add_systems(
                 PostUpdate,
-                arm_point::apply_arm_pointing
+                (
+                    arm_point::apply_arm_pointing,
+                    ragdoll::sync_bones_from_physics,
+                )
+                    .chain()
                     .after(bevy::app::AnimationSystems)
                     .before(bevy::transform::TransformSystems::Propagate),
             )
@@ -507,6 +518,7 @@ fn spawn_body_on_fps_enter(
             ragdoll_active: false,
             ragdoll_world_angular_velocity: Vec3::ZERO,
             ragdoll_rotation_accum: Quat::IDENTITY,
+            ragdoll_graph: None,
         },
         SceneRoot(scene_handle.clone()),
         WorldPosition::from_dvec3(world_pos.position),
