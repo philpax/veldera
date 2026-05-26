@@ -249,7 +249,12 @@ impl Default for FpsController {
             side_speed: 30.0,
             air_speed_cap: 2.0,
             air_acceleration: 20.0,
-            max_air_speed: 15.0,
+            // Lifted from the original 15 m/s so the point-yeet
+            // mechanic can launch the player at up to
+            // `MAX_YEET_SPEED_M_S`. Normal-gameplay air movement is
+            // bounded by `air_speed_cap` per-tick, so the new
+            // ceiling only matters for explicit launches.
+            max_air_speed: 200.0,
             crouched_speed: 2.0,
             crouch_speed: 6.0,
             uncrouch_speed: 8.0,

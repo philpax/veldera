@@ -174,6 +174,18 @@ pub struct BodyVisual {
     /// is held and toward `0` when released. The IK rotation is mixed
     /// in by this factor so the arm raises and lowers smoothly.
     pub point_amount: f32,
+    /// Seconds the Point action has been held this charge, capped at
+    /// [`arm_point::MAX_CHARGE_DURATION_S`]. Maps linearly to yeet
+    /// speed at release; resets to 0 on yeet or when not pointing.
+    pub charge_seconds: f32,
+    /// Seconds remaining before the player can yeet again. Set to
+    /// [`arm_point::YEET_COOLDOWN_S`] on release; while > 0 the Point
+    /// action is treated as not pressed.
+    pub yeet_cooldown_s: f32,
+    /// Looping rumble audio entity currently playing while charging.
+    /// Spawned on first Point press (off cooldown), despawned on
+    /// release. `None` when no rumble is active.
+    pub rumble_audio_entity: Option<Entity>,
 }
 
 pub struct BodyPlugin;
@@ -184,7 +196,7 @@ impl Plugin for BodyPlugin {
             .init_resource::<BodyTuning>()
             .init_resource::<BodyAssets>()
             .init_resource::<EyeLerp>()
-            .add_systems(Startup, request_body_asset)
+            .add_systems(Startup, (request_body_asset, arm_point::setup_charge_audio))
             .add_systems(
                 Update,
                 (
@@ -455,6 +467,9 @@ fn spawn_body_on_fps_enter(
             right_arm_entity: None,
             right_arm_hand_offset_bind: Vec3::ZERO,
             point_amount: 0.0,
+            charge_seconds: 0.0,
+            yeet_cooldown_s: 0.0,
+            rumble_audio_entity: None,
         },
         SceneRoot(scene_handle.clone()),
         WorldPosition::from_dvec3(world_pos.position),
