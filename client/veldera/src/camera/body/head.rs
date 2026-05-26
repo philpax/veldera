@@ -3,7 +3,7 @@
 //! the head bone, and head-locking the body so the animated head stays
 //! pinned in world space while the rest of the body wobbles around it.
 
-use bevy::prelude::*;
+use bevy::{camera::visibility::NoFrustumCulling, prelude::*};
 
 use super::{BodyVisual, CharacterMetrics};
 use crate::camera::fps::{FpsController, FpsPlayerConfig, LogicalPlayer};
@@ -106,6 +106,53 @@ pub(super) fn hide_head_attached_meshes(
         // walking; scene children may still be spawning.
         if hidden_any {
             body.head_meshes_hidden = true;
+        }
+    }
+}
+
+// ============================================================================
+// Frustum-culling override for first-person body meshes
+// ============================================================================
+
+/// Tag every `Mesh3d` descendant of the body with [`NoFrustumCulling`].
+///
+/// Bevy frustum-culls each mesh by its bind-pose AABB, which doesn't
+/// track animated bone positions — and in first-person the camera
+/// sits inside that AABB. When the player looks up at the sky the
+/// body's bind-pose AABB falls outside the frustum and the whole
+/// skinned mesh disappears; the arm pops back into view only when the
+/// camera turns toward where the bind-pose torso happens to be (or
+/// when crouching changes the body-to-camera offset enough to bring
+/// the AABB back into the frustum). This is the canonical
+/// first-person fix.
+///
+/// Runs each frame until at least one mesh was tagged; the scene
+/// children spawn asynchronously after the `SceneRoot` insert, so a
+/// one-shot system that ran on spawn would miss the meshes entirely.
+pub(super) fn disable_body_frustum_culling(
+    mut commands: Commands,
+    mut body_query: Query<(Entity, &mut BodyVisual)>,
+    children: Query<&Children>,
+    meshes: Query<(), With<Mesh3d>>,
+) {
+    for (entity, mut body) in &mut body_query {
+        if body.frustum_culling_disabled {
+            continue;
+        }
+        let mut tagged_any = false;
+        let mut stack: Vec<Entity> = vec![entity];
+        while let Some(e) = stack.pop() {
+            if meshes.contains(e) {
+                commands.entity(e).insert(NoFrustumCulling);
+                tagged_any = true;
+            }
+            if let Ok(child_list) = children.get(e) {
+                stack.extend(child_list.iter());
+            }
+        }
+        if tagged_any {
+            body.frustum_culling_disabled = true;
+            tracing::info!("Disabled frustum culling on first-person body meshes");
         }
     }
 }

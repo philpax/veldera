@@ -139,6 +139,14 @@ pub struct BodyVisual {
     /// Set true once we've hidden the head-attached submeshes (hair,
     /// eyelashes) that shouldn't appear in first-person view.
     pub head_meshes_hidden: bool,
+    /// Set true once we've disabled frustum culling on every body
+    /// mesh. The bind-pose AABB Bevy culls against doesn't follow
+    /// animated bones, and in first-person the camera sits *inside*
+    /// the body's AABB — small look-direction changes flip the AABB
+    /// outside the frustum and the whole arm vanishes. Tagging every
+    /// `Mesh3d` with `NoFrustumCulling` is the standard first-person
+    /// fix; the body is one skinned mesh, so the cost is negligible.
+    pub frustum_culling_disabled: bool,
     /// Set true once we've populated the animation graph's
     /// `mask_groups` from this scene's bone-name layout.
     pub masks_populated: bool,
@@ -211,6 +219,7 @@ impl Plugin for BodyPlugin {
                     despawn_body_on_fps_exit,
                     head::hide_head_bone,
                     head::hide_head_attached_meshes,
+                    head::disable_body_frustum_culling,
                     populate_bone_mask_groups,
                     install_animation_player,
                     arm_point::cache_right_arm,
@@ -466,6 +475,7 @@ fn spawn_body_on_fps_enter(
             logical_entity,
             head_hidden: false,
             head_meshes_hidden: false,
+            frustum_culling_disabled: false,
             masks_populated: false,
             animation_player: None,
             head_bone_entity: None,
