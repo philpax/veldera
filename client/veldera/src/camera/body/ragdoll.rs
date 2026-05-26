@@ -95,12 +95,10 @@ const RAGDOLL_BONE_TABLE: &[(&str, Option<&str>)] = &[
 const RAGDOLL_BONE_COLLIDER_RADIUS_M: f32 = 0.06;
 
 /// Uniform density for the per-bone sphere colliders (kg/m³).
-/// Bumped well past water-like to ~5× since the small sphere
-/// colliders underrepresent each bone's effective inertia — heavier
-/// bones swing more reluctantly on impact, which trades the
-/// "windmill of doom" tumble for something that reads as actual
-/// weight hitting the ground. Real-human total ~70 kg; current
-/// 0.06 m radius × 19 bones × this density lands roughly there.
+/// ~3× water — gives ~2.7 kg per bone at the current 0.06 m radius,
+/// 51 kg total chain mass. Heavier than this and the static load
+/// through 18 joints overwhelms compliance-driven stiffness;
+/// lighter and the rig feels weightless.
 ///
 /// Set via the `(Collider, ColliderDensity)` pair Avian recommends
 /// — Avian then auto-computes both linear `Mass` and angular
@@ -109,7 +107,7 @@ const RAGDOLL_BONE_COLLIDER_RADIUS_M: f32 = 0.06;
 /// produces NaN under the smallest torque; mixing a
 /// `MassPropertiesBundle` with a `Collider` makes the two compete
 /// and one path silently loses.
-const RAGDOLL_BONE_DENSITY_KG_PER_M3: f32 = 5000.0;
+const RAGDOLL_BONE_DENSITY_KG_PER_M3: f32 = 3000.0;
 
 /// Linear-damping coefficient applied to every ragdoll body
 /// (`v *= exp(-coefficient * dt)`). Stand-in for air resistance —
@@ -118,24 +116,38 @@ const RAGDOLL_BONE_DENSITY_KG_PER_M3: f32 = 5000.0;
 /// after landing.
 const RAGDOLL_LINEAR_DAMPING: f32 = 0.5;
 
-/// Angular-damping coefficient applied to every ragdoll body. Heavy
-/// because the joint chain otherwise spins like a propeller after
-/// any glancing ground contact; 4.0 is "tumbles a few times, then
-/// settles" rather than "windmills for ten seconds".
-const RAGDOLL_ANGULAR_DAMPING: f32 = 4.0;
+/// Angular-damping coefficient applied to every ragdoll body. The
+/// chain pitches and spins on any glancing ground contact + on
+/// gravity asymmetry through the joint chain; we want it to settle
+/// quickly so recovery fires. 8.0 is "tumbles once or twice, then
+/// flops still" — more like a ragdoll, less like a propeller.
+const RAGDOLL_ANGULAR_DAMPING: f32 = 8.0;
 
 /// Per-collider friction for the ragdoll bones (combined with the
 /// terrain's). 1.0 is "rubber on dry asphalt" — bones plant on
 /// landing rather than scoot.
 const RAGDOLL_BONE_FRICTION: f32 = 1.0;
 
+/// Maximum initial speed assigned to each ragdoll body (m/s). The
+/// player can hit 150 m/s on a max-charge yeet, but injecting that
+/// much velocity into a 19-body jointed chain in a single physics
+/// step exceeds what PBD constraints can correct against — first
+/// glancing contact and the chain stretches metres apart. Capping
+/// to ~25 m/s preserves the "thrown forward" feel while staying
+/// within the solver's stability envelope. Higher launch speeds
+/// just feel the same once the body's already in the air.
+const RAGDOLL_INITIAL_SPEED_CAP_M_S: f32 = 25.0;
+
 /// Maps to Avian's `SphericalJoint::with_point_compliance`. Lower =
-/// stiffer joint (less stretch under load). The chain example uses
-/// `1e-6`, but a rigid chain that takes a hard impact (yeet
-/// landing at terminal velocity) oscillates violently at that
-/// stiffness. `1e-4` softens enough to absorb impact spikes
-/// without making the rig visibly noodle on idle gravity.
-const RAGDOLL_JOINT_COMPLIANCE: f32 = 1e-4;
+/// stiffer joint (less stretch under load) in m/N. At `1e-4`
+/// (previous value) and the chain's ~51 kg static load, each
+/// joint stretches ~9 cm under its own weight; over 18 joints
+/// that compounds to a couple of metres of mesh deformation. `1e-6`
+/// mirrors Avian's chain example and gives sub-mm stretch on
+/// static load, which the skinned mesh hides entirely. Previous
+/// "violent oscillation" at this stiffness turned out to be the
+/// missing `AngularDamping`, not joint compliance.
+const RAGDOLL_JOINT_COMPLIANCE: f32 = 1e-6;
 
 /// State for one ragdolled bone: which bone in the skinned mesh,
 /// and which top-level rigid body drives it.
@@ -282,6 +294,15 @@ fn build_ragdoll_graph(
     names: &Query<&Name>,
     global_transforms: &Query<&GlobalTransform>,
 ) -> Option<RagdollGraph> {
+    // Cap initial speed so the PBD solver doesn't have to absorb
+    // a 150 m/s velocity differential when one bone first touches
+    // the ground (the chain can't catch up and stretches metres).
+    let initial_speed = initial_velocity.length();
+    let initial_velocity = if initial_speed > RAGDOLL_INITIAL_SPEED_CAP_M_S {
+        initial_velocity * (RAGDOLL_INITIAL_SPEED_CAP_M_S / initial_speed)
+    } else {
+        initial_velocity
+    };
     // Walk descendants once and map every tracked bone stem to its
     // entity + current GlobalTransform.
     let mut tracked: HashMap<BoneStem, (Entity, GlobalTransform)> = HashMap::new();
@@ -322,9 +343,7 @@ fn build_ragdoll_graph(
         // downstream just won't ragdoll, which is preferable to
         // poisoning the whole rig.
         if !(bone_world_pos.is_finite() && bone_world_rot.is_finite()) {
-            tracing::warn!(
-                "Skipping ragdoll body for {stem}: GlobalTransform is non-finite",
-            );
+            tracing::warn!("Skipping ragdoll body for {stem}: GlobalTransform is non-finite",);
             continue;
         }
 
