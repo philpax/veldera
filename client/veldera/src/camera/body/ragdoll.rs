@@ -14,18 +14,37 @@
 //!    transform (so the skinned mesh follows physics). On exit,
 //!    despawn every spawned rigid body and joint.
 //!
+//!    **Currently gated off** via [`ENABLE_SKELETAL_RAGDOLL`]. The
+//!    joint chain shreds the skinned mesh under high-velocity
+//!    impacts (sub-mm joint stretch becomes metres of visible mesh
+//!    deformation through Linear Blend Skinning). The fix is
+//!    probably a combination of higher `SubstepCount`, swing/twist
+//!    limits on the spherical joints, and bone-to-bone position
+//!    correction, none of which I want to land without time to
+//!    tune. Re-enabling is one constant flip.
+//!
 //! 2. **Whole-body tumble fallback** ([`apply_body_ragdoll`]).
 //!    Integrates a world-space angular velocity into the body
-//!    entity's rotation each frame. Visually invisible when the
-//!    bone-physics rig is up (per-bone writes set bone local
-//!    transforms that cancel the body root rotation in their parent
-//!    chain) but lets the body show *something* tumbly in builds
-//!    where the bone rig couldn't be assembled (missing bones in
-//!    the rig, asset still loading).
+//!    entity's rotation each frame. The visible ragdoll while
+//!    skeletal is off — single mannequin spinning around the
+//!    upright kinematic capsule.
 //!
 //! The kinematic capsule stays upright through both — gravity +
 //! collision drive its slide; the body model on top is what
 //! ragdolls visibly.
+
+/// Compile-time switch for the per-bone skeletal ragdoll rig
+/// ([`manage_ragdoll_skeleton`] + [`sync_bones_from_physics`]).
+///
+/// `false` (current) → only the whole-body tumble in
+/// [`apply_body_ragdoll`] runs. Body spins as one mannequin around
+/// the kinematic capsule; mesh stays intact.
+///
+/// `true` → walk the skeleton, spawn 19 dynamic rigid bodies + 18
+/// spherical joints, drive every bone's local `Transform` from
+/// physics each frame. Mesh shreds on impact at current tuning;
+/// needs joint limits + substep tuning before it's shippable.
+const ENABLE_SKELETAL_RAGDOLL: bool = false;
 
 use std::collections::HashMap;
 
@@ -193,6 +212,9 @@ pub(super) fn manage_ragdoll_skeleton(
     names: Query<&Name>,
     global_transforms: Query<&GlobalTransform>,
 ) {
+    if !ENABLE_SKELETAL_RAGDOLL {
+        return;
+    }
     for (body_entity, mut body) in &mut body_query {
         let Ok((controller, velocity, world_pos)) = logical_query.get(body.logical_entity) else {
             continue;
@@ -246,6 +268,9 @@ pub(super) fn sync_bones_from_physics(
     global_transforms: Query<&GlobalTransform>,
     mut bone_transforms: Query<&mut Transform>,
 ) {
+    if !ENABLE_SKELETAL_RAGDOLL {
+        return;
+    }
     for body in &body_query {
         let Some(graph) = body.ragdoll_graph.as_ref() else {
             continue;
