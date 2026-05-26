@@ -965,24 +965,35 @@ fn fps_controller_render(
             && let Ok(mut floating_camera) = camera_query.single_mut()
         {
             let head_render = head_global.translation();
-            let logical_render = logical_transform.translation;
-            let head_offset = (head_render - logical_render).as_dvec3();
-            floating_camera.position = world_pos.position + head_offset;
-
-            // Compose the camera basis off the body's current world
-            // orientation (which the body-ragdoll system will tumble
-            // in Phase C/D). Mouse look adds yaw around the body's
-            // local up + pitch around the body's local right,
-            // clamped to a head-rotation cone in
-            // `fps_controller_input`.
             let body_rotation = body_global.rotation();
-            let head_basis = body_rotation
-                * Quat::from_rotation_y(controller.head_look_yaw)
-                * Quat::from_rotation_x(controller.head_look_pitch);
-            let look_dir = head_basis * Vec3::Z;
-            let cam_up = head_basis * Vec3::Y;
-            render_transform.look_to(look_dir, cam_up);
-            continue;
+            // Defensive: if physics has gone NaN (joint explosion, etc.)
+            // bail to the normal eye path rather than poison the
+            // floating-origin camera position. Recovery on ground
+            // contact teardowns the bad rigid bodies and we'll be
+            // back in business.
+            if !(head_render.is_finite() && body_rotation.is_finite()) {
+                tracing::warn!(
+                    "Ragdoll camera sees non-finite head bone; falling back to upright eye"
+                );
+            } else {
+                let logical_render = logical_transform.translation;
+                let head_offset = (head_render - logical_render).as_dvec3();
+                floating_camera.position = world_pos.position + head_offset;
+
+                // Compose the camera basis off the body's current world
+                // orientation (which the body-ragdoll system will tumble
+                // in Phase C/D). Mouse look adds yaw around the body's
+                // local up + pitch around the body's local right,
+                // clamped to a head-rotation cone in
+                // `fps_controller_input`.
+                let head_basis = body_rotation
+                    * Quat::from_rotation_y(controller.head_look_yaw)
+                    * Quat::from_rotation_x(controller.head_look_pitch);
+                let look_dir = head_basis * Vec3::Z;
+                let cam_up = head_basis * Vec3::Y;
+                render_transform.look_to(look_dir, cam_up);
+                continue;
+            }
         }
 
         let previous = controller.previous_translation;

@@ -86,11 +86,20 @@ const RAGDOLL_BONE_TABLE: &[(&str, Option<&str>)] = &[
 /// enough to keep terrain contact stable.
 const RAGDOLL_BONE_COLLIDER_RADIUS_M: f32 = 0.06;
 
-/// Uniform mass per ragdolled bone (kg). Real human bones / limbs
-/// vary by ~10×; uniform mass keeps the joint chain numerically
-/// stable and the visual result is fine because the tumble is
-/// driven by gravity + joint constraints, not realistic inertia.
-const RAGDOLL_BONE_MASS_KG: f32 = 2.0;
+/// Uniform density for the per-bone sphere colliders (kg/m³).
+/// Water-like — gives ~0.9 kg per bone at the current 0.06 m
+/// radius, so the 19-bone chain totals ~17 kg of dangling weight
+/// on the kinematic capsule, which feels right for "flopping
+/// mannequin". Real human bones vary by ~10×; uniform keeps the
+/// joint chain numerically stable.
+///
+/// Set via [`MassPropertiesBundle::from_shape`] rather than a raw
+/// [`Mass`] component so the *angular* inertia tensor gets
+/// populated too. A `RigidBody::Dynamic` with only linear mass
+/// (no inertia) produces NaN under the smallest torque, which
+/// cascades through joints into the head bone position and breaks
+/// the floating-origin camera.
+const RAGDOLL_BONE_DENSITY_KG_PER_M3: f32 = 1000.0;
 
 /// Maps to Avian's `SphericalJoint::with_point_compliance`. Lower =
 /// stiffer joint (less stretch under load). `1e-6` mirrors the
@@ -280,7 +289,10 @@ fn build_ragdoll_graph(
             .spawn((
                 RigidBody::Dynamic,
                 Collider::sphere(RAGDOLL_BONE_COLLIDER_RADIUS_M),
-                Mass(RAGDOLL_BONE_MASS_KG),
+                MassPropertiesBundle::from_shape(
+                    &Sphere::new(RAGDOLL_BONE_COLLIDER_RADIUS_M),
+                    RAGDOLL_BONE_DENSITY_KG_PER_M3,
+                ),
                 LinearVelocity(initial_velocity),
                 AngularVelocity::default(),
                 Rotation(bone_world_rot),
