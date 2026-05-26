@@ -136,6 +136,7 @@ pub struct ResolvedMetrics {
     pub stand_height_m: f32,
     pub eye_height_m: f32,
     pub eye_forward_offset_m: f32,
+    pub head_bone_y_m: f32,
     pub head_bone_name: String,
 }
 
@@ -159,6 +160,17 @@ pub struct BodyVisual {
     /// that specific player; a fresh one on `BodyVisual` itself would be
     /// ignored. Populated by [`install_animation_player`].
     pub animation_player: Option<Entity>,
+    /// Cached descendant entity of the head bone. Populated lazily by
+    /// [`hide_head_bone`] so we don't pay the descendant-walk cost on
+    /// every head-lock tick.
+    pub head_bone_entity: Option<Entity>,
+    /// World-space offset between the animated head-bone position and
+    /// where the bind-pose head would be relative to the body root.
+    /// `sync_body_transform` subtracts this from the body's position
+    /// each frame so the head stays put in world space while the rest
+    /// of the body animates around it. One-frame stale (we read the
+    /// animated head in `PostUpdate`, apply on the next tick).
+    pub head_lock_delta: Vec3,
 }
 
 pub struct BodyPlugin;
@@ -187,6 +199,15 @@ impl Plugin for BodyPlugin {
             .add_systems(
                 bevy::app::RunFixedMainLoop,
                 sync_body_transform.in_set(bevy::app::RunFixedMainLoopSystems::AfterFixedMainLoop),
+            )
+            // Head-lock runs in PostUpdate AFTER transform propagation so
+            // the head bone's GlobalTransform reflects the animated pose
+            // we want to compensate for. The computed delta is consumed
+            // by next frame's `sync_body_transform` — one-frame stale,
+            // which is imperceptible at typical render rates.
+            .add_systems(
+                PostUpdate,
+                update_head_lock_delta.after(bevy::transform::TransformSystems::Propagate),
             );
     }
 }
@@ -222,6 +243,7 @@ struct ResolvedMetricsSchema {
     stand_height_m: f32,
     eye_height_m: f32,
     eye_forward_offset_m: f32,
+    head_bone_y_m: f32,
     head_bone_name: String,
 }
 
@@ -373,6 +395,7 @@ fn parse_metrics(gltf: &Gltf) -> Option<ResolvedMetrics> {
         stand_height_m: parsed.veldera_character.stand_height_m,
         eye_height_m: parsed.veldera_character.eye_height_m,
         eye_forward_offset_m: parsed.veldera_character.eye_forward_offset_m,
+        head_bone_y_m: parsed.veldera_character.head_bone_y_m,
         head_bone_name: parsed.veldera_character.head_bone_name,
     })
 }
@@ -412,6 +435,8 @@ fn spawn_body_on_fps_enter(
             head_meshes_hidden: false,
             masks_populated: false,
             animation_player: None,
+            head_bone_entity: None,
+            head_lock_delta: Vec3::ZERO,
         },
         SceneRoot(scene_handle.clone()),
         WorldPosition::from_dvec3(world_pos.position),
@@ -474,6 +499,9 @@ fn hide_head_bone(
         if let Ok(mut transform) = transforms.get_mut(head) {
             transform.scale = Vec3::ZERO;
             body.head_hidden = true;
+            // Cache the head entity for the head-lock system so it
+            // doesn't have to re-walk the descendant tree each frame.
+            body.head_bone_entity = Some(head);
             tracing::info!("Hid head bone '{}'", target_name);
         }
     }
@@ -771,11 +799,15 @@ fn sync_body_transform(
         let foot_offset = local_up * (controller.height * 0.5);
         let _ = config;
         let delta_local = interpolated - logical_transform.translation;
+        // Head-lock: subtract the previous frame's head-bone wobble so
+        // the body shifts to keep its head where the bind pose would put
+        // it. `update_head_lock_delta` writes this each PostUpdate.
+        let head_lock = body.head_lock_delta;
         body_world_pos.position = logical_world.position - foot_offset.as_dvec3()
             + DVec3::new(
-                f64::from(delta_local.x),
-                f64::from(delta_local.y),
-                f64::from(delta_local.z),
+                f64::from(delta_local.x - head_lock.x),
+                f64::from(delta_local.y - head_lock.y),
+                f64::from(delta_local.z - head_lock.z),
             );
 
         // Yaw-only rotation in the radial frame: model faces "north" in
@@ -1248,5 +1280,58 @@ fn set_node_weight(player: &mut AnimationPlayer, node: AnimationNodeIndex, weigh
                 player.play(node).set_weight(weight).repeat();
             }
         }
+    }
+}
+
+// ============================================================================
+// Head-lock
+// ============================================================================
+
+/// Maximum head-lock compensation in metres. Animation can push the
+/// head a few centimetres in any direction; if we ever see a delta
+/// larger than this we clamp rather than risk teleporting the body to
+/// the moon on a transient garbage GlobalTransform read.
+const HEAD_LOCK_MAX_DELTA_M: f32 = 0.5;
+
+/// Read the animated head-bone position out of `GlobalTransform`, work
+/// out how far it's drifted from where the bind-pose head would be
+/// relative to the body root, and store the offset on the `BodyVisual`.
+/// Next frame's `sync_body_transform` subtracts this delta from the
+/// body's world position so the head ends up where it would have been
+/// without animation wobble — the body slides slightly to keep the head
+/// pinned, which is how AAA-style first-person bodies are usually wired.
+fn update_head_lock_delta(
+    metrics: Res<CharacterMetrics>,
+    mut body_query: Query<(&mut BodyVisual, &Transform), Without<LogicalPlayer>>,
+    global_transforms: Query<&GlobalTransform>,
+) {
+    let Some(resolved) = metrics.resolved.as_ref() else {
+        return;
+    };
+    let head_y = resolved.head_bone_y_m;
+
+    for (mut body, body_transform) in &mut body_query {
+        let Some(head_entity) = body.head_bone_entity else {
+            body.head_lock_delta = Vec3::ZERO;
+            continue;
+        };
+        let Ok(head_global) = global_transforms.get(head_entity) else {
+            body.head_lock_delta = Vec3::ZERO;
+            continue;
+        };
+
+        // Where the head bone would sit if no animation was running:
+        // `body_world + body_rotation * (0, head_y, 0)`. The body
+        // rotation is yaw-only (about model +Y, which maps to local up),
+        // so the rotated offset stays a pure up-direction nudge.
+        let body_world = body_transform.translation;
+        let desired_head_world = body_world + body_transform.rotation * Vec3::new(0.0, head_y, 0.0);
+
+        let actual_head_world = head_global.translation();
+        let mut delta = actual_head_world - desired_head_world;
+        if delta.length_squared() > HEAD_LOCK_MAX_DELTA_M * HEAD_LOCK_MAX_DELTA_M {
+            delta = delta.normalize_or_zero() * HEAD_LOCK_MAX_DELTA_M;
+        }
+        body.head_lock_delta = delta;
     }
 }

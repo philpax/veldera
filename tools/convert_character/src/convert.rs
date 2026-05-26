@@ -188,6 +188,11 @@ struct CharacterMetrics {
     /// runtime camera ends up at the base of the neck and looking down
     /// stares into the chest cavity.
     eye_forward_offset_m: f32,
+    /// Bind-pose Y coordinate of the `Head` bone (in metres above the
+    /// skeleton origin). Used by the runtime "head-lock" system to
+    /// shift the body so the animated head stays where the bind-pose
+    /// head would be, regardless of spine/neck wobble.
+    head_bone_y_m: f32,
     /// Name of the head bone the runtime should hide in first-person.
     head_bone_name: String,
 }
@@ -396,6 +401,7 @@ fn extract_metrics(
         stand_height_m,
         eye_height_m,
         eye_forward_offset_m,
+        head_bone_y_m: head_pos.1,
         head_bone_name,
     }
 }
