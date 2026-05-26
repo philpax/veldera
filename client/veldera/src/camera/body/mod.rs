@@ -25,6 +25,7 @@ mod arm_point;
 mod bones;
 mod head;
 mod locomotion;
+mod ragdoll;
 
 use std::collections::HashMap;
 
@@ -200,6 +201,21 @@ pub struct BodyVisual {
     /// Spawned on first Point press (off cooldown), despawned on
     /// release. `None` when no rumble is active.
     pub rumble_audio_entity: Option<Entity>,
+    /// Tracks the body-side view of `RagdollState`, so transitions
+    /// can be detected without a Bevy `Changed<>` query. Driven by
+    /// `ragdoll::apply_body_ragdoll`.
+    pub ragdoll_active: bool,
+    /// World-space angular velocity (rad/s, axis-angle vector) the
+    /// tumble integrator advances every frame while ragdolling. Set
+    /// from launch velocity on ragdoll entry; zeroed on exit.
+    pub ragdoll_world_angular_velocity: Vec3,
+    /// Accumulated world-space tumble rotation applied on top of
+    /// the upright body rotation while ragdolling.
+    /// `body_transform.rotation = ragdoll_rotation_accum *
+    /// upright_rotation`. Reset to identity on each ragdoll entry
+    /// and exit so the body snaps back to upright cleanly on
+    /// recovery.
+    pub ragdoll_rotation_accum: Quat,
 }
 
 pub struct BodyPlugin;
@@ -225,6 +241,7 @@ impl Plugin for BodyPlugin {
                     arm_point::cache_right_arm,
                     locomotion::update_locomotion_blend,
                     arm_point::handle_yeet,
+                    ragdoll::apply_body_ragdoll,
                 )
                     .chain(),
             )
@@ -487,6 +504,9 @@ fn spawn_body_on_fps_enter(
             charge_seconds: 0.0,
             yeet_cooldown_s: 0.0,
             rumble_audio_entity: None,
+            ragdoll_active: false,
+            ragdoll_world_angular_velocity: Vec3::ZERO,
+            ragdoll_rotation_accum: Quat::IDENTITY,
         },
         SceneRoot(scene_handle.clone()),
         WorldPosition::from_dvec3(world_pos.position),
@@ -713,7 +733,15 @@ fn sync_body_transform(
         // Head-lock: subtract the previous frame's head-bone wobble so
         // the body shifts to keep its head where the bind pose would put
         // it. `head::update_head_lock_delta` writes this each PostUpdate.
-        let head_lock = body.head_lock_delta;
+        // During ragdoll the head bone flails by design — pinning it
+        // would fight the tumble and look terrible, so skip the
+        // compensation while ragdolling.
+        let head_lock = if controller.ragdoll_state == crate::camera::fps::RagdollState::Ragdolling
+        {
+            Vec3::ZERO
+        } else {
+            body.head_lock_delta
+        };
         body_world_pos.position = logical_world.position - foot_offset.as_dvec3()
             + DVec3::new(
                 f64::from(delta_local.x - head_lock.x),
@@ -733,7 +761,12 @@ fn sync_body_transform(
         let forward =
             (frame.north * controller.yaw.cos() - frame.east * controller.yaw.sin()).normalize();
         let right = local_up.cross(forward).normalize();
-        body_transform.rotation = Quat::from_mat3(&Mat3::from_cols(right, local_up, forward));
+        let upright_rotation = Quat::from_mat3(&Mat3::from_cols(right, local_up, forward));
+        // While ragdolling, multiply by the world-space tumble
+        // rotation the ragdoll system has been integrating. Outside
+        // ragdoll `ragdoll_rotation_accum` is identity so this
+        // collapses to the upright rotation.
+        body_transform.rotation = body.ragdoll_rotation_accum * upright_rotation;
 
         let _ = resolved;
     }
