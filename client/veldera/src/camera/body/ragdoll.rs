@@ -51,20 +51,28 @@ type BoneStem = &'static str;
 /// Bones we ragdoll, with their parent in the ragdoll graph (`None`
 /// for the chain root, `Hips`).
 ///
-/// The set is the "major" Mixamo skeleton — spine, head, arms, legs —
+/// The set is the "major" Mixamo skeleton — spine, neck, arms, legs —
 /// without fingers, toes, or the shoulder/end markers (`HeadTop_End`,
 /// `ToeBase`, `…HandThumb*` etc.). Bones outside this set stay
 /// animated by the `AnimationPlayer` and inherit their parent
 /// ragdolled bone's tumble through Bevy's transform propagation, so
 /// fingers, toes, and the head marker come along for the ride
 /// without needing their own rigid bodies.
+///
+/// The `Head` bone deliberately *isn't* in the set: the hide-head
+/// pass sets its scale to zero, which collapses its
+/// `GlobalTransform.matrix3` to all-zeros, which makes `.rotation()`
+/// return NaN. Seeding a ragdoll body's `Rotation` from a NaN
+/// initial value cascades NaN through every joint connected to it.
+/// The head follows the neck just fine through transform
+/// propagation, and the camera reads its translation (which is
+/// finite even with a zero-scale matrix).
 const RAGDOLL_BONE_TABLE: &[(&str, Option<&str>)] = &[
     ("Hips", None),
     ("Spine", Some("Hips")),
     ("Spine1", Some("Spine")),
     ("Spine2", Some("Spine1")),
     ("Neck", Some("Spine2")),
-    ("Head", Some("Neck")),
     ("LeftShoulder", Some("Spine2")),
     ("LeftArm", Some("LeftShoulder")),
     ("LeftForeArm", Some("LeftArm")),
@@ -93,19 +101,23 @@ const RAGDOLL_BONE_COLLIDER_RADIUS_M: f32 = 0.06;
 /// mannequin". Real human bones vary by ~10×; uniform keeps the
 /// joint chain numerically stable.
 ///
-/// Set via [`MassPropertiesBundle::from_shape`] rather than a raw
-/// [`Mass`] component so the *angular* inertia tensor gets
-/// populated too. A `RigidBody::Dynamic` with only linear mass
-/// (no inertia) produces NaN under the smallest torque, which
-/// cascades through joints into the head bone position and breaks
-/// the floating-origin camera.
+/// Set via the `(Collider, ColliderDensity)` pair Avian recommends
+/// (see `crates/avian3d/src/dynamics/rigid_body/mass_properties`)
+/// — Avian then auto-computes both linear `Mass` and angular
+/// `AngularInertia` from the collider's shape × density. A
+/// `RigidBody::Dynamic` with only linear mass (no inertia)
+/// produces NaN under the smallest torque; mixing a
+/// `MassPropertiesBundle` with a `Collider` makes the two compete
+/// and one path silently loses.
 const RAGDOLL_BONE_DENSITY_KG_PER_M3: f32 = 1000.0;
 
 /// Maps to Avian's `SphericalJoint::with_point_compliance`. Lower =
-/// stiffer joint (less stretch under load). `1e-6` mirrors the
-/// chain example and keeps the joint visibly attached without
-/// numerical issues.
-const RAGDOLL_JOINT_COMPLIANCE: f32 = 1e-6;
+/// stiffer joint (less stretch under load). The chain example uses
+/// `1e-6`, but a rigid chain that takes a hard impact (yeet
+/// landing at terminal velocity) oscillates violently at that
+/// stiffness. `1e-4` softens enough to absorb impact spikes
+/// without making the rig visibly noodle on idle gravity.
+const RAGDOLL_JOINT_COMPLIANCE: f32 = 1e-4;
 
 /// State for one ragdolled bone: which bone in the skinned mesh,
 /// and which top-level rigid body drives it.
@@ -285,14 +297,24 @@ fn build_ragdoll_graph(
         let bone_world_pos = bone_global.translation();
         let bone_world_rot = bone_global.rotation();
 
+        // Defensive: any bone whose GlobalTransform is non-finite
+        // (zero scale, degenerate matrix from a hide pass, NaN
+        // from physics in a previous frame) would seed a NaN
+        // rigid body and cascade through joints. Skip it; bones
+        // downstream just won't ragdoll, which is preferable to
+        // poisoning the whole rig.
+        if !(bone_world_pos.is_finite() && bone_world_rot.is_finite()) {
+            tracing::warn!(
+                "Skipping ragdoll body for {stem}: GlobalTransform is non-finite",
+            );
+            continue;
+        }
+
         let physics_entity = commands
             .spawn((
                 RigidBody::Dynamic,
                 Collider::sphere(RAGDOLL_BONE_COLLIDER_RADIUS_M),
-                MassPropertiesBundle::from_shape(
-                    &Sphere::new(RAGDOLL_BONE_COLLIDER_RADIUS_M),
-                    RAGDOLL_BONE_DENSITY_KG_PER_M3,
-                ),
+                ColliderDensity(RAGDOLL_BONE_DENSITY_KG_PER_M3),
                 LinearVelocity(initial_velocity),
                 AngularVelocity::default(),
                 Rotation(bone_world_rot),

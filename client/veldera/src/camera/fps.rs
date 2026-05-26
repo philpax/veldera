@@ -177,6 +177,14 @@ pub const HEAD_LOOK_YAW_RANGE_RAD: f32 = 60.0 / 180.0 * PI;
 /// the head-bone orientation while ragdolling (~45° each way).
 pub const HEAD_LOOK_PITCH_RANGE_RAD: f32 = 45.0 / 180.0 * PI;
 
+/// Maximum distance (metres) the ragdoll camera can sit from the
+/// player's logical position. If ragdoll physics catapults the head
+/// bone past this, the camera stops following — keeps a single
+/// frame of bad physics from teleporting the floating-origin
+/// camera into the void and dragging every WorldPosition along
+/// with it (via `sync_dynamic_world_position`).
+pub const RAGDOLL_CAMERA_MAX_OFFSET_M: f32 = 3.0;
+
 /// Player size configuration for the FPS controller.
 ///
 /// Single source of truth for capsule dimensions. Read each tick by
@@ -977,8 +985,19 @@ fn fps_controller_render(
                 );
             } else {
                 let logical_render = logical_transform.translation;
-                let head_offset = (head_render - logical_render).as_dvec3();
-                floating_camera.position = world_pos.position + head_offset;
+                let raw_offset = head_render - logical_render;
+                // Clamp magnitude: physics instability can fling the
+                // head bone arbitrarily far in one frame, and the
+                // camera-tracks-head feedback into the floating
+                // origin makes that runaway. A bounded offset keeps
+                // the camera within a sane radius of the player even
+                // if the rig blows up.
+                let head_offset = if raw_offset.length() > RAGDOLL_CAMERA_MAX_OFFSET_M {
+                    raw_offset.normalize() * RAGDOLL_CAMERA_MAX_OFFSET_M
+                } else {
+                    raw_offset
+                };
+                floating_camera.position = world_pos.position + head_offset.as_dvec3();
 
                 // Compose the camera basis off the body's current world
                 // orientation (which the body-ragdoll system will tumble
