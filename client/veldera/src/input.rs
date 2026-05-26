@@ -227,6 +227,13 @@ fn manage_input_focus(
     // The per-system toggles in `input_system_settings` are the
     // documented mechanism for "force egui to ignore input"; flip
     // them based on cursor-grab state.
+    // `..Default::default()` covers fields the `web` build adds
+    // (text-agent channel, clipboard) and any future fields without
+    // hand-mirroring them here. They default to enabled (egui ON),
+    // which means *some* input may leak through if upstream adds a
+    // new pathway and we don't update this list — accept the
+    // tradeoff over breaking the wasm build on every minor bump.
+    #[allow(clippy::needless_update)]
     let desired_input_settings = if is_grabbed {
         EguiInputSystemSettings {
             run_write_modifiers_keys_state_system: false,
@@ -239,9 +246,21 @@ fn manage_input_focus(
             run_write_keyboard_input_messages_system: false,
             run_write_ime_messages_system: false,
             run_write_file_dnd_messages_system: false,
+            ..Default::default()
         }
     } else {
         EguiInputSystemSettings::default()
+    };
+    // On wasm, also kill the text-agent + clipboard pathways.
+    #[cfg(target_arch = "wasm32")]
+    let desired_input_settings = if is_grabbed {
+        EguiInputSystemSettings {
+            run_write_text_agent_channel_messages_system: false,
+            run_write_web_clipboard_messages_system: false,
+            ..desired_input_settings
+        }
+    } else {
+        desired_input_settings
     };
     if egui_settings.input_system_settings != desired_input_settings {
         egui_settings.input_system_settings = desired_input_settings;
