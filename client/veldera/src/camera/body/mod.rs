@@ -222,6 +222,13 @@ pub struct BodyVisual {
     /// [`ragdoll::manage_ragdoll_skeleton`] and consumed by
     /// [`ragdoll::sync_bones_from_physics`].
     pub ragdoll_graph: Option<ragdoll::RagdollGraph>,
+    /// EWMA-smoothed head-bone render-space position for the
+    /// ragdoll camera. Physics runs at the fixed timestep so the
+    /// head bone's position only changes on Avian's ticks; render
+    /// can be 144+ Hz, which produced visible camera staircase
+    /// jitter. The smoother lets the camera lag the head slightly
+    /// but moves continuously every frame.
+    pub ragdoll_camera_smoothed: Option<Vec3>,
 }
 
 pub struct BodyPlugin;
@@ -519,6 +526,7 @@ fn spawn_body_on_fps_enter(
             ragdoll_world_angular_velocity: Vec3::ZERO,
             ragdoll_rotation_accum: Quat::IDENTITY,
             ragdoll_graph: None,
+            ragdoll_camera_smoothed: None,
         },
         SceneRoot(scene_handle.clone()),
         WorldPosition::from_dvec3(world_pos.position),

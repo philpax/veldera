@@ -185,6 +185,14 @@ pub const HEAD_LOOK_PITCH_RANGE_RAD: f32 = 45.0 / 180.0 * PI;
 /// with it (via `sync_dynamic_world_position`).
 pub const RAGDOLL_CAMERA_MAX_OFFSET_M: f32 = 3.0;
 
+/// Time constant (seconds) for the ragdoll-camera EWMA smoother.
+/// Physics runs on the fixed timestep so head-bone positions step
+/// at ~16 ms intervals; render is variable-rate (often 144+ Hz)
+/// and following the head bone exactly produces staircase jitter.
+/// 30 ms reduces the jitter to imperceptible while keeping the
+/// camera visibly attached to the head.
+pub const RAGDOLL_CAMERA_SMOOTHING_TAU_S: f32 = 0.03;
+
 /// Player size configuration for the FPS controller.
 ///
 /// Single source of truth for capsule dimensions. Read each tick by
@@ -400,6 +408,20 @@ pub fn spawn_fps_player(
             CustomPositionIntegration,
             LinearVelocity::default(),
             LockedAxes::ROTATION_LOCKED,
+            // Default `CollisionLayers` is all-bits-set, which means
+            // the capsule filters for `Ragdoll`. Ragdoll bones spawn
+            // at bone-world positions, most of which are inside the
+            // capsule volume — collision response then steals their
+            // initial velocity and flings them chaotically. Filter
+            // only for things the player should actually push
+            // through (terrain + vehicles).
+            CollisionLayers::new(
+                [crate::vehicle::GameLayer::Ground],
+                [
+                    crate::vehicle::GameLayer::Ground,
+                    crate::vehicle::GameLayer::Vehicle,
+                ],
+            ),
             FpsController {
                 yaw,
                 pitch,
@@ -681,21 +703,15 @@ fn fps_controller_prepare(
         let gravity_dir = -local_up;
         velocity.0 += gravity_dir * crate::constants::GRAVITY * dt;
 
-        // During ragdoll, skip the entire controller logic — no
-        // friction, no input acceleration, no jump, no crouch height
-        // update. Gravity (already applied above) and collision (run
-        // in `fps_controller_slide`) are the only forces on the
-        // capsule. The visual body tumbles independently via the
-        // body ragdoll system.
-        if controller.ragdoll_state == RagdollState::Ragdolling {
-            continue;
-        }
-
-        // Determine grounded state and apply friction/acceleration before move_and_slide.
         let is_grounded = controller.ground_tick >= 1;
+        let is_ragdolling = controller.ragdoll_state == RagdollState::Ragdolling;
 
+        // Ground friction applies always — including during ragdoll —
+        // so the kinematic capsule eventually stops sliding after
+        // landing and the grounded timer can fire recovery. Without
+        // this, lateral velocity from the launch persists forever and
+        // `RAGDOLL_GROUND_RECOVERY_S` never elapses.
         if is_grounded {
-            // Ground friction.
             let vertical_component = velocity.0.dot(local_up) * local_up;
             let lateral_velocity = velocity.0 - vertical_component;
             let lateral_speed = lateral_velocity.length();
@@ -707,10 +723,20 @@ fn fps_controller_prepare(
                 velocity.0 =
                     vertical_component + lateral_velocity.normalize() * lateral_speed * new_speed;
             } else {
-                // Keep vertical velocity (gravity), zero out lateral.
                 velocity.0 = vertical_component;
             }
+        }
 
+        // The rest of the controller logic — input-driven
+        // acceleration, jump, crouch height updates, collider
+        // resize — is for the player driving. While ragdolling
+        // there's no driving; gravity + the friction above are the
+        // only forces on the capsule.
+        if is_ragdolling {
+            continue;
+        }
+
+        if is_grounded {
             // Ground acceleration.
             let add = acceleration(
                 wish_direction,
@@ -940,7 +966,7 @@ fn fps_controller_render(
         ),
         (With<LogicalPlayer>, Without<RenderPlayer>),
     >,
-    body_query: Query<(&super::body::BodyVisual, &GlobalTransform)>,
+    mut body_query: Query<(&mut super::body::BodyVisual, &GlobalTransform)>,
     head_transforms: Query<&GlobalTransform, Without<super::body::BodyVisual>>,
 ) {
     let t = fixed_time.overstep_fraction();
@@ -965,8 +991,8 @@ fn fps_controller_render(
         // to the normal path if the body / head bone isn't loaded
         // yet.
         if controller.ragdoll_state == RagdollState::Ragdolling
-            && let Some((body, body_global)) = body_query
-                .iter()
+            && let Some((mut body, body_global)) = body_query
+                .iter_mut()
                 .find(|(b, _)| b.logical_entity == render_player.logical_entity)
             && let Some(head_entity) = body.head_bone_entity
             && let Ok(head_global) = head_transforms.get(head_entity)
@@ -984,8 +1010,20 @@ fn fps_controller_render(
                     "Ragdoll camera sees non-finite head bone; falling back to upright eye"
                 );
             } else {
+                // EWMA-smooth the head-bone position to absorb the
+                // physics-tick / render-tick mismatch. Time constant
+                // is `RAGDOLL_CAMERA_SMOOTHING_TAU_S`; on the first
+                // ragdoll frame `ragdoll_camera_smoothed` is None
+                // and we snap (no lag, no overshoot).
+                let alpha = (1.0 - (-dt / RAGDOLL_CAMERA_SMOOTHING_TAU_S).exp()).clamp(0.0, 1.0);
+                let smoothed = match body.ragdoll_camera_smoothed {
+                    Some(prev) => prev.lerp(head_render, alpha),
+                    None => head_render,
+                };
+                body.ragdoll_camera_smoothed = Some(smoothed);
+
                 let logical_render = logical_transform.translation;
-                let raw_offset = head_render - logical_render;
+                let raw_offset = smoothed - logical_render;
                 // Clamp magnitude: physics instability can fling the
                 // head bone arbitrarily far in one frame, and the
                 // camera-tracks-head feedback into the floating

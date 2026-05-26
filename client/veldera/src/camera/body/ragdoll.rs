@@ -95,21 +95,39 @@ const RAGDOLL_BONE_TABLE: &[(&str, Option<&str>)] = &[
 const RAGDOLL_BONE_COLLIDER_RADIUS_M: f32 = 0.06;
 
 /// Uniform density for the per-bone sphere colliders (kg/m³).
-/// Water-like — gives ~0.9 kg per bone at the current 0.06 m
-/// radius, so the 19-bone chain totals ~17 kg of dangling weight
-/// on the kinematic capsule, which feels right for "flopping
-/// mannequin". Real human bones vary by ~10×; uniform keeps the
-/// joint chain numerically stable.
+/// Bumped well past water-like to ~5× since the small sphere
+/// colliders underrepresent each bone's effective inertia — heavier
+/// bones swing more reluctantly on impact, which trades the
+/// "windmill of doom" tumble for something that reads as actual
+/// weight hitting the ground. Real-human total ~70 kg; current
+/// 0.06 m radius × 19 bones × this density lands roughly there.
 ///
 /// Set via the `(Collider, ColliderDensity)` pair Avian recommends
-/// (see `crates/avian3d/src/dynamics/rigid_body/mass_properties`)
 /// — Avian then auto-computes both linear `Mass` and angular
 /// `AngularInertia` from the collider's shape × density. A
 /// `RigidBody::Dynamic` with only linear mass (no inertia)
 /// produces NaN under the smallest torque; mixing a
 /// `MassPropertiesBundle` with a `Collider` makes the two compete
 /// and one path silently loses.
-const RAGDOLL_BONE_DENSITY_KG_PER_M3: f32 = 1000.0;
+const RAGDOLL_BONE_DENSITY_KG_PER_M3: f32 = 5000.0;
+
+/// Linear-damping coefficient applied to every ragdoll body
+/// (`v *= exp(-coefficient * dt)`). Stand-in for air resistance —
+/// keeps the rig from accelerating forever under gravity and bleeds
+/// off lateral momentum so the body doesn't slide across the ground
+/// after landing.
+const RAGDOLL_LINEAR_DAMPING: f32 = 0.5;
+
+/// Angular-damping coefficient applied to every ragdoll body. Heavy
+/// because the joint chain otherwise spins like a propeller after
+/// any glancing ground contact; 4.0 is "tumbles a few times, then
+/// settles" rather than "windmills for ten seconds".
+const RAGDOLL_ANGULAR_DAMPING: f32 = 4.0;
+
+/// Per-collider friction for the ragdoll bones (combined with the
+/// terrain's). 1.0 is "rubber on dry asphalt" — bones plant on
+/// landing rather than scoot.
+const RAGDOLL_BONE_FRICTION: f32 = 1.0;
 
 /// Maps to Avian's `SphericalJoint::with_point_compliance`. Lower =
 /// stiffer joint (less stretch under load). The chain example uses
@@ -315,6 +333,9 @@ fn build_ragdoll_graph(
                 RigidBody::Dynamic,
                 Collider::sphere(RAGDOLL_BONE_COLLIDER_RADIUS_M),
                 ColliderDensity(RAGDOLL_BONE_DENSITY_KG_PER_M3),
+                LinearDamping(RAGDOLL_LINEAR_DAMPING),
+                AngularDamping(RAGDOLL_ANGULAR_DAMPING),
+                Friction::new(RAGDOLL_BONE_FRICTION),
                 LinearVelocity(initial_velocity),
                 AngularVelocity::default(),
                 Rotation(bone_world_rot),
@@ -384,6 +405,10 @@ fn teardown_ragdoll_graph(commands: &mut Commands, body: &mut BodyVisual) {
     for ragdolled in graph.bones.into_values() {
         commands.entity(ragdolled.physics_entity).despawn();
     }
+    // Drop the smoothed head-bone tracker so the next ragdoll snaps
+    // to the new head position on its first frame rather than
+    // lerping from a stale value.
+    body.ragdoll_camera_smoothed = None;
     tracing::info!("Tore down ragdoll skeleton");
 }
 

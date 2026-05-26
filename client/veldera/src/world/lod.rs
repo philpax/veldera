@@ -1445,7 +1445,10 @@ fn update_physics_colliders(
                 Transform::from_translation(physics_pos),
                 WorldPosition::from_dvec3(node_data.world_position),
                 TerrainCollider { path: *path },
-                CollisionLayers::new([GameLayer::Ground], [GameLayer::Ground, GameLayer::Vehicle]),
+                CollisionLayers::new(
+                    [GameLayer::Ground],
+                    [GameLayer::Ground, GameLayer::Vehicle, GameLayer::Ragdoll],
+                ),
                 DebugRender::default(),
             ))
             .id();

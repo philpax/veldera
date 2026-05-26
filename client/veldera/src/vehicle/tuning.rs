@@ -138,7 +138,10 @@ mod tuner {
             RigidBody::Static,
             Collider::cuboid(10000.0, 1.0, 10000.0),
             Transform::from_translation(Vec3::new(0.0, -0.5, 0.0)),
-            CollisionLayers::new([GameLayer::Ground], [GameLayer::Ground, GameLayer::Vehicle]),
+            CollisionLayers::new(
+                [GameLayer::Ground],
+                [GameLayer::Ground, GameLayer::Vehicle, GameLayer::Ragdoll],
+            ),
         ));
 
         // Add a slope/ramp for testing slope behavior.
@@ -158,7 +161,10 @@ mod tuner {
             Collider::cuboid(slope_width, slope_thickness, slope_length),
             Transform::from_translation(Vec3::new(0.0, slope_center_y, slope_center_z))
                 .with_rotation(Quat::from_rotation_x(-slope_angle)),
-            CollisionLayers::new([GameLayer::Ground], [GameLayer::Ground, GameLayer::Vehicle]),
+            CollisionLayers::new(
+                [GameLayer::Ground],
+                [GameLayer::Ground, GameLayer::Vehicle, GameLayer::Ragdoll],
+            ),
         ));
 
         // Get vehicle name from command line, default to swiftshadow.
