@@ -12,7 +12,7 @@ use glam::DVec3;
 
 use crate::{
     async_runtime::TaskSpawner,
-    camera::AltitudeRequest,
+    camera::{AltitudeRequest, FlightCamera, HeadingRequest},
     world::{
         coords::ecef_to_lat_lon,
         geo::{
@@ -43,6 +43,11 @@ pub(super) struct LocationParams<'w, 's> {
     pub http_client: Res<'w, HttpClient>,
     pub spawner: TaskSpawner<'w, 's>,
     pub altitude_request: ResMut<'w, AltitudeRequest>,
+    pub heading_request: ResMut<'w, HeadingRequest>,
+    /// Read-only — coexists with the camera tab's read-only flight-camera
+    /// query in the same system. Heading changes flow back through
+    /// [`HeadingRequest`].
+    pub flight_camera_query: Query<'w, 's, &'static FlightCamera>,
     pub diagnostics: Res<'w, DiagnosticsStore>,
 }
 
@@ -218,6 +223,19 @@ pub(super) fn render_location_tab(
             location.altitude_request.request(slider_alt);
         }
     });
+
+    // Compass: shows the camera's yaw relative to local north (the
+    // tangent direction toward the world +Z pole). Useful for aligning
+    // with cardinal axes when reasoning about parallax / wind / shadow
+    // direction; heading edits route through `HeadingRequest` so the
+    // applier system can update the camera entity in a single
+    // disjoint-borrow place.
+    render_compass(
+        ui,
+        &mut location.heading_request,
+        &location.flight_camera_query,
+        position,
+    );
 
     ui.separator();
 
@@ -397,4 +415,129 @@ pub(super) fn render_location_tab(
             .teleport_state
             .request(lat, lon, &location.http_client, &location.spawner);
     }
+}
+
+/// Render the compass row: a small painted rose showing the camera's
+/// current heading, a numeric / cardinal readout, a 0–360° slider, and
+/// quick-snap buttons for the four cardinal directions.
+///
+/// The flight-camera query is read-only here. Heading changes are queued
+/// through [`HeadingRequest`] so the camera-control system owns the
+/// `&mut FlightCamera` borrow — avoiding a query-overlap with the camera
+/// tab's read of the same component within this UI system.
+fn render_compass(
+    ui: &mut egui::Ui,
+    heading_request: &mut HeadingRequest,
+    flight_camera_query: &Query<&FlightCamera>,
+    position: DVec3,
+) {
+    let Ok(flight_cam) = flight_camera_query.single() else {
+        return;
+    };
+
+    // Local tangent basis at the camera position. Matches the bake /
+    // shadow-uniform math (see `cloud_shadow_bake.wgsl` and
+    // `bevy_pbr_clouds_planet::resources`): `world_north` projected
+    // onto the tangent plane, falling back to `world_east` near the
+    // poles where the projection is degenerate.
+    let up = position.normalize().as_vec3();
+    let world_north = Vec3::Z;
+    let mut local_north = (world_north - up * world_north.dot(up)).normalize_or_zero();
+    if local_north.length_squared() < 0.5 {
+        let world_east = Vec3::X;
+        local_north = (world_east - up * world_east.dot(up)).normalize_or_zero();
+    }
+    // `local_north.cross(up)` is geographic east (+Y at lon=0, equator):
+    // `up.cross(local_north)` would give -Y (west) and silently flip the
+    // compass labels. Keep this consistent with `process_heading_request`.
+    let local_east = local_north.cross(up).normalize_or_zero();
+
+    // Current bearing (clockwise from north, in [0, 360)).
+    let horizontal = flight_cam.direction - up * flight_cam.direction.dot(up);
+    let bearing_deg = if horizontal.length_squared() < 1e-8 {
+        0.0
+    } else {
+        let raw = local_east
+            .dot(horizontal)
+            .atan2(local_north.dot(horizontal))
+            .to_degrees();
+        if raw < 0.0 { raw + 360.0 } else { raw }
+    };
+    let cardinal = cardinal_for_bearing(bearing_deg);
+
+    ui.separator();
+
+    ui.horizontal(|ui| {
+        // Painted compass rose: small circle, N marker at top, current-
+        // heading arrow.
+        let size = 56.0;
+        let (rect, _) = ui.allocate_exact_size(egui::vec2(size, size), egui::Sense::hover());
+        let painter = ui.painter();
+        let center = rect.center();
+        let radius = size * 0.45;
+        let stroke_color = ui.visuals().widgets.noninteractive.fg_stroke.color;
+        painter.circle_stroke(center, radius, egui::Stroke::new(1.0, stroke_color));
+        // Cardinal labels around the rose.
+        for (label, deg) in [("N", 0.0_f32), ("E", 90.0), ("S", 180.0), ("W", 270.0)] {
+            let rad = deg.to_radians();
+            // egui Y is screen-down, so subtract the cos term to put
+            // north at the top of the rose.
+            let pos = center + egui::vec2(rad.sin() * radius, -rad.cos() * radius);
+            painter.text(
+                pos,
+                egui::Align2::CENTER_CENTER,
+                label,
+                egui::FontId::proportional(10.0),
+                stroke_color,
+            );
+        }
+        // Heading arrow.
+        let rad = bearing_deg.to_radians();
+        let arrow_end = center + egui::vec2(rad.sin() * radius * 0.8, -rad.cos() * radius * 0.8);
+        painter.line_segment(
+            [center, arrow_end],
+            egui::Stroke::new(2.0, egui::Color32::from_rgb(255, 80, 80)),
+        );
+        painter.circle_filled(arrow_end, 2.5, egui::Color32::from_rgb(255, 80, 80));
+
+        ui.vertical(|ui| {
+            ui.label(format!("Heading: {bearing_deg:5.1}\u{00b0} ({cardinal})"));
+            let mut new_bearing = bearing_deg;
+            if ui
+                .add(
+                    egui::Slider::new(&mut new_bearing, 0.0..=360.0)
+                        .suffix("\u{00b0}")
+                        .smart_aim(false),
+                )
+                .changed()
+            {
+                heading_request.request(new_bearing);
+            }
+            ui.horizontal(|ui| {
+                if ui.button("N").clicked() {
+                    heading_request.request(0.0);
+                }
+                if ui.button("E").clicked() {
+                    heading_request.request(90.0);
+                }
+                if ui.button("S").clicked() {
+                    heading_request.request(180.0);
+                }
+                if ui.button("W").clicked() {
+                    heading_request.request(270.0);
+                }
+            });
+        });
+    });
+}
+
+/// 16-point cardinal label for a bearing in degrees (clockwise from north).
+fn cardinal_for_bearing(deg: f32) -> &'static str {
+    const LABELS: [&str; 16] = [
+        "N", "NNE", "NE", "ENE", "E", "ESE", "SE", "SSE", "S", "SSW", "SW", "WSW", "W", "WNW",
+        "NW", "NNW",
+    ];
+    #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+    let idx = (((deg / 22.5) + 0.5).floor() as i32).rem_euclid(16) as usize;
+    LABELS[idx]
 }

@@ -259,6 +259,29 @@ impl AltitudeRequest {
     }
 }
 
+/// Pending camera-heading change requests.
+///
+/// `bearing_deg` is a compass bearing measured clockwise from local north,
+/// in the tangent plane at the camera's current position (0 = north,
+/// 90 = east, 180 = south, 270 = west). The applier preserves the
+/// camera's current pitch and only rotates its yaw component.
+#[derive(Resource, Default)]
+pub struct HeadingRequest {
+    pending: Option<f32>,
+}
+
+impl HeadingRequest {
+    /// Request a heading change.
+    pub fn request(&mut self, bearing_deg: f32) {
+        self.pending = Some(bearing_deg);
+    }
+
+    /// Take the pending heading request, if any.
+    pub fn take(&mut self) -> Option<f32> {
+        self.pending.take()
+    }
+}
+
 /// Marker component for the camera entity that should be controlled.
 #[derive(Component)]
 pub struct FlightCamera {
@@ -288,6 +311,7 @@ impl Plugin for CameraControllerPlugin {
             .init_resource::<CameraModeState>()
             .init_resource::<CameraModeTransitions>()
             .init_resource::<AltitudeRequest>()
+            .init_resource::<HeadingRequest>()
             .add_plugins((
                 flycam::FlycamPlugin,
                 fps::FpsControllerPlugin,
@@ -301,6 +325,7 @@ impl Plugin for CameraControllerPlugin {
                 (
                     process_mode_transitions,
                     process_altitude_request,
+                    process_heading_request,
                     sync_camera_fov,
                 )
                     .chain(),
@@ -646,4 +671,70 @@ fn process_altitude_request(
             camera.position = camera.position.normalize() * new_radius;
         }
     }
+}
+
+/// Apply a pending compass-heading change to the flycam.
+///
+/// Rotates the camera's yaw so it faces the requested bearing (clockwise
+/// from local north). The pitch is preserved by holding the up-component
+/// of `FlightCamera::direction` fixed and rotating only the in-tangent-
+/// plane component. Looking exactly straight up or down defaults to a
+/// unit horizontal magnitude so the new heading is well-defined.
+///
+/// The matching `Transform` is updated in the same step so the camera
+/// renders the new orientation immediately, even if no input system runs
+/// this frame to do its own `look_to`.
+fn process_heading_request(
+    mut request: ResMut<HeadingRequest>,
+    mut camera_query: Query<(&FloatingOriginCamera, &mut FlightCamera, &mut Transform)>,
+) {
+    let Some(bearing_deg) = request.take() else {
+        return;
+    };
+
+    let Ok((floating, mut flight_cam, mut transform)) = camera_query.single_mut() else {
+        return;
+    };
+
+    let up = floating.position.normalize().as_vec3();
+
+    // Local tangent basis at the camera. `world_north` projected onto
+    // the tangent plane; degenerate at the poles, so fall back to
+    // `world_east`.
+    let world_north = Vec3::Z;
+    let mut local_north = (world_north - up * world_north.dot(up)).normalize_or_zero();
+    if local_north.length_squared() < 0.5 {
+        let world_east = Vec3::X;
+        local_north = (world_east - up * world_east.dot(up)).normalize_or_zero();
+    }
+    // `local_north.cross(up)` gives geographic east (+Y at lon=0, equator):
+    // for up = +X, north = +Z, the cross is +Y. `up.cross(north)` would give
+    // -Y (west), so the order matters — flipping it transposes E and W in
+    // the compass labels and heading-set logic.
+    let local_east = local_north.cross(up).normalize_or_zero();
+
+    // Preserve current pitch: keep the up-component of `direction` and
+    // only rotate the in-plane part. When looking straight up or down
+    // there's no horizontal component to rotate, so synthesise a
+    // unit-magnitude one at the requested bearing.
+    let direction = flight_cam.direction;
+    let vertical_component = up * direction.dot(up);
+    let horizontal = direction - vertical_component;
+    let horizontal_magnitude = horizontal.length();
+    let target_magnitude = if horizontal_magnitude < 1e-4 {
+        1.0
+    } else {
+        horizontal_magnitude
+    };
+
+    let bearing_rad = bearing_deg.to_radians();
+    let new_horizontal =
+        (local_north * bearing_rad.cos() + local_east * bearing_rad.sin()) * target_magnitude;
+    let new_direction = (new_horizontal + vertical_component).normalize_or_zero();
+    if new_direction == Vec3::ZERO {
+        return;
+    }
+
+    flight_cam.direction = new_direction;
+    transform.look_to(new_direction, up);
 }
