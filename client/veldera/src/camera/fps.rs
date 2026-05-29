@@ -173,16 +173,26 @@ pub enum RagdollState {
 
 /// Seconds of continuous airtime before the player ragdolls.
 ///
-/// Tuned so normal jumps (~0.8 s of airtime) never trigger ragdoll,
-/// but yeets and falls off rooftops do. Lower → more sensitive,
-/// higher → harder to ragdoll.
-pub const RAGDOLL_AIRBORNE_THRESHOLD_S: f32 = 1.5;
+/// Low enough that a real fall ragdolls promptly — the ragdoll is meant
+/// to replace the fall animation rather than play after it — while a
+/// normal jump (~0.8 s of airtime) doesn't trigger it. Lower → more
+/// sensitive, higher → harder to ragdoll.
+pub const RAGDOLL_AIRBORNE_THRESHOLD_S: f32 = 1.0;
 
 /// Seconds of continuous ground contact required to exit ragdoll.
 ///
 /// A short delay prevents instant unragdolling on a bouncy collision
-/// transient (e.g. a single-tick ground hit during tumbling).
-pub const RAGDOLL_GROUND_RECOVERY_S: f32 = 0.3;
+/// transient (e.g. a single-tick ground hit during tumbling), but kept
+/// brief so the player pops back to standing quickly once they've
+/// actually settled.
+pub const RAGDOLL_GROUND_RECOVERY_S: f32 = 0.15;
+
+/// Ground-friction coefficient used in place of [`FpsController::friction`]
+/// while ragdolling. Much stronger so that landing on a rooftop at launch
+/// speed arrests the slide almost immediately instead of skidding off the
+/// far edge — you crumple where you hit. Also makes the grounded timer
+/// elapse quickly so recovery fires.
+pub const RAGDOLL_LANDING_FRICTION: f32 = 40.0;
 
 /// Player size configuration for the FPS controller.
 ///
@@ -683,15 +693,23 @@ fn fps_controller_prepare(
         // so the kinematic capsule eventually stops sliding after
         // landing and the grounded timer can fire recovery. Without
         // this, lateral velocity from the launch persists forever and
-        // `RAGDOLL_GROUND_RECOVERY_S` never elapses.
+        // `RAGDOLL_GROUND_RECOVERY_S` never elapses. While ragdolling we
+        // use a much stronger coefficient so a high-speed rooftop
+        // landing arrests almost on contact rather than skidding off the
+        // edge.
         if is_grounded {
+            let friction = if is_ragdolling {
+                RAGDOLL_LANDING_FRICTION
+            } else {
+                controller.friction
+            };
             let vertical_component = velocity.0.dot(local_up) * local_up;
             let lateral_velocity = velocity.0 - vertical_component;
             let lateral_speed = lateral_velocity.length();
 
             if lateral_speed > controller.friction_speed_cutoff {
                 let control = f32::max(lateral_speed, controller.stop_speed);
-                let drop = control * controller.friction * dt;
+                let drop = control * friction * dt;
                 let new_speed = f32::max((lateral_speed - drop) / lateral_speed, 0.0);
                 velocity.0 =
                     vertical_component + lateral_velocity.normalize() * lateral_speed * new_speed;
