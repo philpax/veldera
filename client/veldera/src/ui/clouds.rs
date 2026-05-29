@@ -328,11 +328,13 @@ fn bake_diag_help(mode: CloudShadowBakeDiag) -> &'static str {
     match mode {
         CloudShadowBakeDiag::Off => "Normal: the bake integrates cloud density along the sun ray.",
         CloudShadowBakeDiag::HashGrid => {
-            "Bake writes a world-anchored hashed grid instead of cloud density: each 2 km cell \
-             in the ECEF X/Z plane gets a unique brightness, with black east-west and dark-grey \
-             north-south grid lines. View as terrain shadows (normal render) or full-screen via \
-             the Overview tab's \"Shadow map (raw)\" debug mode. If a recognisable cell drifts \
-             across fixed terrain under camera motion, the shadow map isn't world-anchored."
+            "Bake writes a world-anchored hashed grid instead of cloud density: each 2 km cube in \
+             ECEF space gets a unique brightness. The hash uses all three world axes, so it's \
+             sensitive to drift in ANY direction (a 2D x/z hash is blind to world-Y drift, which \
+             varies by longitude). View as terrain shadows (normal render) or full-screen via the \
+             Overview tab's \"Shadow map (raw)\" debug mode. If a recognisable cell sticks to \
+             fixed terrain as the camera moves, the shadow frame is world-anchored; if it slides \
+             with the camera, the frame is camera-locked."
         }
     }
 }

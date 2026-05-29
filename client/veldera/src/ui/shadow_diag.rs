@@ -155,12 +155,17 @@ fn update_shadow_diagnostics(
     // Tangent basis — same formula as `prepare_cloud_uniforms` and the
     // bake shader. World-north projected onto the tangent plane;
     // degenerate at the poles, where we fall back to world-east.
+    // Tangent basis — must match `prepare_cloud_uniforms` and the bake
+    // shader: fall back to world-east only at the poles (un-normalized
+    // length² < 1e-6), never at the 45° boundary the old `< 0.5` check
+    // hit.
     let world_north = Vec3::Z;
-    let mut forward = (world_north - local_up * world_north.dot(local_up)).normalize_or_zero();
-    if forward.length_squared() < 0.5 {
-        let world_east = Vec3::X;
-        forward = (world_east - local_up * world_east.dot(local_up)).normalize_or_zero();
-    }
+    let forward_unnorm = world_north - local_up * world_north.dot(local_up);
+    let forward = if forward_unnorm.length_squared() < 1e-6 {
+        (Vec3::X - local_up * Vec3::X.dot(local_up)).normalize_or_zero()
+    } else {
+        forward_unnorm.normalize_or_zero()
+    };
     let right = local_up.cross(forward).normalize_or_zero();
 
     // Noise-UV offsets per layer. Compute in f64 then truncate, like

@@ -1366,14 +1366,23 @@ pub(super) fn prepare_cloud_uniforms(
         let center = current_camera_ecef;
         let up = sph_cam.local_up.normalize_or_zero();
         // Pick a tangent-plane basis. Use world North (Z) projected onto
-        // the tangent plane as `forward`; degenerate at the poles, fall
-        // back to world East.
+        // the tangent plane as `forward`. The projection has length² =
+        // cos²(latitude), degenerate ONLY at the poles (north ∥ up), where
+        // we fall back to world East. The check is on the UN-normalized
+        // projection and MUST match the bake shader's threshold exactly —
+        // otherwise the apply (this matrix) and the bake use different
+        // bases above the threshold latitude, misindexing the shadow map
+        // so it slides against the terrain. (The previous code normalised
+        // before checking, so its `< 0.5` test was always 1.0 and never
+        // fired, while the shader's `< 0.5` on the un-normalised vector
+        // fired above 45° — hence the high-latitude slide.)
         let world_north = Vec3::Z;
-        let mut forward = (world_north - up * world_north.dot(up)).normalize_or_zero();
-        if forward.length_squared() < 0.5 {
-            let world_east = Vec3::X;
-            forward = (world_east - up * world_east.dot(up)).normalize_or_zero();
-        }
+        let forward_unnorm = world_north - up * world_north.dot(up);
+        let forward = if forward_unnorm.length_squared() < 1e-6 {
+            (Vec3::X - up * Vec3::X.dot(up)).normalize_or_zero()
+        } else {
+            forward_unnorm.normalize_or_zero()
+        };
         let right = up.cross(forward).normalize_or_zero();
         let footprint = SHADOW_FOOTPRINT_M;
         let scale = 0.5 / footprint;

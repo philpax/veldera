@@ -145,39 +145,29 @@ fn sample_total_density(world_pos: vec3<f32>, sample_pos_local: vec3<f32>) -> f3
 // non-zero, `main` writes this instead of integrating cloud density.
 //
 // Mode 1 (HashGrid): a world-anchored hashed identity grid keyed off
-// the texel's ground ECEF position. Each 2 km × 2 km cell in the X/Z
-// plane gets a unique pseudo-random brightness, with tinted grid lines
-// (black = east-west, dark grey = north-south) so the grid's
-// orientation is readable. Because every visible cell differs from its
-// neighbours, a pattern that drifts under camera motion can't be
-// mistaken for the map simply panning to an adjacent slice.
+// the texel's ground ECEF position. Each 2 km cube in ECEF space gets a
+// unique pseudo-random brightness. The hash uses ALL THREE world axes
+// (x, y, z), so it's sensitive to drift in any direction — unlike a 2D
+// x/z hash, which is blind to drift along world Y (the axis that's large
+// near longitudes ±90° and was hiding the drift at some locations).
+// Because every visible cell differs from its neighbours, a pattern that
+// drifts under camera motion can't be mistaken for the map simply
+// panning to an adjacent slice. If this sticks to fixed terrain as the
+// camera moves, the shadow frame is world-anchored; if it slides with
+// the camera, the frame itself is camera-locked.
 fn shadow_bake_diag_pattern(mode: u32, ground_pos: vec3<f32>) -> f32 {
     if mode != 1u {
         return 1.0;
     }
     let cell_period: f32 = 2000.0;
-    let line_thickness_world: f32 = 200.0;
 
-    let frac_x = fract(ground_pos.x / cell_period);
-    let frac_z = fract(ground_pos.z / cell_period);
-    let dist_x = min(frac_x, 1.0 - frac_x) * cell_period;
-    let dist_z = min(frac_z, 1.0 - frac_z) * cell_period;
-    let on_ns_line = step(dist_x, line_thickness_world); // ⊥ X ⇒ N-S oriented.
-    let on_ew_line = step(dist_z, line_thickness_world); // ⊥ Z ⇒ E-W oriented.
-
-    // 2D hash on integer cell index. Adjacent cells (ix±1, iz±1) get
-    // uncorrelated values, so no two neighbours look the same.
-    let ix = floor(ground_pos.x / cell_period);
-    let iz = floor(ground_pos.z / cell_period);
-    let hash = fract(sin(dot(vec2<f32>(ix, iz), vec2<f32>(127.1, 311.7))) * 43758.5453);
-    // Bias into [0.2, 0.9] so cells stay distinguishable from the
-    // pure-black E-W grid lines.
-    let cell_value = 0.2 + 0.7 * hash;
-
-    var value = cell_value;
-    value = mix(value, 0.0, on_ew_line); // E-W: black.
-    value = mix(value, 0.1, on_ns_line); // N-S: very dark grey.
-    return value;
+    // 3D hash on the integer ECEF cell index. Adjacent cells in any of
+    // x/y/z get uncorrelated values, so the pattern is unique in all
+    // directions and reveals drift along any world axis.
+    let cell = floor(ground_pos / cell_period);
+    let hash = fract(sin(dot(cell, vec3<f32>(127.1, 311.7, 74.7))) * 43758.5453);
+    // Bias into [0.15, 0.9] for good contrast.
+    return 0.15 + 0.75 * hash;
 }
 
 @compute @workgroup_size(8, 8, 1)
@@ -233,10 +223,18 @@ fn main(@builtin(global_invocation_id) idx: vec3<u32>) {
     // the shader.
     let center = atmosphere_transforms.local_up * atmosphere_transforms.camera_radius;
     let up = atmosphere_transforms.local_up;
+    // Tangent basis: world-north projected onto the tangent plane. The
+    // projection has length² = cos²(latitude), which only vanishes AT
+    // THE POLES (north ∥ up); fall back to world-east there. The
+    // threshold MUST match the CPU (`prepare_cloud_uniforms`) exactly —
+    // historically the shader used `< 0.5`, which is cos²(45°), so above
+    // 45° latitude it fell back to world-east while the CPU kept
+    // world-north. That ~90° basis mismatch misindexed the shadow map
+    // and made it slide wildly against the terrain at high latitudes.
     let world_north = vec3<f32>(0.0, 0.0, 1.0);
     var forward = world_north - up * dot(world_north, up);
     let forward_len2 = dot(forward, forward);
-    if forward_len2 < 0.5 {
+    if forward_len2 < 1e-6 {
         let world_east = vec3<f32>(1.0, 0.0, 0.0);
         forward = world_east - up * dot(world_east, up);
     }
