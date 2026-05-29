@@ -226,7 +226,10 @@ pub struct GpuCloudUniform {
     /// Multiplier on the shadow-apply pass's dimming. See
     /// [`CloudLayers::shadow_intensity`].
     pub shadow_intensity: f32,
-    pub pad_shadow_intensity: u32,
+    /// Diagnostic override for the shadow bake. 0 = normal density
+    /// march; non-zero selects a synthetic test pattern. See
+    /// [`crate::CloudShadowBakeDiag`].
+    pub shadow_bake_diag: u32,
 
     // ---- Earth-aware climate model (consumed by sample_layer_density).
     /// 1 = climate model active; 0 = legacy uniform-coverage path.
@@ -1508,7 +1511,7 @@ pub(super) fn prepare_cloud_uniforms(
             god_rays_atmo_scale_height: cloud.god_rays.atmo_scale_height.max(1.0),
             god_rays_hg_g: cloud.god_rays.hg_g.clamp(-0.99, 0.99),
             shadow_intensity: cloud.shadow_intensity.max(0.0),
-            pad_shadow_intensity: 0,
+            shadow_bake_diag: cloud.shadow_bake_diag as u32,
             // Climate sampling is only safe once a `CloudClimateMap`
             // is bound — without it the runtime samples the fallback
             // white texture and reads R=1 (max propensity → threshold

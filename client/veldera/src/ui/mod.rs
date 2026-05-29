@@ -8,6 +8,7 @@ mod inspector;
 mod location;
 mod physics;
 mod profiler;
+mod shadow_diag;
 mod streaming;
 mod vehicle;
 
@@ -50,6 +51,7 @@ impl Plugin for DebugUiPlugin {
     fn build(&self, app: &mut App) {
         app.add_plugins(EguiPlugin::default())
             .add_plugins(FrameTimeDiagnosticsPlugin::default())
+            .add_plugins(shadow_diag::ShadowDiagPlugin)
             .init_resource::<location::CoordinateInputState>()
             .init_resource::<DebugUiState>()
             .init_resource::<vehicle::VehicleHistory>()
@@ -176,6 +178,7 @@ fn debug_ui_system(
     mut physics_params: physics::PhysicsParams,
     mut vehicle_params: vehicle::VehicleParams,
     mut inspector_params: inspector::InspectorParams,
+    mut shadow_diag_params: shadow_diag::ShadowDiagParams,
     profiler_params: profiler::ProfilerParams,
     climate_assets: Res<crate::rendering::clouds::CloudClimateAssets>,
 ) -> Result {
@@ -248,6 +251,7 @@ fn debug_ui_system(
                 atmosphere_subtab,
                 &atmosphere_image_ids,
                 &mut inspector_params,
+                &mut shadow_diag_params,
             );
         }
         DebugTab::Streaming => {

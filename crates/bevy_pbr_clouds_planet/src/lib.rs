@@ -538,6 +538,10 @@ pub struct CloudLayers {
     /// where the absolute light level is already dim); drop to fade
     /// the effect out entirely (0.0 = no dimming).
     pub shadow_intensity: f32,
+    /// Diagnostic override for the shadow bake. Default
+    /// [`CloudShadowBakeDiag::Off`]; set to a test pattern to debug
+    /// shadow-map world-anchoring. See [`CloudShadowBakeDiag`].
+    pub shadow_bake_diag: CloudShadowBakeDiag,
     /// Earth-aware climate model. See [`ClimateSettings`].
     pub climate: ClimateSettings,
     /// Stateful climate simulation. See [`ClimateSimSettings`].
@@ -870,6 +874,7 @@ impl CloudLayers {
             debug_mode: CloudDebugMode::Off,
             god_rays: GodRaysSettings::default(),
             shadow_intensity: 1.0,
+            shadow_bake_diag: CloudShadowBakeDiag::Off,
             climate: ClimateSettings::default(),
             sim: ClimateSimSettings::default(),
             raymarch_jitter: false,
@@ -896,6 +901,7 @@ impl CloudLayers {
             debug_mode: CloudDebugMode::Off,
             god_rays: GodRaysSettings::default(),
             shadow_intensity: 1.0,
+            shadow_bake_diag: CloudShadowBakeDiag::Off,
             climate: ClimateSettings::default(),
             sim: ClimateSimSettings::default(),
             raymarch_jitter: false,
@@ -928,6 +934,7 @@ impl CloudLayers {
             debug_mode: CloudDebugMode::Off,
             god_rays: GodRaysSettings::default(),
             shadow_intensity: 1.0,
+            shadow_bake_diag: CloudShadowBakeDiag::Off,
             climate: ClimateSettings::default(),
             sim: ClimateSimSettings::default(),
             raymarch_jitter: false,
@@ -1004,6 +1011,36 @@ pub enum CloudDebugMode {
     /// with bands of `k_first` changing across the screen, the
     /// world-snap grid is the source.
     KFirst = 11,
+    /// Paints the shadow-map UV the apply pass samples at each pixel
+    /// as R = u, G = v, B = sampled transmittance. Diagnoses whether
+    /// the apply-side projection is stable per-pixel under camera
+    /// motion (it should be: terrain and camera shift cancel through
+    /// `shadow_from_world`). Pair with
+    /// [`CloudShadowBakeDiag::HashGrid`] to see exactly which bake
+    /// content each pixel reads.
+    ShadowUv = 12,
+}
+
+/// Diagnostic override for the cloud-shadow bake pass. When set to
+/// anything other than [`Self::Off`], the bake skips the real
+/// cloud-density march and writes a synthetic, world-anchored test
+/// pattern instead — letting you verify that the shadow map stays
+/// locked to world space under camera motion, independent of the
+/// noise field. View the result either as terrain shadows (normal
+/// render) or full-screen via [`CloudDebugMode::ShadowMap`].
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[repr(u32)]
+pub enum CloudShadowBakeDiag {
+    /// Normal: integrate cloud density along the sun ray.
+    #[default]
+    Off = 0,
+    /// World-anchored hashed identity grid: each 2 km × 2 km cell in
+    /// the ECEF X/Z plane gets a unique pseudo-random brightness, with
+    /// tinted grid lines (black = east-west, dark grey = north-south).
+    /// Every visible cell differs from its neighbours, so a drifting
+    /// pattern can't be mistaken for the map panning to an adjacent
+    /// slice.
+    HashGrid = 1,
 }
 
 impl ExtractComponent for CloudLayers {

@@ -140,6 +140,46 @@ fn sample_total_density(world_pos: vec3<f32>, sample_pos_local: vec3<f32>) -> f3
     return total;
 }
 
+// Diagnostic shadow-bake pattern. Selected at runtime via
+// `cloud.shadow_bake_diag` (see `CloudShadowBakeDiag` in lib.rs); when
+// non-zero, `main` writes this instead of integrating cloud density.
+//
+// Mode 1 (HashGrid): a world-anchored hashed identity grid keyed off
+// the texel's ground ECEF position. Each 2 km × 2 km cell in the X/Z
+// plane gets a unique pseudo-random brightness, with tinted grid lines
+// (black = east-west, dark grey = north-south) so the grid's
+// orientation is readable. Because every visible cell differs from its
+// neighbours, a pattern that drifts under camera motion can't be
+// mistaken for the map simply panning to an adjacent slice.
+fn shadow_bake_diag_pattern(mode: u32, ground_pos: vec3<f32>) -> f32 {
+    if mode != 1u {
+        return 1.0;
+    }
+    let cell_period: f32 = 2000.0;
+    let line_thickness_world: f32 = 200.0;
+
+    let frac_x = fract(ground_pos.x / cell_period);
+    let frac_z = fract(ground_pos.z / cell_period);
+    let dist_x = min(frac_x, 1.0 - frac_x) * cell_period;
+    let dist_z = min(frac_z, 1.0 - frac_z) * cell_period;
+    let on_ns_line = step(dist_x, line_thickness_world); // ⊥ X ⇒ N-S oriented.
+    let on_ew_line = step(dist_z, line_thickness_world); // ⊥ Z ⇒ E-W oriented.
+
+    // 2D hash on integer cell index. Adjacent cells (ix±1, iz±1) get
+    // uncorrelated values, so no two neighbours look the same.
+    let ix = floor(ground_pos.x / cell_period);
+    let iz = floor(ground_pos.z / cell_period);
+    let hash = fract(sin(dot(vec2<f32>(ix, iz), vec2<f32>(127.1, 311.7))) * 43758.5453);
+    // Bias into [0.2, 0.9] so cells stay distinguishable from the
+    // pure-black E-W grid lines.
+    let cell_value = 0.2 + 0.7 * hash;
+
+    var value = cell_value;
+    value = mix(value, 0.0, on_ew_line); // E-W: black.
+    value = mix(value, 0.1, on_ns_line); // N-S: very dark grey.
+    return value;
+}
+
 @compute @workgroup_size(8, 8, 1)
 fn main(@builtin(global_invocation_id) idx: vec3<u32>) {
     let size = vec2<u32>(textureDimensions(shadow_out));
@@ -212,6 +252,15 @@ fn main(@builtin(global_invocation_id) idx: vec3<u32>) {
     // ground_pos is `centre + ground_pos_local`.
     let ground_pos_local = right * local_x + forward * local_y;
     let ground_pos = center + ground_pos_local;
+
+    // Diagnostic override: skip the density march entirely and write a
+    // synthetic, world-anchored test pattern. See
+    // `shadow_bake_diag_pattern` / `CloudShadowBakeDiag`.
+    if cloud.shadow_bake_diag != 0u {
+        let diag = shadow_bake_diag_pattern(cloud.shadow_bake_diag, ground_pos);
+        textureStore(shadow_out, vec2<i32>(idx.xy), vec4(diag));
+        return;
+    }
 
     // Find where the sun ray from `ground_pos` enters and exits the cloud
     // shell (union over all layers). We march that segment integrating

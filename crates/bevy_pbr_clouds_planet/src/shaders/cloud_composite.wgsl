@@ -90,6 +90,7 @@ const DBG_VIEW_EXPOSURE: u32 = 7u;
 const DBG_SHADOW_MAP: u32 = 8u;
 const DBG_CLIMATE_COVERAGE: u32 = 9u;
 const DBG_TOPOGRAPHY: u32 = 10u;
+const DBG_SHADOW_UV: u32 = 12u;
 
 // Linear remap of `x` from `[a, b]` to `[c, d]`. Mirror of the raymarch
 // helper.
@@ -277,8 +278,8 @@ fn main(in: FullscreenVertexOutput) -> @location(0) vec4<f32> {
             return vec4<f32>(display, display, display, 0.0);
         }
     }
-    if cloud.debug_mode == DBG_SHADOW_MAP {
-        // Replace the scene with the raw shadow-map value so it's
+    if cloud.debug_mode == DBG_SHADOW_MAP || cloud.debug_mode == DBG_SHADOW_UV {
+        // Replace the scene with shadow-map diagnostics so they're
         // visible regardless of how dim the underlying scene is (the
         // apply pass's modulate blend can't show this at night).
         // Reconstruct a world position from depth (terrain) or pick a
@@ -304,6 +305,13 @@ fn main(in: FullscreenVertexOutput) -> @location(0) vec4<f32> {
         let t = textureSampleLevel(shadow_map, cloud_sampler, shadow_uv, 0.0).r;
         // src.a = 0 makes the composite blend replace the destination:
         // `dst = src.rgb + dst.rgb * 0 = src.rgb`.
+        if cloud.debug_mode == DBG_SHADOW_UV {
+            // R = u, G = v, B = sampled transmittance. Lets you check
+            // the apply-side projection's per-pixel stability under
+            // camera motion (see `CloudDebugMode::ShadowUv`).
+            return vec4<f32>(shadow_uv.x, shadow_uv.y, t, 0.0);
+        }
+        // DBG_SHADOW_MAP: raw transmittance as grayscale.
         return vec4<f32>(t, t, t, 0.0);
     }
 

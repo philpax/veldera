@@ -126,7 +126,10 @@ struct CloudUniform {
     // Multiplier applied to the apply pass's dimming. See
     // `CloudLayers::shadow_intensity` in lib.rs.
     shadow_intensity: f32,
-    pad_shadow_intensity: u32,
+    // Shadow-bake diagnostic override. 0 = normal density march;
+    // non-zero selects a synthetic test pattern. See
+    // `CloudShadowBakeDiag` in lib.rs.
+    shadow_bake_diag: u32,
 
     // Earth-aware climate model. See `ClimateSettings` in lib.rs.
     climate_enabled: u32,

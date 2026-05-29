@@ -6,7 +6,9 @@
 
 use bevy::{ecs::system::SystemParam, prelude::*};
 use bevy_egui::egui;
-use bevy_pbr_clouds_planet::{CloudDebugMode, CloudLayerKind, CloudLayers, CloudQuality};
+use bevy_pbr_clouds_planet::{
+    CloudDebugMode, CloudLayerKind, CloudLayers, CloudQuality, CloudShadowBakeDiag,
+};
 
 #[derive(SystemParam)]
 pub(super) struct CloudParams<'w, 's> {
@@ -53,6 +55,7 @@ pub(super) fn render_atmosphere_tab(
     subtab: &mut AtmosphereSubTab,
     image_ids: &AtmosphereImageIds,
     inspector: &mut super::inspector::InspectorParams,
+    shadow_diag: &mut super::shadow_diag::ShadowDiagParams,
 ) {
     // Sub-tab bar — visible even when there's no CloudLayers, so the
     // user can still jump to e.g. the Inspector subtab in that case.
@@ -88,7 +91,7 @@ pub(super) fn render_atmosphere_tab(
     match subtab {
         AtmosphereSubTab::Overview => render_overview(ui, &mut cloud),
         AtmosphereSubTab::Layers => render_layers(ui, &mut cloud),
-        AtmosphereSubTab::Shadows => render_shadows(ui, &mut cloud),
+        AtmosphereSubTab::Shadows => render_shadows(ui, &mut cloud, shadow_diag),
         AtmosphereSubTab::GodRays => render_god_rays(ui, &mut cloud),
         AtmosphereSubTab::Climate => render_climate(ui, &mut cloud, image_ids),
         AtmosphereSubTab::Inspector => unreachable!("handled above"),
@@ -261,6 +264,7 @@ fn render_overview(ui: &mut egui::Ui, cloud: &mut CloudLayers) {
                 CloudDebugMode::ClimateCoverage,
                 CloudDebugMode::Topography,
                 CloudDebugMode::KFirst,
+                CloudDebugMode::ShadowUv,
             ] {
                 if ui
                     .selectable_label(matches_mode(cloud.debug_mode, mode), label_for(mode))
@@ -273,13 +277,64 @@ fn render_overview(ui: &mut egui::Ui, cloud: &mut CloudLayers) {
     ui.label(help_for(cloud.debug_mode));
 }
 
-fn render_shadows(ui: &mut egui::Ui, cloud: &mut CloudLayers) {
-    ui.add(egui::Slider::new(&mut cloud.shadow_intensity, 0.0..=5.0).text("shadow intensity"))
-        .on_hover_text(
-            "Multiplier on the cloud-shadow apply pass. 1.0 = default \
-         (~45 % darkening under full shadow). Crank up for tuning, \
-         especially handy for moonlit-shadow visibility tests.",
-        );
+fn render_shadows(
+    ui: &mut egui::Ui,
+    cloud: &mut CloudLayers,
+    shadow_diag: &mut super::shadow_diag::ShadowDiagParams,
+) {
+    egui::ScrollArea::vertical().show(ui, |ui| {
+        ui.add(egui::Slider::new(&mut cloud.shadow_intensity, 0.0..=5.0).text("shadow intensity"))
+            .on_hover_text(
+                "Multiplier on the cloud-shadow apply pass. 1.0 = default \
+             (~45 % darkening under full shadow). Crank up for tuning, \
+             especially handy for moonlit-shadow visibility tests.",
+            );
+
+        ui.separator();
+        ui.label("Bake diagnostic:");
+        egui::ComboBox::from_id_salt("cloud_shadow_bake_diag")
+            .selected_text(bake_diag_label(cloud.shadow_bake_diag))
+            .show_ui(ui, |ui| {
+                for mode in [CloudShadowBakeDiag::Off, CloudShadowBakeDiag::HashGrid] {
+                    if ui
+                        .selectable_label(
+                            cloud.shadow_bake_diag as u32 == mode as u32,
+                            bake_diag_label(mode),
+                        )
+                        .clicked()
+                    {
+                        cloud.shadow_bake_diag = mode;
+                    }
+                }
+            });
+        ui.label(bake_diag_help(cloud.shadow_bake_diag));
+
+        // CPU-side shadow / godray diagnostics (camera state, tangent
+        // basis, noise_uv_offsets, and pinned world-anchor probes).
+        ui.separator();
+        ui.heading("Diagnostics");
+        super::shadow_diag::render_shadow_diag_tab(ui, shadow_diag);
+    });
+}
+
+fn bake_diag_label(mode: CloudShadowBakeDiag) -> &'static str {
+    match mode {
+        CloudShadowBakeDiag::Off => "Off (real density march)",
+        CloudShadowBakeDiag::HashGrid => "Hashed identity grid (2 km cells)",
+    }
+}
+
+fn bake_diag_help(mode: CloudShadowBakeDiag) -> &'static str {
+    match mode {
+        CloudShadowBakeDiag::Off => "Normal: the bake integrates cloud density along the sun ray.",
+        CloudShadowBakeDiag::HashGrid => {
+            "Bake writes a world-anchored hashed grid instead of cloud density: each 2 km cell \
+             in the ECEF X/Z plane gets a unique brightness, with black east-west and dark-grey \
+             north-south grid lines. View as terrain shadows (normal render) or full-screen via \
+             the Overview tab's \"Shadow map (raw)\" debug mode. If a recognisable cell drifts \
+             across fixed terrain under camera motion, the shadow map isn't world-anchored."
+        }
+    }
 }
 
 fn render_climate(ui: &mut egui::Ui, cloud: &mut CloudLayers, image_ids: &AtmosphereImageIds) {
@@ -613,6 +668,7 @@ fn label_for(mode: CloudDebugMode) -> &'static str {
         CloudDebugMode::ClimateCoverage => "Climate coverage",
         CloudDebugMode::Topography => "Topography",
         CloudDebugMode::KFirst => "First-cell index k_first",
+        CloudDebugMode::ShadowUv => "Shadow UV (R=u, G=v, B=t)",
     }
 }
 
@@ -650,6 +706,11 @@ fn help_for(mode: CloudDebugMode) -> &'static str {
              camera moves the bands shift across the screen at each integer-k transition. If \
              these bands' shifting correlates with observed cloud morphing, the world-snap grid \
              is the source of the step function."
+        }
+        CloudDebugMode::ShadowUv => {
+            "Shadow-map UV the apply pass samples per pixel: R = u, G = v, B = sampled \
+             transmittance. Red = outside footprint. Pair with the Shadows tab's bake-diagnostic \
+             pattern to see which bake content each pixel reads."
         }
     }
 }

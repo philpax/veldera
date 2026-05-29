@@ -29,8 +29,9 @@
 // here without separating direct sun from ambient.
 const SHADOW_FLOOR: f32 = 0.45;
 
-// Mirrors `CloudDebugMode::ShadowMap` in lib.rs.
+// Mirrors `CloudDebugMode::ShadowMap` / `ShadowUv` in lib.rs.
 const DBG_SHADOW_MAP: u32 = 8u;
+const DBG_SHADOW_UV: u32 = 12u;
 
 fn reconstruct_world_pos(uv: vec2<f32>, depth: f32) -> vec3<f32> {
     let ndc = vec3(uv * vec2(2.0, -2.0) + vec2(-1.0, 1.0), depth);
@@ -43,11 +44,12 @@ fn main(in: FullscreenVertexOutput) -> @location(0) vec4<f32> {
     let full_pixel = vec2<i32>(in.position.xy);
     let depth = textureLoad(depth_texture, full_pixel, 0);
 
-    // In DBG_SHADOW_MAP mode the composite pass paints the raw shadow
-    // map full-screen (it has a replace-blend, so it can show the
-    // values directly without the dim-night scene swallowing them).
-    // The apply pass here just no-ops so it doesn't double-modulate.
-    if cloud.debug_mode == DBG_SHADOW_MAP {
+    // In the shadow-map debug modes the composite pass paints the
+    // diagnostic full-screen (it has a replace-blend, so it can show
+    // the values directly without the dim-night scene swallowing
+    // them). The apply pass here just no-ops so it doesn't
+    // double-modulate.
+    if cloud.debug_mode == DBG_SHADOW_MAP || cloud.debug_mode == DBG_SHADOW_UV {
         return vec4<f32>(1.0);
     }
 
