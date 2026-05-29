@@ -4,3 +4,5 @@
 # each frame. Physically ≈0.27 lux, but overstated ~10x so moonlit scenes aren't
 # near-black under our tonemap/auto-exposure (game-rendering convention).
 illuminance_full_lux = 3.0
+# Moon's angular diameter from Earth's surface (radians). 0.5181° ≈ 9.043e-3.
+angular_diameter = 0.009043

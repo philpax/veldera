@@ -4,19 +4,26 @@
 //! and sun direction, with support for longitude-based local time calculation.
 //! Includes accurate sun declination based on day of year.
 
-use bevy::prelude::*;
+use bevy::{prelude::*, reflect::TypePath};
+use serde::Deserialize;
 use veldera_constants::AXIAL_TILT_DEG;
 use web_time::Instant;
 
-use crate::world::{coords::ecef_to_lat_lon, floating_origin::FloatingOriginCamera};
+use crate::{
+    config,
+    world::{coords::ecef_to_lat_lon, floating_origin::FloatingOriginCamera},
+};
 
 /// Plugin for the time-of-day system.
 pub struct TimeOfDayPlugin;
 
 impl Plugin for TimeOfDayPlugin {
     fn build(&self, app: &mut App) {
-        app.init_resource::<TimeOfDayState>()
-            .add_systems(Update, (update_sky_color, update_sun_direction));
+        app.add_plugins(config::ConfigPlugin::<TimeOfDayConfig>::new(
+            config::paths::TIME_OF_DAY,
+        ))
+        .init_resource::<TimeOfDayState>()
+        .add_systems(Update, (update_sky_color, update_sun_direction));
     }
 }
 
@@ -287,6 +294,35 @@ pub const SECONDS_PER_HOUR: f64 = 3600.0;
 /// Seconds in a day.
 pub const SECONDS_PER_DAY: f64 = 86400.0;
 
+/// Days since the J2000.0 epoch (2000-01-01 12:00 UTC). Negative for earlier
+/// dates. Used by the lunar/solar ephemerides.
+pub fn days_since_j2000(date: SimpleDate, utc_seconds: f64) -> f64 {
+    const J2000_UNIX_DAYS: i64 = 10_957; // Unix days from 1970-01-01 to 2000-01-01.
+    let j2000_noon_seconds = 12.0 * SECONDS_PER_HOUR;
+    let unix_days = date_to_unix_days(date);
+    (unix_days - J2000_UNIX_DAYS) as f64 + (utc_seconds - j2000_noon_seconds) / SECONDS_PER_DAY
+}
+
+/// Converts a calendar date to days since the Unix epoch (1970-01-01), using
+/// Howard Hinnant's date algorithm.
+pub fn date_to_unix_days(date: SimpleDate) -> i64 {
+    let y = if date.month <= 2 {
+        date.year - 1
+    } else {
+        date.year
+    } as i64;
+    let m = if date.month <= 2 {
+        date.month + 9
+    } else {
+        date.month - 3
+    } as i64;
+    let era = if y >= 0 { y } else { y - 399 } / 400;
+    let yoe = y - era * 400;
+    let doy = (153 * m + 2) / 5 + date.day as i64 - 1;
+    let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
+    era * 146097 + doe - 719_468
+}
+
 /// Split a `seconds-since-midnight` value into `(hours, minutes, seconds)`.
 /// Negative values are clamped to 0.
 pub fn seconds_to_hms(seconds: f64) -> (u32, u32, u32) {
@@ -337,13 +373,38 @@ pub fn local_to_utc(local_seconds: f64, local_date: SimpleDate, lon_deg: f64) ->
     }
 }
 
-// Time period boundaries (in hours).
-const DAWN_START: f64 = 5.0;
-const DAWN_END: f64 = 6.5;
-const SUNRISE_END: f64 = 8.0;
-const SUNSET_START: f64 = 17.0;
-const SUNSET_END: f64 = 18.5;
-const DUSK_END: f64 = 20.0;
+/// Hot-reloadable time-of-day tuning, loaded from
+/// `assets/config/world/time_of_day.toml`. The day-period boundaries (local
+/// hours, 0–24) drive the WebGL fallback sky-colour gradient.
+#[derive(Asset, Resource, TypePath, Clone, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct TimeOfDayConfig {
+    /// Hour at which night begins fading toward dawn.
+    pub dawn_start: f64,
+    /// Hour at which the dawn (night→orange) blend ends.
+    pub dawn_end: f64,
+    /// Hour at which the sunrise (orange→day) blend ends.
+    pub sunrise_end: f64,
+    /// Hour at which the sunset (day→orange) blend begins.
+    pub sunset_start: f64,
+    /// Hour at which the sunset (day→orange) blend ends.
+    pub sunset_end: f64,
+    /// Hour at which the dusk (orange→night) blend ends.
+    pub dusk_end: f64,
+}
+
+impl Default for TimeOfDayConfig {
+    fn default() -> Self {
+        Self {
+            dawn_start: 5.0,
+            dawn_end: 6.5,
+            sunrise_end: 8.0,
+            sunset_start: 17.0,
+            sunset_end: 18.5,
+            dusk_end: 20.0,
+        }
+    }
+}
 
 /// Gets the current UTC time as seconds since midnight.
 #[cfg(not(target_family = "wasm"))]
@@ -425,6 +486,7 @@ use veldera_constants::EARTH_RADIUS_M_F64;
 /// sky rendering directly, so we use black to let it take over.
 fn update_sky_color(
     time_state: Res<TimeOfDayState>,
+    config: Res<TimeOfDayConfig>,
     camera_query: Query<&FloatingOriginCamera>,
     mut camera_settings: Query<&mut Camera>,
 ) {
@@ -441,7 +503,7 @@ fn update_sky_color(
     let sky_color = if should_use_dynamic_clear_color(altitude_m) {
         let (_lat_deg, lon_deg) = ecef_to_lat_lon(floating_camera.position);
         let local_hours = time_state.local_hours_at_longitude(lon_deg);
-        calculate_sky_color(local_hours)
+        calculate_sky_color(&config, local_hours)
     } else {
         // Pure black for space or when atmosphere shader handles rendering.
         Color::LinearRgba(LinearRgba::BLACK)
@@ -468,36 +530,36 @@ fn should_use_dynamic_clear_color(_altitude_m: f64) -> bool {
 }
 
 /// Calculates the sky color based on local time (hours, 0-24).
-fn calculate_sky_color(local_hours: f64) -> Color {
+fn calculate_sky_color(config: &TimeOfDayConfig, local_hours: f64) -> Color {
     let night_color = LinearRgba::new(0.02, 0.02, 0.05, 1.0);
     let dawn_color = LinearRgba::new(0.8, 0.4, 0.2, 1.0);
     let day_color = LinearRgba::new(0.4, 0.6, 0.9, 1.0);
     let sunset_color = LinearRgba::new(0.9, 0.5, 0.3, 1.0);
 
-    let color = if local_hours < DAWN_START {
-        // Night (00:00 - 05:00).
+    let color = if local_hours < config.dawn_start {
+        // Night, before dawn.
         night_color
-    } else if local_hours < DAWN_END {
-        // Dawn (05:00 - 06:30): night -> orange.
-        let t = (local_hours - DAWN_START) / (DAWN_END - DAWN_START);
+    } else if local_hours < config.dawn_end {
+        // Dawn: night -> orange.
+        let t = (local_hours - config.dawn_start) / (config.dawn_end - config.dawn_start);
         lerp_color(night_color, dawn_color, t)
-    } else if local_hours < SUNRISE_END {
-        // Sunrise (06:30 - 08:00): orange -> day.
-        let t = (local_hours - DAWN_END) / (SUNRISE_END - DAWN_END);
+    } else if local_hours < config.sunrise_end {
+        // Sunrise: orange -> day.
+        let t = (local_hours - config.dawn_end) / (config.sunrise_end - config.dawn_end);
         lerp_color(dawn_color, day_color, t)
-    } else if local_hours < SUNSET_START {
-        // Day (08:00 - 17:00).
+    } else if local_hours < config.sunset_start {
+        // Day.
         day_color
-    } else if local_hours < SUNSET_END {
-        // Sunset (17:00 - 18:30): day -> orange.
-        let t = (local_hours - SUNSET_START) / (SUNSET_END - SUNSET_START);
+    } else if local_hours < config.sunset_end {
+        // Sunset: day -> orange.
+        let t = (local_hours - config.sunset_start) / (config.sunset_end - config.sunset_start);
         lerp_color(day_color, sunset_color, t)
-    } else if local_hours < DUSK_END {
-        // Dusk (18:30 - 20:00): orange -> night.
-        let t = (local_hours - SUNSET_END) / (DUSK_END - SUNSET_END);
+    } else if local_hours < config.dusk_end {
+        // Dusk: orange -> night.
+        let t = (local_hours - config.sunset_end) / (config.dusk_end - config.sunset_end);
         lerp_color(sunset_color, night_color, t)
     } else {
-        // Night (20:00 - 24:00).
+        // Night, after dusk.
         night_color
     };
 

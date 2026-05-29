@@ -19,6 +19,7 @@ pub const ARM_POINT: &str = "config/camera/body/arm_point.toml";
 pub const GEO: &str = "config/world/geo.toml";
 pub const LOD: &str = "config/world/lod.toml";
 pub const MOON: &str = "config/world/moon.toml";
+pub const TIME_OF_DAY: &str = "config/world/time_of_day.toml";
 
 // Physics.
 pub const PROJECTILE: &str = "config/physics/projectile.toml";

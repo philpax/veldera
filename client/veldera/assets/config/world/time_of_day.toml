@@ -1,0 +1,11 @@
+# Day-period boundaries (local hours, 0–24) for the WebGL fallback sky-colour
+# gradient. On native, the atmosphere shader renders the sky and these are
+# unused. Each value is where one blend ends and the next begins:
+# night → [dawn_start] dawn → [dawn_end] sunrise → [sunrise_end] day →
+# [sunset_start] sunset → [sunset_end] dusk → [dusk_end] night.
+dawn_start = 5.0
+dawn_end = 6.5
+sunrise_end = 8.0
+sunset_start = 17.0
+sunset_end = 18.5
+dusk_end = 20.0

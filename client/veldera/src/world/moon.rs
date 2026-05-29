@@ -15,24 +15,19 @@
 //!
 //! [Meeus]: https://en.wikipedia.org/wiki/Astronomical_algorithms
 
-use bevy::{prelude::*, reflect::TypePath};
+use bevy::{light::SunDisk, prelude::*, reflect::TypePath};
 use serde::Deserialize;
 
 use crate::{
     config,
-    world::time_of_day::{SimpleDate, TimeOfDayState},
+    world::time_of_day::{SECONDS_PER_HOUR, TimeOfDayState, days_since_j2000},
 };
 
 /// Marker for the lunar `DirectionalLight`.
 #[derive(Component)]
 pub struct Moon;
 
-/// Moon's mean angular diameter from Earth's surface (radians).
-/// 0.5181° ≈ 9.043e-3 rad.
-pub const MOON_ANGULAR_DIAMETER: f32 = 0.009_043;
-
-/// Hot-reloadable lunar lighting tuning, loaded from
-/// `assets/config/world/moon.toml`.
+/// Hot-reloadable lunar tuning, loaded from `assets/config/world/moon.toml`.
 #[derive(Asset, Resource, TypePath, Clone, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct MoonConfig {
@@ -45,12 +40,16 @@ pub struct MoonConfig {
     /// after adaptation. We overstate it by roughly an order of magnitude, per
     /// game-rendering convention.
     pub illuminance_full_lux: f32,
+    /// Moon's angular diameter from Earth's surface (radians). 0.5181° ≈ 9.043e-3.
+    /// Applied to the lunar disk each frame.
+    pub angular_diameter: f32,
 }
 
 impl Default for MoonConfig {
     fn default() -> Self {
         Self {
             illuminance_full_lux: 3.0,
+            angular_diameter: 0.009_043,
         }
     }
 }
@@ -153,9 +152,9 @@ pub fn compute_moon_state(time_state: &TimeOfDayState) -> MoonState {
 fn update_moon(
     time_state: Res<TimeOfDayState>,
     config: Res<MoonConfig>,
-    mut moon_query: Query<(&mut Transform, &mut DirectionalLight), With<Moon>>,
+    mut moon_query: Query<(&mut Transform, &mut DirectionalLight, &mut SunDisk), With<Moon>>,
 ) {
-    let Ok((mut transform, mut light)) = moon_query.single_mut() else {
+    let Ok((mut transform, mut light, mut sun_disk)) = moon_query.single_mut() else {
         return;
     };
 
@@ -163,6 +162,8 @@ fn update_moon(
 
     // The light shines in -Z of its transform, so forward = -direction.
     *transform = Transform::default().looking_to(-state.direction, Vec3::Z);
+
+    sun_disk.angular_size = config.angular_diameter;
 
     // Scale base illuminance by illuminated fraction. Atmospheric extinction
     // (planet occlusion when the Moon is below the horizon, scattering loss
@@ -176,7 +177,6 @@ fn update_moon(
 /// Mirrors `update_sun_direction` in `time_of_day` so we can compute the
 /// Sun's direction here without coupling the modules. Cheap enough to redo.
 fn compute_sun_direction(time_state: &TimeOfDayState) -> Vec3 {
-    const SECONDS_PER_HOUR: f64 = 3600.0;
     let utc_hours = time_state.current_utc_seconds() / SECONDS_PER_HOUR;
     let subsolar_lon = (12.0 - utc_hours) * 15.0;
     let subsolar_lat = time_state.sun_declination_deg();
@@ -197,35 +197,6 @@ fn compute_illuminated_fraction(moon_dir: Vec3, sun_dir: Vec3) -> f32 {
     // Phase angle = 180° - elongation. Illuminated fraction = (1 + cos(phase_angle))/2
     // = (1 - cos(elongation))/2.
     (1.0 - cos_elongation) * 0.5
-}
-
-/// Days since J2000.0 epoch (2000-01-01 12:00 UTC). Negative for earlier
-/// dates.
-fn days_since_j2000(date: SimpleDate, utc_seconds: f64) -> f64 {
-    const J2000_UNIX_DAYS: i64 = 10_957; // Unix days from 1970-01-01 to 2000-01-01
-    const J2000_NOON_SECONDS: f64 = 12.0 * 3600.0;
-    let unix_days = date_to_unix_days(date);
-    (unix_days - J2000_UNIX_DAYS) as f64 + (utc_seconds - J2000_NOON_SECONDS) / 86400.0
-}
-
-/// Converts a calendar date to days since the Unix epoch (1970-01-01),
-/// using Howard Hinnant's date algorithm.
-fn date_to_unix_days(date: SimpleDate) -> i64 {
-    let y = if date.month <= 2 {
-        date.year - 1
-    } else {
-        date.year
-    } as i64;
-    let m = if date.month <= 2 {
-        date.month + 9
-    } else {
-        date.month - 3
-    } as i64;
-    let era = if y >= 0 { y } else { y - 399 } / 400;
-    let yoe = y - era * 400;
-    let doy = (153 * m + 2) / 5 + date.day as i64 - 1;
-    let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
-    era * 146097 + doe - 719_468
 }
 
 /// Converts ecliptic coordinates `(lambda, beta)` in degrees to equatorial

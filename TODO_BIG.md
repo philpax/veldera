@@ -30,3 +30,4 @@
 - [ ] road-hyperlapse teleport that follows the road to your destination:
   - <https://project-osrm.org/docs/v5.5.1/api/#route-service>
   - <https://github.com/Jorl17/open-elevation/blob/master/docs/host-your-own.md>
+- [ ] see if we can get the atmosphere working in webgpu now that we own the code

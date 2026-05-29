@@ -42,7 +42,7 @@ use world::{
     geo::GeoPlugin,
     loader::DataLoaderPlugin,
     lod::LodPlugin,
-    moon::{MOON_ANGULAR_DIAMETER, Moon, MoonPlugin},
+    moon::{Moon, MoonConfig, MoonPlugin},
     time_of_day::{Sun, TimeOfDayPlugin, TimeOfDayState},
 };
 
@@ -195,7 +195,9 @@ fn setup_scene(
             base_color: LinearRgba::new(1.0, 0.96, 0.9, 1.0),
         },
         SunDisk {
-            angular_size: MOON_ANGULAR_DIAMETER,
+            // Initial value; `update_moon` applies `MoonConfig::angular_diameter`
+            // from config each frame.
+            angular_size: MoonConfig::default().angular_diameter,
             intensity: 1.0,
         },
         Transform::default(),
