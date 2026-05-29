@@ -172,25 +172,28 @@ const RAGDOLL_MIN_CAPSULE_LENGTH_M: f32 = 0.02;
 /// inertia) produces NaN under the smallest torque; mixing a
 /// `MassPropertiesBundle` with a `Collider` makes the two compete and
 /// one path silently loses.
-const RAGDOLL_BONE_DENSITY_KG_PER_M3: f32 = 3000.0;
+const RAGDOLL_BONE_DENSITY_KG_PER_M3: f32 = 5000.0;
 
 /// Linear-damping coefficient applied to every dynamic limb body
 /// (`v *= exp(-coefficient * dt)`). Stand-in for air resistance — keeps
 /// the limbs from accelerating forever under gravity and bleeds off
 /// swing so they settle into a hang rather than whipping around.
-const RAGDOLL_LINEAR_DAMPING: f32 = 1.0;
+/// Deliberately heavy: we can't model real flailing convincingly, so we
+/// err toward slight, sluggish motion over stark realistic motion.
+const RAGDOLL_LINEAR_DAMPING: f32 = 10.0;
 
 /// Angular-damping coefficient applied to every dynamic limb body — the
-/// main knob against frantic flailing (rotational air resistance). The
-/// limbs windmill on the torso's motion + gravity asymmetry through the
-/// joints; high damping reads as "limp and heavy" rather than
-/// "propeller". Joint angle limits (still to come) will do the rest.
-const RAGDOLL_ANGULAR_DAMPING: f32 = 14.0;
+/// main knob against flailing (rotational air resistance). The limbs
+/// would otherwise windmill on the torso's motion + gravity asymmetry
+/// through the joints. Cranked high so they read as "limp and heavy",
+/// drifting slowly within the joint limits rather than thrashing — an
+/// intentionally unrealistic-but-calm look.
+const RAGDOLL_ANGULAR_DAMPING: f32 = 120.0;
 
 /// Per-collider friction for the ragdoll bones. Applies to bone-on-bone
 /// self-collision (limbs sliding against the torso); terrain contact is
 /// still off, so it doesn't affect landing.
-const RAGDOLL_BONE_FRICTION: f32 = 1.0;
+const RAGDOLL_BONE_FRICTION: f32 = 2.0;
 
 /// Maps to Avian's `SphericalJoint::with_point_compliance`. Lower =
 /// stiffer joint (less stretch under load) in m/N. `1e-6` mirrors
