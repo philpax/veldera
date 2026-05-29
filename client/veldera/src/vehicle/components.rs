@@ -15,14 +15,11 @@ pub enum GameLayer {
     #[default]
     Ground,
     /// Vehicle bodies and their mesh colliders.
-    /// Used by tuner binary and main app (with spherical-earth feature).
-    #[allow(dead_code)]
     Vehicle,
     /// Per-bone ragdoll rigid bodies. Configured to collide with
     /// [`Ground`](Self::Ground) only — not with each other (joints
     /// would fight collision response at the anchor points) and not
     /// with the player's kinematic capsule.
-    #[allow(dead_code)]
     Ragdoll,
 }
 

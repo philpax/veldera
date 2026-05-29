@@ -14,20 +14,17 @@ use super::{
     core::{self, VehicleFrame, VehiclePhysicsParams, VehicleSimInput, VehicleSimState},
     telemetry::{self, EMIT_TELEMETRY, TelemetrySnapshot},
 };
-#[cfg(feature = "spherical-earth")]
 use crate::{
     camera::{CameraModeState, RadialFrame},
     ui::VehicleRightRequest,
     world::floating_origin::{FloatingOriginCamera, WorldPosition},
 };
-#[cfg(feature = "spherical-earth")]
 use leafwing_input_manager::prelude::*;
 
 /// Jump cooldown in seconds.
 const JUMP_COOLDOWN: f32 = 2.0;
 
 /// Capture vehicle input from action state.
-#[cfg(feature = "spherical-earth")]
 pub fn vehicle_input_system(
     action_query: Query<&ActionState<crate::input::VehicleAction>>,
     mut query: Query<&mut VehicleInput, With<Vehicle>>,
@@ -46,7 +43,6 @@ pub fn vehicle_input_system(
 }
 
 /// Run condition: FollowEntity mode is active.
-#[cfg(feature = "spherical-earth")]
 pub fn is_follow_entity_mode(state: Res<CameraModeState>) -> bool {
     state.is_follow_entity()
 }
@@ -110,9 +106,8 @@ use crate::constants;
 /// handling including banking, surface alignment, momentum-based turning, and
 /// directional drag.
 ///
-/// With `spherical-earth` feature: uses radial frame for spherical Earth physics.
-/// Without: uses flat plane with Y-up.
-#[cfg(feature = "spherical-earth")]
+/// Uses the radial frame from the camera's ECEF position for spherical-Earth
+/// physics; falls back to Y-up when there's no camera.
 #[allow(clippy::too_many_lines, clippy::type_complexity)]
 pub fn vehicle_physics_system(
     time: Res<Time<Fixed>>,
@@ -154,9 +149,8 @@ pub fn vehicle_physics_system(
         computed_inertia,
     ) in &mut query
     {
-        // Compute local up direction.
-        // With camera: use radial frame from ECEF position (spherical Earth).
-        // Without camera: use Y-up (flat plane mode for tuner).
+        // Local up: radial frame from ECEF position when a camera is present,
+        // else Y-up.
         let (local_up, gravity) = if let Some(cam_pos) = camera_pos {
             let ecef_pos = cam_pos + transform.translation.as_dvec3();
             let frame = RadialFrame::from_ecef_position(ecef_pos);
@@ -187,74 +181,7 @@ pub fn vehicle_physics_system(
     }
 }
 
-/// Apply physics forces to vehicles (flat plane mode).
-///
-/// Headless version for tuning binaries - always uses Y-up and 9.81 m/s² gravity.
-#[cfg(not(feature = "spherical-earth"))]
-#[allow(clippy::too_many_lines, clippy::type_complexity)]
-pub fn vehicle_physics_system(
-    time: Res<Time<Fixed>>,
-    spatial_query: SpatialQuery,
-    mut query: Query<(
-        Entity,
-        &Vehicle,
-        &VehicleHoverConfig,
-        &VehicleMovementConfig,
-        &VehicleDragConfig,
-        &VehicleInput,
-        &mut VehicleState,
-        &Transform,
-        &mut LinearVelocity,
-        &mut AngularVelocity,
-        &ComputedMass,
-        &ComputedAngularInertia,
-    )>,
-) {
-    let dt = time.delta_secs();
-    let elapsed = time.elapsed_secs();
-
-    for (
-        entity,
-        vehicle,
-        hover_config,
-        movement_config,
-        drag_config,
-        input,
-        mut state,
-        transform,
-        mut linear_velocity,
-        mut angular_velocity,
-        computed_mass,
-        computed_inertia,
-    ) in &mut query
-    {
-        // Flat plane mode: Y-up, standard gravity.
-        let local_up = Vec3::Y;
-        let gravity = constants::GRAVITY;
-
-        vehicle_physics_inner(
-            dt,
-            elapsed,
-            &spatial_query,
-            entity,
-            vehicle,
-            hover_config,
-            movement_config,
-            drag_config,
-            input,
-            &mut state,
-            transform,
-            &mut linear_velocity,
-            &mut angular_velocity,
-            computed_mass,
-            computed_inertia,
-            local_up,
-            gravity,
-        );
-    }
-}
-
-/// Inner physics computation shared between spherical and flat plane modes.
+/// Inner physics computation for a single vehicle.
 ///
 /// Uses a simple spring-damper hover system with a single central raycast.
 #[allow(clippy::too_many_arguments)]
@@ -473,7 +400,6 @@ fn vehicle_physics_inner(
 }
 
 /// Process requests to right the vehicle (reset orientation to upright).
-#[cfg(feature = "spherical-earth")]
 pub fn process_vehicle_right_request(
     mut right_request: ResMut<VehicleRightRequest>,
     camera_query: Query<&FloatingOriginCamera>,

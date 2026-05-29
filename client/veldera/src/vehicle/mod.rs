@@ -62,17 +62,14 @@ impl Plugin for VehiclePlugin {
                 Startup,
                 (start_loading_vehicle_folder, configure_vehicle_debug_gizmos),
             )
-            .add_systems(FixedPreUpdate, physics::vehicle_physics_system);
-
-        // Systems that require spherical-earth feature (camera modes, right request).
-        #[cfg(feature = "spherical-earth")]
-        app.add_systems(
-            Update,
-            (
-                physics::vehicle_input_system.run_if(physics::is_follow_entity_mode),
-                physics::process_vehicle_right_request,
-            ),
-        );
+            .add_systems(FixedPreUpdate, physics::vehicle_physics_system)
+            .add_systems(
+                Update,
+                (
+                    physics::vehicle_input_system.run_if(physics::is_follow_entity_mode),
+                    physics::process_vehicle_right_request,
+                ),
+            );
 
         app.add_systems(
             Update,

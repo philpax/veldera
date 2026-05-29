@@ -5,11 +5,6 @@ edition.workspace = true
 description = "3D viewer for Google Earth mesh data using Bevy"
 repository.workspace = true
 license.workspace = true
-default-run = "veldera"
-
-[[bin]]
-name = "vehicle-tuning"
-path = "src/vehicle/tuning.rs"
 
 [dependencies]
 # Platform-agnostic async channel (replaces tokio::sync::mpsc).
@@ -120,11 +115,8 @@ default-features = false
 features = ["json"]
 
 [features]
-default = ["webgpu", "spherical-earth"]
+default = ["webgpu"]
 webgpu = ["bevy/webgpu"]
-# Enable spherical Earth physics with floating origin camera.
-# Disable for headless tuning binaries that use flat plane physics.
-spherical-earth = []
 
 [lints]
 workspace = true
