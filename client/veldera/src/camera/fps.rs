@@ -12,6 +12,7 @@ use leafwing_input_manager::prelude::*;
 use serde::Deserialize;
 
 use crate::{
+    config,
     input::CameraAction,
     world::{
         floating_origin::{FloatingOrigin, FloatingOriginCamera, WorldPosition},
@@ -70,42 +71,40 @@ pub(super) struct FpsControllerPlugin;
 
 impl Plugin for FpsControllerPlugin {
     fn build(&self, app: &mut App) {
-        app.add_plugins(crate::config::ConfigPlugin::<FpsConfig>::new(
-            "config/camera/fps.toml",
-        ))
-        .init_resource::<DidFixedTimestepRunThisFrame>()
-        .init_resource::<PreservedFpsState>()
-        .init_resource::<FpsPlayerConfig>()
-        .add_systems(PreUpdate, clear_fixed_timestep_flag)
-        .add_systems(Update, sync_fps_player_geometry)
-        .add_systems(
-            FixedPreUpdate,
-            (
-                set_fixed_time_step_flag,
-                fps_controller_prepare,
-                fps_controller_slide,
-                fps_controller_sync_position,
-            )
-                .chain()
-                .run_if(is_fps_mode.and(teleport_animation_not_active)),
-        )
-        .add_systems(
-            RunFixedMainLoop,
-            (
-                (fps_controller_input, fps_controller_look)
-                    .chain()
-                    .run_if(teleport_animation_not_active)
-                    .in_set(RunFixedMainLoopSystems::BeforeFixedMainLoop),
+        app.add_plugins(config::ConfigPlugin::<FpsConfig>::new(config::paths::FPS))
+            .init_resource::<DidFixedTimestepRunThisFrame>()
+            .init_resource::<PreservedFpsState>()
+            .init_resource::<FpsPlayerConfig>()
+            .add_systems(PreUpdate, clear_fixed_timestep_flag)
+            .add_systems(Update, sync_fps_player_geometry)
+            .add_systems(
+                FixedPreUpdate,
                 (
-                    clear_input.run_if(did_fixed_timestep_run_this_frame),
-                    fps_controller_render.run_if(teleport_animation_not_active),
-                    sync_floating_origin_fps,
+                    set_fixed_time_step_flag,
+                    fps_controller_prepare,
+                    fps_controller_slide,
+                    fps_controller_sync_position,
                 )
                     .chain()
-                    .in_set(RunFixedMainLoopSystems::AfterFixedMainLoop),
+                    .run_if(is_fps_mode.and(teleport_animation_not_active)),
             )
-                .run_if(is_fps_mode),
-        );
+            .add_systems(
+                RunFixedMainLoop,
+                (
+                    (fps_controller_input, fps_controller_look)
+                        .chain()
+                        .run_if(teleport_animation_not_active)
+                        .in_set(RunFixedMainLoopSystems::BeforeFixedMainLoop),
+                    (
+                        clear_input.run_if(did_fixed_timestep_run_this_frame),
+                        fps_controller_render.run_if(teleport_animation_not_active),
+                        sync_floating_origin_fps,
+                    )
+                        .chain()
+                        .in_set(RunFixedMainLoopSystems::AfterFixedMainLoop),
+                )
+                    .run_if(is_fps_mode),
+            );
     }
 }
 

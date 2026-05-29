@@ -36,6 +36,7 @@ use bevy::{math::DVec3, prelude::*, reflect::TypePath};
 use serde::Deserialize;
 
 use crate::{
+    config,
     launch_params::LaunchParams,
     world::floating_origin::{FloatingOriginCamera, WorldPosition},
 };
@@ -348,8 +349,8 @@ pub struct CameraControllerPlugin;
 
 impl Plugin for CameraControllerPlugin {
     fn build(&self, app: &mut App) {
-        app.add_plugins(crate::config::ConfigPlugin::<CameraConfig>::new(
-            "config/camera/camera.toml",
+        app.add_plugins(config::ConfigPlugin::<CameraConfig>::new(
+            config::paths::CAMERA,
         ))
         .register_type::<follow::FollowCameraConfig>()
         .init_resource::<CameraSettings>()

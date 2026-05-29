@@ -23,7 +23,10 @@ use bevy_pbr_clouds_planet::{
 };
 use serde::Deserialize;
 
-use crate::world::{floating_origin::FloatingOriginCamera, time_of_day::TimeOfDayState};
+use crate::{
+    config,
+    world::{floating_origin::FloatingOriginCamera, time_of_day::TimeOfDayState},
+};
 
 /// Hot-reloadable cloud configuration, loaded from
 /// `assets/config/rendering/clouds.toml`. Wraps the cloud crate's
@@ -57,8 +60,8 @@ pub struct CloudIntegrationPlugin;
 impl Plugin for CloudIntegrationPlugin {
     fn build(&self, app: &mut App) {
         app.add_plugins(CloudsPlanetPlugin)
-            .add_plugins(crate::config::ConfigPlugin::<CloudConfig>::new(
-                "config/rendering/clouds.toml",
+            .add_plugins(config::ConfigPlugin::<CloudConfig>::new(
+                config::paths::CLOUDS,
             ))
             .init_resource::<CloudClimateAssets>()
             .add_systems(Startup, load_climate_assets)

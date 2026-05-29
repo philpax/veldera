@@ -14,6 +14,7 @@ use crate::{
         CameraMode, CameraModeState, CameraSettings, FlightCamera, FpsPlayerConfig, LogicalPlayer,
         RadialFrame, RenderPlayer, TeleportAnimationMode, direction_to_yaw_pitch, spawn_fps_player,
     },
+    config,
     world::{
         coords::{lat_lon_to_ecef, slerp_dvec3, smootherstep},
         floating_origin::FloatingOriginCamera,
@@ -45,9 +46,7 @@ impl Plugin for GeoPlugin {
         );
 
         app.insert_resource(client)
-            .add_plugins(crate::config::ConfigPlugin::<GeoConfig>::new(
-                "config/world/geo.toml",
-            ))
+            .add_plugins(config::ConfigPlugin::<GeoConfig>::new(config::paths::GEO))
             .init_resource::<GeocodingState>()
             .init_resource::<TeleportState>()
             .init_resource::<TeleportAnimation>()

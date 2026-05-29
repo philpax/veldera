@@ -18,7 +18,10 @@
 use bevy::{prelude::*, reflect::TypePath};
 use serde::Deserialize;
 
-use crate::world::time_of_day::{SimpleDate, TimeOfDayState};
+use crate::{
+    config,
+    world::time_of_day::{SimpleDate, TimeOfDayState},
+};
 
 /// Marker for the lunar `DirectionalLight`.
 #[derive(Component)]
@@ -57,10 +60,8 @@ pub struct MoonPlugin;
 
 impl Plugin for MoonPlugin {
     fn build(&self, app: &mut App) {
-        app.add_plugins(crate::config::ConfigPlugin::<MoonConfig>::new(
-            "config/world/moon.toml",
-        ))
-        .add_systems(Update, update_moon);
+        app.add_plugins(config::ConfigPlugin::<MoonConfig>::new(config::paths::MOON))
+            .add_systems(Update, update_moon);
     }
 }
 

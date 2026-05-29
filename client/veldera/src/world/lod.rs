@@ -43,6 +43,7 @@ use serde::Deserialize;
 
 use crate::{
     async_runtime::TaskSpawner,
+    config,
     rendering::{
         mesh::{
             RocktreeMeshMarker, convert_mesh, convert_texture,
@@ -112,9 +113,7 @@ impl Plugin for LodPlugin {
             .init_resource::<LodSnapshot>()
             .init_resource::<LodSnapshotRequest>()
             .init_resource::<LodScratch>()
-            .add_plugins(crate::config::ConfigPlugin::<LodTuning>::new(
-                "config/world/lod.toml",
-            ))
+            .add_plugins(config::ConfigPlugin::<LodTuning>::new(config::paths::LOD))
             .add_systems(
                 Update,
                 (

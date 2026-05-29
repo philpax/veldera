@@ -20,6 +20,7 @@ use bevy_pbr_atmosphere_planet::{
 use serde::Deserialize;
 
 use crate::{
+    config,
     constants::{ATMOSPHERE_TOP_RADIUS_M, EARTH_RADIUS_M},
     world::floating_origin::FloatingOriginCamera,
 };
@@ -53,8 +54,8 @@ pub struct AtmosphereIntegrationPlugin;
 impl Plugin for AtmosphereIntegrationPlugin {
     fn build(&self, app: &mut App) {
         app.add_plugins(bevy_pbr_atmosphere_planet::SphericalAtmospherePlugin)
-            .add_plugins(crate::config::ConfigPlugin::<AtmosphereConfig>::new(
-                "config/rendering/atmosphere.toml",
+            .add_plugins(config::ConfigPlugin::<AtmosphereConfig>::new(
+                config::paths::ATMOSPHERE,
             ))
             // Run in PostUpdate to ensure camera position is fully updated.
             // This prevents frame-lag artifacts during camera movement.

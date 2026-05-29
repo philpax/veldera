@@ -38,6 +38,7 @@ use serde::Deserialize;
 
 use crate::{
     camera::{CameraModeTransitions, FollowEntityTarget},
+    config,
     world::floating_origin::{FloatingOriginCamera, WorldPosition},
 };
 
@@ -123,13 +124,11 @@ impl Plugin for PhysicsIntegrationPlugin {
         app.add_plugins(PhysicsPlugins::default())
             // Add debug rendering plugin (disabled by default).
             .add_plugins(PhysicsDebugPlugin)
-            .add_plugins(
-                crate::config::ConfigPlugin::<projectile::ProjectileConfig>::new(
-                    "config/physics/projectile.toml",
-                ),
-            )
-            .add_plugins(crate::config::ConfigPlugin::<PhysicsStreamingConfig>::new(
-                "config/physics/streaming.toml",
+            .add_plugins(config::ConfigPlugin::<projectile::ProjectileConfig>::new(
+                config::paths::PROJECTILE,
+            ))
+            .add_plugins(config::ConfigPlugin::<PhysicsStreamingConfig>::new(
+                config::paths::PHYSICS_STREAMING,
             ))
             .insert_resource(Gravity(Vec3::ZERO))
             .init_resource::<PhysicsState>()

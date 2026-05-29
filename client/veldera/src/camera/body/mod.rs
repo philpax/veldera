@@ -46,6 +46,7 @@ use crate::{
         CameraModeState,
         fps::{FpsController, FpsPlayerConfig, LogicalPlayer, RadialFrame},
     },
+    config,
     world::floating_origin::WorldPosition,
 };
 
@@ -249,16 +250,10 @@ pub struct BodyPlugin;
 impl Plugin for BodyPlugin {
     fn build(&self, app: &mut App) {
         app.add_plugins((
-            crate::config::ConfigPlugin::<ragdoll::RagdollConfig>::new(
-                "config/camera/body/ragdoll.toml",
-            ),
-            crate::config::ConfigPlugin::<locomotion::LocomotionConfig>::new(
-                "config/camera/body/locomotion.toml",
-            ),
-            crate::config::ConfigPlugin::<arm_point::YeetConfig>::new(
-                "config/camera/body/arm_point.toml",
-            ),
-            crate::config::ConfigPlugin::<BodyConfig>::new("config/camera/body/body.toml"),
+            config::ConfigPlugin::<ragdoll::RagdollConfig>::new(config::paths::RAGDOLL),
+            config::ConfigPlugin::<locomotion::LocomotionConfig>::new(config::paths::LOCOMOTION),
+            config::ConfigPlugin::<arm_point::YeetConfig>::new(config::paths::ARM_POINT),
+            config::ConfigPlugin::<BodyConfig>::new(config::paths::BODY),
         ))
         .init_resource::<CharacterMetrics>()
         .init_resource::<BodyTuning>()

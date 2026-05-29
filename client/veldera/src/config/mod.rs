@@ -14,6 +14,8 @@
 //! immediately, and mirrors the loaded asset into that resource whenever the file
 //! is (re)loaded.
 
+pub mod paths;
+
 use bevy::prelude::*;
 use bevy_common_assets::toml::TomlAssetPlugin;
 use core::marker::PhantomData;
