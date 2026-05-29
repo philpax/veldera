@@ -137,19 +137,19 @@ pub struct RenderPlayer {
 
 /// Master compile-time switch for the ragdoll feature.
 ///
-/// `false` (current) → [`fps_controller_slide`] never flips the
-/// state to [`RagdollState::Ragdolling`]; all the other ragdoll
-/// branches (head-locked camera, input/yeet gating, body tumble,
-/// head-lock skip in `sync_body_transform`) key off that state,
-/// so they all skip their ragdoll paths. Effectively reverts to
-/// pre-ragdoll behaviour: normal locomotion, no tumble, no
-/// camera-on-head, even at terminal velocity.
+/// `false` → [`fps_controller_slide`] never flips the state to
+/// [`RagdollState::Ragdolling`]; the input/yeet gating and the
+/// head-lock skip in `sync_body_transform` key off that state, so
+/// they all skip their ragdoll paths. Reverts to pre-ragdoll
+/// behaviour: normal locomotion, even at terminal velocity.
 ///
-/// `true` → the full state machine + whole-body tumble run. The
-/// per-bone skeletal rig is a separate flag —
-/// [`ENABLE_SKELETAL_RAGDOLL`](super::body::ragdoll) — and stays
-/// off independently while the joint chain is being tuned.
-pub const ENABLE_RAGDOLL: bool = false;
+/// `true` (current) → after sustained airtime the player ragdolls:
+/// the body model hangs limply from a kinematic neck anchor pinned to
+/// the controller (see [`body::ragdoll`](super::body::ragdoll)) while
+/// the camera stays on its normal first-person eye path. The skeletal
+/// rig itself is a separate flag —
+/// [`ENABLE_SKELETAL_RAGDOLL`](super::body::ragdoll).
+pub const ENABLE_RAGDOLL: bool = true;
 
 /// Ragdoll state machine for the FPS player.
 ///
@@ -183,31 +183,6 @@ pub const RAGDOLL_AIRBORNE_THRESHOLD_S: f32 = 1.5;
 /// A short delay prevents instant unragdolling on a bouncy collision
 /// transient (e.g. a single-tick ground hit during tumbling).
 pub const RAGDOLL_GROUND_RECOVERY_S: f32 = 0.3;
-
-/// Maximum yaw rotation (radians) the player can apply on top of the
-/// head-bone orientation while ragdolling. Roughly natural head-turn
-/// range (~60°). Symmetric around 0.
-pub const HEAD_LOOK_YAW_RANGE_RAD: f32 = 60.0 / 180.0 * PI;
-
-/// Maximum pitch rotation (radians) the player can apply on top of
-/// the head-bone orientation while ragdolling (~45° each way).
-pub const HEAD_LOOK_PITCH_RANGE_RAD: f32 = 45.0 / 180.0 * PI;
-
-/// Maximum distance (metres) the ragdoll camera can sit from the
-/// player's logical position. If ragdoll physics catapults the head
-/// bone past this, the camera stops following — keeps a single
-/// frame of bad physics from teleporting the floating-origin
-/// camera into the void and dragging every WorldPosition along
-/// with it (via `sync_dynamic_world_position`).
-pub const RAGDOLL_CAMERA_MAX_OFFSET_M: f32 = 3.0;
-
-/// Time constant (seconds) for the ragdoll-camera EWMA smoother.
-/// Physics runs on the fixed timestep so head-bone positions step
-/// at ~16 ms intervals; render is variable-rate (often 144+ Hz)
-/// and following the head bone exactly produces staircase jitter.
-/// 30 ms reduces the jitter to imperceptible while keeping the
-/// camera visibly attached to the head.
-pub const RAGDOLL_CAMERA_SMOOTHING_TAU_S: f32 = 0.03;
 
 /// Player size configuration for the FPS controller.
 ///
@@ -324,14 +299,6 @@ pub struct FpsController {
     /// tick. Triggers the recovery transition once it crosses
     /// [`RAGDOLL_GROUND_RECOVERY_S`].
     pub grounded_time_s: f32,
-    /// Player-controlled yaw offset applied on top of the head-bone
-    /// orientation while ragdolling. Clamped to
-    /// `±HEAD_LOOK_YAW_RANGE_RAD`. Reset to `0` on each ragdoll
-    /// transition so subsequent ragdolls start centred.
-    pub head_look_yaw: f32,
-    /// Pitch counterpart of [`head_look_yaw`](Self::head_look_yaw),
-    /// clamped to `±HEAD_LOOK_PITCH_RANGE_RAD`.
-    pub head_look_pitch: f32,
 }
 
 impl Default for FpsController {
@@ -374,8 +341,6 @@ impl Default for FpsController {
             ragdoll_state: RagdollState::Active,
             airborne_time_s: 0.0,
             grounded_time_s: 0.0,
-            head_look_yaw: 0.0,
-            head_look_pitch: 0.0,
         }
     }
 }
@@ -613,34 +578,26 @@ fn clear_input(mut query: Query<&mut FpsControllerInput>) {
 fn fps_controller_input(
     action_query: Query<&ActionState<CameraAction>>,
     settings: Res<CameraSettings>,
-    mut query: Query<(&mut FpsController, &mut FpsControllerInput)>,
+    mut query: Query<(&FpsController, &mut FpsControllerInput)>,
 ) {
     let Ok(action_state) = action_query.single() else {
         return;
     };
 
-    for (mut controller, mut input) in query
+    for (_controller, mut input) in query
         .iter_mut()
         .filter(|(controller, _)| controller.enable_input)
     {
         let mouse_delta = action_state.axis_pair(&CameraAction::Look) * settings.mouse_sensitivity;
 
-        if controller.ragdoll_state == RagdollState::Ragdolling {
-            // Route mouse to the clamped head-rotation offset rather
-            // than the body yaw/pitch. `input.pitch` / `input.yaw`
-            // stay frozen so on recovery the camera snaps back to
-            // the pre-ragdoll look direction.
-            controller.head_look_pitch = (controller.head_look_pitch - mouse_delta.y)
-                .clamp(-HEAD_LOOK_PITCH_RANGE_RAD, HEAD_LOOK_PITCH_RANGE_RAD);
-            controller.head_look_yaw = (controller.head_look_yaw - mouse_delta.x)
-                .clamp(-HEAD_LOOK_YAW_RANGE_RAD, HEAD_LOOK_YAW_RANGE_RAD);
-        } else {
-            input.pitch = (input.pitch - mouse_delta.y)
-                .clamp(-FRAC_PI_2 + ANGLE_EPSILON, FRAC_PI_2 - ANGLE_EPSILON);
-            input.yaw -= mouse_delta.x;
-            if input.yaw.abs() > PI {
-                input.yaw = input.yaw.rem_euclid(TAU);
-            }
+        // Look behaviour is unchanged while ragdolling — the camera
+        // stays on the normal eye path, so the player can still look
+        // around freely as the body dangles below.
+        input.pitch = (input.pitch - mouse_delta.y)
+            .clamp(-FRAC_PI_2 + ANGLE_EPSILON, FRAC_PI_2 - ANGLE_EPSILON);
+        input.yaw -= mouse_delta.x;
+        if input.yaw.abs() > PI {
+            input.yaw = input.yaw.rem_euclid(TAU);
         }
 
         let move_input = action_state.clamped_axis_pair(&CameraAction::Move);
@@ -855,7 +812,17 @@ fn fps_controller_slide(
         let frame = RadialFrame::from_ecef_position(ecef_pos);
         let local_up = frame.up;
 
-        let filter = SpatialQueryFilter::from_excluded_entities([entity]);
+        // Restrict the sweep to terrain and vehicles. `CollisionLayers`
+        // only gates the contact solver, not spatial queries — without a
+        // layer mask here, `MoveAndSlide` would sweep against the
+        // player's own ragdoll bones (spawned around the capsule on
+        // ragdoll entry), catching the capsule on them so it hangs in
+        // the air and its path is deflected. The bones must never be
+        // obstacles to the controller.
+        let filter = SpatialQueryFilter::from_excluded_entities([entity]).with_mask([
+            crate::vehicle::GameLayer::Ground,
+            crate::vehicle::GameLayer::Vehicle,
+        ]);
         let mut ground_hit = false;
         let traction_cutoff = controller.traction_normal_cutoff;
 
@@ -899,12 +866,6 @@ fn fps_controller_slide(
                 RagdollState::Active => {
                     if controller.airborne_time_s >= RAGDOLL_AIRBORNE_THRESHOLD_S {
                         controller.ragdoll_state = RagdollState::Ragdolling;
-                        // Start the head-look offset centred on the head's
-                        // natural orientation so the camera doesn't jump
-                        // to a stale offset accumulated from a previous
-                        // ragdoll.
-                        controller.head_look_yaw = 0.0;
-                        controller.head_look_pitch = 0.0;
                         tracing::info!(
                             "Entering ragdoll after {:.2}s airborne",
                             controller.airborne_time_s
@@ -967,7 +928,7 @@ fn acceleration(
 // Render system
 // ============================================================================
 
-#[allow(clippy::type_complexity, clippy::too_many_arguments)]
+#[allow(clippy::type_complexity)]
 fn fps_controller_render(
     fixed_time: Res<Time<Fixed>>,
     real_time: Res<Time>,
@@ -984,8 +945,6 @@ fn fps_controller_render(
         ),
         (With<LogicalPlayer>, Without<RenderPlayer>),
     >,
-    mut body_query: Query<(&mut super::body::BodyVisual, &GlobalTransform)>,
-    head_transforms: Query<&GlobalTransform, Without<super::body::BodyVisual>>,
 ) {
     let t = fixed_time.overstep_fraction();
     let dt = real_time.delta_secs();
@@ -1003,74 +962,9 @@ fn fps_controller_render(
 
         render_transform.translation = Vec3::ZERO;
 
-        // Ragdoll: camera position rides the head bone in world
-        // space, rotation is the body's tumble orientation with the
-        // player's clamped head-look offset applied. Falls through
-        // to the normal path if the body / head bone isn't loaded
-        // yet.
-        if controller.ragdoll_state == RagdollState::Ragdolling
-            && let Some((mut body, body_global)) = body_query
-                .iter_mut()
-                .find(|(b, _)| b.logical_entity == render_player.logical_entity)
-            && let Some(head_entity) = body.head_bone_entity
-            && let Ok(head_global) = head_transforms.get(head_entity)
-            && let Ok(mut floating_camera) = camera_query.single_mut()
-        {
-            let head_render = head_global.translation();
-            let body_rotation = body_global.rotation();
-            // Defensive: if physics has gone NaN (joint explosion, etc.)
-            // bail to the normal eye path rather than poison the
-            // floating-origin camera position. Recovery on ground
-            // contact teardowns the bad rigid bodies and we'll be
-            // back in business.
-            if !(head_render.is_finite() && body_rotation.is_finite()) {
-                tracing::warn!(
-                    "Ragdoll camera sees non-finite head bone; falling back to upright eye"
-                );
-            } else {
-                // EWMA-smooth the head-bone position to absorb the
-                // physics-tick / render-tick mismatch. Time constant
-                // is `RAGDOLL_CAMERA_SMOOTHING_TAU_S`; on the first
-                // ragdoll frame `ragdoll_camera_smoothed` is None
-                // and we snap (no lag, no overshoot).
-                let alpha = (1.0 - (-dt / RAGDOLL_CAMERA_SMOOTHING_TAU_S).exp()).clamp(0.0, 1.0);
-                let smoothed = match body.ragdoll_camera_smoothed {
-                    Some(prev) => prev.lerp(head_render, alpha),
-                    None => head_render,
-                };
-                body.ragdoll_camera_smoothed = Some(smoothed);
-
-                let logical_render = logical_transform.translation;
-                let raw_offset = smoothed - logical_render;
-                // Clamp magnitude: physics instability can fling the
-                // head bone arbitrarily far in one frame, and the
-                // camera-tracks-head feedback into the floating
-                // origin makes that runaway. A bounded offset keeps
-                // the camera within a sane radius of the player even
-                // if the rig blows up.
-                let head_offset = if raw_offset.length() > RAGDOLL_CAMERA_MAX_OFFSET_M {
-                    raw_offset.normalize() * RAGDOLL_CAMERA_MAX_OFFSET_M
-                } else {
-                    raw_offset
-                };
-                floating_camera.position = world_pos.position + head_offset.as_dvec3();
-
-                // Compose the camera basis off the body's current world
-                // orientation (which the body-ragdoll system will tumble
-                // in Phase C/D). Mouse look adds yaw around the body's
-                // local up + pitch around the body's local right,
-                // clamped to a head-rotation cone in
-                // `fps_controller_input`.
-                let head_basis = body_rotation
-                    * Quat::from_rotation_y(controller.head_look_yaw)
-                    * Quat::from_rotation_x(controller.head_look_pitch);
-                let look_dir = head_basis * Vec3::Z;
-                let cam_up = head_basis * Vec3::Y;
-                render_transform.look_to(look_dir, cam_up);
-                continue;
-            }
-        }
-
+        // The camera stays on the normal first-person eye path even
+        // while ragdolling — only the body model dangles (see
+        // `body::ragdoll`). Look behaviour is unchanged.
         let previous = controller.previous_translation;
         let current = logical_transform.translation;
         let interpolated = previous.unwrap_or(current).lerp(current, t);

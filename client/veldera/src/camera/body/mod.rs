@@ -201,34 +201,15 @@ pub struct BodyVisual {
     /// Spawned on first Point press (off cooldown), despawned on
     /// release. `None` when no rumble is active.
     pub rumble_audio_entity: Option<Entity>,
-    /// Tracks the body-side view of `RagdollState`, so transitions
-    /// can be detected without a Bevy `Changed<>` query. Driven by
-    /// `ragdoll::apply_body_ragdoll`.
-    pub ragdoll_active: bool,
-    /// World-space angular velocity (rad/s, axis-angle vector) the
-    /// tumble integrator advances every frame while ragdolling. Set
-    /// from launch velocity on ragdoll entry; zeroed on exit.
-    pub ragdoll_world_angular_velocity: Vec3,
-    /// Accumulated world-space tumble rotation applied on top of
-    /// the upright body rotation while ragdolling.
-    /// `body_transform.rotation = ragdoll_rotation_accum *
-    /// upright_rotation`. Reset to identity on each ragdoll entry
-    /// and exit so the body snaps back to upright cleanly on
-    /// recovery.
-    pub ragdoll_rotation_accum: Quat,
     /// Per-bone ragdoll rig owned by this body. `None` outside
     /// ragdoll; `Some` while ragdolling and the rig was assembled
-    /// successfully (Hips bone found). Built by
-    /// [`ragdoll::manage_ragdoll_skeleton`] and consumed by
-    /// [`ragdoll::sync_bones_from_physics`].
+    /// successfully (Hips + neck anchor found). Built by
+    /// [`ragdoll::manage_ragdoll_skeleton`], pinned each tick by
+    /// [`ragdoll::drive_ragdoll_anchor`], and consumed by
+    /// [`ragdoll::sync_bones_from_physics`]. Its `Some`/`None` edge
+    /// is what the skeleton manager uses to detect ragdoll
+    /// entry/exit.
     pub ragdoll_graph: Option<ragdoll::RagdollGraph>,
-    /// EWMA-smoothed head-bone render-space position for the
-    /// ragdoll camera. Physics runs at the fixed timestep so the
-    /// head bone's position only changes on Avian's ticks; render
-    /// can be 144+ Hz, which produced visible camera staircase
-    /// jitter. The smoother lets the camera lag the head slightly
-    /// but moves continuously every frame.
-    pub ragdoll_camera_smoothed: Option<Vec3>,
 }
 
 pub struct BodyPlugin;
@@ -254,10 +235,18 @@ impl Plugin for BodyPlugin {
                     arm_point::cache_right_arm,
                     locomotion::update_locomotion_blend,
                     arm_point::handle_yeet,
-                    ragdoll::apply_body_ragdoll,
                     ragdoll::manage_ragdoll_skeleton,
                 )
                     .chain(),
+            )
+            // Re-pin the kinematic neck anchor to the controller right
+            // before Avian's solve (and after `apply_origin_shift`,
+            // which lives in the previous schedule), so the dangling
+            // chain hangs from the controller's current position this
+            // physics tick.
+            .add_systems(
+                bevy::app::FixedPostUpdate,
+                ragdoll::drive_ragdoll_anchor.before(avian3d::prelude::PhysicsSystems::Prepare),
             )
             .add_systems(
                 bevy::app::RunFixedMainLoop,
@@ -522,11 +511,7 @@ fn spawn_body_on_fps_enter(
             charge_seconds: 0.0,
             yeet_cooldown_s: 0.0,
             rumble_audio_entity: None,
-            ragdoll_active: false,
-            ragdoll_world_angular_velocity: Vec3::ZERO,
-            ragdoll_rotation_accum: Quat::IDENTITY,
             ragdoll_graph: None,
-            ragdoll_camera_smoothed: None,
         },
         SceneRoot(scene_handle.clone()),
         WorldPosition::from_dvec3(world_pos.position),
@@ -753,15 +738,11 @@ fn sync_body_transform(
         // Head-lock: subtract the previous frame's head-bone wobble so
         // the body shifts to keep its head where the bind pose would put
         // it. `head::update_head_lock_delta` writes this each PostUpdate.
-        // During ragdoll the head bone flails by design — pinning it
-        // would fight the tumble and look terrible, so skip the
-        // compensation while ragdolling.
-        let head_lock = if controller.ragdoll_state == crate::camera::fps::RagdollState::Ragdolling
-        {
-            Vec3::ZERO
-        } else {
-            body.head_lock_delta
-        };
+        // This stays on during ragdoll: only the limbs ragdoll, while the
+        // torso (head included) renders from animation, so pinning the
+        // head to the camera is exactly what we want — it keeps the chest
+        // below the view instead of clipping into it.
+        let head_lock = body.head_lock_delta;
         body_world_pos.position = logical_world.position - foot_offset.as_dvec3()
             + DVec3::new(
                 f64::from(delta_local.x - head_lock.x),
@@ -781,12 +762,12 @@ fn sync_body_transform(
         let forward =
             (frame.north * controller.yaw.cos() - frame.east * controller.yaw.sin()).normalize();
         let right = local_up.cross(forward).normalize();
-        let upright_rotation = Quat::from_mat3(&Mat3::from_cols(right, local_up, forward));
-        // While ragdolling, multiply by the world-space tumble
-        // rotation the ragdoll system has been integrating. Outside
-        // ragdoll `ragdoll_rotation_accum` is identity so this
-        // collapses to the upright rotation.
-        body_transform.rotation = body.ragdoll_rotation_accum * upright_rotation;
+        // The body root stays upright even while ragdolling: the limp
+        // dangle lives entirely in the per-bone local transforms
+        // `ragdoll::sync_bones_from_physics` writes, so the root only
+        // needs to provide a stable, sensibly-placed parent frame for
+        // those bones to hang from.
+        body_transform.rotation = Quat::from_mat3(&Mat3::from_cols(right, local_up, forward));
 
         let _ = resolved;
     }

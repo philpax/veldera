@@ -1,50 +1,76 @@
-//! Body ragdoll.
+//! Body ragdoll: kinematic torso, dynamic limbs.
 //!
-//! Two layered effects, both gated on
-//! [`RagdollState::Ragdolling`](crate::camera::fps::RagdollState):
+//! While [`RagdollState::Ragdolling`](crate::camera::fps::RagdollState)
+//! is active, the torso is held upright and pinned to the controller
+//! while the arms and legs hang and flail under physics.
 //!
-//! 1. **Per-bone skeletal physics**
-//!    ([`manage_ragdoll_skeleton`], [`sync_bones_from_physics`]).
-//!    On ragdoll entry, walk the skeleton and spawn a top-level
-//!    Avian `RigidBody::Dynamic` for each tracked bone, wired to its
-//!    parent bone's body with a `SphericalJoint`. Each frame between
+//! The design deliberately decouples the *camera* from the physics.
+//! The camera stays on its normal first-person eye path (see
+//! [`fps_controller_render`](crate::camera::fps)) — look behaviour is
+//! unchanged during ragdoll. Only the body *model* ragdolls, and it
+//! does so by pinning the torso to the controller and hanging the limbs
+//! off it:
+//!
+//! 1. **Kinematic torso** ([`drive_ragdoll_anchor`]). The spine,
+//!    shoulders, and neck ([`is_torso`]) are each a
+//!    `RigidBody::Kinematic` whose `Position`/`Rotation` we re-pin every
+//!    physics tick to the controller's frame — at the offsets and
+//!    upright bind orientations captured at ragdoll entry, yawing with
+//!    the controller. The torso never falls or folds; it rides the
+//!    controller rigidly, which is what keeps the chest and head aligned
+//!    with the view and makes the body feel *driven by* the controller.
+//!
+//! 2. **Dynamic limb capsules** ([`build_ragdoll_graph`]). Every other
+//!    bone (arms, forearms, hands, legs, feet) is a `RigidBody::Dynamic`
+//!    wired to its parent with a `SphericalJoint`. Each bone's collider
+//!    is a *capsule* running from its joint toward its child
+//!    ([`capsule_target`]); the body origin stays at the joint (so the
+//!    mesh sync is unchanged) but the capsule's centroid — and thus the
+//!    auto-computed center of mass — sits partway down the bone, so
+//!    gravity finally has a lever and the limbs hang on their own.
+//!    Capsules also give the body *volume*: bones self-collide
+//!    ([`GameLayer::Ragdoll`] vs itself, with adjacent jointed pairs
+//!    exempted by `JointCollisionDisabled`), so limbs stop at the
+//!    kinematic torso and at each other instead of sliding through.
+//!    Because the torso is kinematic it never fights itself, so the
+//!    overlapping fat spine capsules don't jam.
+//!
+//! 3. **Mesh follow** ([`sync_bones_from_physics`]). Each frame between
 //!    [`bevy::app::AnimationSystems`] and
-//!    [`bevy::transform::TransformSystems::Propagate`], write each
-//!    ragdolled bone's local `Transform` from its rigid body's world
-//!    transform (so the skinned mesh follows physics). On exit,
-//!    despawn every spawned rigid body and joint.
+//!    [`bevy::transform::TransformSystems::Propagate`], each *limb*
+//!    bone's local `Transform` is written from its rigid body so the
+//!    skinned limbs follow physics. The torso bones are left as the
+//!    `AnimationPlayer` + head-lock posed them — identical to standing —
+//!    so the head stays pinned to the camera (no clipping into the view)
+//!    and the chest stays upright; only the limbs ragdoll.
 //!
-//!    **Currently gated off** via [`ENABLE_SKELETAL_RAGDOLL`]. The
-//!    joint chain shreds the skinned mesh under high-velocity
-//!    impacts (sub-mm joint stretch becomes metres of visible mesh
-//!    deformation through Linear Blend Skinning). The fix is
-//!    probably a combination of higher `SubstepCount`, swing/twist
-//!    limits on the spherical joints, and bone-to-bone position
-//!    correction, none of which I want to land without time to
-//!    tune. Re-enabling is one constant flip.
+//! On exit ([`manage_ragdoll_skeleton`] sees the state flip back),
+//! every spawned body + joint is despawned and the `AnimationPlayer`
+//! resumes driving the mesh — the body stands back up.
 //!
-//! 2. **Whole-body tumble fallback** ([`apply_body_ragdoll`]).
-//!    Integrates a world-space angular velocity into the body
-//!    entity's rotation each frame. The visible ragdoll while
-//!    skeletal is off — single mannequin spinning around the
-//!    upright kinematic capsule.
+//! This avoids the failure modes of the earlier rigs: the camera no
+//! longer feeds the head's position into the floating origin (no runaway
+//! to infinity); the chain never absorbs a 150 m/s velocity differential
+//! (anchor + bones share the launch velocity, and `sync_bones` works in
+//! one physics-coherent frame, so no mesh stretch); and real capsule
+//! volume + self-collision stops the limbs gliding through each other.
 //!
-//! The kinematic capsule stays upright through both — gravity +
-//! collision drive its slide; the body model on top is what
-//! ragdolls visibly.
+//! Not yet modelled (clean follow-ups): per-joint swing/twist *angle
+//! limits* (need bind-pose-relative joint frames, so elbows/knees can
+//! currently hyperextend), terrain/building collision for the bones
+//! (needs CCD at launch speed), and mesh-derived capsule dimensions
+//! (radii are currently heuristic per body region).
 
-/// Compile-time switch for the per-bone skeletal ragdoll rig
-/// ([`manage_ragdoll_skeleton`] + [`sync_bones_from_physics`]).
+/// Compile-time switch for the head-anchored skeletal ragdoll.
 ///
-/// `false` (current) → only the whole-body tumble in
-/// [`apply_body_ragdoll`] runs. Body spins as one mannequin around
-/// the kinematic capsule; mesh stays intact.
+/// `false` → the state machine still runs (if
+/// [`ENABLE_RAGDOLL`](crate::camera::fps::ENABLE_RAGDOLL) is on) but no
+/// rig is built; the body keeps animating normally through the tumble.
 ///
-/// `true` → walk the skeleton, spawn 19 dynamic rigid bodies + 18
-/// spherical joints, drive every bone's local `Transform` from
-/// physics each frame. Mesh shreds on impact at current tuning;
-/// needs joint limits + substep tuning before it's shippable.
-const ENABLE_SKELETAL_RAGDOLL: bool = false;
+/// `true` → on ragdoll entry, walk the skeleton, spawn a kinematic
+/// torso + dynamic limb capsules wired with spherical joints, and drive
+/// the skinned mesh from physics until recovery.
+const ENABLE_SKELETAL_RAGDOLL: bool = true;
 
 use std::collections::HashMap;
 
@@ -55,7 +81,7 @@ use super::{BodyVisual, bones::bone_stem};
 use crate::{
     camera::fps::{FpsController, LogicalPlayer, RadialFrame, RagdollState},
     vehicle::GameLayer,
-    world::floating_origin::WorldPosition,
+    world::floating_origin::{FloatingOriginCamera, WorldPosition},
 };
 
 /// All bone names in the ragdoll table are `&'static str` constants,
@@ -74,7 +100,7 @@ type BoneStem = &'static str;
 /// without fingers, toes, or the shoulder/end markers (`HeadTop_End`,
 /// `ToeBase`, `…HandThumb*` etc.). Bones outside this set stay
 /// animated by the `AnimationPlayer` and inherit their parent
-/// ragdolled bone's tumble through Bevy's transform propagation, so
+/// ragdolled bone's pose through Bevy's transform propagation, so
 /// fingers, toes, and the head marker come along for the ride
 /// without needing their own rigid bodies.
 ///
@@ -84,8 +110,7 @@ type BoneStem = &'static str;
 /// return NaN. Seeding a ragdoll body's `Rotation` from a NaN
 /// initial value cascades NaN through every joint connected to it.
 /// The head follows the neck just fine through transform
-/// propagation, and the camera reads its translation (which is
-/// finite even with a zero-scale matrix).
+/// propagation, so pinning the neck upright keeps the head upright.
 const RAGDOLL_BONE_TABLE: &[(&str, Option<&str>)] = &[
     ("Hips", None),
     ("Spine", Some("Hips")),
@@ -108,65 +133,126 @@ const RAGDOLL_BONE_TABLE: &[(&str, Option<&str>)] = &[
     ("RightFoot", Some("RightLeg")),
 ];
 
-/// Sphere collider radius per ragdolled bone (metres). Small enough
-/// that adjacent bones don't continuously interpenetrate; large
-/// enough to keep terrain contact stable.
-const RAGDOLL_BONE_COLLIDER_RADIUS_M: f32 = 0.06;
+/// The topmost torso bone, carrying the head. Like the rest of the
+/// torso it's kinematic and re-pinned upright to the controller every
+/// tick; the head (excluded from the table — its hide-pass zero scale
+/// would NaN a rigid body) follows it through transform propagation, so
+/// pinning the neck upright keeps the head upright and at the view.
+const RAGDOLL_ANCHOR_STEM: BoneStem = "Neck";
 
-/// Uniform density for the per-bone sphere colliders (kg/m³).
-/// ~3× water — gives ~2.7 kg per bone at the current 0.06 m radius,
-/// 51 kg total chain mass. Heavier than this and the static load
-/// through 18 joints overwhelms compliance-driven stiffness;
-/// lighter and the rig feels weightless.
+/// Per-bone capsule radii (metres), grouped by body region. The torso
+/// is fat so the chest/pelvis have real volume for the limbs to collide
+/// against; limbs are thinner. A bone's capsule *length* is free — it's
+/// the distance to its [`capsule_target`] child — so only the radius is
+/// tuned here.
+const RAGDOLL_TORSO_RADIUS_M: f32 = 0.12;
+const RAGDOLL_LEG_RADIUS_M: f32 = 0.08;
+const RAGDOLL_ARM_RADIUS_M: f32 = 0.05;
+const RAGDOLL_SHOULDER_RADIUS_M: f32 = 0.06;
+/// Radius for leaf bones (hands, feet, the neck anchor), which have no
+/// child to span a capsule to and so spawn as small spheres.
+const RAGDOLL_LEAF_RADIUS_M: f32 = 0.06;
+
+/// Below this bone→child distance (metres) the capsule would be
+/// degenerate (endpoints nearly coincident), so spawn a sphere instead.
+const RAGDOLL_MIN_CAPSULE_LENGTH_M: f32 = 0.02;
+
+/// Uniform density for the per-bone colliders (kg/m³). ~3× water.
 ///
 /// Set via the `(Collider, ColliderDensity)` pair Avian recommends
-/// — Avian then auto-computes both linear `Mass` and angular
-/// `AngularInertia` from the collider's shape × density. A
-/// `RigidBody::Dynamic` with only linear mass (no inertia)
-/// produces NaN under the smallest torque; mixing a
-/// `MassPropertiesBundle` with a `Collider` makes the two compete
-/// and one path silently loses.
+/// — Avian then auto-computes linear `Mass`, angular `AngularInertia`,
+/// *and the center of mass* from the collider's shape × density. For a
+/// capsule running from the bone's joint toward its child, the centroid
+/// (hence COM) lands at the capsule midpoint, **offset from the joint**
+/// — which is exactly what lets gravity exert a torque and the limb
+/// hang on its own. A `RigidBody::Dynamic` with only linear mass (no
+/// inertia) produces NaN under the smallest torque; mixing a
+/// `MassPropertiesBundle` with a `Collider` makes the two compete and
+/// one path silently loses.
 const RAGDOLL_BONE_DENSITY_KG_PER_M3: f32 = 3000.0;
 
-/// Linear-damping coefficient applied to every ragdoll body
-/// (`v *= exp(-coefficient * dt)`). Stand-in for air resistance —
-/// keeps the rig from accelerating forever under gravity and bleeds
-/// off lateral momentum so the body doesn't slide across the ground
-/// after landing.
-const RAGDOLL_LINEAR_DAMPING: f32 = 0.5;
+/// Linear-damping coefficient applied to every dynamic limb body
+/// (`v *= exp(-coefficient * dt)`). Stand-in for air resistance — keeps
+/// the limbs from accelerating forever under gravity and bleeds off
+/// swing so they settle into a hang rather than whipping around.
+const RAGDOLL_LINEAR_DAMPING: f32 = 1.0;
 
-/// Angular-damping coefficient applied to every ragdoll body. The
-/// chain pitches and spins on any glancing ground contact + on
-/// gravity asymmetry through the joint chain; we want it to settle
-/// quickly so recovery fires. 8.0 is "tumbles once or twice, then
-/// flops still" — more like a ragdoll, less like a propeller.
-const RAGDOLL_ANGULAR_DAMPING: f32 = 8.0;
+/// Angular-damping coefficient applied to every dynamic limb body — the
+/// main knob against frantic flailing (rotational air resistance). The
+/// limbs windmill on the torso's motion + gravity asymmetry through the
+/// joints; high damping reads as "limp and heavy" rather than
+/// "propeller". Joint angle limits (still to come) will do the rest.
+const RAGDOLL_ANGULAR_DAMPING: f32 = 14.0;
 
-/// Per-collider friction for the ragdoll bones (combined with the
-/// terrain's). 1.0 is "rubber on dry asphalt" — bones plant on
-/// landing rather than scoot.
+/// Per-collider friction for the ragdoll bones. Applies to bone-on-bone
+/// self-collision (limbs sliding against the torso); terrain contact is
+/// still off, so it doesn't affect landing.
 const RAGDOLL_BONE_FRICTION: f32 = 1.0;
 
-/// Maximum initial speed assigned to each ragdoll body (m/s). The
-/// player can hit 150 m/s on a max-charge yeet, but injecting that
-/// much velocity into a 19-body jointed chain in a single physics
-/// step exceeds what PBD constraints can correct against — first
-/// glancing contact and the chain stretches metres apart. Capping
-/// to ~25 m/s preserves the "thrown forward" feel while staying
-/// within the solver's stability envelope. Higher launch speeds
-/// just feel the same once the body's already in the air.
-const RAGDOLL_INITIAL_SPEED_CAP_M_S: f32 = 25.0;
-
 /// Maps to Avian's `SphericalJoint::with_point_compliance`. Lower =
-/// stiffer joint (less stretch under load) in m/N. At `1e-4`
-/// (previous value) and the chain's ~51 kg static load, each
-/// joint stretches ~9 cm under its own weight; over 18 joints
-/// that compounds to a couple of metres of mesh deformation. `1e-6`
-/// mirrors Avian's chain example and gives sub-mm stretch on
-/// static load, which the skinned mesh hides entirely. Previous
-/// "violent oscillation" at this stiffness turned out to be the
-/// missing `AngularDamping`, not joint compliance.
+/// stiffer joint (less stretch under load) in m/N. `1e-6` mirrors
+/// Avian's chain example and gives sub-mm stretch on the hanging
+/// chain's static load, which the skinned mesh hides entirely.
 const RAGDOLL_JOINT_COMPLIANCE: f32 = 1e-6;
+
+/// Time constant (seconds) for the soft position correction that keeps
+/// the kinematic neck anchor pinned to the controller.
+///
+/// The anchor is driven by *velocity*, not by teleporting its
+/// `Position`: each tick its `LinearVelocity` is set to the player's
+/// render-space velocity (the same "treadmill" velocity the dynamic
+/// bones carry, so the joint solver sees no differential) plus a small
+/// `position_error / tau` correction that closes any residual drift.
+/// Teleporting the anchor's `Position` instead would open a
+/// `velocity * dt` gap against the bones every tick — metres at launch
+/// speed — which the joints yank shut as a velocity spike, shredding
+/// the mesh. 0.04 s keeps the physics torso tightly on the controller
+/// (so the limb joints hang from the right place and physics
+/// coordinates stay bounded) while staying above the fixed timestep, so
+/// the correction never over-shoots. The *rendered* body is decoupled
+/// from any residual physics drift by the smooth-root routing in
+/// [`sync_bones_from_physics`], so this only governs the physics.
+const RAGDOLL_ANCHOR_CORRECTION_TAU_S: f32 = 0.04;
+
+/// Maximum speed (m/s) any dynamic bone may diverge from the player's
+/// (common-mode) velocity, clamped every tick before the solve.
+///
+/// The chain only ever shreds when a joint has to absorb a large
+/// velocity differential in one step — falling past terrain at launch
+/// speed, or the abrupt deceleration when the player capsule hits the
+/// ground while the limbs are still falling. Capping each bone to the
+/// player velocity ± this leaves ample room for a visible dangle and
+/// flop while guaranteeing the solver never sees more than ~2× this as
+/// a between-bone differential, which it resolves comfortably.
+const RAGDOLL_BONE_MAX_REL_SPEED_M_S: f32 = 12.0;
+
+/// The torso bones, *besides the neck anchor* (see [`is_torso`]). These
+/// plus the [`RAGDOLL_ANCHOR_STEM`] neck are all driven kinematically —
+/// pinned to the controller's frame each tick by
+/// [`drive_ragdoll_anchor`] at their captured offsets and upright bind
+/// orientations. Making the torso a rigid, controller-driven unit is
+/// what keeps the chest and head aligned with the view and makes the
+/// body feel *driven by* the controller rather than the reverse.
+///
+/// Everything *not* here or the anchor (arms, forearms, hands, legs,
+/// feet) is dynamic: with capsule colliders their center of mass sits
+/// partway down the bone, so gravity torques them into a natural hang,
+/// and self-collision stops them at the kinematic torso.
+const RAGDOLL_UPRIGHT_BONES: &[&str] = &[
+    "Hips",
+    "Spine",
+    "Spine1",
+    "Spine2",
+    "LeftShoulder",
+    "RightShoulder",
+];
+
+/// Whether a bone is part of the kinematic, controller-driven torso
+/// (the spine column, shoulders, and neck anchor) as opposed to a
+/// free-hanging dynamic limb.
+fn is_torso(stem: &str) -> bool {
+    stem == RAGDOLL_ANCHOR_STEM || RAGDOLL_UPRIGHT_BONES.contains(&stem)
+}
 
 /// State for one ragdolled bone: which bone in the skinned mesh,
 /// and which top-level rigid body drives it.
@@ -175,14 +261,13 @@ pub struct RagdolledBone {
     /// The bone entity inside the skinned mesh hierarchy whose local
     /// `Transform` we write each frame.
     pub bone_entity: Entity,
-    /// The top-level dynamic rigid body whose world transform we
-    /// read each frame.
+    /// The top-level rigid body whose world transform we read each
+    /// frame.
     pub physics_entity: Entity,
 }
 
 /// Bookkeeping for one ragdoll instance, owned by the body. `None`
 /// outside ragdoll, `Some` for the duration of one tumble.
-#[derive(Default)]
 pub struct RagdollGraph {
     /// Bone-stem-indexed map of every spawned rigid body. Lookup is
     /// by stem because joints reference each other by stem (see
@@ -190,6 +275,19 @@ pub struct RagdollGraph {
     pub bones: HashMap<BoneStem, RagdolledBone>,
     /// Spherical-joint entities, despawned on ragdoll exit.
     pub joints: Vec<Entity>,
+    /// Per kinematic torso bone (spine, shoulders, neck anchor): where
+    /// it sits relative to the logical player, in the controller's
+    /// yaw-oriented radial basis `(right, up, forward)`. Captured at
+    /// ragdoll entry; [`drive_ragdoll_anchor`] reconstructs each torso
+    /// bone's world target from this every tick so the torso rides the
+    /// controller rigidly, rotating with its yaw.
+    pub torso_offsets: HashMap<BoneStem, Vec3>,
+    /// Each torso bone's orientation at ragdoll entry, relative to the
+    /// upright body basis (`upright⁻¹ · bone_world_rotation`).
+    /// Re-expressed in the current upright frame each tick to give the
+    /// bone's target rotation, so the torso holds a coherent upright
+    /// pose that yaws with the controller.
+    pub bind_relative_rotations: HashMap<BoneStem, Quat>,
 }
 
 // ============================================================================
@@ -199,14 +297,18 @@ pub struct RagdollGraph {
 /// Track ragdoll-state transitions and build/tear down the
 /// per-bone rigid-body graph accordingly.
 ///
-/// On entry: walk the body's skeleton, find each tracked bone, and
-/// spawn a sphere-collider rigid body at its current world position
-/// with the player's launch velocity. Then connect parent-child
-/// pairs via `SphericalJoint`s. On exit: despawn every spawned
-/// rigid body and joint entity.
+/// On entry: walk the body's skeleton, find each tracked bone, spawn a
+/// kinematic neck anchor + dynamic bodies for the rest at their current
+/// world positions, seed the dynamic bodies with the player's launch
+/// velocity, and wire parent-child pairs via `SphericalJoint`s. On
+/// exit: despawn every spawned rigid body and joint entity.
+#[allow(clippy::type_complexity)]
 pub(super) fn manage_ragdoll_skeleton(
     mut commands: Commands,
-    logical_query: Query<(&FpsController, &LinearVelocity, &WorldPosition), With<LogicalPlayer>>,
+    logical_query: Query<
+        (&FpsController, &LinearVelocity, &WorldPosition, &Transform),
+        With<LogicalPlayer>,
+    >,
     mut body_query: Query<(Entity, &mut BodyVisual)>,
     children: Query<&Children>,
     names: Query<&Name>,
@@ -216,7 +318,9 @@ pub(super) fn manage_ragdoll_skeleton(
         return;
     }
     for (body_entity, mut body) in &mut body_query {
-        let Ok((controller, velocity, world_pos)) = logical_query.get(body.logical_entity) else {
+        let Ok((controller, velocity, world_pos, logical_transform)) =
+            logical_query.get(body.logical_entity)
+        else {
             continue;
         };
         let now_ragdolling = controller.ragdoll_state == RagdollState::Ragdolling;
@@ -229,6 +333,8 @@ pub(super) fn manage_ragdoll_skeleton(
                     body_entity,
                     velocity.0,
                     world_pos.position,
+                    logical_transform.translation,
+                    controller.yaw,
                     &children,
                     &names,
                     &global_transforms,
@@ -250,22 +356,138 @@ pub(super) fn manage_ragdoll_skeleton(
     }
 }
 
+/// Drive the kinematic torso (spine, shoulders, neck anchor) to track
+/// the controller each physics tick, before Avian's solve, and keep the
+/// dynamic limbs from diverging too far in one step.
+///
+/// Runs in `FixedPostUpdate` before [`PhysicsSystems::Prepare`], which
+/// is after `physics::apply_origin_shift` (a previous schedule, so the
+/// freshly-set positions aren't double-shifted by the floating origin)
+/// and before the solver.
+///
+/// **Torso bones** are driven by *velocity, not position*. A falling
+/// player has a huge render-space velocity (launch speed) but a
+/// near-stationary render *position* — the origin shift cancels the
+/// bulk motion each tick. The dynamic limbs carry that same velocity,
+/// so to avoid a per-tick velocity differential at the joints (which
+/// the solver would resolve as a spike), each torso bone rides the same
+/// "treadmill": its `LinearVelocity` is set to the player's render
+/// velocity plus a soft `position_error / tau` correction toward its
+/// pinned target. Its orientation is set directly to the upright bind
+/// pose — spherical joints anchor at the body origin, so rotating a
+/// torso bone only moves where its limbs attach, never the torso itself
+/// (it's kinematic). Targets are reconstructed in render space from
+/// absolute ECEF (`WorldPosition - camera`), independent of origin-shift
+/// timing.
+///
+/// **Limb bones** get only a safety clamp: their velocity is capped to
+/// the player's ± [`RAGDOLL_BONE_MAX_REL_SPEED_M_S`] so a joint never
+/// has to absorb a large differential in one step. Their rotation is
+/// left entirely to physics — offset-COM capsules hang under gravity.
+#[allow(clippy::type_complexity)]
+pub(super) fn drive_ragdoll_anchor(
+    camera_query: Query<&FloatingOriginCamera>,
+    body_query: Query<&BodyVisual>,
+    logical_query: Query<(&WorldPosition, &FpsController, &LinearVelocity), With<LogicalPlayer>>,
+    mut bone_query: Query<
+        (
+            &Position,
+            &mut Rotation,
+            &mut LinearVelocity,
+            &mut AngularVelocity,
+        ),
+        (With<RigidBody>, Without<LogicalPlayer>),
+    >,
+) {
+    if !ENABLE_SKELETAL_RAGDOLL {
+        return;
+    }
+    let Ok(camera) = camera_query.single() else {
+        return;
+    };
+    for body in &body_query {
+        let Some(graph) = body.ragdoll_graph.as_ref() else {
+            continue;
+        };
+        let Ok((world_pos, controller, player_velocity)) = logical_query.get(body.logical_entity)
+        else {
+            continue;
+        };
+
+        let logical_render = (world_pos.position - camera.position).as_vec3();
+        let frame = RadialFrame::from_ecef_position(world_pos.position);
+        let forward = (frame.north * controller.yaw.cos() - frame.east * controller.yaw.sin())
+            .normalize_or_zero();
+        let right = frame.up.cross(forward).normalize_or_zero();
+        let upright = Quat::from_mat3(&Mat3::from_cols(right, frame.up, forward));
+        let player_velocity = player_velocity.0;
+
+        for (stem, ragdolled) in &graph.bones {
+            let Ok((position, mut rotation, mut linear, mut angular)) =
+                bone_query.get_mut(ragdolled.physics_entity)
+            else {
+                continue;
+            };
+
+            if is_torso(stem) {
+                // Kinematic torso bone: pin to the controller frame.
+                // Reconstruct its world target from the captured
+                // yaw-frame offset, ride the treadmill velocity toward
+                // it, and set the upright bind orientation directly.
+                let (Some(&offset), Some(&bind_relative)) = (
+                    graph.torso_offsets.get(*stem),
+                    graph.bind_relative_rotations.get(*stem),
+                ) else {
+                    continue;
+                };
+                let target =
+                    logical_render + right * offset.x + frame.up * offset.y + forward * offset.z;
+                linear.0 =
+                    player_velocity + (target - position.0) / RAGDOLL_ANCHOR_CORRECTION_TAU_S;
+                rotation.0 = upright * bind_relative;
+                angular.0 = Vec3::ZERO;
+            } else {
+                // Dynamic limb: cap divergence from the common-mode
+                // (player) velocity so the joints never absorb a large
+                // differential in one step. Rotation is left to physics.
+                let relative = linear.0 - player_velocity;
+                let speed = relative.length();
+                if speed > RAGDOLL_BONE_MAX_REL_SPEED_M_S {
+                    linear.0 =
+                        player_velocity + relative * (RAGDOLL_BONE_MAX_REL_SPEED_M_S / speed);
+                }
+            }
+        }
+    }
+}
+
 /// Each frame between [`bevy::app::AnimationSystems`] and
 /// [`bevy::transform::TransformSystems::Propagate`], write every
-/// ragdolled bone's local `Transform` from its rigid body's world
-/// transform, so the skinned mesh follows physics.
+/// *limb* bone's local `Transform` from its rigid body, so the skinned
+/// limbs follow physics.
 ///
-/// The local transform is computed against the bone's *actual
-/// hierarchical parent*'s previous-frame `GlobalTransform` (the
-/// frame we read here predates the propagation step that uses our
-/// writes), giving a one-frame lag that's imperceptible at render
-/// rates. Translations are written; the bone's existing scale is
+/// The **torso is deliberately left alone** — its bones keep the pose
+/// the `AnimationPlayer` and head-lock give them, exactly as when
+/// standing. That's what keeps the head pinned to the camera and the
+/// chest below it (no clipping into the view), and keeps the chest
+/// upright by construction. The kinematic torso rigid bodies exist only
+/// to anchor the limb joints near the controller; their transforms
+/// aren't rendered.
+///
+/// A limb bone's local is computed against its *parent rigid body*'s
+/// transform (both in the physics render-space, origin-shifted together)
+/// so the relative pose is free of the floating-origin / fixed-step
+/// snap, then composed onto the parent bone's animated (smooth) global
+/// during propagation. The physics torso is pinned upright at the
+/// controller and the animated torso sits at the same place, so the
+/// limbs hang correctly off the smooth, per-frame torso.
+///
+/// Translations and rotations are written; the bone's existing scale is
 /// preserved so the head-bone scale-to-zero hide isn't undone.
 pub(super) fn sync_bones_from_physics(
     body_query: Query<&BodyVisual>,
     physics_query: Query<(&Position, &Rotation), With<RigidBody>>,
     parents: Query<&ChildOf>,
-    global_transforms: Query<&GlobalTransform>,
     mut bone_transforms: Query<&mut Transform>,
 ) {
     if !ENABLE_SKELETAL_RAGDOLL {
@@ -275,26 +497,45 @@ pub(super) fn sync_bones_from_physics(
         let Some(graph) = body.ragdoll_graph.as_ref() else {
             continue;
         };
+
+        // Map each ragdolled bone entity to its rigid body, so a limb's
+        // hierarchical parent can be resolved to the parent's *physics*
+        // transform.
+        let mut bone_to_physics: HashMap<Entity, Entity> = HashMap::new();
         for ragdolled in graph.bones.values() {
-            let Ok((position, rotation)) = physics_query.get(ragdolled.physics_entity) else {
+            bone_to_physics.insert(ragdolled.bone_entity, ragdolled.physics_entity);
+        }
+
+        for (stem, ragdolled) in &graph.bones {
+            // Torso bones (including the neck/head) render from animation
+            // + head-lock, not physics — see the system doc.
+            if is_torso(stem) {
                 continue;
-            };
+            }
+
             let Ok(parent) = parents.get(ragdolled.bone_entity) else {
                 continue;
             };
-            let Ok(parent_global) = global_transforms.get(parent.parent()) else {
+            // A limb's parent is always a ragdolled bone (torso or limb),
+            // so its physics transform is available.
+            let Some(&parent_physics) = bone_to_physics.get(&parent.parent()) else {
                 continue;
             };
-
-            // Desired world transform of the bone = the rigid body's
-            // world transform. The bone's local Transform must
-            // compose with its parent's GlobalTransform to produce
-            // that target.
+            let Ok((position, rotation)) = physics_query.get(ragdolled.physics_entity) else {
+                continue;
+            };
+            let Ok((parent_pos, parent_rot)) = physics_query.get(parent_physics) else {
+                continue;
+            };
+            let parent_world = GlobalTransform::from(
+                Transform::from_translation(parent_pos.0).with_rotation(parent_rot.0),
+            );
             let target_world = GlobalTransform::from(
                 Transform::from_translation(position.0).with_rotation(rotation.0),
             );
-            let local = parent_global.affine().inverse() * target_world.affine();
-            let local = Transform::from_matrix(local.into());
+            let local = Transform::from_matrix(
+                (parent_world.affine().inverse() * target_world.affine()).into(),
+            );
 
             if let Ok(mut transform) = bone_transforms.get_mut(ragdolled.bone_entity) {
                 transform.translation = local.translation;
@@ -310,24 +551,54 @@ pub(super) fn sync_bones_from_physics(
 // Build / teardown helpers
 // ============================================================================
 
+/// The bone a given bone's capsule spans toward (its primary child down
+/// the limb/spine), or `None` for a leaf bone (hands, feet, the neck
+/// anchor) which spawns as a sphere instead. Branch points pick the
+/// continuation that should carry the volume: `Hips` → up the spine,
+/// `Spine2` → up to the neck (so the chest is a fat vertical column).
+fn capsule_target(stem: &str) -> Option<&'static str> {
+    Some(match stem {
+        "Hips" => "Spine",
+        "Spine" => "Spine1",
+        "Spine1" => "Spine2",
+        "Spine2" => "Neck",
+        "LeftShoulder" => "LeftArm",
+        "LeftArm" => "LeftForeArm",
+        "LeftForeArm" => "LeftHand",
+        "RightShoulder" => "RightArm",
+        "RightArm" => "RightForeArm",
+        "RightForeArm" => "RightHand",
+        "LeftUpLeg" => "LeftLeg",
+        "LeftLeg" => "LeftFoot",
+        "RightUpLeg" => "RightLeg",
+        "RightLeg" => "RightFoot",
+        _ => return None,
+    })
+}
+
+/// Capsule (or leaf-sphere) radius for a bone, by body region.
+fn bone_radius(stem: &str) -> f32 {
+    match stem {
+        "Hips" | "Spine" | "Spine1" | "Spine2" => RAGDOLL_TORSO_RADIUS_M,
+        "LeftUpLeg" | "RightUpLeg" | "LeftLeg" | "RightLeg" => RAGDOLL_LEG_RADIUS_M,
+        "LeftArm" | "RightArm" | "LeftForeArm" | "RightForeArm" => RAGDOLL_ARM_RADIUS_M,
+        "LeftShoulder" | "RightShoulder" => RAGDOLL_SHOULDER_RADIUS_M,
+        _ => RAGDOLL_LEAF_RADIUS_M,
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
 fn build_ragdoll_graph(
     commands: &mut Commands,
     body_root: Entity,
     initial_velocity: Vec3,
     body_ecef: glam::DVec3,
+    logical_render_pos: Vec3,
+    yaw: f32,
     children: &Query<&Children>,
     names: &Query<&Name>,
     global_transforms: &Query<&GlobalTransform>,
 ) -> Option<RagdollGraph> {
-    // Cap initial speed so the PBD solver doesn't have to absorb
-    // a 150 m/s velocity differential when one bone first touches
-    // the ground (the chain can't catch up and stretches metres).
-    let initial_speed = initial_velocity.length();
-    let initial_velocity = if initial_speed > RAGDOLL_INITIAL_SPEED_CAP_M_S {
-        initial_velocity * (RAGDOLL_INITIAL_SPEED_CAP_M_S / initial_speed)
-    } else {
-        initial_velocity
-    };
     // Walk descendants once and map every tracked bone stem to its
     // entity + current GlobalTransform.
     let mut tracked: HashMap<BoneStem, (Entity, GlobalTransform)> = HashMap::new();
@@ -351,9 +622,27 @@ fn build_ragdoll_graph(
         return None;
     }
 
-    let mut graph = RagdollGraph::default();
-    // Pass 1: spawn one rigid body per tracked bone.
-    for (stem, parent_stem) in RAGDOLL_BONE_TABLE {
+    if !tracked.contains_key(RAGDOLL_ANCHOR_STEM) {
+        tracing::warn!("Ragdoll build aborted: anchor bone {RAGDOLL_ANCHOR_STEM} not found");
+        return None;
+    }
+
+    // Controller-frame basis at ragdoll entry. Each kinematic torso
+    // bone's position offset and orientation are captured relative to
+    // this so the torso can be re-pinned to the controller (yawing with
+    // it) every tick.
+    let frame = RadialFrame::from_ecef_position(body_ecef);
+    let forward = (frame.north * yaw.cos() - frame.east * yaw.sin()).normalize_or_zero();
+    let right = frame.up.cross(forward).normalize_or_zero();
+    let upright = Quat::from_mat3(&Mat3::from_cols(right, frame.up, forward));
+
+    let mut bones: HashMap<BoneStem, RagdolledBone> = HashMap::new();
+    let mut bind_relative_rotations: HashMap<BoneStem, Quat> = HashMap::new();
+    let mut torso_offsets: HashMap<BoneStem, Vec3> = HashMap::new();
+    // Pass 1: spawn one rigid body per tracked bone. Torso bones (spine,
+    // shoulders, neck) are kinematic and pinned to the controller; the
+    // limbs are dynamic and hang.
+    for (stem, _parent_stem) in RAGDOLL_BONE_TABLE {
         let stem_key = *stem;
         let Some((bone_entity, bone_global)) = tracked.get(&stem_key) else {
             continue;
@@ -372,47 +661,119 @@ fn build_ragdoll_graph(
             continue;
         }
 
-        let physics_entity = commands
-            .spawn((
+        let is_torso_bone = is_torso(stem_key);
+        let spawn_rot = bone_world_rot;
+
+        // Capsule running from this bone's joint (the body origin) toward
+        // its child, expressed in the bone's local frame. The body
+        // origin stays at the joint so `sync_bones_from_physics` is
+        // unchanged, but the capsule's centroid — hence the auto-computed
+        // center of mass — sits partway down the bone, giving gravity a
+        // lever to hang the limb. Leaf bones (and degenerate near-zero
+        // spans) fall back to a sphere.
+        let radius = bone_radius(stem_key);
+        let collider = match capsule_target(stem_key).and_then(|child| tracked.get(child)) {
+            Some((_, child_global)) => {
+                let child_local =
+                    bone_world_rot.inverse() * (child_global.translation() - bone_world_pos);
+                if child_local.length() > RAGDOLL_MIN_CAPSULE_LENGTH_M {
+                    Collider::capsule_endpoints(radius, Vec3::ZERO, child_local)
+                } else {
+                    Collider::sphere(radius)
+                }
+            }
+            None => Collider::sphere(radius),
+        };
+
+        let mut entity_commands = commands.spawn((
+            collider,
+            ColliderDensity(RAGDOLL_BONE_DENSITY_KG_PER_M3),
+            Friction::new(RAGDOLL_BONE_FRICTION),
+            Rotation(spawn_rot),
+            Position(bone_world_pos),
+            Transform::from_translation(bone_world_pos).with_rotation(spawn_rot),
+            WorldPosition::from_dvec3(body_ecef + bone_world_pos.as_dvec3()),
+            // Self-collision only: bones collide with each other (so
+            // limbs stop at the torso instead of passing through) but
+            // not with terrain or the player capsule. Colliding the
+            // chain with terrain at launch speed needs CCD and is a
+            // separate follow-up; landing is detected by the player
+            // capsule, not the bones. Adjacent (jointed) pairs are
+            // exempted via `JointCollisionDisabled` on the joint.
+            CollisionLayers::new([GameLayer::Ragdoll], [GameLayer::Ragdoll]),
+            Name::new(format!("ragdoll_{stem}")),
+        ));
+        if is_torso_bone {
+            // Kinematic: driven each tick by `drive_ragdoll_anchor`.
+            entity_commands.insert((
+                RigidBody::Kinematic,
+                LinearVelocity::default(),
+                AngularVelocity::default(),
+            ));
+        } else {
+            // Dynamic limb. Seed with the full launch velocity: the
+            // torso flies with the controller too, so there's no
+            // velocity differential for the solver to absorb — the limb
+            // only sags once gravity overtakes the shared launch
+            // momentum.
+            entity_commands.insert((
                 RigidBody::Dynamic,
-                Collider::sphere(RAGDOLL_BONE_COLLIDER_RADIUS_M),
-                ColliderDensity(RAGDOLL_BONE_DENSITY_KG_PER_M3),
                 LinearDamping(RAGDOLL_LINEAR_DAMPING),
                 AngularDamping(RAGDOLL_ANGULAR_DAMPING),
-                Friction::new(RAGDOLL_BONE_FRICTION),
                 LinearVelocity(initial_velocity),
                 AngularVelocity::default(),
-                Rotation(bone_world_rot),
-                Position(Vec3::ZERO),
-                Transform::from_translation(bone_world_pos).with_rotation(bone_world_rot),
-                WorldPosition::from_dvec3(body_ecef + bone_world_pos.as_dvec3()),
-                CollisionLayers::new([GameLayer::Ragdoll], [GameLayer::Ground]),
-                Name::new(format!("ragdoll_{}", stem)),
-            ))
-            .id();
+            ));
+        }
+        let physics_entity = entity_commands.id();
 
-        graph.bones.insert(
+        if is_torso_bone {
+            // Capture this torso bone's pin target relative to the
+            // controller frame: position offset in the yaw basis, and
+            // orientation relative to the upright basis.
+            let offset = bone_world_pos - logical_render_pos;
+            torso_offsets.insert(
+                stem_key,
+                Vec3::new(offset.dot(right), offset.dot(frame.up), offset.dot(forward)),
+            );
+            bind_relative_rotations.insert(stem_key, upright.inverse() * bone_world_rot);
+        }
+        bones.insert(
             stem_key,
             RagdolledBone {
                 bone_entity: *bone_entity,
                 physics_entity,
             },
         );
-        let _ = parent_stem;
     }
 
-    // Pass 2: wire parent → child spherical joints. The anchor on
-    // the parent body is the child bone's world position expressed
-    // in the parent body's local frame; the anchor on the child is
-    // its own origin (Vec3::ZERO).
+    if !bones.contains_key(RAGDOLL_ANCHOR_STEM) {
+        tracing::warn!(
+            "Ragdoll build aborted: anchor bone {RAGDOLL_ANCHOR_STEM} had no rigid body"
+        );
+        for ragdolled in bones.into_values() {
+            commands.entity(ragdolled.physics_entity).despawn();
+        }
+        return None;
+    }
+
+    // Pass 2: wire parent → child spherical joints, but only where the
+    // child is a dynamic limb. Joints between two torso bones are
+    // pointless — both are kinematically driven to fixed relative
+    // positions — and would just be extra constraints, so skip them.
+    // The anchor on the parent body is the child bone's world position
+    // expressed in the parent body's local frame; the anchor on the
+    // child is its own origin (Vec3::ZERO).
+    let mut joints = Vec::new();
     for (stem, parent_stem) in RAGDOLL_BONE_TABLE {
         let Some(parent_stem) = parent_stem else {
             continue;
         };
         let stem_key = *stem;
         let parent_key = *parent_stem;
-        let (Some(child), Some(parent)) = (graph.bones.get(stem_key), graph.bones.get(parent_key))
-        else {
+        if is_torso(stem_key) {
+            continue;
+        }
+        let (Some(child), Some(parent)) = (bones.get(stem_key), bones.get(parent_key)) else {
             continue;
         };
         let (Some((_, child_global)), Some((_, parent_global))) =
@@ -426,17 +787,27 @@ fn build_ragdoll_graph(
         let anchor_on_parent = parent_world_rot.inverse() * (child_world_pos - parent_world_pos);
 
         let joint_entity = commands
-            .spawn(
+            .spawn((
                 SphericalJoint::new(parent.physics_entity, child.physics_entity)
                     .with_local_anchor1(anchor_on_parent)
                     .with_local_anchor2(Vec3::ZERO)
                     .with_point_compliance(RAGDOLL_JOINT_COMPLIANCE),
-            )
+                // Don't let a bone collide with the parent it's jointed
+                // to — adjacent capsules overlap at the shared joint by
+                // construction. Non-adjacent capsules still collide, so
+                // limbs stop at the torso.
+                JointCollisionDisabled,
+            ))
             .id();
-        graph.joints.push(joint_entity);
+        joints.push(joint_entity);
     }
 
-    Some(graph)
+    Some(RagdollGraph {
+        bones,
+        joints,
+        torso_offsets,
+        bind_relative_rotations,
+    })
 }
 
 fn teardown_ragdoll_graph(commands: &mut Commands, body: &mut BodyVisual) {
@@ -449,107 +820,5 @@ fn teardown_ragdoll_graph(commands: &mut Commands, body: &mut BodyVisual) {
     for ragdolled in graph.bones.into_values() {
         commands.entity(ragdolled.physics_entity).despawn();
     }
-    // Drop the smoothed head-bone tracker so the next ragdoll snaps
-    // to the new head position on its first frame rather than
-    // lerping from a stale value.
-    body.ragdoll_camera_smoothed = None;
     tracing::info!("Tore down ragdoll skeleton");
-}
-
-// ============================================================================
-// Whole-body tumble fallback (Phase C)
-// ============================================================================
-
-/// Conversion factor from launch speed (m/s) to tumble rate (rad/s).
-/// Tuned so a max-charge yeet (~150 m/s) hits the
-/// [`TUMBLE_MAX_RAD_PER_S`] ceiling and a casual fall (~10 m/s
-/// terminal) still tumbles visibly.
-const TUMBLE_RAD_PER_S_PER_M_S: f32 = 0.07;
-
-/// Floor on tumble rate (rad/s). Below this, slow falls would barely
-/// rotate the model before recovery, which reads as a stuck-mid-air
-/// pose rather than a ragdoll.
-const TUMBLE_MIN_RAD_PER_S: f32 = 4.0;
-
-/// Ceiling on tumble rate (rad/s). Past ~10 rad/s the model blurs to
-/// strobing; capping keeps the spin readable.
-const TUMBLE_MAX_RAD_PER_S: f32 = 10.0;
-
-/// Track [`RagdollState`] transitions, set initial angular velocity
-/// on entry from the player's launch velocity, integrate the body's
-/// world-space tumble rotation each frame, and reset on exit.
-///
-/// Runs every frame (not on the fixed timestep) so the spin reads
-/// smoothly at the render rate. The integrated rotation lives on
-/// `BodyVisual` and is consumed by `sync_body_transform`, which
-/// composes it with the upright body rotation each frame.
-///
-/// When the per-bone skeletal rig is up
-/// ([`BodyVisual::ragdoll_graph`] is `Some`), this rotation is
-/// effectively invisible: each ragdolled bone's local Transform is
-/// computed relative to its parent's `GlobalTransform`, which
-/// includes the body root's rotation, so the bone-local writes
-/// cancel the body root's contribution. The tumble stays useful as
-/// a fallback when the bone rig couldn't be built (asset not
-/// loaded, missing bones).
-pub(super) fn apply_body_ragdoll(
-    time: Res<Time>,
-    logical_query: Query<(&FpsController, &LinearVelocity, &WorldPosition), With<LogicalPlayer>>,
-    mut body_query: Query<&mut BodyVisual>,
-) {
-    let dt = time.delta_secs();
-    for mut body in &mut body_query {
-        let Ok((controller, velocity, world_pos)) = logical_query.get(body.logical_entity) else {
-            continue;
-        };
-        let now_ragdolling = controller.ragdoll_state == RagdollState::Ragdolling;
-
-        // State-edge handling: on entry, sample velocity to seed the
-        // tumble axis. On exit, snap rotation back to identity so the
-        // body recovers to upright in one frame.
-        match (body.ragdoll_active, now_ragdolling) {
-            (false, true) => {
-                body.ragdoll_world_angular_velocity =
-                    initial_angular_velocity(velocity.0, world_pos.position);
-                body.ragdoll_rotation_accum = Quat::IDENTITY;
-            }
-            (true, false) => {
-                body.ragdoll_world_angular_velocity = Vec3::ZERO;
-                body.ragdoll_rotation_accum = Quat::IDENTITY;
-            }
-            _ => {}
-        }
-        body.ragdoll_active = now_ragdolling;
-
-        if now_ragdolling {
-            let omega = body.ragdoll_world_angular_velocity;
-            let delta = Quat::from_scaled_axis(omega * dt);
-            body.ragdoll_rotation_accum = (delta * body.ragdoll_rotation_accum).normalize();
-        }
-    }
-}
-
-/// Pick a world-space angular velocity axis × rate that makes the
-/// body "topple in the direction it's flying".
-///
-/// Axis is `velocity × local_up` so the body pitches forward when
-/// flying horizontally, and falls back on a fixed axis when the
-/// launch is purely vertical (pure-up or pure-down has zero cross
-/// product). Magnitude is `speed * TUMBLE_RAD_PER_S_PER_M_S`,
-/// clamped to `[TUMBLE_MIN_RAD_PER_S, TUMBLE_MAX_RAD_PER_S]` so even
-/// slow falls visibly tumble and fast yeets don't strobe.
-fn initial_angular_velocity(velocity: Vec3, ecef_pos: glam::DVec3) -> Vec3 {
-    let frame = RadialFrame::from_ecef_position(ecef_pos);
-    let up = frame.up;
-    let speed = velocity.length();
-    let rate = (speed * TUMBLE_RAD_PER_S_PER_M_S).clamp(TUMBLE_MIN_RAD_PER_S, TUMBLE_MAX_RAD_PER_S);
-    let axis = velocity.cross(up).normalize_or_zero();
-    if axis == Vec3::ZERO {
-        // Vertical launch: pick an axis perpendicular to up so the
-        // body tumbles in *some* direction. North (radial X) is as
-        // arbitrary as any other choice here.
-        frame.north * rate
-    } else {
-        axis * rate
-    }
 }
