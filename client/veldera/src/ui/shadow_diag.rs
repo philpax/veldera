@@ -1,24 +1,17 @@
 //! Shadow diagnostics tab.
 //!
-//! Captures every CPU-side input to the cloud shadow / godray pipeline
-//! and surfaces it in egui so a single recording can show how every
-//! quantity evolves under camera motion. The math here is a faithful
-//! replica of `prepare_cloud_uniforms` in `bevy_pbr_clouds_planet` —
-//! same f32-quantised camera ECEF, same tangent basis, same
-//! `noise_uv_offset` — so the values match what the bake/apply/godray
-//! shaders actually see for the current frame.
-//!
-//! The tab also lets the user PIN reference world points (ECEF). Each
-//! pin records its initial render-world, shadow_uv, and bake-side
-//! `ground_pos` at pin time, then re-evaluates them every frame and
-//! displays the deltas. World-anchoring is correct iff
-//! `Δbake_ground_pos` stays near zero as the camera moves; any drift
-//! is the bug we're hunting.
+//! Surfaces the CPU-side inputs to the cloud shadow / godray pipeline —
+//! camera ECEF (f64 and the f32-quantised value the shaders see), the
+//! tangent basis `shadow_from_world` is built from, and the per-layer
+//! `noise_uv_offset`s — as a live reference readout. The tangent-basis
+//! math mirrors `prepare_cloud_uniforms` and the bake shader, so it's a
+//! handy place to confirm the basis (and its pole-fallback) matches what
+//! the GPU computes.
 
 use bevy::{ecs::system::SystemParam, prelude::*};
 use bevy_egui::egui;
 use bevy_pbr_atmosphere_planet::SphericalAtmosphereCamera;
-use bevy_pbr_clouds_planet::{CloudLayers, constants::SHADOW_FOOTPRINT_M};
+use bevy_pbr_clouds_planet::CloudLayers;
 use glam::DVec3;
 
 use crate::world::floating_origin::FloatingOriginCamera;
@@ -45,94 +38,34 @@ pub struct FrameSnapshot {
     pub noise_uv_offsets: Vec<(String, Vec3, f32)>,
 }
 
-/// Per-pin evaluation: derived quantities for a fixed world point at
-/// the current camera position. We compute both the apply path
-/// (terrain → shadow_uv) and the bake path (texel UV → ground_pos);
-/// for world-anchoring `bake_ground_pos` should remain ≈ const as the
-/// camera moves.
-#[derive(Default, Clone, Copy)]
-pub struct PinnedEval {
-    /// `(world_ecef - cam_ecef_f64).as_vec3()` — render-world coords
-    /// the apply shader recovers from `world_from_clip * ndc`.
-    pub render_world: Vec3,
-    pub shadow_uv: Vec2,
-    /// `cam_ecef_quant + right*local_x + forward*local_y` — the world
-    /// point the bake associates with the texel at `shadow_uv`.
-    pub bake_ground_pos: Vec3,
-}
-
-/// A pinned reference world point. `initial` is captured at pin time;
-/// `current` is recomputed every frame.
-#[derive(Clone)]
-pub struct PinnedPoint {
-    pub label: String,
-    pub world_ecef: DVec3,
-    pub initial: PinnedEval,
-    pub current: PinnedEval,
-}
-
-/// All the diagnostic state, updated each frame in `Update`.
+/// Live diagnostic state, refreshed each frame in `Update`.
 #[derive(Resource, Default)]
 pub struct ShadowDiagnostics {
     pub current: FrameSnapshot,
     pub previous: FrameSnapshot,
-    pub pinned: Vec<PinnedPoint>,
     pub frame_count: u64,
-}
-
-/// Pending pin commands queued from the UI. The actual pin creation
-/// reads the live `FloatingOriginCamera`, so we route it through a
-/// queue rather than holding the camera borrow inside the render
-/// callback.
-#[derive(Resource, Default)]
-pub struct PinRequest {
-    pub pending: Vec<PinKind>,
-    pub clear: bool,
-}
-
-#[derive(Clone, Copy)]
-pub enum PinKind {
-    /// Camera position projected to sea level.
-    BelowCamera,
-    /// Camera position projected to sea level, offset by 1 km in each
-    /// cardinal direction (N, E, S, W). Four pins added at once.
-    CardinalProbes,
-    /// Sea-level probes due north of the camera at increasing
-    /// great-circle distances (1, 10, 50, 100, 200 km). Directly
-    /// surfaces the predicted distance-scaling of the tangent-plane
-    /// drift: `Δbake_ground_pos` should grow ~linearly with distance.
-    DistanceProbesNorth,
-    /// Sea-level probes 100 km out in each cardinal direction (N, E,
-    /// S, W). Surfaces the heading/latitude dependence of the
-    /// far-field drift.
-    FarCardinalProbes,
-    /// Camera's current position (the literal ECEF).
-    CameraEcef,
 }
 
 #[derive(SystemParam)]
 pub struct ShadowDiagParams<'w> {
     pub diag: ResMut<'w, ShadowDiagnostics>,
-    pub pin_request: ResMut<'w, PinRequest>,
 }
 
-/// Plugin: registers the resources and the per-frame update system.
+/// Plugin: registers the resource and the per-frame update system.
 pub struct ShadowDiagPlugin;
 
 impl Plugin for ShadowDiagPlugin {
     fn build(&self, app: &mut App) {
         app.init_resource::<ShadowDiagnostics>()
-            .init_resource::<PinRequest>()
             .add_systems(Update, update_shadow_diagnostics);
     }
 }
 
-/// Recompute the diagnostic snapshot. Runs every frame so the deltas
-/// shown in the UI are frame-to-frame (i.e. tied to whatever camera
-/// motion happened this tick).
+/// Recompute the diagnostic snapshot. Runs every frame so the per-frame
+/// deltas shown in the UI track whatever camera motion happened this
+/// tick.
 fn update_shadow_diagnostics(
     mut diag: ResMut<ShadowDiagnostics>,
-    mut pin_request: ResMut<PinRequest>,
     query: Query<(
         &FloatingOriginCamera,
         &SphericalAtmosphereCamera,
@@ -152,9 +85,6 @@ fn update_shadow_diagnostics(
     let cam_ecef_quant = sph_cam.local_up * sph_cam.camera_radius;
     let center = cam_ecef_quant;
 
-    // Tangent basis — same formula as `prepare_cloud_uniforms` and the
-    // bake shader. World-north projected onto the tangent plane;
-    // degenerate at the poles, where we fall back to world-east.
     // Tangent basis — must match `prepare_cloud_uniforms` and the bake
     // shader: fall back to world-east only at the poles (un-normalized
     // length² < 1e-6), never at the 45° boundary the old `< 0.5` check
@@ -196,145 +126,6 @@ fn update_shadow_diagnostics(
     };
     diag.previous = std::mem::replace(&mut diag.current, snap);
     diag.frame_count += 1;
-
-    // Apply pin requests. Done here (rather than in the render
-    // closure) so we have the live camera borrow.
-    if pin_request.clear {
-        diag.pinned.clear();
-        pin_request.clear = false;
-    }
-    let requests: Vec<PinKind> = pin_request.pending.drain(..).collect();
-    for kind in requests {
-        let new_pins = create_pin(kind, cam_ecef_f64, right, forward, local_up);
-        for (label, world_ecef) in new_pins {
-            let eval = eval_pin(world_ecef, cam_ecef_f64, center, right, forward);
-            diag.pinned.push(PinnedPoint {
-                label,
-                world_ecef,
-                initial: eval,
-                current: eval,
-            });
-        }
-    }
-
-    // Re-evaluate every existing pin against the current camera state.
-    for p in &mut diag.pinned {
-        p.current = eval_pin(p.world_ecef, cam_ecef_f64, center, right, forward);
-    }
-}
-
-/// Project the camera position to sea level and produce the world
-/// points the user requested.
-fn create_pin(
-    kind: PinKind,
-    cam_ecef_f64: DVec3,
-    right: Vec3,
-    forward: Vec3,
-    _up: Vec3,
-) -> Vec<(String, DVec3)> {
-    let ground = cam_ecef_f64.normalize() * crate::constants::EARTH_RADIUS_M_F64;
-    // -right = local_east (the basis uses north × up = east).
-    let north_dir = forward.as_dvec3().normalize_or_zero();
-    let east_dir = (-right).as_dvec3().normalize_or_zero();
-    match kind {
-        PinKind::BelowCamera => vec![("below-camera (sea level)".into(), ground)],
-        PinKind::CardinalProbes => vec![
-            (
-                "1 km N (sea level)".into(),
-                great_circle(ground, north_dir, 1000.0),
-            ),
-            (
-                "1 km E (sea level)".into(),
-                great_circle(ground, east_dir, 1000.0),
-            ),
-            (
-                "1 km S (sea level)".into(),
-                great_circle(ground, -north_dir, 1000.0),
-            ),
-            (
-                "1 km W (sea level)".into(),
-                great_circle(ground, -east_dir, 1000.0),
-            ),
-        ],
-        PinKind::DistanceProbesNorth => [1000.0, 10_000.0, 50_000.0, 100_000.0, 200_000.0]
-            .into_iter()
-            .map(|d| {
-                (
-                    format!("{:.0} km N (sea level)", d / 1000.0),
-                    great_circle(ground, north_dir, d),
-                )
-            })
-            .collect(),
-        PinKind::FarCardinalProbes => vec![
-            (
-                "100 km N (sea level)".into(),
-                great_circle(ground, north_dir, 100_000.0),
-            ),
-            (
-                "100 km E (sea level)".into(),
-                great_circle(ground, east_dir, 100_000.0),
-            ),
-            (
-                "100 km S (sea level)".into(),
-                great_circle(ground, -north_dir, 100_000.0),
-            ),
-            (
-                "100 km W (sea level)".into(),
-                great_circle(ground, -east_dir, 100_000.0),
-            ),
-        ],
-        PinKind::CameraEcef => vec![("camera ECEF (now)".into(), cam_ecef_f64)],
-    }
-}
-
-/// Sea-level point at great-circle arc distance `dist_m` from `from`
-/// (an on-surface ECEF point) heading along `tangent_dir` (a unit
-/// tangent at `from`). Stays on the sphere of radius `|from|`, so a
-/// 100 km probe is genuinely at sea level rather than sitting ~785 m
-/// above it as a flat tangent offset would.
-fn great_circle(from: DVec3, tangent_dir: DVec3, dist_m: f64) -> DVec3 {
-    let radius = from.length();
-    if radius < 1.0 {
-        return from;
-    }
-    let radial = from / radius;
-    let alpha = dist_m / radius;
-    let dir = radial * alpha.cos() + tangent_dir * alpha.sin();
-    dir * radius
-}
-
-/// Replicate the apply / bake math for a fixed world point. See
-/// [`PinnedEval`] for what each field means.
-fn eval_pin(
-    world_ecef: DVec3,
-    cam_ecef_f64: DVec3,
-    center: Vec3,
-    right: Vec3,
-    forward: Vec3,
-) -> PinnedEval {
-    let render_world = (world_ecef - cam_ecef_f64).as_vec3();
-
-    // shadow_uv = scale * dot(basis, render_world) + 0.5
-    // (the `+ center` and `- right.dot(center)` from the matrix
-    // cancel exactly under right ⊥ up because cam_ecef ∥ up.)
-    let scale = 0.5 / SHADOW_FOOTPRINT_M;
-    let shadow_uv = Vec2::new(
-        scale * right.dot(render_world) + 0.5,
-        scale * forward.dot(render_world) + 0.5,
-    );
-
-    // Bake's ground_pos for the texel at `shadow_uv`. Pure CPU replica
-    // of `let ground_pos = center + ground_pos_local;` in the bake.
-    let local_x = (shadow_uv.x - 0.5) * 2.0 * SHADOW_FOOTPRINT_M;
-    let local_y = (shadow_uv.y - 0.5) * 2.0 * SHADOW_FOOTPRINT_M;
-    let ground_pos_local = right * local_x + forward * local_y;
-    let bake_ground_pos = center + ground_pos_local;
-
-    PinnedEval {
-        render_world,
-        shadow_uv,
-        bake_ground_pos,
-    }
 }
 
 /// Render the sub-tab.
@@ -467,131 +258,6 @@ pub fn render_shadow_diag_tab(ui: &mut egui::Ui, params: &mut ShadowDiagParams) 
                     }
                 }
             });
-    }
-
-    ui.separator();
-    ui.heading("Pinned reference points");
-    ui.horizontal_wrapped(|ui| {
-        if ui.button("Pin below-camera (sea level)").clicked() {
-            params.pin_request.pending.push(PinKind::BelowCamera);
-        }
-        if ui.button("Pin 4 cardinal probes (1 km)").clicked() {
-            params.pin_request.pending.push(PinKind::CardinalProbes);
-        }
-        if ui
-            .button("Pin N distance probes (1–200 km)")
-            .on_hover_text(
-                "Probes due north at 1, 10, 50, 100, 200 km. If the tangent-plane \
-                 theory holds, Δbake_ground_pos grows ~linearly with distance.",
-            )
-            .clicked()
-        {
-            params
-                .pin_request
-                .pending
-                .push(PinKind::DistanceProbesNorth);
-        }
-        if ui
-            .button("Pin 4 far cardinal probes (100 km)")
-            .on_hover_text("N/E/S/W at 100 km — surfaces heading/latitude dependence.")
-            .clicked()
-        {
-            params.pin_request.pending.push(PinKind::FarCardinalProbes);
-        }
-        if ui.button("Pin camera ECEF (now)").clicked() {
-            params.pin_request.pending.push(PinKind::CameraEcef);
-        }
-        if ui.button("Clear all").clicked() {
-            params.pin_request.clear = true;
-        }
-    });
-
-    if diag.pinned.is_empty() {
-        ui.label(
-            "No pins. Pin a few points, then move the camera. \
-             `Δbake_ground_pos` should stay near zero if the bake is \
-             correctly world-anchored.",
-        );
-    } else {
-        for (idx, p) in diag.pinned.iter().enumerate() {
-            ui.separator();
-            ui.label(format!(
-                "Pin #{idx}: {} @ ECEF ({:.1}, {:.1}, {:.1})",
-                p.label, p.world_ecef.x, p.world_ecef.y, p.world_ecef.z
-            ));
-            egui::Grid::new(format!("pin_{idx}_grid"))
-                .num_columns(2)
-                .striped(true)
-                .show(ui, |ui| {
-                    row(
-                        ui,
-                        "render_world",
-                        format!(
-                            "({:.3}, {:.3}, {:.3}) m",
-                            p.current.render_world.x,
-                            p.current.render_world.y,
-                            p.current.render_world.z
-                        ),
-                    );
-                    row(
-                        ui,
-                        "shadow_uv",
-                        format!(
-                            "({:.5}, {:.5})  init ({:.5}, {:.5})",
-                            p.current.shadow_uv.x,
-                            p.current.shadow_uv.y,
-                            p.initial.shadow_uv.x,
-                            p.initial.shadow_uv.y
-                        ),
-                    );
-                    let uv_drift = p.current.shadow_uv - p.initial.shadow_uv;
-                    row(
-                        ui,
-                        "  Δshadow_uv (since pin)",
-                        format!("({:.6}, {:.6})", uv_drift.x, uv_drift.y),
-                    );
-                    row(
-                        ui,
-                        "bake_ground_pos",
-                        format!(
-                            "({:.3}, {:.3}, {:.3}) m",
-                            p.current.bake_ground_pos.x,
-                            p.current.bake_ground_pos.y,
-                            p.current.bake_ground_pos.z
-                        ),
-                    );
-                    let bake_drift = p.current.bake_ground_pos - p.initial.bake_ground_pos;
-                    row(
-                        ui,
-                        "  Δbake_ground_pos (since pin)",
-                        format!(
-                            "({:.4}, {:.4}, {:.4}) m  |Δ| = {:.4} m",
-                            bake_drift.x,
-                            bake_drift.y,
-                            bake_drift.z,
-                            bake_drift.length()
-                        ),
-                    );
-                    // The world point the bake nominally samples vs.
-                    // the pin's actual world position. For terrain
-                    // off the tangent plane there's a static
-                    // projection offset (camera altitude × tangent
-                    // geometry); the *change* of this number across
-                    // frames is the world-anchoring signal.
-                    let projection_err = p.current.bake_ground_pos.as_dvec3() - p.world_ecef;
-                    row(
-                        ui,
-                        "  projection vs pin (now)",
-                        format!(
-                            "({:.3}, {:.3}, {:.3}) m  |.| = {:.3} m",
-                            projection_err.x,
-                            projection_err.y,
-                            projection_err.z,
-                            projection_err.length()
-                        ),
-                    );
-                });
-        }
     }
 }
 
