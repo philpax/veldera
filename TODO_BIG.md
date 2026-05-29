@@ -3,7 +3,9 @@
 - [ ] preserve velocity on camera<->fps transition
 - [ ] light pollution map?
 - [ ] switching to fps mode should preserve the velocity you had in noclip mode
-- [ ] atmospheric fog to communicate distance
+- [ ] atmospheric fog to communicate distance. we might already have a basic ground fog implementation - check in on that
+- [ ] compare reference photos of clouds
+- [ ] split todo into multiple files
 - [ ] collision tiles are still a bit wonky, especially when walking
 - [ ] body does not correctly move/respawn if you teleport while in fps mode
 - [ ] openstreetmap embedded ui map
