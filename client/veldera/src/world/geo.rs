@@ -550,7 +550,7 @@ impl ArcTrajectory {
         target: DVec3,
         animation_mode: TeleportAnimationMode,
     ) -> Self {
-        let earth_radius = crate::constants::EARTH_RADIUS_M_F64;
+        let earth_radius = veldera_constants::EARTH_RADIUS_M_F64;
         let start_altitude = start.length() - earth_radius;
         let target_altitude = target.length() - earth_radius;
 
@@ -658,7 +658,7 @@ impl ArcTrajectory {
         let altitude = self.altitude_at_t(t);
 
         // Final position is the unit sphere position scaled by (earth_radius + altitude).
-        horizontal_dir * (crate::constants::EARTH_RADIUS_M_F64 + altitude)
+        horizontal_dir * (veldera_constants::EARTH_RADIUS_M_F64 + altitude)
     }
 }
 
@@ -882,7 +882,7 @@ fn poll_teleport(
                     let start_direction = flight_camera.direction;
 
                     // Set radius to earth_radius + elevation + small offset above ground.
-                    let radius = crate::constants::EARTH_RADIUS_M_F64 + elevation + 10.0;
+                    let radius = veldera_constants::EARTH_RADIUS_M_F64 + elevation + 10.0;
                     let target_position = lat_lon_to_ecef(pending.lat, pending.lon, radius);
 
                     // Check for very short distance: skip animation.
@@ -904,7 +904,7 @@ fn poll_teleport(
                     let start_norm = start_position.normalize();
                     let target_norm = target_position.normalize();
                     let arc_angle = start_norm.dot(target_norm).clamp(-1.0, 1.0).acos();
-                    let surface_distance = arc_angle * crate::constants::EARTH_RADIUS_M_F64;
+                    let surface_distance = arc_angle * veldera_constants::EARTH_RADIUS_M_F64;
 
                     // Create the trajectory.
                     let trajectory = ArcTrajectory::new(

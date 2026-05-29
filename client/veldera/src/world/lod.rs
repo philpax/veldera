@@ -64,7 +64,7 @@ use crate::{
 
 use avian3d::prelude::*;
 
-use crate::constants::EARTH_RADIUS_M_F64;
+use veldera_constants::EARTH_RADIUS_M_F64;
 
 /// Hot-reloadable LoD streaming parameters, loaded from
 /// `assets/config/world/lod.toml`. Tune these to trade memory and CPU against

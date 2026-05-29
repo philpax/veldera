@@ -179,7 +179,7 @@ pub fn render_shadow_diag_tab(ui: &mut egui::Ui, params: &mut ShadowDiagParams) 
                 format!("{:.3} m", diag.current.camera_radius),
             );
             let altitude =
-                diag.current.cam_ecef_f64.length() - crate::constants::EARTH_RADIUS_M_F64;
+                diag.current.cam_ecef_f64.length() - veldera_constants::EARTH_RADIUS_M_F64;
             row(ui, "altitude", format!("{altitude:.3} m"));
             row(
                 ui,

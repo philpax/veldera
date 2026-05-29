@@ -205,7 +205,7 @@ fn debug_ui_system(
     // Compute camera position and altitude (needed for lat/lon and diagnostics).
     let (position, _altitude) = if let Ok((cam, _, _)) = camera_params.camera_query.single() {
         let pos = cam.position;
-        let alt_m = pos.length() - crate::constants::EARTH_RADIUS_M_F64;
+        let alt_m = pos.length() - veldera_constants::EARTH_RADIUS_M_F64;
         (pos, alt_m)
     } else {
         (DVec3::ZERO, 0.0)

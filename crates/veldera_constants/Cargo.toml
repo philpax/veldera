@@ -1,0 +1,12 @@
+[package]
+name = "veldera_constants"
+version = "0.1.0"
+edition.workspace = true
+repository.workspace = true
+license.workspace = true
+description = "Shared physical constants for veldera (earth radii, atmosphere, gravity)."
+
+[dependencies]
+
+[lints]
+workspace = true

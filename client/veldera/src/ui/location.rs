@@ -84,7 +84,7 @@ pub(super) fn render_location_tab(
     ui.separator();
 
     let (lat_deg, lon_deg) = ecef_to_lat_lon(position);
-    let altitude = position.length() - crate::constants::EARTH_RADIUS_M_F64;
+    let altitude = position.length() - veldera_constants::EARTH_RADIUS_M_F64;
 
     // Update text fields when not editing and not teleporting.
     if !location.coord_state.is_editing && !location.teleport_state.is_pending() {

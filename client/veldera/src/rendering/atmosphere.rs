@@ -19,11 +19,8 @@ use bevy_pbr_atmosphere_planet::{
 };
 use serde::Deserialize;
 
-use crate::{
-    config,
-    constants::{ATMOSPHERE_TOP_RADIUS_M, EARTH_RADIUS_M},
-    world::floating_origin::FloatingOriginCamera,
-};
+use crate::{config, world::floating_origin::FloatingOriginCamera};
+use veldera_constants::{ATMOSPHERE_TOP_RADIUS_M, EARTH_RADIUS_M};
 
 /// Hot-reloadable atmosphere tuning, loaded from
 /// `assets/config/rendering/atmosphere.toml`.

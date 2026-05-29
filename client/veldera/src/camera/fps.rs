@@ -715,7 +715,7 @@ fn fps_controller_prepare(
 
         // Apply gravity.
         let gravity_dir = -local_up;
-        velocity.0 += gravity_dir * crate::constants::GRAVITY * dt;
+        velocity.0 += gravity_dir * veldera_constants::GRAVITY * dt;
 
         let is_grounded = controller.ground_tick >= 1;
         let is_ragdolling = controller.ragdoll_state == RagdollState::Ragdolling;

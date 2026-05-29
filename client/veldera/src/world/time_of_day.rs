@@ -5,12 +5,10 @@
 //! Includes accurate sun declination based on day of year.
 
 use bevy::prelude::*;
+use veldera_constants::AXIAL_TILT_DEG;
 use web_time::Instant;
 
 use crate::world::{coords::ecef_to_lat_lon, floating_origin::FloatingOriginCamera};
-
-/// Earth's axial tilt in degrees.
-const AXIAL_TILT_DEG: f64 = 23.44;
 
 /// Plugin for the time-of-day system.
 pub struct TimeOfDayPlugin;
@@ -417,8 +415,8 @@ fn days_since_epoch_to_date(days: i32) -> SimpleDate {
 }
 
 #[cfg(target_family = "wasm")]
-use crate::constants::ATMOSPHERE_HEIGHT_M;
-use crate::constants::EARTH_RADIUS_M_F64;
+use veldera_constants::ATMOSPHERE_HEIGHT_M;
+use veldera_constants::EARTH_RADIUS_M_F64;
 
 /// System that updates the sky color based on local time.
 ///

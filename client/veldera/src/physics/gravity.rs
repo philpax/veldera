@@ -7,7 +7,8 @@
 use avian3d::prelude::*;
 use bevy::prelude::*;
 
-use crate::{camera::LogicalPlayer, constants::GRAVITY, world::floating_origin::WorldPosition};
+use crate::{camera::LogicalPlayer, world::floating_origin::WorldPosition};
+use veldera_constants::GRAVITY;
 
 /// Apply radial gravity toward Earth center.
 ///

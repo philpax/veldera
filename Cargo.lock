@@ -1294,6 +1294,7 @@ dependencies = [
  "bevy",
  "glam",
  "tracing",
+ "veldera_constants",
 ]
 
 [[package]]
@@ -6844,9 +6845,14 @@ dependencies = [
  "tracing-subscriber",
  "tracing-wasm",
  "urlencoding",
+ "veldera_constants",
  "wasm-bindgen",
  "web-time",
 ]
+
+[[package]]
+name = "veldera_constants"
+version = "0.1.0"
 
 [[package]]
 name = "version_check"

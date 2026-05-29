@@ -15,6 +15,7 @@ bevy = { version = "0.18.0", default-features = false, features = [
 ] }
 glam = "0.30"
 tracing = "0.1"
+veldera_constants = { path = "../veldera_constants" }
 
 [lints]
 workspace = true

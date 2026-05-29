@@ -7,7 +7,6 @@ mod assets;
 mod async_runtime;
 mod camera;
 mod config;
-mod constants;
 mod input;
 mod launch_params;
 mod physics;
@@ -91,7 +90,7 @@ fn setup_scene(
     });
 
     // Convert launch parameters to ECEF position.
-    let radius = constants::EARTH_RADIUS_M_F64 + params.altitude;
+    let radius = veldera_constants::EARTH_RADIUS_M_F64 + params.altitude;
     let start_position = lat_lon_to_ecef(params.lat, params.lon, radius);
 
     // Compute initial viewing direction: look north along the surface.

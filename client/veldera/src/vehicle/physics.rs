@@ -98,7 +98,7 @@ fn copy_sim_state_back(state: &mut VehicleState, sim_state: &VehicleSimState) {
     state.grounded = sim_state.grounded;
 }
 
-use crate::constants;
+use veldera_constants as constants;
 
 /// Apply physics forces to vehicles.
 ///

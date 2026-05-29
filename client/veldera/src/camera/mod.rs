@@ -710,7 +710,7 @@ fn process_altitude_request(
         // 3. Position - reset to zero so physics starts fresh at the new location
         // 4. LinearVelocity - reset to zero to stop any falling
         if let Ok((mut world_pos, mut physics_pos, mut velocity)) = player_query.single_mut() {
-            let new_radius = crate::constants::EARTH_RADIUS_M_F64 + altitude;
+            let new_radius = veldera_constants::EARTH_RADIUS_M_F64 + altitude;
             let new_ecef = world_pos.position.normalize() * new_radius;
 
             world_pos.position = new_ecef;
@@ -725,7 +725,7 @@ fn process_altitude_request(
     } else {
         // In flycam or follow entity mode, update the camera position.
         if let Ok(mut camera) = camera_query.single_mut() {
-            let new_radius = crate::constants::EARTH_RADIUS_M_F64 + altitude;
+            let new_radius = veldera_constants::EARTH_RADIUS_M_F64 + altitude;
             camera.position = camera.position.normalize() * new_radius;
         }
     }

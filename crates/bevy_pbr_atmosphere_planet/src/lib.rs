@@ -249,12 +249,10 @@ pub struct SphericalAtmosphere {
 impl SphericalAtmosphere {
     /// Create an Earth-like atmosphere configuration.
     pub fn earthlike(medium: Handle<ScatteringMedium>) -> Self {
-        const EARTH_BOTTOM_RADIUS: f32 = 6_371_000.0;
-        const EARTH_TOP_RADIUS: f32 = 6_471_000.0;
         const EARTH_ALBEDO: Vec3 = Vec3::splat(0.3);
         Self {
-            bottom_radius: EARTH_BOTTOM_RADIUS,
-            top_radius: EARTH_TOP_RADIUS,
+            bottom_radius: veldera_constants::EARTH_RADIUS_M,
+            top_radius: veldera_constants::ATMOSPHERE_TOP_RADIUS_M,
             ground_albedo: EARTH_ALBEDO,
             medium,
         }
