@@ -32,7 +32,7 @@ mod fps;
 mod input;
 
 use avian3d::prelude::*;
-use bevy::prelude::*;
+use bevy::{math::DVec3, prelude::*};
 
 use crate::{
     launch_params::LaunchParams,
@@ -282,6 +282,30 @@ impl HeadingRequest {
     }
 }
 
+/// Pending precise-translation requests.
+///
+/// Moves the camera a fixed great-circle distance along a compass
+/// bearing (clockwise from local north), preserving altitude. Unlike
+/// free-flight movement, the distance is exact and repeatable —
+/// intended for diagnostics that need a known camera displacement.
+#[derive(Resource, Default)]
+pub struct TranslateRequest {
+    pending: Option<(f32, f64)>,
+}
+
+impl TranslateRequest {
+    /// Request a translation of `distance_m` metres along `bearing_deg`
+    /// (0 = north, 90 = east, 180 = south, 270 = west).
+    pub fn request(&mut self, bearing_deg: f32, distance_m: f64) {
+        self.pending = Some((bearing_deg, distance_m));
+    }
+
+    /// Take the pending translation request, if any.
+    pub fn take(&mut self) -> Option<(f32, f64)> {
+        self.pending.take()
+    }
+}
+
 /// Marker component for the camera entity that should be controlled.
 #[derive(Component)]
 pub struct FlightCamera {
@@ -312,6 +336,7 @@ impl Plugin for CameraControllerPlugin {
             .init_resource::<CameraModeTransitions>()
             .init_resource::<AltitudeRequest>()
             .init_resource::<HeadingRequest>()
+            .init_resource::<TranslateRequest>()
             .add_plugins((
                 flycam::FlycamPlugin,
                 fps::FpsControllerPlugin,
@@ -326,6 +351,7 @@ impl Plugin for CameraControllerPlugin {
                     process_mode_transitions,
                     process_altitude_request,
                     process_heading_request,
+                    process_translate_request,
                     sync_camera_fov,
                 )
                     .chain(),
@@ -737,4 +763,83 @@ fn process_heading_request(
 
     flight_cam.direction = new_direction;
     transform.look_to(new_direction, up);
+}
+
+/// Apply a pending precise-translation request.
+///
+/// Moves the camera a fixed great-circle distance along a compass
+/// bearing, preserving altitude. Mirrors `process_altitude_request`'s
+/// dual handling: in flycam/follow mode it moves the
+/// `FloatingOriginCamera` (parallel-transporting the look direction so
+/// the view doesn't twist as local up rotates); in FPS mode it moves
+/// the logical player's `WorldPosition` and resets physics so the body
+/// doesn't fight the teleport.
+#[allow(clippy::type_complexity)]
+fn process_translate_request(
+    mut request: ResMut<TranslateRequest>,
+    mode_state: Res<CameraModeState>,
+    mut camera_query: Query<(
+        &mut FloatingOriginCamera,
+        Option<&mut FlightCamera>,
+        &mut Transform,
+    )>,
+    mut player_query: Query<
+        (&mut WorldPosition, &mut Position, &mut LinearVelocity),
+        With<fps::LogicalPlayer>,
+    >,
+) {
+    let Some((bearing_deg, distance_m)) = request.take() else {
+        return;
+    };
+
+    if mode_state.is_fps_controller() {
+        if let Ok((mut world_pos, mut physics_pos, mut velocity)) = player_query.single_mut() {
+            world_pos.position = translate_ecef(world_pos.position, bearing_deg, distance_m);
+            *physics_pos = Position(Vec3::ZERO);
+            *velocity = LinearVelocity::ZERO;
+            if let Ok((mut camera, _, _)) = camera_query.single_mut() {
+                camera.position = world_pos.position;
+            }
+        }
+        return;
+    }
+
+    let Ok((mut camera, flight_cam, mut transform)) = camera_query.single_mut() else {
+        return;
+    };
+    let old_up = camera.position.normalize().as_vec3();
+    let new_position = translate_ecef(camera.position, bearing_deg, distance_m);
+    camera.position = new_position;
+
+    // Parallel-transport the look direction across the change in local
+    // up so the camera doesn't straighten out as it moves over the
+    // sphere (mirrors the flycam movement system).
+    if let Some(mut flight_cam) = flight_cam {
+        let new_up = new_position.normalize().as_vec3();
+        let rotation = Quat::from_rotation_arc(old_up, new_up);
+        flight_cam.direction = (rotation * flight_cam.direction).normalize();
+        transform.look_to(flight_cam.direction, new_up);
+    }
+}
+
+/// Move an ECEF position `distance_m` metres along a compass bearing
+/// (clockwise from local north), staying on the same-radius sphere.
+/// The tangent basis matches the compass / shadow-bake convention
+/// (`east = north × up`).
+fn translate_ecef(pos: DVec3, bearing_deg: f32, distance_m: f64) -> DVec3 {
+    let radius = pos.length();
+    if radius < 1.0 {
+        return pos;
+    }
+    let up = pos / radius;
+    let world_north = DVec3::Z;
+    let mut north = (world_north - up * world_north.dot(up)).normalize_or_zero();
+    if north.length_squared() < 0.5 {
+        north = (DVec3::X - up * DVec3::X.dot(up)).normalize_or_zero();
+    }
+    let east = north.cross(up);
+    let bearing = f64::from(bearing_deg).to_radians();
+    let tangent = north * bearing.cos() + east * bearing.sin();
+    let alpha = distance_m / radius;
+    (up * alpha.cos() + tangent * alpha.sin()) * radius
 }

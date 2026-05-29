@@ -97,6 +97,15 @@ pub enum PinKind {
     /// Camera position projected to sea level, offset by 1 km in each
     /// cardinal direction (N, E, S, W). Four pins added at once.
     CardinalProbes,
+    /// Sea-level probes due north of the camera at increasing
+    /// great-circle distances (1, 10, 50, 100, 200 km). Directly
+    /// surfaces the predicted distance-scaling of the tangent-plane
+    /// drift: `Δbake_ground_pos` should grow ~linearly with distance.
+    DistanceProbesNorth,
+    /// Sea-level probes 100 km out in each cardinal direction (N, E,
+    /// S, W). Surfaces the heading/latitude dependence of the
+    /// far-field drift.
+    FarCardinalProbes,
     /// Camera's current position (the literal ECEF).
     CameraEcef,
 }
@@ -219,18 +228,74 @@ fn create_pin(
     _up: Vec3,
 ) -> Vec<(String, DVec3)> {
     let ground = cam_ecef_f64.normalize() * crate::constants::EARTH_RADIUS_M_F64;
-    let north_step = forward.as_dvec3() * 1000.0;
-    let east_step = (-right).as_dvec3() * 1000.0; // -right = local_east (north × up = east)
+    // -right = local_east (the basis uses north × up = east).
+    let north_dir = forward.as_dvec3().normalize_or_zero();
+    let east_dir = (-right).as_dvec3().normalize_or_zero();
     match kind {
         PinKind::BelowCamera => vec![("below-camera (sea level)".into(), ground)],
         PinKind::CardinalProbes => vec![
-            ("1 km N (sea level)".into(), ground + north_step),
-            ("1 km E (sea level)".into(), ground + east_step),
-            ("1 km S (sea level)".into(), ground - north_step),
-            ("1 km W (sea level)".into(), ground - east_step),
+            (
+                "1 km N (sea level)".into(),
+                great_circle(ground, north_dir, 1000.0),
+            ),
+            (
+                "1 km E (sea level)".into(),
+                great_circle(ground, east_dir, 1000.0),
+            ),
+            (
+                "1 km S (sea level)".into(),
+                great_circle(ground, -north_dir, 1000.0),
+            ),
+            (
+                "1 km W (sea level)".into(),
+                great_circle(ground, -east_dir, 1000.0),
+            ),
+        ],
+        PinKind::DistanceProbesNorth => [1000.0, 10_000.0, 50_000.0, 100_000.0, 200_000.0]
+            .into_iter()
+            .map(|d| {
+                (
+                    format!("{:.0} km N (sea level)", d / 1000.0),
+                    great_circle(ground, north_dir, d),
+                )
+            })
+            .collect(),
+        PinKind::FarCardinalProbes => vec![
+            (
+                "100 km N (sea level)".into(),
+                great_circle(ground, north_dir, 100_000.0),
+            ),
+            (
+                "100 km E (sea level)".into(),
+                great_circle(ground, east_dir, 100_000.0),
+            ),
+            (
+                "100 km S (sea level)".into(),
+                great_circle(ground, -north_dir, 100_000.0),
+            ),
+            (
+                "100 km W (sea level)".into(),
+                great_circle(ground, -east_dir, 100_000.0),
+            ),
         ],
         PinKind::CameraEcef => vec![("camera ECEF (now)".into(), cam_ecef_f64)],
     }
+}
+
+/// Sea-level point at great-circle arc distance `dist_m` from `from`
+/// (an on-surface ECEF point) heading along `tangent_dir` (a unit
+/// tangent at `from`). Stays on the sphere of radius `|from|`, so a
+/// 100 km probe is genuinely at sea level rather than sitting ~785 m
+/// above it as a flat tangent offset would.
+fn great_circle(from: DVec3, tangent_dir: DVec3, dist_m: f64) -> DVec3 {
+    let radius = from.length();
+    if radius < 1.0 {
+        return from;
+    }
+    let radial = from / radius;
+    let alpha = dist_m / radius;
+    let dir = radial * alpha.cos() + tangent_dir * alpha.sin();
+    dir * radius
 }
 
 /// Replicate the apply / bake math for a fixed world point. See
@@ -407,6 +472,26 @@ pub fn render_shadow_diag_tab(ui: &mut egui::Ui, params: &mut ShadowDiagParams) 
         }
         if ui.button("Pin 4 cardinal probes (1 km)").clicked() {
             params.pin_request.pending.push(PinKind::CardinalProbes);
+        }
+        if ui
+            .button("Pin N distance probes (1–200 km)")
+            .on_hover_text(
+                "Probes due north at 1, 10, 50, 100, 200 km. If the tangent-plane \
+                 theory holds, Δbake_ground_pos grows ~linearly with distance.",
+            )
+            .clicked()
+        {
+            params
+                .pin_request
+                .pending
+                .push(PinKind::DistanceProbesNorth);
+        }
+        if ui
+            .button("Pin 4 far cardinal probes (100 km)")
+            .on_hover_text("N/E/S/W at 100 km — surfaces heading/latitude dependence.")
+            .clicked()
+        {
+            params.pin_request.pending.push(PinKind::FarCardinalProbes);
         }
         if ui.button("Pin camera ECEF (now)").clicked() {
             params.pin_request.pending.push(PinKind::CameraEcef);

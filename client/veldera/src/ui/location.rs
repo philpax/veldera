@@ -12,7 +12,7 @@ use glam::DVec3;
 
 use crate::{
     async_runtime::TaskSpawner,
-    camera::{AltitudeRequest, FlightCamera, HeadingRequest},
+    camera::{AltitudeRequest, FlightCamera, HeadingRequest, TranslateRequest},
     world::{
         coords::ecef_to_lat_lon,
         geo::{
@@ -24,12 +24,25 @@ use crate::{
 };
 
 /// State for the lat/long text input fields.
-#[derive(Resource, Default)]
+#[derive(Resource)]
 pub(super) struct CoordinateInputState {
     lat_text: String,
     lon_text: String,
     /// Track whether text fields are focused to avoid overwriting user input.
     is_editing: bool,
+    /// Selected distance (metres) for the precise-translation buttons.
+    translate_distance_m: f64,
+}
+
+impl Default for CoordinateInputState {
+    fn default() -> Self {
+        Self {
+            lat_text: String::new(),
+            lon_text: String::new(),
+            is_editing: false,
+            translate_distance_m: 1000.0,
+        }
+    }
 }
 
 /// Resources for the location & time tab.
@@ -44,6 +57,7 @@ pub(super) struct LocationParams<'w, 's> {
     pub spawner: TaskSpawner<'w, 's>,
     pub altitude_request: ResMut<'w, AltitudeRequest>,
     pub heading_request: ResMut<'w, HeadingRequest>,
+    pub translate_request: ResMut<'w, TranslateRequest>,
     /// Read-only — coexists with the camera tab's read-only flight-camera
     /// query in the same system. Heading changes flow back through
     /// [`HeadingRequest`].
@@ -235,6 +249,16 @@ pub(super) fn render_location_tab(
         &mut location.heading_request,
         &location.flight_camera_query,
         position,
+    );
+
+    // Precise translation: move the camera an exact great-circle
+    // distance along a cardinal direction. Repeatable (unlike
+    // hand-flown movement), so diagnostics can correlate a known
+    // displacement with the resulting drift.
+    render_translation_controls(
+        ui,
+        &mut location.coord_state.translate_distance_m,
+        &mut location.translate_request,
     );
 
     ui.separator();
@@ -528,6 +552,54 @@ fn render_compass(
                 }
             });
         });
+    });
+}
+
+/// Render the precise-translation controls: a distance selector plus
+/// N/E/S/W buttons that move the camera an exact great-circle distance
+/// along that bearing. Edits route through [`TranslateRequest`] so the
+/// camera-control system owns the position write.
+fn render_translation_controls(
+    ui: &mut egui::Ui,
+    distance_m: &mut f64,
+    translate_request: &mut TranslateRequest,
+) {
+    ui.separator();
+    ui.label("Precise move:");
+    ui.horizontal(|ui| {
+        ui.label("Distance:");
+        for (label, metres) in [
+            ("100 m", 100.0),
+            ("1 km", 1000.0),
+            ("10 km", 10_000.0),
+            ("50 km", 50_000.0),
+            ("100 km", 100_000.0),
+        ] {
+            // Bit-compare is fine here: the stored value only ever comes
+            // from these exact literals.
+            if ui
+                .selectable_label((*distance_m - metres).abs() < f64::EPSILON, label)
+                .clicked()
+            {
+                *distance_m = metres;
+            }
+        }
+    });
+    ui.horizontal(|ui| {
+        let d = *distance_m;
+        ui.label(format!("Move {:.0} m:", d));
+        if ui.button("N").clicked() {
+            translate_request.request(0.0, d);
+        }
+        if ui.button("E").clicked() {
+            translate_request.request(90.0, d);
+        }
+        if ui.button("S").clicked() {
+            translate_request.request(180.0, d);
+        }
+        if ui.button("W").clicked() {
+            translate_request.request(270.0, d);
+        }
     });
 }
 
