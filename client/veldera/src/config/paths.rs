@@ -22,6 +22,7 @@ pub const MOON: &str = "config/world/moon.toml";
 pub const TIME_OF_DAY: &str = "config/world/time_of_day.toml";
 
 // Physics.
+pub const PHYSICS: &str = "config/physics/physics.toml";
 pub const PROJECTILE: &str = "config/physics/projectile.toml";
 pub const PHYSICS_STREAMING: &str = "config/physics/streaming.toml";
 

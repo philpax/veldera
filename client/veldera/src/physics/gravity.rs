@@ -7,8 +7,7 @@
 use avian3d::prelude::*;
 use bevy::prelude::*;
 
-use crate::{camera::LogicalPlayer, world::floating_origin::WorldPosition};
-use veldera_constants::GRAVITY;
+use crate::{camera::LogicalPlayer, physics::PhysicsConfig, world::floating_origin::WorldPosition};
 
 /// Apply radial gravity toward Earth center.
 ///
@@ -18,6 +17,7 @@ use veldera_constants::GRAVITY;
 #[allow(clippy::type_complexity)]
 pub fn apply_radial_gravity(
     time: Res<Time>,
+    config: Res<PhysicsConfig>,
     mut query: Query<
         (&WorldPosition, &mut LinearVelocity),
         (With<RigidBody>, Without<LogicalPlayer>),
@@ -30,6 +30,6 @@ pub fn apply_radial_gravity(
         let gravity_dir = -world_pos.position.normalize().as_vec3();
 
         // Apply gravitational acceleration: v += g * dt.
-        velocity.0 += gravity_dir * GRAVITY * dt;
+        velocity.0 += gravity_dir * config.gravity * dt;
     }
 }

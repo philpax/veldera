@@ -98,8 +98,6 @@ fn copy_sim_state_back(state: &mut VehicleState, sim_state: &VehicleSimState) {
     state.grounded = sim_state.grounded;
 }
 
-use veldera_constants as constants;
-
 /// Apply physics forces to vehicles.
 ///
 /// Implements PID-controlled hover thrusters with radial gravity, Wipeout-style
@@ -111,6 +109,7 @@ use veldera_constants as constants;
 #[allow(clippy::too_many_lines, clippy::type_complexity)]
 pub fn vehicle_physics_system(
     time: Res<Time<Fixed>>,
+    physics_config: Res<crate::physics::PhysicsConfig>,
     spatial_query: SpatialQuery,
     camera_query: Query<&FloatingOriginCamera>,
     mut query: Query<(
@@ -154,9 +153,9 @@ pub fn vehicle_physics_system(
         let (local_up, gravity) = if let Some(cam_pos) = camera_pos {
             let ecef_pos = cam_pos + transform.translation.as_dvec3();
             let frame = RadialFrame::from_ecef_position(ecef_pos);
-            (frame.up, constants::GRAVITY)
+            (frame.up, physics_config.gravity)
         } else {
-            (Vec3::Y, constants::GRAVITY)
+            (Vec3::Y, physics_config.gravity)
         };
 
         vehicle_physics_inner(

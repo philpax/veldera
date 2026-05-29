@@ -1,0 +1,6 @@
+# Global physics. Drives the manually-applied radial gravity (Avian's built-in
+# gravity stays zero — we integrate gravity toward Earth's centre ourselves), the
+# FPS controller, and vehicles.
+
+# Gravitational acceleration magnitude (m/s²).
+gravity = 9.81

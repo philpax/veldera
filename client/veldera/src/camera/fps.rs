@@ -668,6 +668,7 @@ fn fps_controller_prepare(
     time: Res<Time<Fixed>>,
     player_config: Res<FpsPlayerConfig>,
     fps_config: Res<FpsConfig>,
+    physics_config: Res<crate::physics::PhysicsConfig>,
     camera_query: Query<&FloatingOriginCamera>,
     mut query: Query<
         (
@@ -715,7 +716,7 @@ fn fps_controller_prepare(
 
         // Apply gravity.
         let gravity_dir = -local_up;
-        velocity.0 += gravity_dir * veldera_constants::GRAVITY * dt;
+        velocity.0 += gravity_dir * physics_config.gravity * dt;
 
         let is_grounded = controller.ground_tick >= 1;
         let is_ragdolling = controller.ragdoll_state == RagdollState::Ragdolling;

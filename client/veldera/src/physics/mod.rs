@@ -105,6 +105,25 @@ impl Default for PhysicsStreamingConfig {
     }
 }
 
+/// Hot-reloadable global physics tuning, loaded from
+/// `assets/config/physics/physics.toml`. Drives the manually-applied gravity for
+/// the radial-gravity system, the FPS controller, and vehicles (Avian's built-in
+/// gravity stays zero — we integrate radial gravity ourselves).
+#[derive(Asset, Resource, TypePath, Clone, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct PhysicsConfig {
+    /// Gravitational acceleration magnitude (m/s²).
+    pub gravity: f32,
+}
+
+impl Default for PhysicsConfig {
+    fn default() -> Self {
+        Self {
+            gravity: veldera_constants::GRAVITY,
+        }
+    }
+}
+
 /// Return the target physics LoD depth for a node at `effective_distance_m`,
 /// or `None` if it's beyond the outermost band. Depths are resolved as offsets
 /// below [`PHYSICS_FINEST_DEPTH`].
@@ -129,6 +148,9 @@ impl Plugin for PhysicsIntegrationPlugin {
             ))
             .add_plugins(config::ConfigPlugin::<PhysicsStreamingConfig>::new(
                 config::paths::PHYSICS_STREAMING,
+            ))
+            .add_plugins(config::ConfigPlugin::<PhysicsConfig>::new(
+                config::paths::PHYSICS,
             ))
             .insert_resource(Gravity(Vec3::ZERO))
             .init_resource::<PhysicsState>()
