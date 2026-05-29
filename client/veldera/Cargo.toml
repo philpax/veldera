@@ -41,7 +41,9 @@ bevy = { version = "0.18.0", default-features = false, features = [
 ] }
 bevy_egui = "0.39"
 bevy_pbr_atmosphere_planet = { path = "../../crates/bevy_pbr_atmosphere_planet" }
-bevy_pbr_clouds_planet = { path = "../../crates/bevy_pbr_clouds_planet" }
+bevy_pbr_clouds_planet = { path = "../../crates/bevy_pbr_clouds_planet", features = [
+  "serde",
+] }
 egui_dock = "0.18"
 egui_extras = { version = "0.33.3", features = ["datepicker"] }
 # Pulled in transitively via egui_extras's datepicker feature; declared

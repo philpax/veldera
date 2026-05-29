@@ -9,6 +9,7 @@ use bevy::{
     asset::RenderAssetUsages,
     image::{Image, ImageSampler},
     prelude::*,
+    reflect::TypePath,
     render::render_resource::{
         Extent3d, TextureDescriptor, TextureDimension, TextureFormat, TextureUsages,
     },
@@ -20,8 +21,26 @@ use bevy_pbr_clouds_planet::{
     CLIMATE_MAP_HEIGHT, CLIMATE_MAP_WIDTH, CloudCameraEcef, CloudClimateMap, CloudEarthTopography,
     CloudLayers, CloudSimStatePreview, CloudsPlanetPlugin,
 };
+use serde::Deserialize;
 
 use crate::world::{floating_origin::FloatingOriginCamera, time_of_day::TimeOfDayState};
+
+/// Hot-reloadable cloud configuration, loaded from
+/// `assets/config/rendering/clouds.toml`. Wraps the cloud crate's
+/// [`CloudLayers`] (the same type the Atmosphere debug tab edits) so the whole
+/// layer stack — quality, raymarch/denoise knobs, climate + sim, god rays, and
+/// each sub-layer — is editable from one file. Applied to the live `CloudLayers`
+/// component by [`apply_cloud_config`]; the runtime `world_time_seconds` is
+/// preserved across reloads.
+#[derive(Asset, Resource, TypePath, Clone, Deserialize)]
+#[serde(transparent)]
+pub struct CloudConfig(pub CloudLayers);
+
+impl Default for CloudConfig {
+    fn default() -> Self {
+        Self(earth_stratocumulus())
+    }
+}
 
 /// Path the climate model expects for the planet topography. The
 /// `bake_earth_topography` tool produces this; if missing the climate
@@ -38,17 +57,22 @@ pub struct CloudIntegrationPlugin;
 impl Plugin for CloudIntegrationPlugin {
     fn build(&self, app: &mut App) {
         app.add_plugins(CloudsPlanetPlugin)
+            .add_plugins(crate::config::ConfigPlugin::<CloudConfig>::new(
+                "config/rendering/clouds.toml",
+            ))
             .init_resource::<CloudClimateAssets>()
             .add_systems(Startup, load_climate_assets)
             .add_systems(
                 Update,
                 (
+                    apply_cloud_config,
                     sync_cloud_world_time,
                     sync_cloud_camera_ecef,
                     sync_cloud_topography,
                     sync_cloud_climate_map,
                     sync_cloud_sim_state_preview,
-                ),
+                )
+                    .chain(),
             );
     }
 }
@@ -207,6 +231,21 @@ fn sync_cloud_camera_ecef(
 /// so f32 stays precise (per-frame wind offsets wrap modulo the noise
 /// tile, so the once-every-12-day boundary is invisible at any sane
 /// time-of-day speed).
+/// Apply [`CloudConfig`] to every live [`CloudLayers`] when the config
+/// (re)loads, so editing `clouds.toml` updates the sky without a restart. The
+/// runtime `world_time_seconds` is preserved (it's driven by the world clock in
+/// [`sync_cloud_world_time`], which runs right after this).
+fn apply_cloud_config(config: Res<CloudConfig>, mut clouds: Query<&mut CloudLayers>) {
+    if !config.is_changed() {
+        return;
+    }
+    for mut layers in &mut clouds {
+        let world_time = layers.world_time_seconds;
+        *layers = config.0.clone();
+        layers.world_time_seconds = world_time;
+    }
+}
+
 fn sync_cloud_world_time(time_state: Res<TimeOfDayState>, mut clouds: Query<&mut CloudLayers>) {
     let absolute = f64::from(time_state.day_of_year()) * 86400.0 + time_state.current_utc_seconds();
     let wrapped = (absolute.rem_euclid(1_000_000.0)) as f32;

@@ -269,6 +269,7 @@ impl Plugin for CloudsPlanetPlugin {
 /// Defaults to [`CloudQuality::High`] on desktop and [`CloudQuality::Low`]
 /// on WASM (see [`CloudQuality::default_for_platform`]).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 #[repr(u32)]
 pub enum CloudQuality {
     /// 32 primary steps, 3 light steps, 2 multi-scatter octaves, 1/4 res.
@@ -341,6 +342,7 @@ impl CloudQuality {
 /// doesn't dispatch on it — every sub-layer goes through the same shader
 /// with its own parameters.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub enum CloudLayerKind {
     /// Mid-altitude (~1.5-5 km) puffy cumulus / stratocumulus.
     Stratocumulus,
@@ -370,6 +372,8 @@ impl CloudLayerKind {
 /// stratocumulus + cirrus combo) this is a no-op since only one layer
 /// contributes density at any given altitude.
 #[derive(Clone, Debug)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+#[cfg_attr(feature = "serde", serde(default))]
 pub struct CloudSubLayer {
     pub kind: CloudLayerKind,
     pub enabled: bool,
@@ -506,12 +510,20 @@ impl CloudSubLayer {
     }
 }
 
+impl Default for CloudSubLayer {
+    fn default() -> Self {
+        Self::stratocumulus()
+    }
+}
+
 /// Container component placed on a camera. Holds up to [`MAX_CLOUD_LAYERS`]
 /// cloud sub-layers, plus shared rendering settings.
 ///
 /// Heights inside each sub-layer are altitudes above the planet surface
 /// (above [`SphericalAtmosphere::bottom_radius`]).
 #[derive(Clone, Component, Debug)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+#[cfg_attr(feature = "serde", serde(default))]
 #[require(Camera3d, Hdr)]
 pub struct CloudLayers {
     /// Sub-layers, processed in array order each frame. Indices beyond
@@ -527,6 +539,10 @@ pub struct CloudLayers {
     /// Set this every frame from your world clock. The recommended
     /// value is `day_of_year * 86400 + utc_seconds`, optionally wrapped
     /// modulo a safe number (e.g. 1e6) to keep f32 precision.
+    ///
+    /// Runtime state, not configuration: skipped by serde so the world clock
+    /// (not a config file) drives it.
+    #[cfg_attr(feature = "serde", serde(skip))]
     pub world_time_seconds: f32,
     /// Debug visualisation mode. See [`CloudDebugMode`].
     pub debug_mode: CloudDebugMode,
@@ -656,6 +672,8 @@ pub struct CloudLayers {
 /// `latitude_strength` and `ocean_strength`. Set `enabled = false` to
 /// keep the legacy uniform-coverage behaviour.
 #[derive(Clone, Copy, Debug)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+#[cfg_attr(feature = "serde", serde(default))]
 pub struct ClimateSettings {
     /// Master on/off. When `false`, neither latitude nor ocean
     /// contributions are applied — every layer uses its base
@@ -722,6 +740,8 @@ impl Default for ClimateSettings {
 /// Set `enabled = false` to revert the runtime to sampling the
 /// static climate directly.
 #[derive(Clone, Copy, Debug)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+#[cfg_attr(feature = "serde", serde(default))]
 pub struct ClimateSimSettings {
     /// Master on/off.
     pub enabled: bool,
@@ -820,6 +840,8 @@ impl Default for ClimateSimSettings {
 /// by the cloud-shadow map at every step. Set `enabled = false` to skip
 /// the dispatch entirely.
 #[derive(Clone, Copy, Debug)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+#[cfg_attr(feature = "serde", serde(default))]
 pub struct GodRaysSettings {
     /// Master on/off. When `false`, the pass writes nothing.
     pub enabled: bool,
@@ -957,6 +979,7 @@ impl CloudLayers {
 /// during bring-up when nothing's rendering and you need to figure out which
 /// stage is broken.
 #[derive(Clone, Copy, Debug, Default)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 #[repr(u32)]
 pub enum CloudDebugMode {
     /// Normal render: composited inscattering + transmittance.
@@ -1029,6 +1052,7 @@ pub enum CloudDebugMode {
 /// noise field. View the result either as terrain shadows (normal
 /// render) or full-screen via [`CloudDebugMode::ShadowMap`].
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 #[repr(u32)]
 pub enum CloudShadowBakeDiag {
     /// Normal: integrate cloud density along the sun ray.

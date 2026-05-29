@@ -1303,6 +1303,7 @@ dependencies = [
  "bevy",
  "bevy_pbr_atmosphere_planet",
  "glam",
+ "serde",
  "tracing",
 ]
 

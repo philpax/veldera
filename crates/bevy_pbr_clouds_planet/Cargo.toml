@@ -15,7 +15,13 @@ bevy = { version = "0.18.0", default-features = false, features = [
 ] }
 bevy_pbr_atmosphere_planet = { path = "../bevy_pbr_atmosphere_planet" }
 glam = "0.30"
+serde = { version = "1", features = ["derive"], optional = true }
 tracing = "0.1"
+
+[features]
+# Derive serde on the public cloud configuration types so they can be loaded
+# from config files. Pulls in glam's serde impls for the `Vec2` wind field.
+serde = ["dep:serde", "glam/serde"]
 
 [lints]
 workspace = true

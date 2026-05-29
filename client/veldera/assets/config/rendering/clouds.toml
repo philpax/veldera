@@ -1,0 +1,95 @@
+# Volumetric cloud configuration (the Atmosphere debug tab edits these live).
+# Mirrors bevy_pbr_clouds_planet::CloudLayers. All fields are optional (missing
+# ones fall back to code defaults).
+#
+# `quality` is intentionally omitted so it stays platform-adaptive (High on
+# native, Low on web); set it explicitly (`quality = "Low" | "Medium" | "High"`)
+# to override. `world_time_seconds` is runtime state, driven by the world clock.
+
+# --- Debug / shadows --------------------------------------------------------
+debug_mode = "Off"          # "Off" | "ShellHit" | "Noise" | ... (see CloudDebugMode)
+shadow_intensity = 1.0      # cloud-shadow dimming on terrain; 0 = none
+shadow_bake_diag = "Off"    # shadow-map debug pattern; normally "Off"
+
+# --- Raymarch ---------------------------------------------------------------
+raymarch_jitter = false                 # TAA ray-direction jitter (see note re: temporal rotation)
+raymarch_jitter_magnitude = 1.0         # sub-grid t_first jitter scale (0 = rings return)
+raymarch_taa_jitter_magnitude = 1.0     # TAA sub-pixel jitter window scale
+raymarch_lod_bias = 3.0                 # cloud-noise mip bias; higher = finer, less stable
+primary_step_world_m = 800.0            # primary-march spacing (m); smaller = slower/finer
+density_band_half_width = 0.1           # coverage smoothstep half-width; wider = fuzzier/stabler
+raymarch_jitter_temporal_rotation = true # per-frame hash rotation (only safe when raymarch_jitter = false)
+
+# --- Denoise (A-Trous) ------------------------------------------------------
+denoise = true
+denoise_iterations = 1                  # must be odd
+denoise_sigma_transmittance = 0.1       # alpha edge-stop; smaller = sharper silhouettes
+denoise_sigma_color = 0.5               # rgb edge-stop
+denoise_variance_strength = 0.0         # SVGF variance modulation (paper default 4.0)
+
+# --- God rays ---------------------------------------------------------------
+[god_rays]
+enabled = true
+num_steps = 24            # raymarch steps/pixel (16-48)
+max_distance = 100000.0   # per-pixel march cap (m)
+scatter_rate = 2e-5       # air-scatter at sea level, per metre
+atmo_scale_height = 8000.0
+hg_g = 0.7                # forward anisotropy (0 = isotropic, 1 = pure forward)
+
+# --- Climate model (latitude bands + ocean differentiation) -----------------
+[climate]
+enabled = true
+latitude_strength = 0.85     # 0 = layer coverage, 1 = pure latitude bands
+ocean_strength = 0.5         # ocean stratocumulus bonus
+itcz_seasonal_shift_deg = 12.0
+itcz_north_bias_deg = 5.0
+
+# --- Climate simulation (advection + relaxation + vorticity) ----------------
+[sim]
+enabled = true
+dt_seconds = 60.0
+tau_seconds = 86400.0        # relaxation toward climate (1 day)
+wind_speed = 1.0             # multiplier on analytic zonal winds
+wind_meander = 0.5           # 0 = pure zonal, 1 = full jet-stream wobble
+coriolis = true
+max_steps_per_frame = 4
+vorticity_enabled = true
+vorticity_strength = 0.0002
+vorticity_forcing = 0.00008
+vorticity_damping_seconds = 86400.0
+
+# --- Sub-layers (processed in order; kind is "Stratocumulus" | "Cirrus" |
+#     "GroundFog"). wind_velocity is [east, north] m/s. --------------------
+[[layers]]
+kind = "Stratocumulus"
+enabled = true
+inner_altitude = 1500.0
+outer_altitude = 5000.0
+coverage = 0.65
+density_scale = 0.005
+noise_tile = 4000.0
+weather_tile = 80000.0
+weather_strength = 0.85
+hg_forward = 0.8
+hg_backward = -0.3
+hg_blend = 0.7
+wind_velocity = [8.0, 0.0]
+evolution_rate = 0.003
+climate_strength = 1.0
+
+[[layers]]
+kind = "Cirrus"
+enabled = true
+inner_altitude = 9000.0
+outer_altitude = 12000.0
+coverage = 0.78
+density_scale = 0.0008
+noise_tile = 8000.0
+weather_tile = 250000.0
+weather_strength = 0.7
+hg_forward = 0.92
+hg_backward = -0.1
+hg_blend = 0.85
+wind_velocity = [25.0, 0.0]
+evolution_rate = 0.001
+climate_strength = 0.3
