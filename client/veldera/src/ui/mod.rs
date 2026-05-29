@@ -272,6 +272,9 @@ fn debug_ui_system(
             let mut viewer = ClosureViewer { render: render_tab };
             DockArea::new(dock_state)
                 .style(Style::from_egui(ui.style()))
+                .show_close_buttons(false)
+                .show_leaf_collapse_buttons(false)
+                .show_leaf_close_all_buttons(false)
                 .show_inside(ui, &mut viewer);
         });
 
