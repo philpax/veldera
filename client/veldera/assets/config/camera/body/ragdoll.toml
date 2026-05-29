@@ -1,0 +1,70 @@
+# Skeletal ragdoll tuning (kinematic torso, dynamic limbs).
+#
+# The bone topology, anchor bone, and which bones are kinematic torso vs. dynamic
+# limb are structural and stay in code (`camera/body/ragdoll.rs`); only the
+# numeric feel lives here.
+
+# Master switch for the skeletal rig. false = the body keeps animating normally
+# through a tumble (no rig built); true = spawn the kinematic-torso/dynamic-limb
+# rig on ragdoll entry. (Whether the tumble triggers at all is the separate
+# `enable_ragdoll` in config/camera/fps.toml.)
+enable_skeletal = true
+
+# --- Capsule radii (metres) -------------------------------------------------
+# The torso is fat so the chest/pelvis have real volume for limbs to collide
+# against; limbs are thinner. A bone's capsule *length* is free (the distance to
+# its child), so only the radius is tuned.
+torso_radius_m = 0.12
+leg_radius_m = 0.08
+arm_radius_m = 0.05
+shoulder_radius_m = 0.06
+# Leaf bones (hands, feet, the neck anchor) have no child to span a capsule to,
+# so they spawn as small spheres of this radius.
+leaf_radius_m = 0.06
+# Below this bone->child span the capsule would be degenerate, so a sphere is
+# spawned instead.
+min_capsule_length_m = 0.02
+
+# --- Mass / damping ---------------------------------------------------------
+# Uniform per-bone collider density (kg/m^3, ~5x water). Avian auto-computes
+# mass, angular inertia, AND centre of mass from the capsule shape x density;
+# the capsule's centroid sits partway down the bone, giving gravity a lever so
+# the limb hangs. (A dynamic body with linear mass but no inertia NaNs under the
+# smallest torque, so this path must stay a collider+density pair.)
+bone_density_kg_per_m3 = 5000.0
+# Linear damping on dynamic limbs (v *= exp(-coeff * dt)) — air-resistance
+# stand-in that bleeds off swing so limbs settle into a hang. Deliberately heavy.
+linear_damping = 10.0
+# Angular damping on dynamic limbs — the main anti-flailing knob. Cranked high
+# so limbs read as "limp and heavy", drifting within the joint limits rather
+# than windmilling. Try 60-160.
+angular_damping = 120.0
+# Bone-on-bone self-collision friction (terrain contact is off, so this doesn't
+# affect landing).
+bone_friction = 2.0
+
+# --- Joint / anchor stability ----------------------------------------------
+# Spherical-joint point compliance (m/N); lower = stiffer (less stretch under
+# load). 1e-6 gives sub-mm stretch the skinned mesh hides entirely.
+joint_compliance = 1e-6
+# Time constant (s) for the kinematic neck anchor's soft velocity correction.
+# The anchor rides the player's render velocity plus position_error / tau toward
+# its pin target; keep this above the fixed timestep so the correction never
+# overshoots. Smaller = tighter pin.
+anchor_correction_tau_s = 0.04
+# Max speed (m/s) any dynamic bone may diverge from the player velocity, clamped
+# each tick before the solve. Stops a joint absorbing a large differential in
+# one step (which shreds the mesh) while leaving room for a visible dangle.
+bone_max_rel_speed_m_s = 12.0
+
+# --- Joint angle limits (degrees, relative to bind pose) --------------------
+# Swing caps how far a limb bends off its bone axis; twist caps how far it rolls.
+# Symmetric cones for now. Proximal = upper arm/thigh, mid = forearm/shin,
+# extremity = hands/feet.
+[joint_limits]
+proximal_swing_deg = 70.0
+proximal_twist_deg = 25.0
+mid_swing_deg = 75.0
+mid_twist_deg = 10.0
+extremity_swing_deg = 40.0
+extremity_twist_deg = 15.0

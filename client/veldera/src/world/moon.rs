@@ -15,7 +15,8 @@
 //!
 //! [Meeus]: https://en.wikipedia.org/wiki/Astronomical_algorithms
 
-use bevy::prelude::*;
+use bevy::{prelude::*, reflect::TypePath};
+use serde::Deserialize;
 
 use crate::world::time_of_day::{SimpleDate, TimeOfDayState};
 
@@ -27,23 +28,39 @@ pub struct Moon;
 /// 0.5181° ≈ 9.043e-3 rad.
 pub const MOON_ANGULAR_DIAMETER: f32 = 0.009_043;
 
-/// Peak full-moon illuminance at zenith, in lux. The light's actual
-/// `illuminance` is scaled by the illuminated fraction each frame.
-///
-/// The physical value is ≈0.27 lux, but at that magnitude the eye relies on
-/// rod-dominated scotopic vision — something neither our tonemap nor
-/// AutoExposure can replicate, so moonlit scenes come out near-black even
-/// after adaptation. We follow the game-rendering convention of overstating
-/// this by roughly an order of magnitude; revisit if a more physical
-/// pipeline (e.g. AgX tonemap with night-vision response curve) is added.
-pub const MOON_ILLUMINANCE_FULL_LUX: f32 = 3.0;
+/// Hot-reloadable lunar lighting tuning, loaded from
+/// `assets/config/world/moon.toml`.
+#[derive(Asset, Resource, TypePath, Clone, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct MoonConfig {
+    /// Peak full-moon illuminance at zenith (lux); scaled by the illuminated
+    /// fraction each frame.
+    ///
+    /// The physical value is ≈0.27 lux, but at that magnitude the eye relies on
+    /// rod-dominated scotopic vision — something neither our tonemap nor
+    /// AutoExposure can replicate, so moonlit scenes come out near-black even
+    /// after adaptation. We overstate it by roughly an order of magnitude, per
+    /// game-rendering convention.
+    pub illuminance_full_lux: f32,
+}
+
+impl Default for MoonConfig {
+    fn default() -> Self {
+        Self {
+            illuminance_full_lux: 3.0,
+        }
+    }
+}
 
 /// Plugin that drives the Moon's transform and brightness each frame.
 pub struct MoonPlugin;
 
 impl Plugin for MoonPlugin {
     fn build(&self, app: &mut App) {
-        app.add_systems(Update, update_moon);
+        app.add_plugins(crate::config::ConfigPlugin::<MoonConfig>::new(
+            "config/world/moon.toml",
+        ))
+        .add_systems(Update, update_moon);
     }
 }
 
@@ -134,6 +151,7 @@ pub fn compute_moon_state(time_state: &TimeOfDayState) -> MoonState {
 
 fn update_moon(
     time_state: Res<TimeOfDayState>,
+    config: Res<MoonConfig>,
     mut moon_query: Query<(&mut Transform, &mut DirectionalLight), With<Moon>>,
 ) {
     let Ok((mut transform, mut light)) = moon_query.single_mut() else {
@@ -151,7 +169,7 @@ fn update_moon(
     // Sun, via the light's `color`. The disk in the sky scales automatically
     // because the atmosphere shader derives its radiance from
     // `color * illuminance`.
-    light.illuminance = MOON_ILLUMINANCE_FULL_LUX * state.illuminated_fraction;
+    light.illuminance = config.illuminance_full_lux * state.illuminated_fraction;
 }
 
 /// Mirrors `update_sun_direction` in `time_of_day` so we can compute the

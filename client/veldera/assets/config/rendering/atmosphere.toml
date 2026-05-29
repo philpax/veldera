@@ -1,0 +1,8 @@
+# Atmosphere rendering.
+#
+# The bottom/top radii are tied to Earth's radius and the shared atmosphere
+# height, so they stay in code. Ground albedo is a free visual knob.
+
+# Linear RGB (0–1) the sky bounces light off. Higher = brighter horizon and more
+# multiple-scattering fill light.
+ground_albedo = [0.3, 0.3, 0.3]

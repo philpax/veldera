@@ -6,6 +6,7 @@
 mod assets;
 mod async_runtime;
 mod camera;
+mod config;
 mod constants;
 mod input;
 mod launch_params;
@@ -27,7 +28,7 @@ use bevy::{
     prelude::*,
     render::view::Hdr,
 };
-use camera::{CameraControllerPlugin, DEFAULT_FOV_DEG, FlightCamera};
+use camera::{CameraControllerPlugin, FlightCamera};
 use input::InputPlugin;
 use launch_params::LaunchParams;
 use rendering::{
@@ -118,11 +119,12 @@ fn setup_scene(
         Camera::default(),
         Transform::from_translation(Vec3::ZERO).looking_to(start_direction, up),
         Projection::Perspective(PerspectiveProjection {
-            // Initial FoV; `sync_camera_fov` continuously copies the
-            // `CameraSettings` value here, so the Camera tab slider
-            // (under `client/veldera/src/ui/camera.rs`) takes effect
-            // live without rebuilding the camera entity.
-            fov: DEFAULT_FOV_DEG.to_radians(),
+            // Initial FoV placeholder; `sync_fov_from_config` applies
+            // `config/camera/camera.toml`'s `default_fov_deg` once it loads and
+            // `sync_camera_fov` then copies the `CameraSettings` value here, so
+            // the Camera tab slider (`client/veldera/src/ui/camera.rs`) takes
+            // effect live without rebuilding the camera entity.
+            fov: 75.0_f32.to_radians(),
             near: 1.0,
             far: 100_000_000.0, // 100,000 km to see the whole Earth.
             ..Default::default()
@@ -238,6 +240,14 @@ fn main() {
         DefaultPlugins
             .set(WindowPlugin {
                 primary_window: Some(window),
+                ..Default::default()
+            })
+            .set(AssetPlugin {
+                // We ship no `.meta` sidecars; skipping the check avoids 404
+                // spam on the web (Bevy #10157) and stray lookups on native.
+                // Hot-reloading of config TOML is driven by the `file_watcher`
+                // cargo feature (native only), not a runtime override here.
+                meta_check: bevy::asset::AssetMetaCheck::Never,
                 ..Default::default()
             })
             .set(bevy::log::LogPlugin {

@@ -64,21 +64,11 @@
 //! the bones (needs CCD at launch speed), and mesh-derived capsule
 //! dimensions (radii are currently heuristic per body region).
 
-/// Compile-time switch for the head-anchored skeletal ragdoll.
-///
-/// `false` → the state machine still runs (if
-/// [`ENABLE_RAGDOLL`](crate::camera::fps::ENABLE_RAGDOLL) is on) but no
-/// rig is built; the body keeps animating normally through the tumble.
-///
-/// `true` → on ragdoll entry, walk the skeleton, spawn a kinematic
-/// torso + dynamic limb capsules wired with spherical joints, and drive
-/// the skinned mesh from physics until recovery.
-const ENABLE_SKELETAL_RAGDOLL: bool = true;
-
 use std::collections::HashMap;
 
 use avian3d::prelude::*;
-use bevy::prelude::*;
+use bevy::{prelude::*, reflect::TypePath};
+use serde::Deserialize;
 
 use super::{BodyVisual, bones::bone_stem};
 use crate::{
@@ -86,6 +76,103 @@ use crate::{
     vehicle::GameLayer,
     world::floating_origin::{FloatingOriginCamera, WorldPosition},
 };
+
+/// Hot-reloadable tuning for the skeletal ragdoll, loaded from
+/// `assets/config/camera/body/ragdoll.toml`. The bone topology
+/// ([`RAGDOLL_BONE_TABLE`], [`RAGDOLL_UPRIGHT_BONES`], [`RAGDOLL_ANCHOR_STEM`])
+/// stays compiled in — it's structural, not a tunable value. Defaults below are
+/// the values these constants held before externalization, so behaviour is
+/// unchanged until the TOML is edited.
+#[derive(Asset, Resource, TypePath, Clone, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct RagdollConfig {
+    /// Master switch for the skeletal rig. `false` → the state machine still
+    /// runs (if [`FpsConfig::enable_ragdoll`](crate::camera::fps::FpsConfig) is
+    /// on) but no rig is built; the body keeps animating normally through the
+    /// tumble. `true` → on ragdoll entry, spawn a kinematic torso + dynamic
+    /// limb capsules and drive the skinned mesh from physics until recovery.
+    pub enable_skeletal: bool,
+    /// Spine/pelvis capsule radius (metres).
+    pub torso_radius_m: f32,
+    /// Leg capsule radius (metres).
+    pub leg_radius_m: f32,
+    /// Arm capsule radius (metres).
+    pub arm_radius_m: f32,
+    /// Shoulder capsule radius (metres).
+    pub shoulder_radius_m: f32,
+    /// Leaf-bone (hands, feet, neck anchor) sphere radius (metres).
+    pub leaf_radius_m: f32,
+    /// Below this bone→child span, spawn a sphere instead of a capsule (metres).
+    pub min_capsule_length_m: f32,
+    /// Uniform per-bone collider density (kg/m³).
+    pub bone_density_kg_per_m3: f32,
+    /// Linear damping on dynamic limbs (air-resistance stand-in).
+    pub linear_damping: f32,
+    /// Angular damping on dynamic limbs — the main anti-flailing knob.
+    pub angular_damping: f32,
+    /// Bone-on-bone self-collision friction.
+    pub bone_friction: f32,
+    /// Spherical-joint point compliance (m/N); lower = stiffer.
+    pub joint_compliance: f32,
+    /// Time constant (s) for the kinematic neck anchor's soft correction.
+    pub anchor_correction_tau_s: f32,
+    /// Maximum per-bone divergence from the player velocity (m/s).
+    pub bone_max_rel_speed_m_s: f32,
+    /// Per-region joint swing/twist limits.
+    pub joint_limits: RagdollJointLimits,
+}
+
+impl Default for RagdollConfig {
+    fn default() -> Self {
+        Self {
+            enable_skeletal: true,
+            torso_radius_m: 0.12,
+            leg_radius_m: 0.08,
+            arm_radius_m: 0.05,
+            shoulder_radius_m: 0.06,
+            leaf_radius_m: 0.06,
+            min_capsule_length_m: 0.02,
+            bone_density_kg_per_m3: 5000.0,
+            linear_damping: 10.0,
+            angular_damping: 120.0,
+            bone_friction: 2.0,
+            joint_compliance: 1e-6,
+            anchor_correction_tau_s: 0.04,
+            bone_max_rel_speed_m_s: 12.0,
+            joint_limits: RagdollJointLimits::default(),
+        }
+    }
+}
+
+/// Swing-cone and twist half-angles (degrees) per limb region, keyed by the
+/// child bone hanging off each joint. Proximal limbs (upper arm/thigh) get the
+/// widest cone, mid limbs (forearm/shin) a tighter one, extremities the least.
+#[derive(Clone, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct RagdollJointLimits {
+    /// Upper arms and thighs (`LeftArm`, `RightArm`, `LeftUpLeg`, `RightUpLeg`).
+    pub proximal_swing_deg: f32,
+    pub proximal_twist_deg: f32,
+    /// Forearms and shins (`LeftForeArm`, `RightForeArm`, `LeftLeg`, `RightLeg`).
+    pub mid_swing_deg: f32,
+    pub mid_twist_deg: f32,
+    /// Everything else (hands, feet).
+    pub extremity_swing_deg: f32,
+    pub extremity_twist_deg: f32,
+}
+
+impl Default for RagdollJointLimits {
+    fn default() -> Self {
+        Self {
+            proximal_swing_deg: 70.0,
+            proximal_twist_deg: 25.0,
+            mid_swing_deg: 75.0,
+            mid_twist_deg: 10.0,
+            extremity_swing_deg: 40.0,
+            extremity_twist_deg: 15.0,
+        }
+    }
+}
 
 /// All bone names in the ragdoll table are `&'static str` constants,
 /// so HashMap keys + cross-references can just borrow them directly
@@ -142,95 +229,6 @@ const RAGDOLL_BONE_TABLE: &[(&str, Option<&str>)] = &[
 /// would NaN a rigid body) follows it through transform propagation, so
 /// pinning the neck upright keeps the head upright and at the view.
 const RAGDOLL_ANCHOR_STEM: BoneStem = "Neck";
-
-/// Per-bone capsule radii (metres), grouped by body region. The torso
-/// is fat so the chest/pelvis have real volume for the limbs to collide
-/// against; limbs are thinner. A bone's capsule *length* is free — it's
-/// the distance to its [`capsule_target`] child — so only the radius is
-/// tuned here.
-const RAGDOLL_TORSO_RADIUS_M: f32 = 0.12;
-const RAGDOLL_LEG_RADIUS_M: f32 = 0.08;
-const RAGDOLL_ARM_RADIUS_M: f32 = 0.05;
-const RAGDOLL_SHOULDER_RADIUS_M: f32 = 0.06;
-/// Radius for leaf bones (hands, feet, the neck anchor), which have no
-/// child to span a capsule to and so spawn as small spheres.
-const RAGDOLL_LEAF_RADIUS_M: f32 = 0.06;
-
-/// Below this bone→child distance (metres) the capsule would be
-/// degenerate (endpoints nearly coincident), so spawn a sphere instead.
-const RAGDOLL_MIN_CAPSULE_LENGTH_M: f32 = 0.02;
-
-/// Uniform density for the per-bone colliders (kg/m³). ~3× water.
-///
-/// Set via the `(Collider, ColliderDensity)` pair Avian recommends
-/// — Avian then auto-computes linear `Mass`, angular `AngularInertia`,
-/// *and the center of mass* from the collider's shape × density. For a
-/// capsule running from the bone's joint toward its child, the centroid
-/// (hence COM) lands at the capsule midpoint, **offset from the joint**
-/// — which is exactly what lets gravity exert a torque and the limb
-/// hang on its own. A `RigidBody::Dynamic` with only linear mass (no
-/// inertia) produces NaN under the smallest torque; mixing a
-/// `MassPropertiesBundle` with a `Collider` makes the two compete and
-/// one path silently loses.
-const RAGDOLL_BONE_DENSITY_KG_PER_M3: f32 = 5000.0;
-
-/// Linear-damping coefficient applied to every dynamic limb body
-/// (`v *= exp(-coefficient * dt)`). Stand-in for air resistance — keeps
-/// the limbs from accelerating forever under gravity and bleeds off
-/// swing so they settle into a hang rather than whipping around.
-/// Deliberately heavy: we can't model real flailing convincingly, so we
-/// err toward slight, sluggish motion over stark realistic motion.
-const RAGDOLL_LINEAR_DAMPING: f32 = 10.0;
-
-/// Angular-damping coefficient applied to every dynamic limb body — the
-/// main knob against flailing (rotational air resistance). The limbs
-/// would otherwise windmill on the torso's motion + gravity asymmetry
-/// through the joints. Cranked high so they read as "limp and heavy",
-/// drifting slowly within the joint limits rather than thrashing — an
-/// intentionally unrealistic-but-calm look.
-const RAGDOLL_ANGULAR_DAMPING: f32 = 120.0;
-
-/// Per-collider friction for the ragdoll bones. Applies to bone-on-bone
-/// self-collision (limbs sliding against the torso); terrain contact is
-/// still off, so it doesn't affect landing.
-const RAGDOLL_BONE_FRICTION: f32 = 2.0;
-
-/// Maps to Avian's `SphericalJoint::with_point_compliance`. Lower =
-/// stiffer joint (less stretch under load) in m/N. `1e-6` mirrors
-/// Avian's chain example and gives sub-mm stretch on the hanging
-/// chain's static load, which the skinned mesh hides entirely.
-const RAGDOLL_JOINT_COMPLIANCE: f32 = 1e-6;
-
-/// Time constant (seconds) for the soft position correction that keeps
-/// the kinematic neck anchor pinned to the controller.
-///
-/// The anchor is driven by *velocity*, not by teleporting its
-/// `Position`: each tick its `LinearVelocity` is set to the player's
-/// render-space velocity (the same "treadmill" velocity the dynamic
-/// bones carry, so the joint solver sees no differential) plus a small
-/// `position_error / tau` correction that closes any residual drift.
-/// Teleporting the anchor's `Position` instead would open a
-/// `velocity * dt` gap against the bones every tick — metres at launch
-/// speed — which the joints yank shut as a velocity spike, shredding
-/// the mesh. 0.04 s keeps the physics torso tightly on the controller
-/// (so the limb joints hang from the right place and physics
-/// coordinates stay bounded) while staying above the fixed timestep, so
-/// the correction never over-shoots. The *rendered* body is decoupled
-/// from any residual physics drift by the smooth-root routing in
-/// [`sync_bones_from_physics`], so this only governs the physics.
-const RAGDOLL_ANCHOR_CORRECTION_TAU_S: f32 = 0.04;
-
-/// Maximum speed (m/s) any dynamic bone may diverge from the player's
-/// (common-mode) velocity, clamped every tick before the solve.
-///
-/// The chain only ever shreds when a joint has to absorb a large
-/// velocity differential in one step — falling past terrain at launch
-/// speed, or the abrupt deceleration when the player capsule hits the
-/// ground while the limbs are still falling. Capping each bone to the
-/// player velocity ± this leaves ample room for a visible dangle and
-/// flop while guaranteeing the solver never sees more than ~2× this as
-/// a between-bone differential, which it resolves comfortably.
-const RAGDOLL_BONE_MAX_REL_SPEED_M_S: f32 = 12.0;
 
 /// The torso bones, *besides the neck anchor* (see [`is_torso`]). These
 /// plus the [`RAGDOLL_ANCHOR_STEM`] neck are all driven kinematically —
@@ -311,6 +309,7 @@ pub struct RagdollGraph {
 #[allow(clippy::type_complexity)]
 pub(super) fn manage_ragdoll_skeleton(
     mut commands: Commands,
+    config: Res<RagdollConfig>,
     logical_query: Query<
         (&FpsController, &LinearVelocity, &WorldPosition, &Transform),
         With<LogicalPlayer>,
@@ -320,7 +319,7 @@ pub(super) fn manage_ragdoll_skeleton(
     names: Query<&Name>,
     global_transforms: Query<&GlobalTransform>,
 ) {
-    if !ENABLE_SKELETAL_RAGDOLL {
+    if !config.enable_skeletal {
         return;
     }
     for (body_entity, mut body) in &mut body_query {
@@ -335,6 +334,7 @@ pub(super) fn manage_ragdoll_skeleton(
         match (was_ragdolling, now_ragdolling) {
             (false, true) => {
                 let graph = build_ragdoll_graph(
+                    &config,
                     &mut commands,
                     body_entity,
                     velocity.0,
@@ -392,6 +392,7 @@ pub(super) fn manage_ragdoll_skeleton(
 /// left entirely to physics — offset-COM capsules hang under gravity.
 #[allow(clippy::type_complexity)]
 pub(super) fn drive_ragdoll_anchor(
+    config: Res<RagdollConfig>,
     camera_query: Query<&FloatingOriginCamera>,
     body_query: Query<&BodyVisual>,
     logical_query: Query<(&WorldPosition, &FpsController, &LinearVelocity), With<LogicalPlayer>>,
@@ -405,7 +406,7 @@ pub(super) fn drive_ragdoll_anchor(
         (With<RigidBody>, Without<LogicalPlayer>),
     >,
 ) {
-    if !ENABLE_SKELETAL_RAGDOLL {
+    if !config.enable_skeletal {
         return;
     }
     let Ok(camera) = camera_query.single() else {
@@ -448,8 +449,7 @@ pub(super) fn drive_ragdoll_anchor(
                 };
                 let target =
                     logical_render + right * offset.x + frame.up * offset.y + forward * offset.z;
-                linear.0 =
-                    player_velocity + (target - position.0) / RAGDOLL_ANCHOR_CORRECTION_TAU_S;
+                linear.0 = player_velocity + (target - position.0) / config.anchor_correction_tau_s;
                 rotation.0 = upright * bind_relative;
                 angular.0 = Vec3::ZERO;
             } else {
@@ -458,9 +458,8 @@ pub(super) fn drive_ragdoll_anchor(
                 // differential in one step. Rotation is left to physics.
                 let relative = linear.0 - player_velocity;
                 let speed = relative.length();
-                if speed > RAGDOLL_BONE_MAX_REL_SPEED_M_S {
-                    linear.0 =
-                        player_velocity + relative * (RAGDOLL_BONE_MAX_REL_SPEED_M_S / speed);
+                if speed > config.bone_max_rel_speed_m_s {
+                    linear.0 = player_velocity + relative * (config.bone_max_rel_speed_m_s / speed);
                 }
             }
         }
@@ -491,12 +490,13 @@ pub(super) fn drive_ragdoll_anchor(
 /// Translations and rotations are written; the bone's existing scale is
 /// preserved so the head-bone scale-to-zero hide isn't undone.
 pub(super) fn sync_bones_from_physics(
+    config: Res<RagdollConfig>,
     body_query: Query<&BodyVisual>,
     physics_query: Query<(&Position, &Rotation), With<RigidBody>>,
     parents: Query<&ChildOf>,
     mut bone_transforms: Query<&mut Transform>,
 ) {
-    if !ENABLE_SKELETAL_RAGDOLL {
+    if !config.enable_skeletal {
         return;
     }
     for body in &body_query {
@@ -583,13 +583,13 @@ fn capsule_target(stem: &str) -> Option<&'static str> {
 }
 
 /// Capsule (or leaf-sphere) radius for a bone, by body region.
-fn bone_radius(stem: &str) -> f32 {
+fn bone_radius(cfg: &RagdollConfig, stem: &str) -> f32 {
     match stem {
-        "Hips" | "Spine" | "Spine1" | "Spine2" => RAGDOLL_TORSO_RADIUS_M,
-        "LeftUpLeg" | "RightUpLeg" | "LeftLeg" | "RightLeg" => RAGDOLL_LEG_RADIUS_M,
-        "LeftArm" | "RightArm" | "LeftForeArm" | "RightForeArm" => RAGDOLL_ARM_RADIUS_M,
-        "LeftShoulder" | "RightShoulder" => RAGDOLL_SHOULDER_RADIUS_M,
-        _ => RAGDOLL_LEAF_RADIUS_M,
+        "Hips" | "Spine" | "Spine1" | "Spine2" => cfg.torso_radius_m,
+        "LeftUpLeg" | "RightUpLeg" | "LeftLeg" | "RightLeg" => cfg.leg_radius_m,
+        "LeftArm" | "RightArm" | "LeftForeArm" | "RightForeArm" => cfg.arm_radius_m,
+        "LeftShoulder" | "RightShoulder" => cfg.shoulder_radius_m,
+        _ => cfg.leaf_radius_m,
     }
 }
 
@@ -602,17 +602,23 @@ fn bone_radius(stem: &str) -> f32 {
 /// later refinement — but the cones already stop the limbs windmilling
 /// and hyperextending. Proximal limbs (upper arm/thigh) get the widest
 /// cone, mid limbs (forearm/shin) a tighter one, extremities the least.
-fn joint_limits_rad(child_stem: &str) -> (f32, f32) {
+fn joint_limits_rad(cfg: &RagdollConfig, child_stem: &str) -> (f32, f32) {
+    let limits = &cfg.joint_limits;
     let (swing_deg, twist_deg): (f32, f32) = match child_stem {
-        "LeftArm" | "RightArm" | "LeftUpLeg" | "RightUpLeg" => (70.0, 25.0),
-        "LeftForeArm" | "RightForeArm" | "LeftLeg" | "RightLeg" => (75.0, 10.0),
-        _ => (40.0, 15.0),
+        "LeftArm" | "RightArm" | "LeftUpLeg" | "RightUpLeg" => {
+            (limits.proximal_swing_deg, limits.proximal_twist_deg)
+        }
+        "LeftForeArm" | "RightForeArm" | "LeftLeg" | "RightLeg" => {
+            (limits.mid_swing_deg, limits.mid_twist_deg)
+        }
+        _ => (limits.extremity_swing_deg, limits.extremity_twist_deg),
     };
     (swing_deg.to_radians(), twist_deg.to_radians())
 }
 
 #[allow(clippy::too_many_arguments)]
 fn build_ragdoll_graph(
+    cfg: &RagdollConfig,
     commands: &mut Commands,
     body_root: Entity,
     initial_velocity: Vec3,
@@ -695,12 +701,12 @@ fn build_ragdoll_graph(
         // center of mass — sits partway down the bone, giving gravity a
         // lever to hang the limb. Leaf bones (and degenerate near-zero
         // spans) fall back to a sphere.
-        let radius = bone_radius(stem_key);
+        let radius = bone_radius(cfg, stem_key);
         let collider = match capsule_target(stem_key).and_then(|child| tracked.get(child)) {
             Some((_, child_global)) => {
                 let child_local =
                     bone_world_rot.inverse() * (child_global.translation() - bone_world_pos);
-                if child_local.length() > RAGDOLL_MIN_CAPSULE_LENGTH_M {
+                if child_local.length() > cfg.min_capsule_length_m {
                     Collider::capsule_endpoints(radius, Vec3::ZERO, child_local)
                 } else {
                     Collider::sphere(radius)
@@ -711,8 +717,8 @@ fn build_ragdoll_graph(
 
         let mut entity_commands = commands.spawn((
             collider,
-            ColliderDensity(RAGDOLL_BONE_DENSITY_KG_PER_M3),
-            Friction::new(RAGDOLL_BONE_FRICTION),
+            ColliderDensity(cfg.bone_density_kg_per_m3),
+            Friction::new(cfg.bone_friction),
             Rotation(spawn_rot),
             Position(bone_world_pos),
             Transform::from_translation(bone_world_pos).with_rotation(spawn_rot),
@@ -742,8 +748,8 @@ fn build_ragdoll_graph(
             // momentum.
             entity_commands.insert((
                 RigidBody::Dynamic,
-                LinearDamping(RAGDOLL_LINEAR_DAMPING),
-                AngularDamping(RAGDOLL_ANGULAR_DAMPING),
+                LinearDamping(cfg.linear_damping),
+                AngularDamping(cfg.angular_damping),
                 LinearVelocity(initial_velocity),
                 AngularVelocity::default(),
             ));
@@ -817,7 +823,7 @@ fn build_ragdoll_graph(
         // stays identity, so at rest the two frame bases coincide. The
         // limits then bound deviation from the rest pose.
         let bind_relative = parent_world_rot.inverse() * child_world_rot;
-        let (swing, twist) = joint_limits_rad(stem_key);
+        let (swing, twist) = joint_limits_rad(cfg, stem_key);
 
         let joint_entity = commands
             .spawn((
@@ -825,7 +831,7 @@ fn build_ragdoll_graph(
                     .with_local_anchor1(anchor_on_parent)
                     .with_local_anchor2(Vec3::ZERO)
                     .with_local_basis1(bind_relative)
-                    .with_point_compliance(RAGDOLL_JOINT_COMPLIANCE)
+                    .with_point_compliance(cfg.joint_compliance)
                     .with_swing_limits(-swing, swing)
                     .with_twist_limits(-twist, twist),
                 // Don't let a bone collide with the parent it's jointed

@@ -13,6 +13,12 @@ if command -v wasm-opt > /dev/null 2>&1; then
     wasm-opt -Oz -o build/veldera_bg.wasm build/veldera_bg.wasm
 fi
 
+# Copy runtime assets next to the page. Bevy fetches assets over HTTP from
+# `./assets/` relative to index.html on the web, so without this the config
+# TOML, models, audio, fonts, and topography all 404 in a production build.
+rm -rf build/assets
+cp -r client/veldera/assets build/assets
+
 cat <<EOF > build/index.html
 <!DOCTYPE html>
 <html lang="en">

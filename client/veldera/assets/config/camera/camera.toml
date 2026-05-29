@@ -1,0 +1,12 @@
+# Flight-camera tuning.
+
+# Clamp range (m/s) for the scroll-adjusted fly speed.
+min_speed = 10.0
+max_speed = 25000.0
+
+# Vertical field of view (degrees). Applied on load/reload; the Camera tab FoV
+# slider edits it live between reloads. ~75 vertical ≈ 100 horizontal at 16:9.
+default_fov_deg = 75.0
+# FoV slider bounds (degrees). Beyond ~120 fish-eye distortion gets unpleasant.
+min_fov_deg = 30.0
+max_fov_deg = 120.0

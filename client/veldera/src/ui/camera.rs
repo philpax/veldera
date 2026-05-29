@@ -7,11 +7,10 @@ use bevy_egui::egui;
 
 use crate::{
     camera::{
-        BodyTuning, CameraMode, CameraModeState, CameraSettings, CharacterMetrics,
+        BodyTuning, CameraConfig, CameraMode, CameraModeState, CameraSettings, CharacterMetrics,
         EYE_FORWARD_OFFSET_SLIDER_RANGE, EYE_HEIGHT_SLIDER_RANGE, FPS_PLAYER_MAX_RADIUS_RATIO,
         FPS_PLAYER_MIN_RADIUS_RATIO, FlightCamera, FollowCameraConfig, FollowEntityTarget,
-        FpsPlayerConfig, MAX_EYE_LERP_DURATION_S, MAX_FOV_DEG, MAX_SPEED, MIN_FOV_DEG, MIN_SPEED,
-        TeleportAnimationMode,
+        FpsPlayerConfig, MAX_EYE_LERP_DURATION_S, TeleportAnimationMode,
     },
     world::floating_origin::FloatingOriginCamera,
 };
@@ -20,6 +19,7 @@ use crate::{
 #[derive(SystemParam)]
 pub(super) struct CameraParams<'w, 's> {
     pub settings: ResMut<'w, CameraSettings>,
+    pub config: Res<'w, CameraConfig>,
     pub camera_mode: Res<'w, CameraModeState>,
     pub player_config: ResMut<'w, FpsPlayerConfig>,
     pub body_tuning: ResMut<'w, BodyTuning>,
@@ -59,9 +59,12 @@ pub(super) fn render_camera_tab(ui: &mut egui::Ui, camera: &mut CameraParams) {
         ui.horizontal(|ui| {
             ui.label("Speed:");
             ui.add(
-                egui::Slider::new(&mut camera.settings.base_speed, MIN_SPEED..=MAX_SPEED)
-                    .logarithmic(true)
-                    .suffix(" m/s"),
+                egui::Slider::new(
+                    &mut camera.settings.base_speed,
+                    camera.config.min_speed..=camera.config.max_speed,
+                )
+                .logarithmic(true)
+                .suffix(" m/s"),
             );
         });
 
@@ -114,9 +117,12 @@ fn render_fov_slider(ui: &mut egui::Ui, camera: &mut CameraParams) {
     ui.horizontal(|ui| {
         ui.label("FoV:");
         let response = ui.add(
-            egui::Slider::new(&mut fov_deg, MIN_FOV_DEG..=MAX_FOV_DEG)
-                .step_by(1.0)
-                .suffix("\u{00b0}"),
+            egui::Slider::new(
+                &mut fov_deg,
+                camera.config.min_fov_deg..=camera.config.max_fov_deg,
+            )
+            .step_by(1.0)
+            .suffix("\u{00b0}"),
         );
         if response.changed() {
             camera.settings.fov_radians = fov_deg.to_radians();

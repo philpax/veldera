@@ -10,7 +10,8 @@
 use std::{collections::HashMap, f32::consts::PI};
 
 use avian3d::prelude::*;
-use bevy::{animation::graph::AnimationNodeIndex, prelude::*};
+use bevy::{animation::graph::AnimationNodeIndex, prelude::*, reflect::TypePath};
+use serde::Deserialize;
 
 use super::{BodyAssets, BodyVisual};
 use crate::{
@@ -18,25 +19,36 @@ use crate::{
     world::floating_origin::WorldPosition,
 };
 
-// ----------------------------------------------------------------------------
-// Tuning. All speeds are in metres per second.
-// ----------------------------------------------------------------------------
+/// Hot-reloadable locomotion-blend tuning, loaded from
+/// `assets/config/camera/body/locomotion.toml`. All speeds are metres/second.
+#[derive(Asset, Resource, TypePath, Clone, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct LocomotionConfig {
+    /// Speeds below this are "idle" — no directional clip contributes. Above it
+    /// we blend in walking/running.
+    pub deadzone_m_s: f32,
+    /// Reference horizontal speed for the `locomotion/walking` clip; crossfaded
+    /// from idle below and to running above.
+    pub walk_ref_m_s: f32,
+    /// Reference horizontal speed for the `locomotion/running` clip; anything
+    /// faster stays pinned to running.
+    pub run_ref_m_s: f32,
+    /// Vertical speed above which the body switches to the airborne pose. Uses
+    /// vertical velocity rather than `ground_tick` (which drops for a single
+    /// tick when cresting uneven ground and would spam the jump-loop pose).
+    pub airborne_vertical_m_s: f32,
+}
 
-/// Speeds below this are treated as "idle" — no directional locomotion
-/// clip contributes. Above the deadzone we blend in walking/running.
-pub const LOCOMOTION_DEADZONE_M_S: f32 = 0.3;
-/// Reference horizontal speed for the `locomotion/walking` clip.
-/// Crossfaded from idle below and to `locomotion/running` above.
-pub const LOCOMOTION_WALK_REF_M_S: f32 = 3.0;
-/// Reference horizontal speed for the `locomotion/running` clip.
-/// Anything faster stays pinned to running.
-pub const LOCOMOTION_RUN_REF_M_S: f32 = 8.0;
-/// Vertical speed (m/s) above which the body switches to the airborne
-/// pose. We use vertical velocity rather than `FpsController::ground_tick`
-/// because the latter loses ground contact for a single tick whenever
-/// the player crests an uneven surface, which would otherwise spam the
-/// jump-loop pose during normal walking.
-pub const LOCOMOTION_AIRBORNE_VERTICAL_M_S: f32 = 2.0;
+impl Default for LocomotionConfig {
+    fn default() -> Self {
+        Self {
+            deadzone_m_s: 0.3,
+            walk_ref_m_s: 3.0,
+            run_ref_m_s: 8.0,
+            airborne_vertical_m_s: 2.0,
+        }
+    }
+}
 
 /// Eight-way direction labels — match the clip names from the Mixamo
 /// "Rifle 8-Way Locomotion Pack". Ordered counter-clockwise starting at
@@ -75,6 +87,7 @@ const DIRECTION_NAMES: [&str; 8] = [
 /// ```
 pub(super) fn update_locomotion_blend(
     config: Res<FpsPlayerConfig>,
+    loco: Res<LocomotionConfig>,
     body_assets: Res<BodyAssets>,
     logical_query: Query<
         (&FpsController, &LinearVelocity, &Transform, &WorldPosition),
@@ -111,7 +124,7 @@ pub(super) fn update_locomotion_blend(
         let side_speed = horizontal_vel.dot(right);
         let speed = (fwd_speed * fwd_speed + side_speed * side_speed).sqrt();
 
-        let airborne = vertical_speed.abs() > LOCOMOTION_AIRBORNE_VERTICAL_M_S;
+        let airborne = vertical_speed.abs() > loco.airborne_vertical_m_s;
         let crouch_amount = if controller.upright_height > controller.crouch_height {
             ((controller.upright_height - controller.height)
                 / (controller.upright_height - controller.crouch_height))
@@ -120,8 +133,14 @@ pub(super) fn update_locomotion_blend(
             0.0
         };
 
-        let targets =
-            compute_locomotion_weights(speed, fwd_speed, side_speed, airborne, crouch_amount);
+        let targets = compute_locomotion_weights(
+            &loco,
+            speed,
+            fwd_speed,
+            side_speed,
+            airborne,
+            crouch_amount,
+        );
 
         apply_locomotion_weights(
             &mut player,
@@ -149,6 +168,7 @@ struct LocomotionTargets {
 }
 
 fn compute_locomotion_weights(
+    cfg: &LocomotionConfig,
     speed: f32,
     fwd_speed: f32,
     side_speed: f32,
@@ -171,10 +191,10 @@ fn compute_locomotion_weights(
     let mut idle_upper_body = 0.0;
     if standing_w > 0.0 {
         idle_upper_body +=
-            write_standing_weights(&mut clips, speed, fwd_speed, side_speed, standing_w);
+            write_standing_weights(cfg, &mut clips, speed, fwd_speed, side_speed, standing_w);
     }
     if crouching_w > 0.0 {
-        write_crouching_weights(&mut clips, speed, fwd_speed, side_speed, crouching_w);
+        write_crouching_weights(cfg, &mut clips, speed, fwd_speed, side_speed, crouching_w);
         idle_upper_body += crouching_w;
     }
 
@@ -185,20 +205,17 @@ fn compute_locomotion_weights(
 }
 
 /// Locomotion-pack 3-gait blend (idle / walking / running) summing to 1.
-fn locomotion_gait_blend(speed: f32) -> (f32, f32, f32) {
-    if speed <= LOCOMOTION_DEADZONE_M_S {
+fn locomotion_gait_blend(cfg: &LocomotionConfig, speed: f32) -> (f32, f32, f32) {
+    if speed <= cfg.deadzone_m_s {
         return (1.0, 0.0, 0.0);
     }
-    if speed < LOCOMOTION_WALK_REF_M_S {
-        let t = ((speed - LOCOMOTION_DEADZONE_M_S)
-            / (LOCOMOTION_WALK_REF_M_S - LOCOMOTION_DEADZONE_M_S))
-            .clamp(0.0, 1.0);
+    if speed < cfg.walk_ref_m_s {
+        let t =
+            ((speed - cfg.deadzone_m_s) / (cfg.walk_ref_m_s - cfg.deadzone_m_s)).clamp(0.0, 1.0);
         return (1.0 - t, t, 0.0);
     }
-    if speed < LOCOMOTION_RUN_REF_M_S {
-        let t = ((speed - LOCOMOTION_WALK_REF_M_S)
-            / (LOCOMOTION_RUN_REF_M_S - LOCOMOTION_WALK_REF_M_S))
-            .clamp(0.0, 1.0);
+    if speed < cfg.run_ref_m_s {
+        let t = ((speed - cfg.walk_ref_m_s) / (cfg.run_ref_m_s - cfg.walk_ref_m_s)).clamp(0.0, 1.0);
         return (0.0, 1.0 - t, t);
     }
     (0.0, 0.0, 1.0)
@@ -207,15 +224,16 @@ fn locomotion_gait_blend(speed: f32) -> (f32, f32, f32) {
 /// Returns the additional `idle_upper_body` weight contribution from
 /// the rifle-pack backward clips used in this standing tick.
 fn write_standing_weights(
+    cfg: &LocomotionConfig,
     clips: &mut HashMap<String, f32>,
     speed: f32,
     fwd_speed: f32,
     side_speed: f32,
     standing_w: f32,
 ) -> f32 {
-    let (idle_g, walk_g, run_g) = locomotion_gait_blend(speed);
+    let (idle_g, walk_g, run_g) = locomotion_gait_blend(cfg, speed);
 
-    if speed <= LOCOMOTION_DEADZONE_M_S {
+    if speed <= cfg.deadzone_m_s {
         add_weight(clips, "locomotion/idle", standing_w);
         return 0.0;
     }
@@ -312,13 +330,14 @@ fn write_standing_weights(
 }
 
 fn write_crouching_weights(
+    cfg: &LocomotionConfig,
     clips: &mut HashMap<String, f32>,
     speed: f32,
     fwd_speed: f32,
     side_speed: f32,
     crouching_w: f32,
 ) {
-    if speed <= LOCOMOTION_DEADZONE_M_S {
+    if speed <= cfg.deadzone_m_s {
         add_weight(clips, "rifle-8-way/idle crouching", crouching_w);
         return;
     }

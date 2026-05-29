@@ -6,9 +6,10 @@
 use std::f32::consts::*;
 
 use avian3d::{parry::shape::SharedShape, prelude::*};
-use bevy::prelude::*;
+use bevy::{prelude::*, reflect::TypePath};
 use glam::DVec3;
 use leafwing_input_manager::prelude::*;
+use serde::Deserialize;
 
 use crate::{
     input::CameraAction,
@@ -69,38 +70,41 @@ pub(super) struct FpsControllerPlugin;
 
 impl Plugin for FpsControllerPlugin {
     fn build(&self, app: &mut App) {
-        app.init_resource::<DidFixedTimestepRunThisFrame>()
-            .init_resource::<PreservedFpsState>()
-            .init_resource::<FpsPlayerConfig>()
-            .add_systems(PreUpdate, clear_fixed_timestep_flag)
-            .add_systems(
-                FixedPreUpdate,
+        app.add_plugins(crate::config::ConfigPlugin::<FpsConfig>::new(
+            "config/camera/fps.toml",
+        ))
+        .init_resource::<DidFixedTimestepRunThisFrame>()
+        .init_resource::<PreservedFpsState>()
+        .init_resource::<FpsPlayerConfig>()
+        .add_systems(PreUpdate, clear_fixed_timestep_flag)
+        .add_systems(
+            FixedPreUpdate,
+            (
+                set_fixed_time_step_flag,
+                fps_controller_prepare,
+                fps_controller_slide,
+                fps_controller_sync_position,
+            )
+                .chain()
+                .run_if(is_fps_mode.and(teleport_animation_not_active)),
+        )
+        .add_systems(
+            RunFixedMainLoop,
+            (
+                (fps_controller_input, fps_controller_look)
+                    .chain()
+                    .run_if(teleport_animation_not_active)
+                    .in_set(RunFixedMainLoopSystems::BeforeFixedMainLoop),
                 (
-                    set_fixed_time_step_flag,
-                    fps_controller_prepare,
-                    fps_controller_slide,
-                    fps_controller_sync_position,
+                    clear_input.run_if(did_fixed_timestep_run_this_frame),
+                    fps_controller_render.run_if(teleport_animation_not_active),
+                    sync_floating_origin_fps,
                 )
                     .chain()
-                    .run_if(is_fps_mode.and(teleport_animation_not_active)),
+                    .in_set(RunFixedMainLoopSystems::AfterFixedMainLoop),
             )
-            .add_systems(
-                RunFixedMainLoop,
-                (
-                    (fps_controller_input, fps_controller_look)
-                        .chain()
-                        .run_if(teleport_animation_not_active)
-                        .in_set(RunFixedMainLoopSystems::BeforeFixedMainLoop),
-                    (
-                        clear_input.run_if(did_fixed_timestep_run_this_frame),
-                        fps_controller_render.run_if(teleport_animation_not_active),
-                        sync_floating_origin_fps,
-                    )
-                        .chain()
-                        .in_set(RunFixedMainLoopSystems::AfterFixedMainLoop),
-                )
-                    .run_if(is_fps_mode),
-            );
+                .run_if(is_fps_mode),
+        );
     }
 }
 
@@ -135,21 +139,45 @@ pub struct RenderPlayer {
     pub logical_entity: Entity,
 }
 
-/// Master compile-time switch for the ragdoll feature.
-///
-/// `false` → [`fps_controller_slide`] never flips the state to
-/// [`RagdollState::Ragdolling`]; the input/yeet gating and the
-/// head-lock skip in `sync_body_transform` key off that state, so
-/// they all skip their ragdoll paths. Reverts to pre-ragdoll
-/// behaviour: normal locomotion, even at terminal velocity.
-///
-/// `true` (current) → after sustained airtime the player ragdolls:
-/// the body model hangs limply from a kinematic neck anchor pinned to
-/// the controller (see [`body::ragdoll`](super::body::ragdoll)) while
-/// the camera stays on its normal first-person eye path. The skeletal
-/// rig itself is a separate flag —
+/// Hot-reloadable ragdoll-trigger tuning for the FPS controller, loaded from
+/// `assets/config/camera/fps.toml`. The skeletal rig itself has a separate
+/// compile-time switch,
 /// [`ENABLE_SKELETAL_RAGDOLL`](super::body::ragdoll).
-pub const ENABLE_RAGDOLL: bool = true;
+#[derive(Asset, Resource, TypePath, Clone, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct FpsConfig {
+    /// Master switch for the ragdoll feature. `false` →
+    /// [`fps_controller_slide`] never flips state to
+    /// [`RagdollState::Ragdolling`]; input/yeet gating and the head-lock skip
+    /// all key off that state, reverting to normal locomotion even at terminal
+    /// velocity. `true` → after sustained airtime the body hangs limply from a
+    /// kinematic neck anchor while the camera stays on its first-person path.
+    pub enable_ragdoll: bool,
+    /// Seconds of continuous airtime before the player ragdolls. Low enough that
+    /// a real fall ragdolls promptly, high enough that a normal jump (~0.8 s)
+    /// doesn't. Lower = more sensitive.
+    pub airborne_threshold_s: f32,
+    /// Seconds of continuous ground contact required to exit ragdoll. A short
+    /// delay avoids unragdolling on a single-tick bounce transient; kept brief
+    /// so the player pops back up quickly once settled.
+    pub ground_recovery_s: f32,
+    /// Ground-friction coefficient used in place of [`FpsController::friction`]
+    /// while ragdolling. Much stronger so landing at launch speed arrests the
+    /// slide almost immediately (you crumple where you hit) and the grounded
+    /// timer elapses quickly so recovery fires.
+    pub landing_friction: f32,
+}
+
+impl Default for FpsConfig {
+    fn default() -> Self {
+        Self {
+            enable_ragdoll: true,
+            airborne_threshold_s: 1.0,
+            ground_recovery_s: 0.15,
+            landing_friction: 40.0,
+        }
+    }
+}
 
 /// Ragdoll state machine for the FPS player.
 ///
@@ -170,29 +198,6 @@ pub enum RagdollState {
     /// is suppressed. Gravity + collision still apply.
     Ragdolling,
 }
-
-/// Seconds of continuous airtime before the player ragdolls.
-///
-/// Low enough that a real fall ragdolls promptly — the ragdoll is meant
-/// to replace the fall animation rather than play after it — while a
-/// normal jump (~0.8 s of airtime) doesn't trigger it. Lower → more
-/// sensitive, higher → harder to ragdoll.
-pub const RAGDOLL_AIRBORNE_THRESHOLD_S: f32 = 1.0;
-
-/// Seconds of continuous ground contact required to exit ragdoll.
-///
-/// A short delay prevents instant unragdolling on a bouncy collision
-/// transient (e.g. a single-tick ground hit during tumbling), but kept
-/// brief so the player pops back to standing quickly once they've
-/// actually settled.
-pub const RAGDOLL_GROUND_RECOVERY_S: f32 = 0.15;
-
-/// Ground-friction coefficient used in place of [`FpsController::friction`]
-/// while ragdolling. Much stronger so that landing on a rooftop at launch
-/// speed arrests the slide almost immediately instead of skidding off the
-/// far edge — you crumple where you hit. Also makes the grounded timer
-/// elapse quickly so recovery fires.
-pub const RAGDOLL_LANDING_FRICTION: f32 = 40.0;
 
 /// Player size configuration for the FPS controller.
 ///
@@ -303,11 +308,11 @@ pub struct FpsController {
     /// Seconds of continuous airtime, reset on every grounded tick.
     /// Triggers the [`Active`](RagdollState::Active) →
     /// [`Ragdolling`](RagdollState::Ragdolling) transition when it
-    /// crosses [`RAGDOLL_AIRBORNE_THRESHOLD_S`].
+    /// crosses [`FpsConfig::airborne_threshold_s`].
     pub airborne_time_s: f32,
     /// Seconds of continuous ground contact, reset on every airborne
     /// tick. Triggers the recovery transition once it crosses
-    /// [`RAGDOLL_GROUND_RECOVERY_S`].
+    /// [`FpsConfig::ground_recovery_s`].
     pub grounded_time_s: f32,
 }
 
@@ -637,6 +642,7 @@ fn fps_controller_look(mut query: Query<(&mut FpsController, &FpsControllerInput
 fn fps_controller_prepare(
     time: Res<Time<Fixed>>,
     player_config: Res<FpsPlayerConfig>,
+    fps_config: Res<FpsConfig>,
     camera_query: Query<&FloatingOriginCamera>,
     mut query: Query<
         (
@@ -693,13 +699,13 @@ fn fps_controller_prepare(
         // so the kinematic capsule eventually stops sliding after
         // landing and the grounded timer can fire recovery. Without
         // this, lateral velocity from the launch persists forever and
-        // `RAGDOLL_GROUND_RECOVERY_S` never elapses. While ragdolling we
+        // `ground_recovery_s` never elapses. While ragdolling we
         // use a much stronger coefficient so a high-speed rooftop
         // landing arrests almost on contact rather than skidding off the
         // edge.
         if is_grounded {
             let friction = if is_ragdolling {
-                RAGDOLL_LANDING_FRICTION
+                fps_config.landing_friction
             } else {
                 controller.friction
             };
@@ -805,6 +811,7 @@ fn fps_controller_prepare(
 #[allow(clippy::type_complexity)]
 fn fps_controller_slide(
     time: Res<Time<Fixed>>,
+    fps_config: Res<FpsConfig>,
     move_and_slide: MoveAndSlide,
     camera_query: Query<&FloatingOriginCamera>,
     mut query: Query<
@@ -879,10 +886,10 @@ fn fps_controller_slide(
             controller.grounded_time_s = 0.0;
         }
 
-        if ENABLE_RAGDOLL {
+        if fps_config.enable_ragdoll {
             match controller.ragdoll_state {
                 RagdollState::Active => {
-                    if controller.airborne_time_s >= RAGDOLL_AIRBORNE_THRESHOLD_S {
+                    if controller.airborne_time_s >= fps_config.airborne_threshold_s {
                         controller.ragdoll_state = RagdollState::Ragdolling;
                         tracing::info!(
                             "Entering ragdoll after {:.2}s airborne",
@@ -891,7 +898,7 @@ fn fps_controller_slide(
                     }
                 }
                 RagdollState::Ragdolling => {
-                    if controller.grounded_time_s >= RAGDOLL_GROUND_RECOVERY_S {
+                    if controller.grounded_time_s >= fps_config.ground_recovery_s {
                         controller.ragdoll_state = RagdollState::Active;
                         controller.airborne_time_s = 0.0;
                         controller.grounded_time_s = 0.0;

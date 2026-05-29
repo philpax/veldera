@@ -1,0 +1,33 @@
+# Yeet (arm-point launch) tuning. Note: [rumble].base_hz is baked into the
+# synthesized loop at startup and only takes effect on restart.
+
+# Seconds for the arm to fully raise / lower.
+point_ramp_duration_s = 0.5
+# Max charge hold time (s); past this the charge saturates at 1.0.
+max_charge_duration_s = 10.0
+# Launch speed at zero charge — a soft push (m/s).
+min_yeet_speed_m_s = 5.0
+# Launch speed at full charge (m/s).
+max_yeet_speed_m_s = 150.0
+# Cooldown after release before charging again (s); stops chained infinite flight.
+cooldown_s = 3.0
+# Upward nudge (m/s) added to the launch unless aiming steeply down, so the
+# controller's slide doesn't re-detect ground and eat the launch (~3 m/s ≈ 5 cm
+# in the first tick).
+ground_detach_m_s = 3.0
+# Look dot(up) below which the upward nudge is skipped (aiming down).
+downward_detach_threshold = -0.5
+# Distance (m) ahead of the camera the right arm aims at. Further = closer to
+# parallel-with-look; closer = more exaggerated convergence on the crosshair.
+aim_distance_m = 10.0
+
+# Procedural charge-rumble audio.
+[rumble]
+# Fundamental frequency (Hz), sub-bass; harmonics add the menace. Restart to apply.
+base_hz = 50.0
+# Volume at zero / full charge (linear).
+min_volume = 0.05
+max_volume = 0.6
+# Playback speed at zero / full charge (doubling speed = +1 octave).
+min_speed = 0.5
+max_speed = 1.5

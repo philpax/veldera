@@ -1,0 +1,10 @@
+# Projectiles fired from the camera in FPS mode.
+
+# Base radius (m), multiplied by a random scale in [min_scale, max_scale] per shot.
+radius_base = 1.0
+radius_min_scale = 0.5
+radius_max_scale = 1.5
+# Initial speed along the look direction (m/s).
+speed = 50.0
+# Minimum time between shots (s).
+fire_debounce_secs = 0.2

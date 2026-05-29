@@ -9,6 +9,7 @@ use bevy::{
     math::UVec2,
     pbr::ScatteringMedium,
     prelude::*,
+    reflect::TypePath,
     render::{Extract, ExtractSchedule, RenderApp},
 };
 use bevy_pbr_atmosphere_planet::{
@@ -16,11 +17,35 @@ use bevy_pbr_atmosphere_planet::{
     SphericalAtmosphere, SphericalAtmosphereCamera, SphericalAtmosphereEnvironmentMapLight,
     compute_sun_transmittance,
 };
+use serde::Deserialize;
 
 use crate::{
     constants::{ATMOSPHERE_TOP_RADIUS_M, EARTH_RADIUS_M},
     world::floating_origin::FloatingOriginCamera,
 };
+
+/// Hot-reloadable atmosphere tuning, loaded from
+/// `assets/config/rendering/atmosphere.toml`.
+///
+/// The atmosphere's bottom/top radii are tied to [`EARTH_RADIUS_M`] and the
+/// shared atmosphere height, so they stay compiled in; the ground albedo is a
+/// free visual ("climate") knob and lives here. It's applied to the
+/// [`SphericalAtmosphere`] component by [`apply_atmosphere_config`].
+#[derive(Asset, Resource, TypePath, Clone, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct AtmosphereConfig {
+    /// Ground albedo (linear RGB, 0–1) the sky bounces light off. Higher =
+    /// brighter horizon and more multiple-scattering fill.
+    pub ground_albedo: [f32; 3],
+}
+
+impl Default for AtmosphereConfig {
+    fn default() -> Self {
+        Self {
+            ground_albedo: [0.3, 0.3, 0.3],
+        }
+    }
+}
 
 /// Plugin that integrates spherical atmosphere with floating origin cameras.
 pub struct AtmosphereIntegrationPlugin;
@@ -28,11 +53,18 @@ pub struct AtmosphereIntegrationPlugin;
 impl Plugin for AtmosphereIntegrationPlugin {
     fn build(&self, app: &mut App) {
         app.add_plugins(bevy_pbr_atmosphere_planet::SphericalAtmospherePlugin)
+            .add_plugins(crate::config::ConfigPlugin::<AtmosphereConfig>::new(
+                "config/rendering/atmosphere.toml",
+            ))
             // Run in PostUpdate to ensure camera position is fully updated.
             // This prevents frame-lag artifacts during camera movement.
             .add_systems(
                 PostUpdate,
-                (sync_atmosphere_camera, update_atmospheric_light_extinction),
+                (
+                    sync_atmosphere_camera,
+                    update_atmospheric_light_extinction,
+                    apply_atmosphere_config,
+                ),
             );
     }
 
@@ -216,5 +248,22 @@ impl AtmosphereBundle {
                 ..Default::default()
             },
         }
+    }
+}
+
+/// Apply [`AtmosphereConfig`] to the live [`SphericalAtmosphere`] whenever the
+/// config (re)loads, so editing `atmosphere.toml` updates the sky's ground
+/// albedo without restarting. The bundle spawns with the default albedo; this
+/// overwrites it once the asset loads.
+fn apply_atmosphere_config(
+    config: Res<AtmosphereConfig>,
+    mut atmospheres: Query<&mut SphericalAtmosphere>,
+) {
+    if !config.is_changed() {
+        return;
+    }
+    let albedo = Vec3::from_array(config.ground_albedo);
+    for mut atmosphere in &mut atmospheres {
+        atmosphere.ground_albedo = albedo;
     }
 }

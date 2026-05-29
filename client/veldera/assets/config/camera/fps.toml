@@ -1,0 +1,16 @@
+# FPS controller ragdoll-trigger tuning.
+# (Whether the skeletal rig is built is the separate `enable_skeletal` in
+# config/camera/body/ragdoll.toml.)
+
+# Master switch for the ragdoll feature. false = normal locomotion even at
+# terminal velocity; true = ragdoll after sustained airtime.
+enable_ragdoll = true
+# Seconds of continuous airtime before the player ragdolls. Low enough that a
+# real fall ragdolls promptly, high enough a normal jump (~0.8 s) doesn't.
+airborne_threshold_s = 1.0
+# Seconds of continuous ground contact required to exit ragdoll (avoids
+# unragdolling on a single-tick bounce, but pops back up quickly once settled).
+ground_recovery_s = 0.15
+# Ground friction while ragdolling — much stronger than normal so a high-speed
+# landing arrests almost on contact instead of skidding off the edge.
+landing_friction = 40.0

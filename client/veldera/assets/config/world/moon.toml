@@ -1,0 +1,6 @@
+# Lunar lighting.
+
+# Peak full-moon illuminance at zenith (lux), scaled by the illuminated fraction
+# each frame. Physically ≈0.27 lux, but overstated ~10x so moonlit scenes aren't
+# near-black under our tonemap/auto-exposure (game-rendering convention).
+illuminance_full_lux = 3.0

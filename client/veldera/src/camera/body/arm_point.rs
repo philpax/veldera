@@ -7,7 +7,7 @@
 //! synthesized low rumble loops during the charge, ramping in volume
 //! and pitch as the charge climbs. On release, the rumble cuts and a
 //! whoosh sample plays as the player is yeeted along the look
-//! direction. A [`YEET_COOLDOWN_S`] timeout follows the launch to
+//! direction. A [`YeetConfig::cooldown_s`] timeout follows the launch to
 //! prevent infinite flying.
 //!
 //! Bone-name lookup uses the centralised constants in [`super::bones`];
@@ -28,8 +28,9 @@
 use std::sync::Arc;
 
 use avian3d::prelude::*;
-use bevy::{audio::Volume, prelude::*};
+use bevy::{audio::Volume, prelude::*, reflect::TypePath};
 use leafwing_input_manager::prelude::*;
+use serde::Deserialize;
 
 use super::{
     BodyVisual,
@@ -45,51 +46,87 @@ use crate::{
 };
 
 // ----------------------------------------------------------------------------
-// Tuning constants
+// Tuning
 // ----------------------------------------------------------------------------
 
-/// Seconds for the arm to fully raise / lower. Linear ramp on
-/// `point_amount`.
-pub const POINT_RAMP_DURATION_S: f32 = 0.5;
+/// Hot-reloadable yeet (arm-point launch) tuning, loaded from
+/// `assets/config/camera/body/arm_point.toml`.
+///
+/// Note: [`RumbleConfig::base_hz`] only takes effect on restart — the rumble
+/// loop is synthesized once at startup (see [`generate_rumble_wav`]). The volume
+/// and speed ranges, applied to the live audio sink each frame, hot-reload.
+#[derive(Asset, Resource, TypePath, Clone, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct YeetConfig {
+    /// Seconds for the arm to fully raise / lower (linear ramp on `point_amount`).
+    pub point_ramp_duration_s: f32,
+    /// Maximum charge hold time (s); past this the charge saturates at 1.0.
+    pub max_charge_duration_s: f32,
+    /// Launch speed at zero charge — a soft push (m/s).
+    pub min_yeet_speed_m_s: f32,
+    /// Launch speed at full charge (m/s).
+    pub max_yeet_speed_m_s: f32,
+    /// Cooldown after release before charging again (s); stops chained flight.
+    pub cooldown_s: f32,
+    /// Small upward nudge (m/s) added to the launch unless aiming steeply down,
+    /// so the controller's slide doesn't re-detect ground and eat the launch.
+    pub ground_detach_m_s: f32,
+    /// `dot(up)` threshold below which the upward nudge is skipped (aiming down).
+    pub downward_detach_threshold: f32,
+    /// Distance (m) ahead of the camera the right arm aims at while pointing.
+    /// Further out → arm closer to parallel-with-look; closer → more convergence.
+    pub aim_distance_m: f32,
+    /// Procedural rumble audio.
+    pub rumble: RumbleConfig,
+}
 
-/// Maximum hold time (seconds) for charging the yeet. Past this the
-/// charge saturates at 1.0; the rumble stays pinned at full intensity.
-pub const MAX_CHARGE_DURATION_S: f32 = 10.0;
+impl Default for YeetConfig {
+    fn default() -> Self {
+        Self {
+            point_ramp_duration_s: 0.5,
+            max_charge_duration_s: 10.0,
+            min_yeet_speed_m_s: 5.0,
+            max_yeet_speed_m_s: 150.0,
+            cooldown_s: 3.0,
+            ground_detach_m_s: 3.0,
+            downward_detach_threshold: -0.5,
+            aim_distance_m: 10.0,
+            rumble: RumbleConfig::default(),
+        }
+    }
+}
 
-/// Launch speed at zero charge — a soft push.
-pub const MIN_YEET_SPEED_M_S: f32 = 5.0;
-/// Launch speed at full charge.
-pub const MAX_YEET_SPEED_M_S: f32 = 150.0;
+/// Charge-rumble audio parameters.
+#[derive(Clone, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct RumbleConfig {
+    /// Fundamental frequency (Hz); sub-bass, harmonics add the menace.
+    /// Applied at startup only — the loop is baked once.
+    pub base_hz: f32,
+    /// Volume at zero charge (linear).
+    pub min_volume: f32,
+    /// Volume at full charge (linear).
+    pub max_volume: f32,
+    /// Playback speed at zero charge (1.0 = original pitch).
+    pub min_speed: f32,
+    /// Playback speed at full charge (doubling = +1 octave).
+    pub max_speed: f32,
+}
 
-/// Cooldown after release before the player can charge / yeet again.
-/// Stops infinite flight by chaining yeets back-to-back.
-pub const YEET_COOLDOWN_S: f32 = 3.0;
-
-/// Small upward nudge (m/s) added to the launch velocity unless the
-/// player is aiming steeply downward. Lifts the player off the ground
-/// by a tick so the FPS controller's slide doesn't re-detect ground
-/// contact and re-apply friction the same frame, killing the launch
-/// before it leaves. ~3 m/s lifts ~5 cm in the first tick — enough.
-const YEET_GROUND_DETACH_M_S: f32 = 3.0;
-/// Look-direction `dot(up)` threshold under which we skip the upward
-/// nudge (player is aiming steeply downward and probably wants the
-/// downward velocity preserved).
-const YEET_DOWNWARD_DETACH_THRESHOLD: f32 = -0.5;
-
-/// Distance (metres) ahead of the camera that the right arm aims at
-/// while pointing. The finger line passes through this point on the
-/// look ray, so the gesture reads as "aiming at the crosshair" even
-/// though the hand stays at its natural off-centre position. Further
-/// out → arm closer to parallel-with-look (less visible aim toward
-/// the centre); closer → more exaggerated convergence.
-const POINT_AIM_DISTANCE_M: f32 = 10.0;
+impl Default for RumbleConfig {
+    fn default() -> Self {
+        Self {
+            base_hz: 50.0,
+            min_volume: 0.05,
+            max_volume: 0.6,
+            min_speed: 0.5,
+            max_speed: 1.5,
+        }
+    }
+}
 
 /// Path to the whoosh asset (looked up via `AssetServer`).
 const WHOOSH_ASSET_PATH: &str = "855844__sadiquecat__whoosh-long-bamboo-stick-os-st-13.wav";
-
-// ----------------------------------------------------------------------------
-// Procedural rumble parameters
-// ----------------------------------------------------------------------------
 
 /// Sample rate (Hz) of the synthesized rumble. 48 kHz is rodio's
 /// default-friendly rate and matches the whoosh sample's rate.
@@ -97,18 +134,6 @@ const RUMBLE_SAMPLE_RATE: u32 = 48_000;
 /// Loop length in seconds. 1.0 keeps the loop seamless for any integer
 /// frequency (all sines return to 0 at the boundary) and stays small.
 const RUMBLE_LOOP_DURATION_S: f32 = 1.0;
-/// Fundamental frequency of the rumble. Sub-bass territory — most of
-/// the menace comes from the harmonics layered on top.
-const RUMBLE_BASE_HZ: f32 = 50.0;
-
-/// Volume range for the rumble, indexed by charge ratio. Linear scale.
-const RUMBLE_MIN_VOLUME: f32 = 0.05;
-const RUMBLE_MAX_VOLUME: f32 = 0.6;
-/// Playback-speed range for the rumble. Doubling speed bumps the pitch
-/// an octave; this range keeps it sub-bass but adds menace as it
-/// climbs.
-const RUMBLE_MIN_SPEED: f32 = 0.5;
-const RUMBLE_MAX_SPEED: f32 = 1.5;
 
 // ----------------------------------------------------------------------------
 // Resources
@@ -129,11 +154,12 @@ pub(super) struct ChargeAudio {
 // ============================================================================
 
 pub(super) fn setup_charge_audio(
+    config: Res<YeetConfig>,
     asset_server: Res<AssetServer>,
     mut audio_sources: ResMut<Assets<AudioSource>>,
     mut commands: Commands,
 ) {
-    let rumble_wav = generate_rumble_wav();
+    let rumble_wav = generate_rumble_wav(config.rumble.base_hz);
     let rumble = audio_sources.add(AudioSource {
         bytes: Arc::from(rumble_wav.into_boxed_slice()),
     });
@@ -149,14 +175,14 @@ pub(super) fn setup_charge_audio(
 /// with a slow tremolo. Every frequency is a positive integer Hz, so
 /// each sine completes a whole number of cycles in 1 s and returns to
 /// zero at the loop boundary — no click on wrap.
-fn generate_rumble_wav() -> Vec<u8> {
+fn generate_rumble_wav(base_hz: f32) -> Vec<u8> {
     use std::f32::consts::TAU;
 
     let num_samples = (RUMBLE_SAMPLE_RATE as f32 * RUMBLE_LOOP_DURATION_S) as usize;
     let mut samples_i16 = Vec::with_capacity(num_samples);
     for i in 0..num_samples {
         let t = i as f32 / RUMBLE_SAMPLE_RATE as f32;
-        let f = RUMBLE_BASE_HZ;
+        let f = base_hz;
         // Fundamental + octave + subharmonic + 3rd harmonic.
         let mix = 0.60 * (TAU * f * t).sin()
             + 0.30 * (TAU * (2.0 * f) * t).sin()
@@ -323,6 +349,7 @@ fn find_descendant_by_bone_stem(
 #[allow(clippy::type_complexity, clippy::too_many_arguments)]
 pub(super) fn apply_arm_pointing(
     mut commands: Commands,
+    config: Res<YeetConfig>,
     time: Res<Time>,
     actions: Query<&ActionState<CameraAction>>,
     charge_audio: Option<Res<ChargeAudio>>,
@@ -354,9 +381,9 @@ pub(super) fn apply_arm_pointing(
         let on_cooldown = body.yeet_cooldown_s > 0.0;
         let pointing = input_pressed && !on_cooldown;
 
-        // Linear ramp of point_amount toward 0/1 over POINT_RAMP_DURATION_S.
+        // Linear ramp of point_amount toward 0/1 over point_ramp_duration_s.
         let target = if pointing { 1.0 } else { 0.0 };
-        let step = dt / POINT_RAMP_DURATION_S;
+        let step = dt / config.point_ramp_duration_s;
         body.point_amount = if target > body.point_amount {
             (body.point_amount + step).min(target)
         } else {
@@ -365,14 +392,15 @@ pub(super) fn apply_arm_pointing(
 
         // Charge accumulates while pointing, resets while not.
         if pointing {
-            body.charge_seconds = (body.charge_seconds + dt).min(MAX_CHARGE_DURATION_S);
+            body.charge_seconds = (body.charge_seconds + dt).min(config.max_charge_duration_s);
         } else {
             body.charge_seconds = 0.0;
         }
-        let charge_ratio = body.charge_seconds / MAX_CHARGE_DURATION_S;
+        let charge_ratio = body.charge_seconds / config.max_charge_duration_s;
 
         // Rumble audio lifecycle.
         update_rumble_audio(
+            &config.rumble,
             &mut commands,
             body.as_mut(),
             charge_audio.as_deref(),
@@ -435,7 +463,7 @@ pub(super) fn apply_arm_pointing(
         // `GlobalTransform` translation is its position relative to
         // the camera, and the aim target is just `look_dir * AIM`.
         let shoulder_to_cam = arm_global.translation();
-        let target_world = look_dir * POINT_AIM_DISTANCE_M;
+        let target_world = look_dir * config.aim_distance_m;
         let arm_direction_world = (target_world - shoulder_to_cam).normalize_or_zero();
         if arm_direction_world == Vec3::ZERO {
             continue;
@@ -466,6 +494,7 @@ pub(super) fn apply_arm_pointing(
 
 /// Spawn / update / despawn the looping rumble audio for one body.
 fn update_rumble_audio(
+    rumble: &RumbleConfig,
     commands: &mut Commands,
     body: &mut BodyVisual,
     charge_audio: Option<&ChargeAudio>,
@@ -484,8 +513,8 @@ fn update_rumble_audio(
                 .spawn((
                     AudioPlayer::new(audio.rumble.clone()),
                     PlaybackSettings::LOOP
-                        .with_volume(Volume::Linear(RUMBLE_MIN_VOLUME))
-                        .with_speed(RUMBLE_MIN_SPEED),
+                        .with_volume(Volume::Linear(rumble.min_volume))
+                        .with_speed(rumble.min_speed),
                 ))
                 .id();
             body.rumble_audio_entity = Some(entity);
@@ -497,8 +526,8 @@ fn update_rumble_audio(
         if let Some(entity) = body.rumble_audio_entity
             && let Ok(mut sink) = sinks.get_mut(entity)
         {
-            let volume = lerp(RUMBLE_MIN_VOLUME, RUMBLE_MAX_VOLUME, charge_ratio);
-            let speed = lerp(RUMBLE_MIN_SPEED, RUMBLE_MAX_SPEED, charge_ratio);
+            let volume = lerp(rumble.min_volume, rumble.max_volume, charge_ratio);
+            let speed = lerp(rumble.min_speed, rumble.max_speed, charge_ratio);
             sink.set_volume(Volume::Linear(volume));
             sink.set_speed(speed);
         }
@@ -521,6 +550,7 @@ fn lerp(a: f32, b: f32, t: f32) -> f32 {
 /// kick off the whoosh sample, and start the cooldown.
 pub(super) fn handle_yeet(
     mut commands: Commands,
+    config: Res<YeetConfig>,
     actions: Query<&ActionState<CameraAction>>,
     charge_audio: Option<Res<ChargeAudio>>,
     mut body_query: Query<&mut BodyVisual>,
@@ -555,8 +585,12 @@ pub(super) fn handle_yeet(
             continue;
         }
 
-        let charge_ratio = (body.charge_seconds / MAX_CHARGE_DURATION_S).clamp(0.0, 1.0);
-        let speed = lerp(MIN_YEET_SPEED_M_S, MAX_YEET_SPEED_M_S, charge_ratio);
+        let charge_ratio = (body.charge_seconds / config.max_charge_duration_s).clamp(0.0, 1.0);
+        let speed = lerp(
+            config.min_yeet_speed_m_s,
+            config.max_yeet_speed_m_s,
+            charge_ratio,
+        );
 
         let frame = RadialFrame::from_ecef_position(world_pos.position);
         let forward_horizontal =
@@ -577,8 +611,8 @@ pub(super) fn handle_yeet(
         // contact (which would re-apply friction and immediately eat
         // most of the lateral velocity, leaving only the vertical
         // kick the player feels as "jump height, no momentum").
-        let detach_up = if look_dir.dot(frame.up) > YEET_DOWNWARD_DETACH_THRESHOLD {
-            frame.up * YEET_GROUND_DETACH_M_S
+        let detach_up = if look_dir.dot(frame.up) > config.downward_detach_threshold {
+            frame.up * config.ground_detach_m_s
         } else {
             Vec3::ZERO
         };
@@ -590,7 +624,7 @@ pub(super) fn handle_yeet(
 
         // Reset charge and start cooldown.
         body.charge_seconds = 0.0;
-        body.yeet_cooldown_s = YEET_COOLDOWN_S;
+        body.yeet_cooldown_s = config.cooldown_s;
 
         // Fire-and-forget whoosh sample. `PlaybackMode::Despawn` cleans
         // up the entity once the sample finishes.

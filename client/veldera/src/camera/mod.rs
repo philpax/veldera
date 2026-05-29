@@ -32,7 +32,8 @@ mod fps;
 mod input;
 
 use avian3d::prelude::*;
-use bevy::{math::DVec3, prelude::*};
+use bevy::{math::DVec3, prelude::*, reflect::TypePath};
+use serde::Deserialize;
 
 use crate::{
     launch_params::LaunchParams,
@@ -50,23 +51,40 @@ pub use fps::{
 };
 
 // ============================================================================
-// Constants
+// Configuration
 // ============================================================================
 
-/// Minimum base speed in meters per second.
-pub const MIN_SPEED: f32 = 10.0;
-/// Maximum base speed in meters per second.
-pub const MAX_SPEED: f32 = 25_000.0;
+/// Hot-reloadable flight-camera tuning, loaded from
+/// `assets/config/camera/camera.toml`.
+#[derive(Asset, Resource, TypePath, Clone, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct CameraConfig {
+    /// Minimum base speed (m/s); lower clamp on the scroll-adjusted fly speed.
+    pub min_speed: f32,
+    /// Maximum base speed (m/s); upper clamp on the scroll-adjusted fly speed.
+    pub max_speed: f32,
+    /// Default vertical field of view (degrees). ~75° vertical gives ~100°
+    /// horizontal at 16:9 — wider than Quake-style 90° horizontal, keeps the
+    /// first-person body from feeling oppressively large.
+    pub default_fov_deg: f32,
+    /// Minimum vertical FoV slider value (degrees).
+    pub min_fov_deg: f32,
+    /// Maximum vertical FoV slider value (degrees). Beyond this, fish-eye
+    /// distortion gets unpleasant.
+    pub max_fov_deg: f32,
+}
 
-/// Default vertical field of view, in degrees. ~75° vertical gives ~100°
-/// horizontal at 16:9 — slightly wider than 90° horizontal Quake-style,
-/// keeps the first-person body from feeling oppressively large.
-pub const DEFAULT_FOV_DEG: f32 = 75.0;
-/// Minimum vertical FoV slider value, in degrees.
-pub const MIN_FOV_DEG: f32 = 30.0;
-/// Maximum vertical FoV slider value, in degrees. Beyond this fish-eye
-/// distortion gets unpleasant in a 3D scene.
-pub const MAX_FOV_DEG: f32 = 120.0;
+impl Default for CameraConfig {
+    fn default() -> Self {
+        Self {
+            min_speed: 10.0,
+            max_speed: 25_000.0,
+            default_fov_deg: 75.0,
+            min_fov_deg: 30.0,
+            max_fov_deg: 120.0,
+        }
+    }
+}
 
 // ============================================================================
 // Camera mode
@@ -230,7 +248,10 @@ impl Default for CameraSettings {
             base_speed: 1000.0,
             boost_multiplier: 5.0,
             mouse_sensitivity: 0.001,
-            fov_radians: DEFAULT_FOV_DEG.to_radians(),
+            // Mirrors `CameraConfig::default_fov_deg`; a `Default` impl can't
+            // read the config resource. `sync_fov_from_config` overwrites this
+            // once `config/camera/camera.toml` loads.
+            fov_radians: 75.0_f32.to_radians(),
             teleport_animation_mode: TeleportAnimationMode::default(),
         }
     }
@@ -330,32 +351,45 @@ pub struct CameraControllerPlugin;
 
 impl Plugin for CameraControllerPlugin {
     fn build(&self, app: &mut App) {
-        app.register_type::<follow::FollowCameraConfig>()
-            .init_resource::<CameraSettings>()
-            .init_resource::<CameraModeState>()
-            .init_resource::<CameraModeTransitions>()
-            .init_resource::<AltitudeRequest>()
-            .init_resource::<HeadingRequest>()
-            .init_resource::<TranslateRequest>()
-            .add_plugins((
-                flycam::FlycamPlugin,
-                fps::FpsControllerPlugin,
-                follow::FollowCameraPlugin,
-                input::CameraInputPlugin,
-                body::BodyPlugin,
-            ))
-            .add_systems(PostStartup, apply_initial_camera_mode)
-            .add_systems(
-                Update,
-                (
-                    process_mode_transitions,
-                    process_altitude_request,
-                    process_heading_request,
-                    process_translate_request,
-                    sync_camera_fov,
-                )
-                    .chain(),
-            );
+        app.add_plugins(crate::config::ConfigPlugin::<CameraConfig>::new(
+            "config/camera/camera.toml",
+        ))
+        .register_type::<follow::FollowCameraConfig>()
+        .init_resource::<CameraSettings>()
+        .init_resource::<CameraModeState>()
+        .init_resource::<CameraModeTransitions>()
+        .init_resource::<AltitudeRequest>()
+        .init_resource::<HeadingRequest>()
+        .init_resource::<TranslateRequest>()
+        .add_plugins((
+            flycam::FlycamPlugin,
+            fps::FpsControllerPlugin,
+            follow::FollowCameraPlugin,
+            input::CameraInputPlugin,
+            body::BodyPlugin,
+        ))
+        .add_systems(PostStartup, apply_initial_camera_mode)
+        .add_systems(
+            Update,
+            (
+                sync_fov_from_config,
+                process_mode_transitions,
+                process_altitude_request,
+                process_heading_request,
+                process_translate_request,
+                sync_camera_fov,
+            )
+                .chain(),
+        );
+    }
+}
+
+/// Apply [`CameraConfig::default_fov_deg`] to [`CameraSettings`] whenever the
+/// config (re)loads, so editing `camera.toml` updates the FoV live. The UI
+/// slider still edits `fov_radians` directly between reloads.
+fn sync_fov_from_config(config: Res<CameraConfig>, mut settings: ResMut<CameraSettings>) {
+    if config.is_changed() {
+        settings.fov_radians = config.default_fov_deg.to_radians();
     }
 }
 

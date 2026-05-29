@@ -110,6 +110,11 @@ impl Plugin for PhysicsIntegrationPlugin {
         app.add_plugins(PhysicsPlugins::default())
             // Add debug rendering plugin (disabled by default).
             .add_plugins(PhysicsDebugPlugin)
+            .add_plugins(
+                crate::config::ConfigPlugin::<projectile::ProjectileConfig>::new(
+                    "config/physics/projectile.toml",
+                ),
+            )
             .insert_resource(Gravity(Vec3::ZERO))
             .init_resource::<PhysicsState>()
             .init_resource::<MotionTracker>()

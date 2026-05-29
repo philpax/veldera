@@ -63,6 +63,8 @@ tracing = "0.1"
 urlencoding = "2"
 # Cross-platform time support.
 web-time = "1"
+# Serde-backed asset loaders; we use the TOML one for hot-reloadable configs.
+bevy_common_assets = { version = "0.15", features = ["toml"] }
 
 # Native: Additional Bevy features and Tokio runtime.
 [target.'cfg(not(target_family = "wasm"))'.dependencies]
@@ -78,6 +80,9 @@ bevy = { version = "0.18.0", default-features = false, features = [
   "bevy_render",
   "bevy_window",
   "bevy_winit",
+  # Watches `assets/` and emits `AssetEvent::Modified` so config TOML edits
+  # hot-reload while the game runs. Native only; browsers can't watch the FS.
+  "file_watcher",
   "gltf_animation",
   "jpeg",
   "multi_threaded",

@@ -1,0 +1,10 @@
+# Locomotion blend tuning. All speeds are metres per second.
+
+# Speeds below this are "idle" — no directional clip contributes.
+deadzone_m_s = 0.3
+# Reference speed for the walking clip (crossfaded from idle below, running above).
+walk_ref_m_s = 3.0
+# Reference speed for the running clip (anything faster stays pinned to running).
+run_ref_m_s = 8.0
+# Vertical speed above which the body switches to the airborne (jump-loop) pose.
+airborne_vertical_m_s = 2.0

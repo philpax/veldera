@@ -14,7 +14,7 @@ use crate::{
     },
 };
 
-use super::{CameraModeState, CameraSettings, FlightCamera, MAX_SPEED, MIN_SPEED};
+use super::{CameraConfig, CameraModeState, CameraSettings, FlightCamera};
 
 // ============================================================================
 // Plugin
@@ -65,6 +65,7 @@ fn is_follow_entity_mode(state: Res<CameraModeState>) -> bool {
 
 /// Adjust speed with mouse scroll wheel.
 fn adjust_speed_with_scroll(
+    config: Res<CameraConfig>,
     action_query: Query<&ActionState<CameraAction>>,
     mut settings: ResMut<CameraSettings>,
 ) {
@@ -76,7 +77,8 @@ fn adjust_speed_with_scroll(
     if scroll != 0.0 {
         // Adjust speed logarithmically for smooth scaling.
         let factor = 1.1_f32.powf(scroll);
-        settings.base_speed = (settings.base_speed * factor).clamp(MIN_SPEED, MAX_SPEED);
+        settings.base_speed =
+            (settings.base_speed * factor).clamp(config.min_speed, config.max_speed);
     }
 }
 

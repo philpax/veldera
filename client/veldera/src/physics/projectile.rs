@@ -5,10 +5,11 @@
 //! outside physics range or when their contact tile unloads.
 
 use avian3d::prelude::*;
-use bevy::{audio::Volume, prelude::*};
+use bevy::{audio::Volume, prelude::*, reflect::TypePath};
 use glam::DVec3;
 use leafwing_input_manager::prelude::*;
 use rand::Rng;
+use serde::Deserialize;
 
 use crate::{
     camera::CameraModeState,
@@ -29,20 +30,34 @@ pub struct BounceSoundHandle(Handle<AudioSource>);
 #[derive(Resource)]
 pub struct FireSoundHandle(Handle<AudioSource>);
 
-/// Base projectile radius in meters.
-const PROJECTILE_RADIUS_BASE: f32 = 1.0;
+/// Hot-reloadable projectile tuning, loaded from
+/// `assets/config/physics/projectile.toml`.
+#[derive(Asset, Resource, TypePath, Clone, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct ProjectileConfig {
+    /// Base projectile radius (m), multiplied by a random scale per shot.
+    pub radius_base: f32,
+    /// Minimum random radius scale factor.
+    pub radius_min_scale: f32,
+    /// Maximum random radius scale factor.
+    pub radius_max_scale: f32,
+    /// Initial projectile speed (m/s).
+    pub speed: f32,
+    /// Minimum time between spawns (s).
+    pub fire_debounce_secs: f32,
+}
 
-/// Minimum radius scale factor.
-const PROJECTILE_RADIUS_MIN_SCALE: f32 = 0.5;
-
-/// Maximum radius scale factor.
-const PROJECTILE_RADIUS_MAX_SCALE: f32 = 1.5;
-
-/// Initial projectile speed in m/s.
-const PROJECTILE_SPEED: f32 = 50.0;
-
-/// Minimum time between projectile spawns in seconds.
-const FIRE_DEBOUNCE_SECS: f32 = 0.2;
+impl Default for ProjectileConfig {
+    fn default() -> Self {
+        Self {
+            radius_base: 1.0,
+            radius_min_scale: 0.5,
+            radius_max_scale: 1.5,
+            speed: 50.0,
+            fire_debounce_secs: 0.2,
+        }
+    }
+}
 
 /// Tracks time since last projectile spawn for debouncing.
 #[derive(Resource, Default)]
@@ -53,8 +68,8 @@ pub struct ProjectileFireState {
 
 impl ProjectileFireState {
     /// Check if enough time has passed to fire again.
-    fn can_fire(&self) -> bool {
-        self.time_since_last_fire >= FIRE_DEBOUNCE_SECS
+    fn can_fire(&self, debounce_secs: f32) -> bool {
+        self.time_since_last_fire >= debounce_secs
     }
 
     /// Record that a projectile was just fired.
@@ -82,6 +97,7 @@ pub struct Projectile {
 #[allow(clippy::too_many_arguments)]
 pub fn click_to_fire_system(
     mut commands: Commands,
+    config: Res<ProjectileConfig>,
     time: Res<Time>,
     action_query: Query<&ActionState<CameraAction>>,
     mode_state: Res<CameraModeState>,
@@ -109,7 +125,7 @@ pub fn click_to_fire_system(
     }
 
     // Debounce check.
-    if !fire_state.can_fire() {
+    if !fire_state.can_fire(config.fire_debounce_secs) {
         return;
     }
 
@@ -122,6 +138,7 @@ pub fn click_to_fire_system(
     let camera_dir = transform.forward().as_vec3();
 
     spawn_projectile(
+        &config,
         &mut commands,
         &mut meshes,
         &mut materials,
@@ -147,6 +164,7 @@ pub fn click_to_fire_system(
 
 /// Spawn a projectile sphere from the camera position in the camera direction.
 fn spawn_projectile(
+    config: &ProjectileConfig,
     commands: &mut Commands,
     meshes: &mut Assets<Mesh>,
     materials: &mut Assets<StandardMaterial>,
@@ -156,8 +174,8 @@ fn spawn_projectile(
     let mut rng = rand::rng();
 
     // Randomize radius.
-    let radius_scale = rng.random_range(PROJECTILE_RADIUS_MIN_SCALE..=PROJECTILE_RADIUS_MAX_SCALE);
-    let radius = PROJECTILE_RADIUS_BASE * radius_scale;
+    let radius_scale = rng.random_range(config.radius_min_scale..=config.radius_max_scale);
+    let radius = config.radius_base * radius_scale;
 
     // Generate pastel color using HSL.
     let hue = rng.random_range(0.0..360.0);
@@ -171,7 +189,7 @@ fn spawn_projectile(
     let physics_pos = Vec3::new(offset.x, offset.y, offset.z);
 
     // Initial velocity in camera direction.
-    let initial_velocity = camera_dir * PROJECTILE_SPEED;
+    let initial_velocity = camera_dir * config.speed;
 
     // Create sphere mesh with randomized size.
     let mesh = meshes.add(Sphere::new(radius));

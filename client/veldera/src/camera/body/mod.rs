@@ -190,12 +190,13 @@ pub struct BodyVisual {
     /// in by this factor so the arm raises and lowers smoothly.
     pub point_amount: f32,
     /// Seconds the Point action has been held this charge, capped at
-    /// [`arm_point::MAX_CHARGE_DURATION_S`]. Maps linearly to yeet
-    /// speed at release; resets to 0 on yeet or when not pointing.
+    /// [`YeetConfig::max_charge_duration_s`](arm_point::YeetConfig). Maps
+    /// linearly to yeet speed at release; resets to 0 on yeet or when not
+    /// pointing.
     pub charge_seconds: f32,
     /// Seconds remaining before the player can yeet again. Set to
-    /// [`arm_point::YEET_COOLDOWN_S`] on release; while > 0 the Point
-    /// action is treated as not pressed.
+    /// [`YeetConfig::cooldown_s`](arm_point::YeetConfig) on release; while > 0
+    /// the Point action is treated as not pressed.
     pub yeet_cooldown_s: f32,
     /// Looping rumble audio entity currently playing while charging.
     /// Spawned on first Point press (off cooldown), despawned on
@@ -216,65 +217,76 @@ pub struct BodyPlugin;
 
 impl Plugin for BodyPlugin {
     fn build(&self, app: &mut App) {
-        app.init_resource::<CharacterMetrics>()
-            .init_resource::<BodyTuning>()
-            .init_resource::<BodyAssets>()
-            .init_resource::<EyeLerp>()
-            .add_systems(Startup, (request_body_asset, arm_point::setup_charge_audio))
-            .add_systems(
-                Update,
-                (
-                    consume_loaded_metrics,
-                    spawn_body_on_fps_enter,
-                    despawn_body_on_fps_exit,
-                    head::hide_head_bone,
-                    head::hide_head_attached_meshes,
-                    head::disable_body_frustum_culling,
-                    populate_bone_mask_groups,
-                    install_animation_player,
-                    arm_point::cache_right_arm,
-                    locomotion::update_locomotion_blend,
-                    arm_point::handle_yeet,
-                    ragdoll::manage_ragdoll_skeleton,
-                )
-                    .chain(),
+        app.add_plugins((
+            crate::config::ConfigPlugin::<ragdoll::RagdollConfig>::new(
+                "config/camera/body/ragdoll.toml",
+            ),
+            crate::config::ConfigPlugin::<locomotion::LocomotionConfig>::new(
+                "config/camera/body/locomotion.toml",
+            ),
+            crate::config::ConfigPlugin::<arm_point::YeetConfig>::new(
+                "config/camera/body/arm_point.toml",
+            ),
+        ))
+        .init_resource::<CharacterMetrics>()
+        .init_resource::<BodyTuning>()
+        .init_resource::<BodyAssets>()
+        .init_resource::<EyeLerp>()
+        .add_systems(Startup, (request_body_asset, arm_point::setup_charge_audio))
+        .add_systems(
+            Update,
+            (
+                consume_loaded_metrics,
+                spawn_body_on_fps_enter,
+                despawn_body_on_fps_exit,
+                head::hide_head_bone,
+                head::hide_head_attached_meshes,
+                head::disable_body_frustum_culling,
+                populate_bone_mask_groups,
+                install_animation_player,
+                arm_point::cache_right_arm,
+                locomotion::update_locomotion_blend,
+                arm_point::handle_yeet,
+                ragdoll::manage_ragdoll_skeleton,
             )
-            // Re-pin the kinematic neck anchor to the controller right
-            // before Avian's solve (and after `apply_origin_shift`,
-            // which lives in the previous schedule), so the dangling
-            // chain hangs from the controller's current position this
-            // physics tick.
-            .add_systems(
-                bevy::app::FixedPostUpdate,
-                ragdoll::drive_ragdoll_anchor.before(avian3d::prelude::PhysicsSystems::Prepare),
+                .chain(),
+        )
+        // Re-pin the kinematic neck anchor to the controller right
+        // before Avian's solve (and after `apply_origin_shift`,
+        // which lives in the previous schedule), so the dangling
+        // chain hangs from the controller's current position this
+        // physics tick.
+        .add_systems(
+            bevy::app::FixedPostUpdate,
+            ragdoll::drive_ragdoll_anchor.before(avian3d::prelude::PhysicsSystems::Prepare),
+        )
+        .add_systems(
+            bevy::app::RunFixedMainLoop,
+            sync_body_transform.in_set(bevy::app::RunFixedMainLoopSystems::AfterFixedMainLoop),
+        )
+        // Arm-pointing IK runs in PostUpdate AFTER `animate_targets`
+        // writes bone poses (so we can stomp the right arm) but
+        // BEFORE transform propagation builds GlobalTransforms (so
+        // the head-lock and rendering see our override).
+        .add_systems(
+            PostUpdate,
+            (
+                arm_point::apply_arm_pointing,
+                ragdoll::sync_bones_from_physics,
             )
-            .add_systems(
-                bevy::app::RunFixedMainLoop,
-                sync_body_transform.in_set(bevy::app::RunFixedMainLoopSystems::AfterFixedMainLoop),
-            )
-            // Arm-pointing IK runs in PostUpdate AFTER `animate_targets`
-            // writes bone poses (so we can stomp the right arm) but
-            // BEFORE transform propagation builds GlobalTransforms (so
-            // the head-lock and rendering see our override).
-            .add_systems(
-                PostUpdate,
-                (
-                    arm_point::apply_arm_pointing,
-                    ragdoll::sync_bones_from_physics,
-                )
-                    .chain()
-                    .after(bevy::app::AnimationSystems)
-                    .before(bevy::transform::TransformSystems::Propagate),
-            )
-            // Head-lock runs in PostUpdate AFTER transform propagation so
-            // the head bone's GlobalTransform reflects the animated pose
-            // we want to compensate for. The computed delta is consumed
-            // by next frame's `sync_body_transform` — one-frame stale,
-            // which is imperceptible at typical render rates.
-            .add_systems(
-                PostUpdate,
-                head::update_head_lock_delta.after(bevy::transform::TransformSystems::Propagate),
-            );
+                .chain()
+                .after(bevy::app::AnimationSystems)
+                .before(bevy::transform::TransformSystems::Propagate),
+        )
+        // Head-lock runs in PostUpdate AFTER transform propagation so
+        // the head bone's GlobalTransform reflects the animated pose
+        // we want to compensate for. The computed delta is consumed
+        // by next frame's `sync_body_transform` — one-frame stale,
+        // which is imperceptible at typical render rates.
+        .add_systems(
+            PostUpdate,
+            head::update_head_lock_delta.after(bevy::transform::TransformSystems::Propagate),
+        );
     }
 }
 
