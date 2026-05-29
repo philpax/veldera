@@ -40,14 +40,11 @@ use crate::{
     world::floating_origin::{FloatingOriginCamera, WorldPosition},
 };
 
-pub use body::{
-    BodyTuning, CharacterMetrics, EYE_FORWARD_OFFSET_SLIDER_RANGE, EYE_HEIGHT_SLIDER_RANGE,
-    MAX_EYE_LERP_DURATION_S,
-};
+pub use body::{BodyConfig, BodyTuning, CharacterMetrics};
 pub use follow::{FollowCameraConfig, FollowEntityTarget, FollowedEntity};
 pub use fps::{
-    FPS_PLAYER_MAX_RADIUS_RATIO, FPS_PLAYER_MIN_RADIUS_RATIO, FpsController, FpsPlayerConfig,
-    LogicalPlayer, RadialFrame, RenderPlayer, direction_to_yaw_pitch, spawn_fps_player,
+    FpsController, FpsPlayerConfig, LogicalPlayer, RadialFrame, RenderPlayer,
+    direction_to_yaw_pitch, spawn_fps_player,
 };
 
 // ============================================================================

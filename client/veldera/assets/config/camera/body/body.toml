@@ -1,0 +1,16 @@
+# First-person body tuning. Eye height/forward *values* come from the character
+# model; this is the cross-fade timing, the Camera-tab slider bounds, and the
+# head-lock clamp.
+
+# Eye cross-fade when entering FPS mode: default duration, and slider upper bound (s).
+default_eye_lerp_duration_s = 0.3
+max_eye_lerp_duration_s = 2.0
+
+# Camera-tab slider bounds [min, max] (m). The model is the source of truth; wide
+# ranges let unusual placements be auditioned.
+eye_height_slider = [-0.5, 3.0]
+eye_forward_offset_slider = [-0.5, 0.5]
+
+# Max head-lock compensation before clamping (m) — caps how far the body root is
+# shifted to keep the animated head pinned to the camera.
+head_lock_max_delta_m = 0.5

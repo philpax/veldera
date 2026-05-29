@@ -7,10 +7,9 @@ use bevy_egui::egui;
 
 use crate::{
     camera::{
-        BodyTuning, CameraConfig, CameraMode, CameraModeState, CameraSettings, CharacterMetrics,
-        EYE_FORWARD_OFFSET_SLIDER_RANGE, EYE_HEIGHT_SLIDER_RANGE, FPS_PLAYER_MAX_RADIUS_RATIO,
-        FPS_PLAYER_MIN_RADIUS_RATIO, FlightCamera, FollowCameraConfig, FollowEntityTarget,
-        FpsPlayerConfig, MAX_EYE_LERP_DURATION_S, TeleportAnimationMode,
+        BodyConfig, BodyTuning, CameraConfig, CameraMode, CameraModeState, CameraSettings,
+        CharacterMetrics, FlightCamera, FollowCameraConfig, FollowEntityTarget, FpsPlayerConfig,
+        TeleportAnimationMode,
     },
     world::floating_origin::FloatingOriginCamera,
 };
@@ -20,6 +19,7 @@ use crate::{
 pub(super) struct CameraParams<'w, 's> {
     pub settings: ResMut<'w, CameraSettings>,
     pub config: Res<'w, CameraConfig>,
+    pub body_config: Res<'w, BodyConfig>,
     pub camera_mode: Res<'w, CameraModeState>,
     pub player_config: ResMut<'w, FpsPlayerConfig>,
     pub body_tuning: ResMut<'w, BodyTuning>,
@@ -135,6 +135,9 @@ fn render_fov_slider(ui: &mut egui::Ui, camera: &mut CameraParams) {
 /// re-running the converter; a "Reset" button restores the model-derived
 /// values from `CharacterMetrics`.
 fn render_body_tuning(ui: &mut egui::Ui, camera: &mut CameraParams) {
+    let eye_height_slider = camera.body_config.eye_height_slider;
+    let eye_forward_slider = camera.body_config.eye_forward_offset_slider;
+    let max_eye_lerp = camera.body_config.max_eye_lerp_duration_s;
     let tuning = &mut *camera.body_tuning;
     let model = camera.character_metrics.resolved.as_ref();
 
@@ -147,9 +150,12 @@ fn render_body_tuning(ui: &mut egui::Ui, camera: &mut CameraParams) {
         ui.horizontal(|ui| {
             ui.label("Eye height:");
             ui.add(
-                egui::Slider::new(&mut tuning.eye_height_m, EYE_HEIGHT_SLIDER_RANGE)
-                    .step_by(0.01)
-                    .suffix(" m"),
+                egui::Slider::new(
+                    &mut tuning.eye_height_m,
+                    eye_height_slider[0]..=eye_height_slider[1],
+                )
+                .step_by(0.01)
+                .suffix(" m"),
             );
             if let Some(m) = model
                 && ui
@@ -166,7 +172,7 @@ fn render_body_tuning(ui: &mut egui::Ui, camera: &mut CameraParams) {
             ui.add(
                 egui::Slider::new(
                     &mut tuning.eye_forward_offset_m,
-                    EYE_FORWARD_OFFSET_SLIDER_RANGE,
+                    eye_forward_slider[0]..=eye_forward_slider[1],
                 )
                 .step_by(0.005)
                 .suffix(" m"),
@@ -184,12 +190,9 @@ fn render_body_tuning(ui: &mut egui::Ui, camera: &mut CameraParams) {
         ui.horizontal(|ui| {
             ui.label("Eye lerp duration:");
             ui.add(
-                egui::Slider::new(
-                    &mut tuning.eye_lerp_duration_s,
-                    0.0..=MAX_EYE_LERP_DURATION_S,
-                )
-                .step_by(0.05)
-                .suffix(" s"),
+                egui::Slider::new(&mut tuning.eye_lerp_duration_s, 0.0..=max_eye_lerp)
+                    .step_by(0.05)
+                    .suffix(" s"),
             );
         });
 
@@ -208,6 +211,7 @@ fn render_body_tuning(ui: &mut egui::Ui, camera: &mut CameraParams) {
 /// re-reads each tick, so the collider and the eye height update live.
 fn render_player_size_config(ui: &mut egui::Ui, camera: &mut CameraParams) {
     let config = &mut *camera.player_config;
+    let (min_radius_ratio, max_radius_ratio) = (config.min_radius_ratio, config.max_radius_ratio);
     ui.collapsing("Player size", |ui| {
         ui.horizontal(|ui| {
             ui.label("Height:");
@@ -222,7 +226,7 @@ fn render_player_size_config(ui: &mut egui::Ui, camera: &mut CameraParams) {
             ui.add(
                 egui::Slider::new(
                     &mut config.radius_ratio,
-                    FPS_PLAYER_MIN_RADIUS_RATIO..=FPS_PLAYER_MAX_RADIUS_RATIO,
+                    min_radius_ratio..=max_radius_ratio,
                 )
                 .step_by(0.01),
             );

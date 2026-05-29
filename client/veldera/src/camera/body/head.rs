@@ -5,7 +5,7 @@
 
 use bevy::{camera::visibility::NoFrustumCulling, prelude::*};
 
-use super::{BodyVisual, CharacterMetrics};
+use super::{BodyConfig, BodyVisual, CharacterMetrics};
 use crate::camera::fps::{FpsController, FpsPlayerConfig, LogicalPlayer};
 
 // ============================================================================
@@ -162,12 +162,6 @@ pub(super) fn disable_body_frustum_culling(
 // space, even when the spine bends during locomotion.
 // ============================================================================
 
-/// Maximum head-lock compensation in metres. Animation can push the
-/// head a few centimetres in any direction; if we ever see a delta
-/// larger than this we clamp rather than risk teleporting the body to
-/// the moon on a transient garbage GlobalTransform read.
-const HEAD_LOCK_MAX_DELTA_M: f32 = 0.5;
-
 /// Read the animated head-bone position out of `GlobalTransform`, work
 /// out how far it's drifted from where the bind-pose head would be
 /// relative to the body root, and store the offset on the `BodyVisual`.
@@ -178,6 +172,7 @@ const HEAD_LOCK_MAX_DELTA_M: f32 = 0.5;
 pub(super) fn update_head_lock_delta(
     metrics: Res<CharacterMetrics>,
     config: Res<FpsPlayerConfig>,
+    body_config: Res<BodyConfig>,
     mut body_query: Query<(&mut BodyVisual, &Transform), Without<LogicalPlayer>>,
     logical_query: Query<&FpsController, With<LogicalPlayer>>,
     global_transforms: Query<&GlobalTransform>,
@@ -221,9 +216,10 @@ pub(super) fn update_head_lock_delta(
             body_world + body_transform.rotation * Vec3::new(0.0, scaled_head_y, 0.0);
 
         let actual_head_world = head_global.translation();
+        let max_delta = body_config.head_lock_max_delta_m;
         let mut delta = actual_head_world - desired_head_world;
-        if delta.length_squared() > HEAD_LOCK_MAX_DELTA_M * HEAD_LOCK_MAX_DELTA_M {
-            delta = delta.normalize_or_zero() * HEAD_LOCK_MAX_DELTA_M;
+        if delta.length_squared() > max_delta * max_delta {
+            delta = delta.normalize_or_zero() * max_delta;
         }
         body.head_lock_delta = delta;
     }

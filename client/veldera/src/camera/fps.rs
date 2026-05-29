@@ -77,6 +77,7 @@ impl Plugin for FpsControllerPlugin {
         .init_resource::<PreservedFpsState>()
         .init_resource::<FpsPlayerConfig>()
         .add_systems(PreUpdate, clear_fixed_timestep_flag)
+        .add_systems(Update, sync_fps_player_geometry)
         .add_systems(
             FixedPreUpdate,
             (
@@ -166,6 +167,19 @@ pub struct FpsConfig {
     /// slide almost immediately (you crumple where you hit) and the grounded
     /// timer elapses quickly so recovery fires.
     pub landing_friction: f32,
+    /// Crouched height as a fraction of upright height. These capsule-geometry
+    /// values are mirrored into [`FpsPlayerConfig`] (the resource the controller
+    /// methods read) by [`sync_fps_player_geometry`].
+    pub crouch_height_ratio: f32,
+    /// Minimum allowed `radius_ratio` (slider floor + clamp). A very thin
+    /// capsule wedges into collision gaps, so keep a sensible floor.
+    pub min_radius_ratio: f32,
+    /// Maximum allowed `radius_ratio` (slider ceiling + clamp). A capsule needs
+    /// `radius < height / 2`, so keep this strictly below `0.5`.
+    pub max_radius_ratio: f32,
+    /// Tolerance (radians) keeping look pitch just shy of straight up/down to
+    /// avoid the look basis degenerating at the poles.
+    pub angle_epsilon: f32,
 }
 
 impl Default for FpsConfig {
@@ -175,6 +189,10 @@ impl Default for FpsConfig {
             airborne_threshold_s: 1.0,
             ground_recovery_s: 0.15,
             landing_friction: 40.0,
+            crouch_height_ratio: 1.0 / 1.8,
+            min_radius_ratio: 0.05,
+            max_radius_ratio: 0.49,
+            angle_epsilon: 0.001_953_125,
         }
     }
 }
@@ -214,29 +232,25 @@ pub struct FpsPlayerConfig {
     pub height: f32,
     /// Capsule radius as a fraction of `height`.
     pub radius_ratio: f32,
+    /// Crouched height as a fraction of upright `height`. Synced from
+    /// [`FpsConfig::crouch_height_ratio`] by [`sync_fps_player_geometry`].
+    pub crouch_height_ratio: f32,
+    /// Minimum allowed `radius_ratio` (slider floor + clamp). Synced from
+    /// [`FpsConfig::min_radius_ratio`].
+    pub min_radius_ratio: f32,
+    /// Maximum allowed `radius_ratio` (slider ceiling + clamp). Synced from
+    /// [`FpsConfig::max_radius_ratio`].
+    pub max_radius_ratio: f32,
 }
-
-/// Crouched height as a fraction of upright `FpsPlayerConfig::height`.
-///
-/// Chosen to match the previous hard-coded ratio of `1.0 / 1.8`, so the
-/// crouch animation feels the same at the default player size.
-const CROUCH_HEIGHT_RATIO: f32 = 1.0 / 1.8;
-
-/// Maximum allowed `radius_ratio`. A capsule needs `radius < height / 2`
-/// or the hemispheres overlap and the cylinder segment vanishes; clamp
-/// slightly under `0.5` so we always have a non-degenerate capsule.
-pub const FPS_PLAYER_MAX_RADIUS_RATIO: f32 = 0.49;
-
-/// Minimum allowed `radius_ratio`. A very thin capsule is fine
-/// geometrically but causes the controller to wedge into collision
-/// gaps; pick a sensible floor for the slider.
-pub const FPS_PLAYER_MIN_RADIUS_RATIO: f32 = 0.05;
 
 impl Default for FpsPlayerConfig {
     fn default() -> Self {
         Self {
             height: 1.8,
             radius_ratio: 0.5 / 1.8,
+            crouch_height_ratio: 1.0 / 1.8,
+            min_radius_ratio: 0.05,
+            max_radius_ratio: 0.49,
         }
     }
 }
@@ -247,12 +261,12 @@ impl FpsPlayerConfig {
         self.height
             * self
                 .radius_ratio
-                .clamp(FPS_PLAYER_MIN_RADIUS_RATIO, FPS_PLAYER_MAX_RADIUS_RATIO)
+                .clamp(self.min_radius_ratio, self.max_radius_ratio)
     }
 
     /// Crouched capsule height derived from upright `height`.
     pub fn crouch_height(&self) -> f32 {
-        self.height * CROUCH_HEIGHT_RATIO
+        self.height * self.crouch_height_ratio
     }
 }
 
@@ -561,12 +575,22 @@ pub(super) fn preserve_and_cleanup(
 // Controller systems
 // ============================================================================
 
-const ANGLE_EPSILON: f32 = 0.001953125;
-
 fn clear_fixed_timestep_flag(
     mut did_fixed_timestep_run_this_frame: ResMut<DidFixedTimestepRunThisFrame>,
 ) {
     did_fixed_timestep_run_this_frame.0 = false;
+}
+
+/// Mirror the capsule-geometry ratios from [`FpsConfig`] (file-backed) into
+/// [`FpsPlayerConfig`] (the runtime resource the controller methods read)
+/// whenever the config (re)loads. `height`/`radius_ratio` stay owned by the
+/// model load and the Camera-tab sliders.
+fn sync_fps_player_geometry(config: Res<FpsConfig>, mut player_config: ResMut<FpsPlayerConfig>) {
+    if config.is_changed() {
+        player_config.crouch_height_ratio = config.crouch_height_ratio;
+        player_config.min_radius_ratio = config.min_radius_ratio;
+        player_config.max_radius_ratio = config.max_radius_ratio;
+    }
 }
 
 fn set_fixed_time_step_flag(
@@ -593,12 +617,14 @@ fn clear_input(mut query: Query<&mut FpsControllerInput>) {
 fn fps_controller_input(
     action_query: Query<&ActionState<CameraAction>>,
     settings: Res<CameraSettings>,
+    config: Res<FpsConfig>,
     mut query: Query<(&FpsController, &mut FpsControllerInput)>,
 ) {
     let Ok(action_state) = action_query.single() else {
         return;
     };
 
+    let angle_epsilon = config.angle_epsilon;
     for (_controller, mut input) in query
         .iter_mut()
         .filter(|(controller, _)| controller.enable_input)
@@ -609,7 +635,7 @@ fn fps_controller_input(
         // stays on the normal eye path, so the player can still look
         // around freely as the body dangles below.
         input.pitch = (input.pitch - mouse_delta.y)
-            .clamp(-FRAC_PI_2 + ANGLE_EPSILON, FRAC_PI_2 - ANGLE_EPSILON);
+            .clamp(-FRAC_PI_2 + angle_epsilon, FRAC_PI_2 - angle_epsilon);
         input.yaw -= mouse_delta.x;
         if input.yaw.abs() > PI {
             input.yaw = input.yaw.rem_euclid(TAU);

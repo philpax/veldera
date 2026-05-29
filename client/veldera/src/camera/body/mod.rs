@@ -33,6 +33,7 @@ use bevy::{
     animation::{AnimationTargetId, graph::AnimationNodeIndex},
     gltf::Gltf,
     prelude::*,
+    reflect::TypePath,
     scene::SceneRoot,
 };
 use glam::DVec3;
@@ -43,10 +44,7 @@ use bones::{LOWER_BODY_MASK, UPPER_BODY_MASK};
 use crate::{
     camera::{
         CameraModeState,
-        fps::{
-            FPS_PLAYER_MAX_RADIUS_RATIO, FPS_PLAYER_MIN_RADIUS_RATIO, FpsController,
-            FpsPlayerConfig, LogicalPlayer, RadialFrame,
-        },
+        fps::{FpsController, FpsPlayerConfig, LogicalPlayer, RadialFrame},
     },
     world::floating_origin::WorldPosition,
 };
@@ -58,17 +56,39 @@ use crate::{
 /// Path to the character glTF, relative to the asset root.
 pub const BODY_GLTF_PATH: &str = "characters/leonard.glb";
 
-/// Default duration of the eye cross-fade when entering FPS mode, in
-/// seconds. Tweakable at runtime via [`BodyTuning::eye_lerp_duration_s`].
-pub const DEFAULT_EYE_LERP_DURATION_S: f32 = 0.3;
-/// Upper bound on the eye-lerp duration slider, in seconds.
-pub const MAX_EYE_LERP_DURATION_S: f32 = 2.0;
-/// Slider bounds for tweaking the eye height. The model is the source of
-/// truth, but a wide range lets us audition unusual placements (e.g. for
-/// non-humanoid characters once we add them).
-pub const EYE_HEIGHT_SLIDER_RANGE: std::ops::RangeInclusive<f32> = -0.5..=3.0;
-/// Slider bounds for tweaking the forward eye offset.
-pub const EYE_FORWARD_OFFSET_SLIDER_RANGE: std::ops::RangeInclusive<f32> = -0.5..=0.5;
+/// Hot-reloadable first-person body tuning, loaded from
+/// `assets/config/camera/body/body.toml`. Eye height/forward *values* come from
+/// the character model ([`CharacterMetrics`]); this carries the cross-fade
+/// timing, the Camera-tab slider bounds, and the head-lock clamp.
+#[derive(Asset, Resource, TypePath, Clone, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct BodyConfig {
+    /// Default eye cross-fade duration when entering FPS mode (s); seeds
+    /// [`BodyTuning::eye_lerp_duration_s`].
+    pub default_eye_lerp_duration_s: f32,
+    /// Upper bound of the eye-lerp duration slider (s).
+    pub max_eye_lerp_duration_s: f32,
+    /// `[min, max]` bounds for the eye-height slider (m). The model is the
+    /// source of truth; a wide range lets unusual placements be auditioned.
+    pub eye_height_slider: [f32; 2],
+    /// `[min, max]` bounds for the forward eye-offset slider (m).
+    pub eye_forward_offset_slider: [f32; 2],
+    /// Maximum head-lock compensation before clamping (m). Caps how far the
+    /// rendered body root is shifted to keep the head pinned to the camera.
+    pub head_lock_max_delta_m: f32,
+}
+
+impl Default for BodyConfig {
+    fn default() -> Self {
+        Self {
+            default_eye_lerp_duration_s: 0.3,
+            max_eye_lerp_duration_s: 2.0,
+            eye_height_slider: [-0.5, 3.0],
+            eye_forward_offset_slider: [-0.5, 0.5],
+            head_lock_max_delta_m: 0.5,
+        }
+    }
+}
 
 // ============================================================================
 // Mixamo pack prefixes (mirroring `tools/convert_character`'s subfolder
@@ -114,9 +134,20 @@ impl Default for BodyTuning {
         Self {
             eye_height_m: 0.0,
             eye_forward_offset_m: 0.0,
-            eye_lerp_duration_s: DEFAULT_EYE_LERP_DURATION_S,
+            // Mirrors `BodyConfig::default_eye_lerp_duration_s`; `sync_body_config`
+            // applies the config value once `body.toml` loads.
+            eye_lerp_duration_s: 0.3,
             initialised_from_model: false,
         }
+    }
+}
+
+/// Seed [`BodyTuning::eye_lerp_duration_s`] from [`BodyConfig`] whenever the
+/// config (re)loads, so editing `body.toml` updates the eye cross-fade timing.
+/// Eye height/forward are model-derived and so aren't touched here.
+fn sync_body_config(config: Res<BodyConfig>, mut tuning: ResMut<BodyTuning>) {
+    if config.is_changed() {
+        tuning.eye_lerp_duration_s = config.default_eye_lerp_duration_s;
     }
 }
 
@@ -227,6 +258,7 @@ impl Plugin for BodyPlugin {
             crate::config::ConfigPlugin::<arm_point::YeetConfig>::new(
                 "config/camera/body/arm_point.toml",
             ),
+            crate::config::ConfigPlugin::<BodyConfig>::new("config/camera/body/body.toml"),
         ))
         .init_resource::<CharacterMetrics>()
         .init_resource::<BodyTuning>()
@@ -236,6 +268,7 @@ impl Plugin for BodyPlugin {
         .add_systems(
             Update,
             (
+                sync_body_config,
                 consume_loaded_metrics,
                 spawn_body_on_fps_enter,
                 despawn_body_on_fps_exit,
@@ -403,9 +436,10 @@ fn consume_loaded_metrics(
                 // keep the existing radius ratio rather than deriving one
                 // from the mesh, since the silhouette varies per model.
                 player_config.height = parsed.stand_height_m;
-                let ratio = player_config
-                    .radius_ratio
-                    .clamp(FPS_PLAYER_MIN_RADIUS_RATIO, FPS_PLAYER_MAX_RADIUS_RATIO);
+                let ratio = player_config.radius_ratio.clamp(
+                    player_config.min_radius_ratio,
+                    player_config.max_radius_ratio,
+                );
                 player_config.radius_ratio = ratio;
 
                 // Seed BodyTuning the first time we load the model.
