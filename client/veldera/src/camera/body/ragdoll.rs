@@ -55,11 +55,14 @@
 //! one physics-coherent frame, so no mesh stretch); and real capsule
 //! volume + self-collision stops the limbs gliding through each other.
 //!
-//! Not yet modelled (clean follow-ups): per-joint swing/twist *angle
-//! limits* (need bind-pose-relative joint frames, so elbows/knees can
-//! currently hyperextend), terrain/building collision for the bones
-//! (needs CCD at launch speed), and mesh-derived capsule dimensions
-//! (radii are currently heuristic per body region).
+//! Limb joints carry swing/twist angle limits relative to the bind pose
+//! ([`joint_limits_rad`]), so the limbs can't windmill or hyperextend
+//! past a cone around their rest pose. (The cones are symmetric for now;
+//! one-directional hinges for elbows/knees would be the next refinement.)
+//!
+//! Not yet modelled (clean follow-ups): terrain/building collision for
+//! the bones (needs CCD at launch speed), and mesh-derived capsule
+//! dimensions (radii are currently heuristic per body region).
 
 /// Compile-time switch for the head-anchored skeletal ragdoll.
 ///
@@ -587,6 +590,24 @@ fn bone_radius(stem: &str) -> f32 {
     }
 }
 
+/// Per-joint swing-cone and twist half-angles (degrees), keyed by the
+/// *child* bone (the one hanging off the joint). The joint frames are
+/// oriented so the bind pose is the zero, so these bound how far the
+/// limb can deviate from its rest pose: the swing cone caps how far it
+/// can bend away from the bone axis, the twist caps how far it can roll.
+/// Symmetric for now — a one-directional hinge for elbows/knees is a
+/// later refinement — but the cones already stop the limbs windmilling
+/// and hyperextending. Proximal limbs (upper arm/thigh) get the widest
+/// cone, mid limbs (forearm/shin) a tighter one, extremities the least.
+fn joint_limits_rad(child_stem: &str) -> (f32, f32) {
+    let (swing_deg, twist_deg): (f32, f32) = match child_stem {
+        "LeftArm" | "RightArm" | "LeftUpLeg" | "RightUpLeg" => (70.0, 25.0),
+        "LeftForeArm" | "RightForeArm" | "LeftLeg" | "RightLeg" => (75.0, 10.0),
+        _ => (40.0, 15.0),
+    };
+    (swing_deg.to_radians(), twist_deg.to_radians())
+}
+
 #[allow(clippy::too_many_arguments)]
 fn build_ragdoll_graph(
     commands: &mut Commands,
@@ -784,14 +805,26 @@ fn build_ragdoll_graph(
         let parent_world_pos = parent_global.translation();
         let parent_world_rot = parent_global.rotation();
         let child_world_pos = child_global.translation();
+        let child_world_rot = child_global.rotation();
         let anchor_on_parent = parent_world_rot.inverse() * (child_world_pos - parent_world_pos);
+
+        // Orient the joint so the bind pose is the zero of the
+        // swing/twist limits: the parent frame's basis is the
+        // bind-relative parent→child rotation, the child frame's basis
+        // stays identity, so at rest the two frame bases coincide. The
+        // limits then bound deviation from the rest pose.
+        let bind_relative = parent_world_rot.inverse() * child_world_rot;
+        let (swing, twist) = joint_limits_rad(stem_key);
 
         let joint_entity = commands
             .spawn((
                 SphericalJoint::new(parent.physics_entity, child.physics_entity)
                     .with_local_anchor1(anchor_on_parent)
                     .with_local_anchor2(Vec3::ZERO)
-                    .with_point_compliance(RAGDOLL_JOINT_COMPLIANCE),
+                    .with_local_basis1(bind_relative)
+                    .with_point_compliance(RAGDOLL_JOINT_COMPLIANCE)
+                    .with_swing_limits(-swing, swing)
+                    .with_twist_limits(-twist, twist),
                 // Don't let a bone collide with the parent it's jointed
                 // to — adjacent capsules overlap at the shared joint by
                 // construction. Non-adjacent capsules still collide, so
