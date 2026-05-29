@@ -4,7 +4,7 @@
 //! elevation lookup via Open Elevation API.
 
 use avian3d::prelude::*;
-use bevy::{audio::Volume, prelude::*};
+use bevy::{audio::Volume, prelude::*, reflect::TypePath};
 use glam::DVec3;
 use serde::Deserialize;
 
@@ -45,6 +45,9 @@ impl Plugin for GeoPlugin {
         );
 
         app.insert_resource(client)
+            .add_plugins(crate::config::ConfigPlugin::<GeoConfig>::new(
+                "config/world/geo.toml",
+            ))
             .init_resource::<GeocodingState>()
             .init_resource::<TeleportState>()
             .init_resource::<TeleportAnimation>()
@@ -306,11 +309,162 @@ impl TeleportAnimation {
     }
 }
 
-/// Extra delay after physics is detected before returning control.
-const PHYSICS_SETTLE_DELAY: f32 = 0.2;
+/// Hot-reloadable teleport tuning, loaded from `assets/config/world/geo.toml`.
+///
+/// (The geocoding request throttle stays compiled in — it's an external API
+/// politeness floor, not a gameplay knob.)
+#[derive(Asset, Resource, TypePath, Clone, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct GeoConfig {
+    /// Extra delay (s) after terrain physics is detected at the destination
+    /// before returning control to the player, so they don't drop through
+    /// still-settling colliders.
+    pub physics_settle_delay: f32,
+    /// Maximum time (s) to wait for destination physics to load before spawning
+    /// the player anyway.
+    pub physics_wait_timeout: f32,
+    /// Fraction of the teleport animation `[0, 1]` spent ascending before the
+    /// cruise phase. The ascent eases the camera from its start orientation to
+    /// the cruise look.
+    pub teleport_ascent_end: f64,
+    /// Fraction `[0, 1]` at which the descent phase begins (cruise ends). The
+    /// arrival whoosh plays here as the camera starts aligning to the horizon.
+    pub teleport_descent_start: f64,
+    /// Shape of the fly-to arc (apex altitudes by distance, duration, apex
+    /// position).
+    pub arc: TeleportArc,
+    /// Finite-difference step (in normalized animation time) used to estimate the
+    /// trajectory velocity direction for horizon-mode camera pitch. Numerical;
+    /// smaller is a more local derivative.
+    pub velocity_sample_dt: f64,
+    /// Height above the destination (m) from which the ground-finding ray is
+    /// cast downward when settling the player after a teleport.
+    pub ground_ray_start_height_m: f64,
+    /// Maximum downward distance (m) of the ground-finding ray.
+    pub ground_ray_max_distance_m: f32,
+    /// Height above the detected ground (m) at which the player respawns after a
+    /// teleport.
+    pub spawn_height_above_ground_m: f32,
+}
 
-/// Maximum time to wait for physics to load before giving up.
-const PHYSICS_WAIT_TIMEOUT: f32 = 5.0;
+impl Default for GeoConfig {
+    fn default() -> Self {
+        Self {
+            physics_settle_delay: 0.2,
+            physics_wait_timeout: 5.0,
+            teleport_ascent_end: 0.05,
+            teleport_descent_start: 0.95,
+            arc: TeleportArc::default(),
+            velocity_sample_dt: 0.002,
+            ground_ray_start_height_m: 1000.0,
+            ground_ray_max_distance_m: 2000.0,
+            spawn_height_above_ground_m: 2.0,
+        }
+    }
+}
+
+/// Tuning for the teleport flight arc.
+#[derive(Clone, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct TeleportArc {
+    /// Normalized time `[0, 1]` of the altitude apex; the arc ascends to the
+    /// apex over `[0, apex_t]` and descends over `[apex_t, 1]`.
+    pub apex_t: f64,
+    /// Apex-altitude bands for Classic mode (cinematic zoom-out).
+    pub classic: ApexBands,
+    /// Apex-altitude bands for HorizonChasing mode (stays low, horizon visible).
+    pub horizon: ApexBands,
+    /// Distance → animation-duration bands.
+    pub duration: DurationBands,
+}
+
+impl Default for TeleportArc {
+    fn default() -> Self {
+        Self {
+            apex_t: 0.4,
+            classic: ApexBands {
+                short_m: 10_000.0,
+                city_m: 100_000.0,
+                regional_m: 1_000_000.0,
+                continental_m: 10_000_000.0,
+                min_apex_m: 500.0,
+                short_apex_m: 5_000.0,
+                city_apex_m: 100_000.0,
+                regional_apex_m: 500_000.0,
+                continental_apex_m: 3_000_000.0,
+                max_apex_m: 8_000_000.0,
+            },
+            horizon: ApexBands {
+                short_m: 10_000.0,
+                city_m: 100_000.0,
+                regional_m: 1_000_000.0,
+                continental_m: 10_000_000.0,
+                min_apex_m: 120.0,
+                short_apex_m: 600.0,
+                city_apex_m: 6_000.0,
+                regional_apex_m: 30_000.0,
+                continental_apex_m: 90_000.0,
+                max_apex_m: 180_000.0,
+            },
+            duration: DurationBands {
+                very_short_m: 100.0,
+                short_m: 1_000.0,
+                medium_m: 100_000.0,
+                long_m: 20_000_000.0,
+                min_s: 2.0,
+                short_s: 5.0,
+                medium_s: 10.0,
+                max_s: 15.0,
+            },
+        }
+    }
+}
+
+/// Piecewise-linear apex-altitude table, keyed by great-circle surface distance.
+/// The apex altitude is interpolated between the `*_apex_m` values across the
+/// `*_m` distance breakpoints (all metres); beyond `continental_m` it ramps to
+/// `max_apex_m` over one more `continental_m` of distance.
+#[derive(Clone, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct ApexBands {
+    pub short_m: f64,
+    pub city_m: f64,
+    pub regional_m: f64,
+    pub continental_m: f64,
+    pub min_apex_m: f64,
+    pub short_apex_m: f64,
+    pub city_apex_m: f64,
+    pub regional_apex_m: f64,
+    pub continental_apex_m: f64,
+    pub max_apex_m: f64,
+}
+
+impl Default for ApexBands {
+    fn default() -> Self {
+        TeleportArc::default().classic
+    }
+}
+
+/// Piecewise-linear distance → duration table (distances in metres, durations in
+/// seconds).
+#[derive(Clone, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct DurationBands {
+    pub very_short_m: f64,
+    pub short_m: f64,
+    pub medium_m: f64,
+    pub long_m: f64,
+    pub min_s: f32,
+    pub short_s: f32,
+    pub medium_s: f32,
+    pub max_s: f32,
+}
+
+impl Default for DurationBands {
+    fn default() -> Self {
+        TeleportArc::default().duration
+    }
+}
 
 /// State machine for the teleportation animation.
 enum AnimationState {
@@ -385,11 +539,18 @@ struct ArcTrajectory {
     start_altitude: f64,
     /// Target altitude above surface.
     target_altitude: f64,
+    /// Normalized time of the altitude apex (from [`TeleportArc::apex_t`]).
+    apex_t: f64,
 }
 
 impl ArcTrajectory {
     /// Create a new arc trajectory based on start and target positions.
-    fn new(start: DVec3, target: DVec3, animation_mode: TeleportAnimationMode) -> Self {
+    fn new(
+        arc: &TeleportArc,
+        start: DVec3,
+        target: DVec3,
+        animation_mode: TeleportAnimationMode,
+    ) -> Self {
         let earth_radius = crate::constants::EARTH_RADIUS_M_F64;
         let start_altitude = start.length() - earth_radius;
         let target_altitude = target.length() - earth_radius;
@@ -400,151 +561,85 @@ impl ArcTrajectory {
         let arc_angle = start_norm.dot(target_norm).clamp(-1.0, 1.0).acos();
         let surface_distance = arc_angle * earth_radius;
 
-        // Scale apex altitude based on distance and animation mode.
-        let apex_altitude = match animation_mode {
-            TeleportAnimationMode::Classic => {
-                Self::compute_apex_altitude_classic(surface_distance, start_altitude)
-            }
-            TeleportAnimationMode::HorizonChasing => {
-                Self::compute_apex_altitude_horizon(surface_distance, start_altitude)
-            }
+        // Scale apex altitude based on distance and animation mode. Classic mode
+        // climbs high for a cinematic zoom-out; horizon-chasing stays low.
+        let bands = match animation_mode {
+            TeleportAnimationMode::Classic => &arc.classic,
+            TeleportAnimationMode::HorizonChasing => &arc.horizon,
         };
+        let apex_altitude = Self::compute_apex_altitude(bands, surface_distance, start_altitude);
 
         Self {
             apex_altitude,
             start_altitude,
             target_altitude,
+            apex_t: arc.apex_t,
         }
     }
 
-    /// Compute the apex altitude for classic mode.
+    /// Compute the apex altitude from a [`ApexBands`] table.
     ///
-    /// Scaling is designed to give a cinematic "zoom out" effect:
-    /// - Short hops stay relatively low
-    /// - Long distances go high enough to see Earth's curvature
-    /// - Antipodal journeys reach near-orbital altitudes
-    fn compute_apex_altitude_classic(surface_distance: f64, start_altitude: f64) -> f64 {
-        // Distance thresholds (meters).
-        const SHORT: f64 = 10_000.0;
-        const CITY: f64 = 100_000.0;
-        const REGIONAL: f64 = 1_000_000.0;
-        const CONTINENTAL: f64 = 10_000_000.0;
-
-        // Apex altitude values (meters).
-        const MIN_APEX: f64 = 500.0;
-        const SHORT_APEX: f64 = 5_000.0;
-        const CITY_APEX: f64 = 100_000.0;
-        const REGIONAL_APEX: f64 = 500_000.0;
-        const CONTINENTAL_APEX: f64 = 3_000_000.0;
-        const MAX_APEX: f64 = 8_000_000.0;
-
-        let apex = if surface_distance < SHORT {
-            // Short hop (< 10km).
-            let t = surface_distance / SHORT;
-            MIN_APEX + t * (SHORT_APEX - MIN_APEX)
-        } else if surface_distance < CITY {
-            // City-to-city (10km - 100km).
-            let t = (surface_distance - SHORT) / (CITY - SHORT);
-            SHORT_APEX + t * (CITY_APEX - SHORT_APEX)
-        } else if surface_distance < REGIONAL {
-            // Regional (100km - 1000km).
-            let t = (surface_distance - CITY) / (REGIONAL - CITY);
-            CITY_APEX + t * (REGIONAL_APEX - CITY_APEX)
-        } else if surface_distance < CONTINENTAL {
-            // Continental/intercontinental (1000km - 10000km).
-            let t = (surface_distance - REGIONAL) / (CONTINENTAL - REGIONAL);
-            REGIONAL_APEX + t * (CONTINENTAL_APEX - REGIONAL_APEX)
+    /// Classic-mode bands give a cinematic "zoom out" (short hops stay low, long
+    /// distances climb to see Earth's curvature, antipodal journeys reach
+    /// near-orbital); horizon-mode bands stay much lower to keep the horizon
+    /// visible. The shape is identical — only the band values differ.
+    fn compute_apex_altitude(bands: &ApexBands, surface_distance: f64, start_altitude: f64) -> f64 {
+        let apex = if surface_distance < bands.short_m {
+            // Short hop.
+            let t = surface_distance / bands.short_m;
+            bands.min_apex_m + t * (bands.short_apex_m - bands.min_apex_m)
+        } else if surface_distance < bands.city_m {
+            // City-to-city.
+            let t = (surface_distance - bands.short_m) / (bands.city_m - bands.short_m);
+            bands.short_apex_m + t * (bands.city_apex_m - bands.short_apex_m)
+        } else if surface_distance < bands.regional_m {
+            // Regional.
+            let t = (surface_distance - bands.city_m) / (bands.regional_m - bands.city_m);
+            bands.city_apex_m + t * (bands.regional_apex_m - bands.city_apex_m)
+        } else if surface_distance < bands.continental_m {
+            // Continental / intercontinental.
+            let t =
+                (surface_distance - bands.regional_m) / (bands.continental_m - bands.regional_m);
+            bands.regional_apex_m + t * (bands.continental_apex_m - bands.regional_apex_m)
         } else {
-            // Antipodal (10000km+).
-            let t = ((surface_distance - CONTINENTAL) / CONTINENTAL).min(1.0);
-            CONTINENTAL_APEX + t * (MAX_APEX - CONTINENTAL_APEX)
+            // Antipodal.
+            let t = ((surface_distance - bands.continental_m) / bands.continental_m).min(1.0);
+            bands.continental_apex_m + t * (bands.max_apex_m - bands.continental_apex_m)
         };
 
-        // Ensure apex is at least above the starting altitude.
-        apex.max(start_altitude + MIN_APEX)
+        // Ensure the apex clears the starting altitude.
+        apex.max(start_altitude + bands.min_apex_m)
     }
 
-    /// Compute the apex altitude for horizon-chasing mode.
-    ///
-    /// Stays much lower than classic mode to keep the horizon visible
-    /// and Earth filling the lower half of the view. Tops out at low
-    /// orbital altitude for antipodal journeys.
-    fn compute_apex_altitude_horizon(surface_distance: f64, start_altitude: f64) -> f64 {
-        // Distance thresholds (meters).
-        const SHORT: f64 = 10_000.0;
-        const CITY: f64 = 100_000.0;
-        const REGIONAL: f64 = 1_000_000.0;
-        const CONTINENTAL: f64 = 10_000_000.0;
-
-        // Apex altitude values (meters) — much lower than classic.
-        const MIN_APEX: f64 = 120.0;
-        const SHORT_APEX: f64 = 600.0;
-        const CITY_APEX: f64 = 6_000.0;
-        const REGIONAL_APEX: f64 = 30_000.0;
-        const CONTINENTAL_APEX: f64 = 90_000.0;
-        const MAX_APEX: f64 = 180_000.0;
-
-        let apex = if surface_distance < SHORT {
-            let t = surface_distance / SHORT;
-            MIN_APEX + t * (SHORT_APEX - MIN_APEX)
-        } else if surface_distance < CITY {
-            let t = (surface_distance - SHORT) / (CITY - SHORT);
-            SHORT_APEX + t * (CITY_APEX - SHORT_APEX)
-        } else if surface_distance < REGIONAL {
-            let t = (surface_distance - CITY) / (REGIONAL - CITY);
-            CITY_APEX + t * (REGIONAL_APEX - CITY_APEX)
-        } else if surface_distance < CONTINENTAL {
-            let t = (surface_distance - REGIONAL) / (CONTINENTAL - REGIONAL);
-            REGIONAL_APEX + t * (CONTINENTAL_APEX - REGIONAL_APEX)
+    /// Compute the animation duration from a [`DurationBands`] table.
+    fn compute_duration(bands: &DurationBands, surface_distance: f64) -> f32 {
+        if surface_distance < bands.very_short_m {
+            bands.min_s
+        } else if surface_distance < bands.short_m {
+            let t = (surface_distance / bands.short_m) as f32;
+            bands.min_s + t * (bands.short_s - bands.min_s)
+        } else if surface_distance < bands.medium_m {
+            let t = ((surface_distance - bands.short_m) / (bands.medium_m - bands.short_m)) as f32;
+            bands.short_s + t * (bands.medium_s - bands.short_s)
         } else {
-            let t = ((surface_distance - CONTINENTAL) / CONTINENTAL).min(1.0);
-            CONTINENTAL_APEX + t * (MAX_APEX - CONTINENTAL_APEX)
-        };
-
-        apex.max(start_altitude + MIN_APEX)
-    }
-
-    /// Compute the animation duration based on surface distance.
-    fn compute_duration(surface_distance: f64) -> f32 {
-        // Distance thresholds (meters).
-        const VERY_SHORT: f64 = 100.0;
-        const SHORT: f64 = 1_000.0;
-        const MEDIUM: f64 = 100_000.0;
-        const LONG: f64 = 20_000_000.0;
-
-        // Duration values (seconds).
-        const MIN_DURATION: f32 = 2.0;
-        const SHORT_DURATION: f32 = 5.0;
-        const MEDIUM_DURATION: f32 = 10.0;
-        const MAX_DURATION: f32 = 15.0;
-
-        if surface_distance < VERY_SHORT {
-            MIN_DURATION
-        } else if surface_distance < SHORT {
-            let t = (surface_distance / SHORT) as f32;
-            MIN_DURATION + t * (SHORT_DURATION - MIN_DURATION)
-        } else if surface_distance < MEDIUM {
-            let t = ((surface_distance - SHORT) / (MEDIUM - SHORT)) as f32;
-            SHORT_DURATION + t * (MEDIUM_DURATION - SHORT_DURATION)
-        } else {
-            let t = (((surface_distance - MEDIUM) / LONG) as f32).min(1.0);
-            MEDIUM_DURATION + t * (MAX_DURATION - MEDIUM_DURATION)
+            let t = (((surface_distance - bands.medium_m) / bands.long_m) as f32).min(1.0);
+            bands.medium_s + t * (bands.max_s - bands.medium_s)
         }
     }
 
     /// Compute the altitude at a given t in [0, 1].
     fn altitude_at_t(&self, t: f64) -> f64 {
-        // Altitude envelope that peaks at t=0.4.
-        const APEX_T: f64 = 0.4;
+        // Altitude envelope that peaks at `apex_t`.
+        let apex_t = self.apex_t;
 
-        if t < APEX_T {
+        if t < apex_t {
             // Ascent: smoothstep from start_altitude to apex.
-            let ascent_t = t / APEX_T;
+            let ascent_t = t / apex_t;
             let eased = smootherstep(ascent_t);
             self.start_altitude + eased * (self.apex_altitude - self.start_altitude)
         } else {
             // Descent: smoothstep from apex to target_altitude.
-            let descent_t = (t - APEX_T) / (1.0 - APEX_T);
+            let descent_t = (t - apex_t) / (1.0 - apex_t);
             let eased = smootherstep(descent_t);
             self.apex_altitude + eased * (self.target_altitude - self.apex_altitude)
         }
@@ -568,10 +663,6 @@ impl ArcTrajectory {
     }
 }
 
-// Animation phase boundaries.
-const ASCENT_END: f64 = 0.05;
-const DESCENT_START: f64 = 0.95;
-
 /// Compute the great-circle tangent direction at `position` toward `target`.
 ///
 /// Returns the unit tangent vector in the plane of the great circle,
@@ -592,11 +683,16 @@ fn great_circle_tangent(position: DVec3, target: DVec3, fallback: Vec3) -> Vec3 
 ///
 /// Delegates to either the classic or horizon-chasing logic based on
 /// the animation mode stored in the phase.
-fn compute_orientation_at_t(phase: &TeleportPhase, position: DVec3, t: f64) -> Quat {
+fn compute_orientation_at_t(
+    config: &GeoConfig,
+    phase: &TeleportPhase,
+    position: DVec3,
+    t: f64,
+) -> Quat {
     match phase.animation_mode {
-        TeleportAnimationMode::Classic => compute_orientation_classic(phase, position, t),
+        TeleportAnimationMode::Classic => compute_orientation_classic(config, phase, position, t),
         TeleportAnimationMode::HorizonChasing => {
-            compute_orientation_horizon_chasing(phase, position, t)
+            compute_orientation_horizon_chasing(config, phase, position, t)
         }
     }
 }
@@ -606,22 +702,29 @@ fn compute_orientation_at_t(phase: &TeleportPhase, position: DVec3, t: f64) -> Q
 /// - Ascent: Slerp from initial orientation to looking down.
 /// - Cruise: Always look at Earth center, smoothly rotate up vector.
 /// - Descent: Slerp from looking down to looking at horizon.
-fn compute_orientation_classic(phase: &TeleportPhase, position: DVec3, t: f64) -> Quat {
+fn compute_orientation_classic(
+    config: &GeoConfig,
+    phase: &TeleportPhase,
+    position: DVec3,
+    t: f64,
+) -> Quat {
+    let ascent_end = config.teleport_ascent_end;
+    let descent_start = config.teleport_descent_start;
     // Direction toward Earth center (looking down).
     let down = -position.normalize().as_vec3();
 
-    if t < ASCENT_END {
+    if t < ascent_end {
         // Ascent: slerp from initial orientation to looking down with ascent_up.
-        let phase_t = (t / ASCENT_END) as f32;
+        let phase_t = (t / ascent_end) as f32;
         let eased_t = smootherstep(f64::from(phase_t)) as f32;
 
         let orient_ascent_end = Transform::IDENTITY
             .looking_to(down, phase.ascent_up)
             .rotation;
         phase.orient_start.slerp(orient_ascent_end, eased_t)
-    } else if t < DESCENT_START {
+    } else if t < descent_start {
         // Cruise: always look at Earth center, interpolate the up vector.
-        let cruise_t = ((t - ASCENT_END) / (DESCENT_START - ASCENT_END)) as f32;
+        let cruise_t = ((t - ascent_end) / (descent_start - ascent_end)) as f32;
 
         // Slerp the up vector from ascent_up to descent_up.
         let up = phase
@@ -632,7 +735,7 @@ fn compute_orientation_classic(phase: &TeleportPhase, position: DVec3, t: f64) -
         Transform::IDENTITY.looking_to(down, up).rotation
     } else {
         // Descent: slerp from looking down to final orientation.
-        let phase_t = ((t - DESCENT_START) / (1.0 - DESCENT_START)) as f32;
+        let phase_t = ((t - descent_start) / (1.0 - descent_start)) as f32;
         let eased_t = smootherstep(f64::from(phase_t)) as f32;
 
         let orient_descent_start = Transform::IDENTITY
@@ -650,20 +753,28 @@ fn compute_orientation_classic(phase: &TeleportPhase, position: DVec3, t: f64) -
 /// - Ascent: Slerp from initial orientation to velocity-derived cruise orientation.
 /// - Cruise: Look along the (pitch-amplified) trajectory velocity, radial up.
 /// - Descent: Slerp from cruise orientation to final horizon orientation.
-fn compute_orientation_horizon_chasing(phase: &TeleportPhase, _position: DVec3, t: f64) -> Quat {
-    if t < ASCENT_END {
-        let phase_t = (t / ASCENT_END) as f32;
+fn compute_orientation_horizon_chasing(
+    config: &GeoConfig,
+    phase: &TeleportPhase,
+    _position: DVec3,
+    t: f64,
+) -> Quat {
+    let ascent_end = config.teleport_ascent_end;
+    let descent_start = config.teleport_descent_start;
+    let dt = config.velocity_sample_dt;
+    if t < ascent_end {
+        let phase_t = (t / ascent_end) as f32;
         let eased_t = smootherstep(f64::from(phase_t)) as f32;
 
-        let orient_cruise_start = horizon_cruise_orientation(phase, ASCENT_END);
+        let orient_cruise_start = horizon_cruise_orientation(phase, ascent_end, dt);
         phase.orient_start.slerp(orient_cruise_start, eased_t)
-    } else if t < DESCENT_START {
-        horizon_cruise_orientation(phase, t)
+    } else if t < descent_start {
+        horizon_cruise_orientation(phase, t, dt)
     } else {
-        let phase_t = ((t - DESCENT_START) / (1.0 - DESCENT_START)) as f32;
+        let phase_t = ((t - descent_start) / (1.0 - descent_start)) as f32;
         let eased_t = smootherstep(f64::from(phase_t)) as f32;
 
-        let orient_cruise_end = horizon_cruise_orientation(phase, DESCENT_START);
+        let orient_cruise_end = horizon_cruise_orientation(phase, descent_start, dt);
         orient_cruise_end.slerp(phase.orient_end, eased_t)
     }
 }
@@ -676,9 +787,7 @@ fn compute_orientation_horizon_chasing(phase: &TeleportPhase, _position: DVec3, 
 /// distance: 1x for short hops (natural pitch is already sufficient),
 /// up to 3x for antipodal journeys (where the altitude-to-distance
 /// ratio is tiny).
-fn horizon_cruise_orientation(phase: &TeleportPhase, t: f64) -> Quat {
-    const DT: f64 = 0.002;
-
+fn horizon_cruise_orientation(phase: &TeleportPhase, t: f64, dt: f64) -> Quat {
     // Scale pitch amplification based on arc angle (0 = same point, pi = antipodal).
     let arc_angle = phase
         .start_position
@@ -692,12 +801,12 @@ fn horizon_cruise_orientation(phase: &TeleportPhase, t: f64) -> Quat {
         .trajectory
         .position_at_t(t, phase.start_position, phase.target_position);
     let pos_before = phase.trajectory.position_at_t(
-        (t - DT).max(0.0),
+        (t - dt).max(0.0),
         phase.start_position,
         phase.target_position,
     );
     let pos_after = phase.trajectory.position_at_t(
-        (t + DT).min(1.0),
+        (t + dt).min(1.0),
         phase.start_position,
         phase.target_position,
     );
@@ -745,6 +854,7 @@ fn poll_geocoding_results(mut geocoding_state: ResMut<GeocodingState>) {
 #[allow(clippy::too_many_arguments)]
 fn poll_teleport(
     mut commands: Commands,
+    config: Res<GeoConfig>,
     mut teleport_state: ResMut<TeleportState>,
     mut animation: ResMut<TeleportAnimation>,
     settings: Res<CameraSettings>,
@@ -799,11 +909,13 @@ fn poll_teleport(
 
                     // Create the trajectory.
                     let trajectory = ArcTrajectory::new(
+                        &config.arc,
                         start_position,
                         target_position,
                         settings.teleport_animation_mode,
                     );
-                    let duration = ArcTrajectory::compute_duration(surface_distance);
+                    let duration =
+                        ArcTrajectory::compute_duration(&config.arc.duration, surface_distance);
                     let apex_altitude = trajectory.apex_altitude;
 
                     // Compute orientation keyframes and up vectors.
@@ -905,6 +1017,7 @@ fn poll_teleport(
 fn update_teleport_animation(
     mut commands: Commands,
     time: Res<Time>,
+    config: Res<GeoConfig>,
     mut animation: ResMut<TeleportAnimation>,
     spatial_query: SpatialQuery,
     player_config: Res<FpsPlayerConfig>,
@@ -946,7 +1059,7 @@ fn update_teleport_animation(
                         .position_at_t(t, phase.start_position, phase.target_position);
                 origin_camera.position = position;
 
-                let orientation = compute_orientation_at_t(phase, position, t);
+                let orientation = compute_orientation_at_t(&config, phase, position, t);
                 transform.rotation = orientation;
                 flight_camera.direction = orientation * Vec3::NEG_Z;
             }
@@ -959,8 +1072,8 @@ fn update_teleport_animation(
                 sink.set_volume(Volume::Linear(volume as f32));
             }
 
-            // Play arrival woosh at DESCENT_START (when camera starts aligning to horizon).
-            if t >= DESCENT_START && !phase.arrival_woosh_played {
+            // Play arrival woosh at the descent boundary (camera starts aligning to horizon).
+            if t >= config.teleport_descent_start && !phase.arrival_woosh_played {
                 phase.arrival_woosh_played = true;
                 if let Some(ref woosh) = woosh_sound {
                     commands.spawn((
@@ -980,9 +1093,13 @@ fn update_teleport_animation(
                 }
 
                 // Check if physics is already loaded.
-                if let Some(ground_hit) =
-                    find_ground_underneath(phase.target_position, camera_ecef, &spatial_query)
-                {
+                if let Some(ground_hit) = find_ground_underneath(
+                    phase.target_position,
+                    camera_ecef,
+                    &spatial_query,
+                    config.ground_ray_start_height_m,
+                    config.ground_ray_max_distance_m,
+                ) {
                     phase.state = AnimationState::Settling {
                         detected_at: phase.elapsed,
                         ground_hit,
@@ -997,11 +1114,15 @@ fn update_teleport_animation(
 
         AnimationState::WaitingForPhysics { started_at } => {
             // Check for timeout.
-            if phase.elapsed - started_at >= PHYSICS_WAIT_TIMEOUT {
-                tracing::warn!("Physics wait timeout ({PHYSICS_WAIT_TIMEOUT}s), spawning anyway");
+            if phase.elapsed - started_at >= config.physics_wait_timeout {
+                tracing::warn!(
+                    "Physics wait timeout ({}s), spawning anyway",
+                    config.physics_wait_timeout
+                );
                 complete_teleport_animation(
                     &mut commands,
                     &player_config,
+                    config.spawn_height_above_ground_m,
                     &mut animation,
                     &camera_query,
                 );
@@ -1009,9 +1130,13 @@ fn update_teleport_animation(
             }
 
             // Check for ground.
-            if let Some(ground_hit) =
-                find_ground_underneath(phase.target_position, camera_ecef, &spatial_query)
-            {
+            if let Some(ground_hit) = find_ground_underneath(
+                phase.target_position,
+                camera_ecef,
+                &spatial_query,
+                config.ground_ray_start_height_m,
+                config.ground_ray_max_distance_m,
+            ) {
                 tracing::info!("Physics detected, waiting for settle delay...");
                 phase.state = AnimationState::Settling {
                     detected_at: phase.elapsed,
@@ -1025,7 +1150,14 @@ fn update_teleport_animation(
             ground_hit: _,
         } => {
             // Check if physics disappeared.
-            if find_ground_underneath(phase.target_position, camera_ecef, &spatial_query).is_none()
+            if find_ground_underneath(
+                phase.target_position,
+                camera_ecef,
+                &spatial_query,
+                config.ground_ray_start_height_m,
+                config.ground_ray_max_distance_m,
+            )
+            .is_none()
             {
                 tracing::warn!("Physics disappeared, returning to waiting state");
                 phase.state = AnimationState::WaitingForPhysics {
@@ -1035,12 +1167,16 @@ fn update_teleport_animation(
             }
 
             // Check if settle delay has passed.
-            if phase.elapsed - detected_at >= PHYSICS_SETTLE_DELAY {
+            if phase.elapsed - detected_at >= config.physics_settle_delay {
                 tracing::info!("Physics settled, completing teleport");
                 // Update ground hit with latest position before completing.
-                if let Some(latest_hit) =
-                    find_ground_underneath(phase.target_position, camera_ecef, &spatial_query)
-                {
+                if let Some(latest_hit) = find_ground_underneath(
+                    phase.target_position,
+                    camera_ecef,
+                    &spatial_query,
+                    config.ground_ray_start_height_m,
+                    config.ground_ray_max_distance_m,
+                ) {
                     phase.state = AnimationState::Settling {
                         detected_at: *detected_at,
                         ground_hit: latest_hit,
@@ -1049,6 +1185,7 @@ fn update_teleport_animation(
                 complete_teleport_animation(
                     &mut commands,
                     &player_config,
+                    config.spawn_height_above_ground_m,
                     &mut animation,
                     &camera_query,
                 );
@@ -1072,18 +1209,15 @@ fn find_ground_underneath(
     target_ecef: DVec3,
     camera_ecef: DVec3,
     spatial_query: &SpatialQuery,
+    ray_start_height: f64,
+    ray_max_distance: f32,
 ) -> Option<GroundHit> {
-    // Start 1km above the target position.
-    const RAY_START_HEIGHT: f64 = 1000.0;
-    // Cast 2km downward (enough to reach ground from 1km above).
-    const RAY_MAX_DISTANCE: f32 = 2000.0;
-
     // Direction toward Earth's center (downward in ECEF).
     let down_direction = -target_ecef.normalize().as_vec3();
     let up_direction = -down_direction;
 
-    // Start the ray 1km above the target position (camera-relative).
-    let ray_start_ecef = target_ecef + target_ecef.normalize() * RAY_START_HEIGHT;
+    // Start the ray `ray_start_height` above the target position (camera-relative).
+    let ray_start_ecef = target_ecef + target_ecef.normalize() * ray_start_height;
     let ray_start = (ray_start_ecef - camera_ecef).as_vec3();
 
     // Cast a ray downward.
@@ -1092,7 +1226,7 @@ fn find_ground_underneath(
         .cast_ray(
             ray_start,
             dir,
-            RAY_MAX_DISTANCE,
+            ray_max_distance,
             true,
             &SpatialQueryFilter::default(),
         )
@@ -1109,6 +1243,7 @@ fn find_ground_underneath(
 fn complete_teleport_animation(
     commands: &mut Commands,
     player_config: &FpsPlayerConfig,
+    spawn_height_above_ground: f32,
     animation: &mut ResMut<TeleportAnimation>,
     camera_query: &Query<(
         Entity,
@@ -1125,14 +1260,11 @@ fn complete_teleport_animation(
     if phase.camera_mode == CameraMode::FpsController
         && let Ok((camera_entity, origin_camera, _, flight_camera)) = camera_query.single()
     {
-        // Height above ground to spawn the player (capsule half-height + buffer).
-        const SPAWN_HEIGHT_ABOVE_GROUND: f32 = 2.0;
-
         // Compute physics position (camera-relative) and ECEF position.
         let (physics_pos, spawn_ecef) = if let Some(ground_hit) = phase.ground_hit() {
             // Physics position: ground hit + height offset in up direction.
             let physics_pos =
-                ground_hit.hit_position + ground_hit.up_direction * SPAWN_HEIGHT_ABOVE_GROUND;
+                ground_hit.hit_position + ground_hit.up_direction * spawn_height_above_ground;
             // ECEF position: camera + physics offset.
             let spawn_ecef = origin_camera.position + physics_pos.as_dvec3();
             (physics_pos, spawn_ecef)
@@ -1140,7 +1272,7 @@ fn complete_teleport_animation(
             // Fallback: spawn at camera position (physics origin).
             let up_direction = origin_camera.position.normalize();
             let spawn_ecef =
-                origin_camera.position + up_direction * f64::from(SPAWN_HEIGHT_ABOVE_GROUND);
+                origin_camera.position + up_direction * f64::from(spawn_height_above_ground);
             (Vec3::ZERO, spawn_ecef)
         };
 
@@ -1156,7 +1288,7 @@ fn complete_teleport_animation(
             .insert(RenderPlayer { logical_entity });
 
         tracing::info!(
-            "Respawned FPS player after teleport at ground + {SPAWN_HEIGHT_ABOVE_GROUND}m"
+            "Respawned FPS player after teleport at ground + {spawn_height_above_ground}m"
         );
     }
 

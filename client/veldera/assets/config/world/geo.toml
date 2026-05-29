@@ -1,0 +1,66 @@
+# Teleport (geocoding/fly-to) tuning.
+
+# Extra delay (s) after destination terrain physics is detected before returning
+# control, so the player doesn't drop through still-settling colliders.
+physics_settle_delay = 0.2
+# Max time (s) to wait for destination physics to load before spawning anyway.
+physics_wait_timeout = 5.0
+
+# Teleport animation easing curve (fractions of the flight, 0..1): ascent occupies
+# [0, ascent_end], cruise [ascent_end, descent_start], descent [descent_start, 1].
+# The arrival whoosh plays at descent_start.
+teleport_ascent_end = 0.05
+teleport_descent_start = 0.95
+
+# Finite-difference step (normalized animation time) for estimating trajectory
+# velocity direction (horizon-mode camera pitch). Numerical; smaller = more local.
+velocity_sample_dt = 0.002
+# Ground-finding raycast when settling the player at the destination: cast from
+# this height above the target, up to this distance downward (m).
+ground_ray_start_height_m = 1000.0
+ground_ray_max_distance_m = 2000.0
+# Height above detected ground (m) at which the player respawns after teleport.
+spawn_height_above_ground_m = 2.0
+
+# Fly-to arc shape.
+[arc]
+# Normalized time of the altitude apex; ascend over [0, apex_t], descend after.
+apex_t = 0.4
+
+# Apex altitude by great-circle distance (Classic mode: cinematic zoom-out).
+# *_m are distance breakpoints; *_apex_m are the apex altitudes at each. All metres.
+[arc.classic]
+short_m = 10000.0
+city_m = 100000.0
+regional_m = 1000000.0
+continental_m = 10000000.0
+min_apex_m = 500.0
+short_apex_m = 5000.0
+city_apex_m = 100000.0
+regional_apex_m = 500000.0
+continental_apex_m = 3000000.0
+max_apex_m = 8000000.0
+
+# HorizonChasing mode: stays much lower so the horizon stays visible.
+[arc.horizon]
+short_m = 10000.0
+city_m = 100000.0
+regional_m = 1000000.0
+continental_m = 10000000.0
+min_apex_m = 120.0
+short_apex_m = 600.0
+city_apex_m = 6000.0
+regional_apex_m = 30000.0
+continental_apex_m = 90000.0
+max_apex_m = 180000.0
+
+# Animation duration by distance: *_m distance breakpoints → *_s durations (s).
+[arc.duration]
+very_short_m = 100.0
+short_m = 1000.0
+medium_m = 100000.0
+long_m = 20000000.0
+min_s = 2.0
+short_s = 5.0
+medium_s = 10.0
+max_s = 15.0

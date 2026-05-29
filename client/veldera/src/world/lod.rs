@@ -9,9 +9,10 @@
 //! - **Render rule** refines on screen-space error and frustum-culls,
 //!   producing renderable nodes and the meshes shown on screen.
 //! - **Physics rule** refines on distance-banded target depth (see
-//!   [`crate::physics::PHYSICS_DISTANCE_BANDS`]) with no frustum culling,
-//!   producing exactly one terrain collider per region within
-//!   [`crate::physics::PHYSICS_RANGE`]. If the target depth isn't available
+//!   [`PhysicsStreamingConfig::bands`](crate::physics::PhysicsStreamingConfig))
+//!   with no frustum culling, producing exactly one terrain collider per region
+//!   within [`PhysicsStreamingConfig::range`](crate::physics::PhysicsStreamingConfig).
+//!   If the target depth isn't available
 //!   the deepest loaded ancestor with data is used as a fallback so the
 //!   player can never fall through unloaded ground.
 //!
@@ -31,13 +32,14 @@ use std::{
     sync::Arc,
 };
 
-use bevy::{light::NotShadowCaster, prelude::*};
+use bevy::{light::NotShadowCaster, prelude::*, reflect::TypePath};
 use glam::{DMat4, DVec3};
 use rocktree::{
     BulkMetadata, BulkRequest, Frustum, LodMetrics, Mesh as RocktreeMesh, Node, NodeMetadata,
     NodeRequest,
 };
 use rocktree_decode::{OctreePath, OrientedBoundingBox};
+use serde::Deserialize;
 
 use crate::{
     async_runtime::TaskSpawner,
@@ -52,7 +54,9 @@ use crate::{
 };
 
 use crate::{
-    physics::{MotionTracker, desired_physics_depth, terrain::TerrainCollider},
+    physics::{
+        MotionTracker, PhysicsStreamingConfig, desired_physics_depth, terrain::TerrainCollider,
+    },
     vehicle::GameLayer,
     world::floating_origin::WorldPosition,
 };
@@ -61,51 +65,39 @@ use avian3d::prelude::*;
 
 use crate::constants::EARTH_RADIUS_M_F64;
 
-/// Maximum altitude (above terrain) at which forced proximity loading applies.
-/// Above this height, normal frustum culling is used for all nodes.
-const PROXIMITY_LOADING_MAX_ALTITUDE: f64 = 1000.0;
-
-/// Default keep-loaded radius (m). See [`LodTuning::keep_loaded_radius`].
-const DEFAULT_KEEP_LOADED_RADIUS: f64 = 250.0;
-
-/// Default unload grace period (seconds). See
-/// [`LodTuning::unload_grace_period_secs`].
-const DEFAULT_UNLOAD_GRACE_PERIOD_SECS: f64 = 3.0;
-
-/// Radius around the camera within which loaded nodes are forced visible
-/// in `cull_meshes`, bypassing frustum culling.
-///
-/// Smaller than [`LodTuning::keep_loaded_radius`] on purpose: this only
-/// covers the ground right under the player as a safety net against
-/// frustum-culling edge cases. Anything wider would render nodes behind
-/// the camera for no visual benefit. Not exposed as a slider because the
-/// "right" value here is "as small as possible while keeping the ground
-/// reliable" — there's nothing to tune at runtime.
-const FORCE_VISIBLE_RADIUS: f64 = 50.0;
-
-/// Runtime-tunable LoD streaming parameters exposed in the diagnostics UI.
-///
-/// Both knobs trade memory pressure for view-churn resilience:
-///
-/// - **`keep_loaded_radius`** keeps nearby tiles loaded even when frustum-
-///   culled, so a 360° rotation doesn't drop tiles you were just looking
-///   at. They stay in memory hidden by `cull_meshes` until they re-enter
-///   the frustum — wider means more CPU memory, less reload pop-in.
-/// - **`unload_grace_period_secs`** delays eviction of tiles that have
-///   left every BFS's potential set. Longer means transient camera moves
-///   (look up/down briefly) don't churn streaming, but stale tiles
-///   linger in memory.
-#[derive(Resource, Debug, Clone, Copy)]
+/// Hot-reloadable LoD streaming parameters, loaded from
+/// `assets/config/world/lod.toml`. Tune these to trade memory and CPU against
+/// streaming churn and pop-in, and to observe the performance/quality impact at
+/// runtime. The `keep_loaded_radius` and `unload_grace_period_secs` knobs are
+/// also exposed as sliders in the Streaming diagnostics tab.
+#[derive(Asset, Resource, TypePath, Debug, Clone, Copy, Deserialize)]
+#[serde(default, deny_unknown_fields)]
 pub struct LodTuning {
+    /// Keeps nearby tiles loaded even when frustum-culled, so a 360° turn
+    /// doesn't drop tiles you were just looking at (m). Wider = more CPU memory,
+    /// less reload pop-in.
     pub keep_loaded_radius: f64,
+    /// Delays eviction of tiles that have left every BFS's potential set (s).
+    /// Longer = transient camera moves don't churn streaming, but stale tiles
+    /// linger in memory.
     pub unload_grace_period_secs: f64,
+    /// Maximum altitude above terrain at which forced proximity loading applies
+    /// (m); above this, normal frustum culling is used for all nodes.
+    pub proximity_loading_max_altitude: f64,
+    /// Radius around the camera within which loaded nodes are forced visible in
+    /// `cull_meshes`, bypassing frustum culling (m). A safety net for the ground
+    /// right under the player; kept small so nodes behind the camera aren't
+    /// rendered for no benefit.
+    pub force_visible_radius: f64,
 }
 
 impl Default for LodTuning {
     fn default() -> Self {
         Self {
-            keep_loaded_radius: DEFAULT_KEEP_LOADED_RADIUS,
-            unload_grace_period_secs: DEFAULT_UNLOAD_GRACE_PERIOD_SECS,
+            keep_loaded_radius: 250.0,
+            unload_grace_period_secs: 3.0,
+            proximity_loading_max_altitude: 1000.0,
+            force_visible_radius: 50.0,
         }
     }
 }
@@ -120,7 +112,9 @@ impl Plugin for LodPlugin {
             .init_resource::<LodSnapshot>()
             .init_resource::<LodSnapshotRequest>()
             .init_resource::<LodScratch>()
-            .init_resource::<LodTuning>()
+            .add_plugins(crate::config::ConfigPlugin::<LodTuning>::new(
+                "config/world/lod.toml",
+            ))
             .add_systems(
                 Update,
                 (
@@ -507,6 +501,7 @@ fn effective_distance(obb: &OrientedBoundingBox, camera_pos: DVec3, lead: DVec3)
 struct UnifiedWalkCtx<'a> {
     lod_state: &'a LodState,
     tuning: &'a LodTuning,
+    physics_bands: &'a [(f64, usize)],
     frustum: Frustum,
     lod_metrics: LodMetrics,
     is_low_altitude: bool,
@@ -533,10 +528,12 @@ struct UnifiedWalkCtx<'a> {
 /// We descend if either rule wants to. Refining for one consumer
 /// effectively gives the other a free walk through that subtree, which
 /// is exactly the redundancy the unified walker eliminates.
+#[allow(clippy::too_many_arguments)]
 fn unified_bfs_traversal(
     lod_state: &LodState,
     scratch: &mut LodScratch,
     tuning: &LodTuning,
+    physics_bands: &[(f64, usize)],
     frustum: Frustum,
     lod_metrics: LodMetrics,
     camera_pos: DVec3,
@@ -546,11 +543,12 @@ fn unified_bfs_traversal(
     scratch.physics_result.clear();
 
     let camera_altitude = lod_metrics.camera_position.length() - EARTH_RADIUS_M_F64;
-    let is_low_altitude = camera_altitude <= PROXIMITY_LOADING_MAX_ALTITUDE;
+    let is_low_altitude = camera_altitude <= tuning.proximity_loading_max_altitude;
 
     let ctx = UnifiedWalkCtx {
         lod_state,
         tuning,
+        physics_bands,
         frustum,
         lod_metrics,
         is_low_altitude,
@@ -666,7 +664,7 @@ fn unified_walk(
 
         // -------- physics-side decision --------
         let phys_dist = effective_distance(&child_node.obb, ctx.camera_pos, ctx.lead);
-        let phys_target = desired_physics_depth(phys_dist);
+        let phys_target = desired_physics_depth(ctx.physics_bands, phys_dist);
         let physics_in_range = phys_target.is_some();
         let physics_at_or_past_target =
             physics_in_range && phys_target.is_some_and(|t| child_path.depth() >= t);
@@ -952,6 +950,7 @@ fn update_lod_requests(
     channels: Res<LodChannels>,
     motion: Res<MotionTracker>,
     tuning: Res<LodTuning>,
+    streaming: Res<PhysicsStreamingConfig>,
     mut snapshot_request: ResMut<LodSnapshotRequest>,
     mut snapshot: ResMut<LodSnapshot>,
     spawner: TaskSpawner,
@@ -1005,6 +1004,7 @@ fn update_lod_requests(
             &lod_state,
             &mut scratch,
             &tuning,
+            &streaming.bands,
             frustum,
             lod_metrics,
             lod_metrics.camera_position,
@@ -1308,6 +1308,7 @@ fn poll_lod_node_tasks(
 /// masked parents (all 8 octants) are hidden entirely as an optimization.
 fn cull_meshes(
     lod_state: Res<LodState>,
+    tuning: Res<LodTuning>,
     mut materials: ResMut<Assets<TerrainMaterial>>,
     mut query: Query<(
         &RocktreeMeshMarker,
@@ -1342,7 +1343,8 @@ fn cull_meshes(
         let force_visible = camera_pos.is_some_and(|cam_pos| {
             let altitude = cam_pos.length() - EARTH_RADIUS_M_F64;
             let distance = cam_pos.distance(marker.obb.center);
-            altitude <= PROXIMITY_LOADING_MAX_ALTITUDE && distance <= FORCE_VISIBLE_RADIUS
+            altitude <= tuning.proximity_loading_max_altitude
+                && distance <= tuning.force_visible_radius
         });
 
         if !in_frustum && !force_visible {

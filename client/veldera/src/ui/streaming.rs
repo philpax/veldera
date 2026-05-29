@@ -16,7 +16,7 @@ use glam::DVec3;
 
 use crate::{
     camera::RadialFrame,
-    physics::{PHYSICS_DISTANCE_BANDS, PHYSICS_RANGE},
+    physics::PhysicsStreamingConfig,
     rendering::mesh::RocktreeMeshMarker,
     world::lod::{LodSnapshot, LodSnapshotRequest, LodTuning, SnapshotNode, SnapshotNodeState},
 };
@@ -29,13 +29,14 @@ pub(super) struct StreamingParams<'w, 's> {
     pub snapshot_request: ResMut<'w, LodSnapshotRequest>,
     pub diagnostics_state: ResMut<'w, DiagnosticsViewState>,
     pub tuning: ResMut<'w, LodTuning>,
+    pub streaming: Res<'w, PhysicsStreamingConfig>,
 }
 
 /// Per-frame UI state for the diagnostics map (zoom, layer toggles).
 #[derive(Resource)]
 pub struct DiagnosticsViewState {
     /// Half-side of the map area in meters. 1200 m gives a comfortable
-    /// margin around [`PHYSICS_RANGE`] (1000 m).
+    /// margin around the default physics range (1000 m).
     pub map_radius_m: f32,
     /// Show render-BFS overlay.
     pub show_render: bool,
@@ -62,6 +63,7 @@ pub(super) fn render_streaming_tab(ui: &mut egui::Ui, params: &mut StreamingPara
     let snapshot = &*params.snapshot;
     let view = &mut *params.diagnostics_state;
     let tuning = &mut *params.tuning;
+    let streaming = &*params.streaming;
     let mesh_count = params.mesh_query.iter().count();
 
     if snapshot.camera_pos.is_none() {
@@ -109,7 +111,7 @@ pub(super) fn render_streaming_tab(ui: &mut egui::Ui, params: &mut StreamingPara
         );
     });
 
-    draw_top_down_map(ui, snapshot, view, tuning);
+    draw_top_down_map(ui, snapshot, view, tuning, streaming);
 
     ui.separator();
     draw_per_depth_histogram(ui, snapshot);
@@ -127,6 +129,7 @@ fn draw_top_down_map(
     snapshot: &LodSnapshot,
     view: &DiagnosticsViewState,
     tuning: &LodTuning,
+    streaming: &PhysicsStreamingConfig,
 ) {
     let Some(camera_pos) = snapshot.camera_pos else {
         return;
@@ -157,7 +160,7 @@ fn draw_top_down_map(
     };
 
     // Distance band rings.
-    for (max_d, _) in PHYSICS_DISTANCE_BANDS {
+    for (max_d, _) in &streaming.bands {
         let r_px = *max_d as f32 * pixels_per_m;
         if r_px > 1.0 && r_px < rect.width() {
             painter.circle_stroke(
@@ -167,8 +170,8 @@ fn draw_top_down_map(
             );
         }
     }
-    // Outer PHYSICS_RANGE ring (heavier, warm tint).
-    let outer_r = PHYSICS_RANGE as f32 * pixels_per_m;
+    // Outer physics-range ring (heavier, warm tint).
+    let outer_r = streaming.range as f32 * pixels_per_m;
     if outer_r > 1.0 && outer_r < rect.width() {
         painter.circle_stroke(
             center,

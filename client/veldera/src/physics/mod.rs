@@ -2,8 +2,8 @@
 //!
 //! Integrates Avian physics with the rocktree LOD system. Physics colliders
 //! are loaded at a distance-banded target depth (see
-//! [`PHYSICS_DISTANCE_BANDS`]): the area immediately around the player gets
-//! the finest LoD ([`PHYSICS_FINEST_DEPTH`]), and the target depth steps
+//! [`PhysicsStreamingConfig::bands`]): the area immediately around the player
+//! gets the finest LoD ([`PHYSICS_FINEST_DEPTH`]), and the target depth steps
 //! down as distance grows. If the tree doesn't go that deep at a given
 //! location, or the data isn't loaded yet, the deepest available ancestor
 //! is used as a fallback so the player can never fall through the ground.
@@ -31,8 +31,10 @@ use bevy::{
     color::palettes::css::LIME,
     gizmos::config::{GizmoConfig, GizmoConfigStore},
     prelude::*,
+    reflect::TypePath,
 };
 use glam::DVec3;
+use serde::Deserialize;
 
 use crate::{
     camera::{CameraModeTransitions, FollowEntityTarget},
@@ -44,12 +46,10 @@ pub use terrain::TerrainCollider;
 /// Marker component for entities that should despawn when outside physics range.
 ///
 /// Attach this to any physics entity (projectiles, vehicles, etc.) that should
-/// be automatically cleaned up when it moves beyond [`PHYSICS_RANGE`] from the camera.
+/// be automatically cleaned up when it moves beyond
+/// [`PhysicsStreamingConfig::range`] from the camera.
 #[derive(Component, Default)]
 pub struct DespawnOutsidePhysicsRange;
-
-/// Maximum distance from the camera at which terrain colliders are loaded.
-pub const PHYSICS_RANGE: f64 = 1000.0;
 
 /// Innermost (finest) physics LoD depth — one level coarser than
 /// [`rocktree_decode::MAX_LEVEL`].
@@ -57,48 +57,61 @@ pub const PHYSICS_RANGE: f64 = 1000.0;
 /// The deepest tier carries small thin triangles from photogrammetry
 /// reconstruction that cause physics artifacts (objects catching on
 /// near-degenerate edges), so we bias one level back from the absolute
-/// maximum even at point-blank range.
+/// maximum even at point-blank range. Structural (tied to the octree depth),
+/// so it stays compiled in; the config bands are expressed as depth *offsets
+/// below* this so they remain valid if `MAX_LEVEL` changes.
 pub const PHYSICS_FINEST_DEPTH: usize = rocktree_decode::MAX_LEVEL - 1;
 
-/// Distance bands mapping effective camera distance to a target collider depth.
-///
-/// Each entry is `(max_distance_m, depth)`. The list is sorted by ascending
-/// distance; the first band that covers the queried distance wins. Anything
-/// beyond the last band gets no collider.
-///
-/// "Effective distance" is the raw distance with a directional compression
-/// applied via [`MotionTracker::lead`], so nodes ahead of the player are
-/// loaded at the next-finer band before the player gets there.
-pub const PHYSICS_DISTANCE_BANDS: &[(f64, usize)] = &[
-    (50.0, PHYSICS_FINEST_DEPTH),
-    (150.0, PHYSICS_FINEST_DEPTH - 1),
-    (400.0, PHYSICS_FINEST_DEPTH - 2),
-    (PHYSICS_RANGE, PHYSICS_FINEST_DEPTH - 3),
-];
+/// Hot-reloadable terrain-collider streaming tuning, loaded from
+/// `assets/config/physics/streaming.toml`. Lets you trade physics fidelity
+/// against load for performance/quality experiments at runtime.
+#[derive(Asset, Resource, TypePath, Clone, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct PhysicsStreamingConfig {
+    /// Maximum distance from the camera at which colliders are loaded (m), and
+    /// the despawn radius for [`DespawnOutsidePhysicsRange`] entities.
+    pub range: f64,
+    /// Distance bands mapping effective camera distance to a target collider
+    /// depth, each `(max_distance_m, depth_below_finest)`. Sorted ascending;
+    /// the first band covering the queried distance wins, and the resolved depth
+    /// is `PHYSICS_FINEST_DEPTH - depth_below_finest`. Anything beyond the last
+    /// band gets no collider.
+    pub bands: Vec<(f64, usize)>,
+    /// Lookahead time for the lead vector (s); colliders ahead of the player
+    /// load at the next-finer band before the player arrives.
+    pub lead_time: f64,
+    /// Cap on the lead distance (m) so high-speed runs don't starve the area
+    /// under the player.
+    pub max_lead: f64,
+    /// Speed (m/s) below which the lead vector is zero, avoiding directional
+    /// bias from EWMA jitter at rest.
+    pub lead_speed_epsilon: f64,
+    /// EWMA smoothing factor for the motion tracker (~4-frame half-life at
+    /// 60 Hz at 0.25).
+    pub velocity_smoothing: f64,
+}
 
-/// Lookahead time used when computing the lead vector (seconds).
-pub const PHYSICS_LEAD_TIME: f64 = 1.0;
-
-/// Cap on the lead distance so high-speed teleports / flycam runs don't push
-/// the prediction past [`PHYSICS_RANGE`] and starve the area under the player.
-pub const PHYSICS_MAX_LEAD: f64 = 200.0;
-
-/// Speed below which the lead vector is treated as zero (m/s). Avoids
-/// directional bias from accumulated EWMA jitter when the player is at rest.
-const LEAD_SPEED_EPSILON: f64 = 0.1;
-
-/// EWMA smoothing factor for [`MotionTracker`]. Roughly four-frame half-life
-/// at 60 Hz; high enough to suppress single-frame teleport spikes, low
-/// enough to track real motion almost immediately.
-const VELOCITY_SMOOTHING: f64 = 0.25;
+impl Default for PhysicsStreamingConfig {
+    fn default() -> Self {
+        Self {
+            range: 1000.0,
+            bands: vec![(50.0, 0), (150.0, 1), (400.0, 2), (1000.0, 3)],
+            lead_time: 1.0,
+            max_lead: 200.0,
+            lead_speed_epsilon: 0.1,
+            velocity_smoothing: 0.25,
+        }
+    }
+}
 
 /// Return the target physics LoD depth for a node at `effective_distance_m`,
-/// or `None` if it's beyond the outermost band.
-pub fn desired_physics_depth(effective_distance_m: f64) -> Option<usize> {
-    PHYSICS_DISTANCE_BANDS
+/// or `None` if it's beyond the outermost band. Depths are resolved as offsets
+/// below [`PHYSICS_FINEST_DEPTH`].
+pub fn desired_physics_depth(bands: &[(f64, usize)], effective_distance_m: f64) -> Option<usize> {
+    bands
         .iter()
         .find(|(max_d, _)| effective_distance_m <= *max_d)
-        .map(|&(_, depth)| depth)
+        .map(|&(_, offset)| PHYSICS_FINEST_DEPTH.saturating_sub(offset))
 }
 
 /// Plugin for physics integration with the rocktree LOD system.
@@ -115,6 +128,9 @@ impl Plugin for PhysicsIntegrationPlugin {
                     "config/physics/projectile.toml",
                 ),
             )
+            .add_plugins(crate::config::ConfigPlugin::<PhysicsStreamingConfig>::new(
+                "config/physics/streaming.toml",
+            ))
             .insert_resource(Gravity(Vec3::ZERO))
             .init_resource::<PhysicsState>()
             .init_resource::<MotionTracker>()
@@ -161,11 +177,31 @@ pub struct PhysicsState {
 /// Lives separate from [`PhysicsState`]'s `last_camera_position` because
 /// the two are sampled in different schedules (PhysicsState is read by the
 /// fixed-step origin shift; this is read by the variable-rate LOD update).
-#[derive(Resource, Default)]
+#[derive(Resource)]
 pub struct MotionTracker {
     last_camera_pos: Option<DVec3>,
     last_camera_time: Option<f64>,
     smoothed_velocity: DVec3,
+    /// Lead parameters cached from [`PhysicsStreamingConfig`] each tick by
+    /// [`update_motion_tracker`], so [`MotionTracker::lead`] (called from
+    /// several places in the LoD walk) needs no extra argument.
+    lead_time: f64,
+    max_lead: f64,
+    lead_speed_epsilon: f64,
+}
+
+impl Default for MotionTracker {
+    fn default() -> Self {
+        let cfg = PhysicsStreamingConfig::default();
+        Self {
+            last_camera_pos: None,
+            last_camera_time: None,
+            smoothed_velocity: DVec3::ZERO,
+            lead_time: cfg.lead_time,
+            max_lead: cfg.max_lead,
+            lead_speed_epsilon: cfg.lead_speed_epsilon,
+        }
+    }
 }
 
 impl MotionTracker {
@@ -176,30 +212,38 @@ impl MotionTracker {
         self.smoothed_velocity
     }
 
-    /// Lead vector: motion direction scaled by `speed * PHYSICS_LEAD_TIME`,
-    /// clamped at [`PHYSICS_MAX_LEAD`]. Returns zero below a small speed
-    /// threshold to avoid drift from accumulated noise at rest.
+    /// Lead vector: motion direction scaled by `speed * lead_time`, clamped at
+    /// `max_lead`. Returns zero below `lead_speed_epsilon` to avoid drift from
+    /// accumulated noise at rest. The parameters are cached from
+    /// [`PhysicsStreamingConfig`] by [`update_motion_tracker`].
     pub fn lead(&self) -> DVec3 {
         let speed = self.smoothed_velocity.length();
-        if speed < LEAD_SPEED_EPSILON {
+        if speed < self.lead_speed_epsilon {
             return DVec3::ZERO;
         }
-        let lead_dist = (speed * PHYSICS_LEAD_TIME).min(PHYSICS_MAX_LEAD);
+        let lead_dist = (speed * self.lead_time).min(self.max_lead);
         self.smoothed_velocity / speed * lead_dist
     }
 }
 
 /// Update the motion tracker from the camera's current ECEF position.
 ///
-/// Runs once per frame in [`Update`]. The smoothing constant
-/// [`VELOCITY_SMOOTHING`] is intentionally aggressive (~4-frame half-life
-/// at 60 Hz) so we follow real motion immediately but absorb single-frame
-/// teleport spikes via the [`PHYSICS_MAX_LEAD`] clamp downstream.
+/// Runs once per frame in [`Update`]. The smoothing factor
+/// ([`PhysicsStreamingConfig::velocity_smoothing`]) is intentionally aggressive
+/// (~4-frame half-life at 60 Hz) so we follow real motion immediately but absorb
+/// single-frame teleport spikes via the
+/// [`PhysicsStreamingConfig::max_lead`] clamp downstream.
 fn update_motion_tracker(
     time: Res<Time>,
+    config: Res<PhysicsStreamingConfig>,
     mut tracker: ResMut<MotionTracker>,
     camera_query: Query<&FloatingOriginCamera>,
 ) {
+    // Cache the lead parameters so `MotionTracker::lead` stays argument-free.
+    tracker.lead_time = config.lead_time;
+    tracker.max_lead = config.max_lead;
+    tracker.lead_speed_epsilon = config.lead_speed_epsilon;
+
     let Ok(camera) = camera_query.single() else {
         return;
     };
@@ -210,8 +254,9 @@ fn update_motion_tracker(
         let dt = now - last_time;
         if dt > 0.0 {
             let raw_vel = (camera_pos - last_pos) / dt;
-            tracker.smoothed_velocity = tracker.smoothed_velocity * (1.0 - VELOCITY_SMOOTHING)
-                + raw_vel * VELOCITY_SMOOTHING;
+            let smoothing = config.velocity_smoothing;
+            tracker.smoothed_velocity =
+                tracker.smoothed_velocity * (1.0 - smoothing) + raw_vel * smoothing;
         }
     }
 
@@ -301,11 +346,13 @@ fn sync_dynamic_world_position(
     }
 }
 
-/// Despawn entities marked with [`DespawnOutsidePhysicsRange`] when they exceed [`PHYSICS_RANGE`].
+/// Despawn entities marked with [`DespawnOutsidePhysicsRange`] when they exceed
+/// [`PhysicsStreamingConfig::range`].
 ///
 /// If the camera is following the entity being despawned, exits follow mode first.
 fn despawn_outside_physics_range(
     mut commands: Commands,
+    config: Res<PhysicsStreamingConfig>,
     mut mode_transitions: ResMut<CameraModeTransitions>,
     camera_query: Query<(&FloatingOriginCamera, Option<&FollowEntityTarget>)>,
     query: Query<(Entity, &WorldPosition), With<DespawnOutsidePhysicsRange>>,
@@ -317,7 +364,7 @@ fn despawn_outside_physics_range(
     for (entity, world_pos) in &query {
         let distance = (world_pos.position - camera.position).length();
 
-        if distance > PHYSICS_RANGE {
+        if distance > config.range {
             // If we're following this specific entity, exit follow mode first.
             if follow_target.is_some_and(|ft| ft.target == entity) {
                 mode_transitions.request_exit();
@@ -326,7 +373,7 @@ fn despawn_outside_physics_range(
             tracing::debug!(
                 "Despawning entity: exceeded physics range ({:.0}m > {:.0}m)",
                 distance,
-                PHYSICS_RANGE
+                config.range
             );
             commands.entity(entity).despawn();
         }

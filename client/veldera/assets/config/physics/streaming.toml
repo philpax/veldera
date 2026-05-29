@@ -1,0 +1,21 @@
+# Terrain-collider streaming. Trade physics fidelity against load to tune
+# performance/quality at runtime.
+
+# Max distance colliders load at, and the despawn radius for ranged entities (m).
+range = 1000.0
+
+# Lead vector: load colliders ahead of the player before they arrive.
+lead_time = 1.0          # lookahead time (s)
+max_lead = 200.0         # cap on lead distance (m) so fast runs don't starve nearby
+lead_speed_epsilon = 0.1 # below this speed (m/s) the lead is zero
+velocity_smoothing = 0.25 # EWMA factor (~4-frame half-life at 60 Hz)
+
+# Distance bands: each [max_distance_m, depth_below_finest]. First band covering
+# the (lead-adjusted) distance wins; resolved depth = finest octree depth minus
+# the offset. Sorted ascending; beyond the last band, no collider loads.
+bands = [
+  [50.0, 0],
+  [150.0, 1],
+  [400.0, 2],
+  [1000.0, 3],
+]

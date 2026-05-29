@@ -1,4 +1,5 @@
 - [ ] refactor into multiple crates, engine / game
+  - [ ] look at big files and split them apart
 - [ ] preserve velocity on camera<->fps transition
 - [ ] light pollution map?
 - [ ] switching to fps mode should preserve the velocity you had in noclip mode
