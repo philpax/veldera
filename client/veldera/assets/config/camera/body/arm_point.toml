@@ -4,7 +4,7 @@
 # Seconds for the arm to fully raise / lower.
 point_ramp_duration_s = 0.5
 # Max charge hold time (s); past this the charge saturates at 1.0.
-max_charge_duration_s = 10.0
+max_charge_duration_s = 5.0
 # Launch speed at zero charge — a soft push (m/s).
 min_yeet_speed_m_s = 5.0
 # Launch speed at full charge (m/s).

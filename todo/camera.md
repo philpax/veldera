@@ -1,3 +1,4 @@
+- teleport back up if you fall underneath the world
 - switching to fps mode should preserve the velocity you had in noclip mode
 - body does not correctly move/respawn if you teleport while in fps mode
 - scripted camera moves: a sequence of camera moves, potentially defined at runtime, capable of both micro- and macro- scale moves
