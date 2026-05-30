@@ -31,6 +31,7 @@ use std::collections::HashMap;
 
 use bevy::{
     animation::{AnimationTargetId, graph::AnimationNodeIndex},
+    audio::AddAudioSource,
     gltf::Gltf,
     prelude::*,
     reflect::TypePath,
@@ -210,10 +211,6 @@ pub struct BodyVisual {
     /// [`YeetConfig::cooldown_s`](arm_point::YeetConfig) on release; while > 0
     /// the Point action is treated as not pressed.
     pub yeet_cooldown_s: f32,
-    /// Looping rumble audio entity currently playing while charging.
-    /// Spawned on first Point press (off cooldown), despawned on
-    /// release. `None` when no rumble is active.
-    pub rumble_audio_entity: Option<Entity>,
     /// Per-bone ragdoll rig owned by this body. `None` outside
     /// ragdoll; `Some` while ragdolling and the rig was assembled
     /// successfully (Hips + neck anchor found). Built by
@@ -235,6 +232,8 @@ impl Plugin for BodyPlugin {
             config::ConfigPlugin::<arm_point::YeetConfig>::new(config::paths::ARM_POINT),
             config::ConfigPlugin::<BodyConfig>::new(config::paths::BODY),
         ))
+        // Register the procedural charge-rumble audio source.
+        .add_audio_source::<arm_point::RumbleAudio>()
         .init_resource::<CharacterMetrics>()
         .init_resource::<BodyTuning>()
         .init_resource::<BodyAssets>()
@@ -547,7 +546,6 @@ fn spawn_body_on_fps_enter(
             point_amount: 0.0,
             charge_seconds: 0.0,
             yeet_cooldown_s: 0.0,
-            rumble_audio_entity: None,
             ragdoll_graph: None,
         },
         SceneRoot(scene_handle.clone()),

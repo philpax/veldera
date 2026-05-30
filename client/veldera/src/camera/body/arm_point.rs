@@ -3,10 +3,10 @@
 //! Right-click is held to raise the right arm in the camera's look
 //! direction (single-bone "look-at" — no real IK, the whole straight
 //! arm rotates from the shoulder). The hold builds up `charge_seconds`,
-//! which maps linearly to the launch speed on release. A procedurally
-//! synthesized low rumble loops during the charge, ramping in volume
-//! and pitch as the charge climbs. On release, the rumble cuts and a
-//! whoosh sample plays as the player is yeeted along the look
+//! which maps linearly to the launch speed on release. A procedural low
+//! rumble (a continuous real-time synth, not a loop) plays while charging,
+//! gliding in volume and pitch with the charge; on release it fades to
+//! silence and a whoosh sample plays as the player is yeeted along the look
 //! direction. A [`YeetConfig::cooldown_s`] timeout follows the launch to
 //! prevent infinite flying.
 //!
@@ -25,10 +25,20 @@
 //! the standard pitfalls (degenerate triangles when the target is too
 //! close, pole-vector flipping near the singularity).
 
-use std::sync::Arc;
+use std::{
+    sync::{
+        Arc,
+        atomic::{AtomicU32, Ordering},
+    },
+    time::Duration,
+};
 
 use avian3d::prelude::*;
-use bevy::{audio::Volume, prelude::*, reflect::TypePath};
+use bevy::{
+    audio::{Decodable, Source},
+    prelude::*,
+    reflect::TypePath,
+};
 use leafwing_input_manager::prelude::*;
 use serde::Deserialize;
 
@@ -52,9 +62,9 @@ use crate::{
 /// Hot-reloadable yeet (arm-point launch) tuning, loaded from
 /// `assets/config/camera/body/arm_point.toml`.
 ///
-/// Note: [`RumbleConfig::base_hz`] only takes effect on restart — the rumble
-/// loop is synthesized once at startup (see [`generate_rumble_wav`]). The volume
-/// and speed ranges, applied to the live audio sink each frame, hot-reload.
+/// The rumble is synthesized in real time from these values (see
+/// [`RumbleDecoder`]), so every [`RumbleConfig`] field — `base_hz` included —
+/// hot-reloads with no restart.
 #[derive(Default, Asset, Resource, TypePath, Clone, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct YeetConfig {
@@ -80,20 +90,21 @@ pub struct YeetConfig {
     pub rumble: RumbleConfig,
 }
 
-/// Charge-rumble audio parameters.
+/// Charge-rumble audio parameters. The rumble is a real-time synth (sub-bass
+/// fundamental plus octave, subharmonic, and third harmonic, with a slow
+/// tremolo); these drive its frequency and amplitude from the charge level.
 #[derive(Default, Clone, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct RumbleConfig {
     /// Fundamental frequency (Hz); sub-bass, harmonics add the menace.
-    /// Applied at startup only — the loop is baked once.
     pub base_hz: f32,
     /// Volume at zero charge (linear).
     pub min_volume: f32,
     /// Volume at full charge (linear).
     pub max_volume: f32,
-    /// Playback speed at zero charge (1.0 = original pitch).
+    /// Frequency multiplier at zero charge (1.0 = `base_hz`).
     pub min_speed: f32,
-    /// Playback speed at full charge (doubling = +1 octave).
+    /// Frequency multiplier at full charge (2.0 = +1 octave).
     pub max_speed: f32,
 }
 
@@ -103,96 +114,193 @@ const WHOOSH_ASSET_PATH: &str = "855844__sadiquecat__whoosh-long-bamboo-stick-os
 /// Sample rate (Hz) of the synthesized rumble. 48 kHz is rodio's
 /// default-friendly rate and matches the whoosh sample's rate.
 const RUMBLE_SAMPLE_RATE: u32 = 48_000;
-/// Loop length in seconds. 1.0 keeps the loop seamless for any integer
-/// frequency (all sines return to 0 at the boundary) and stays small.
-const RUMBLE_LOOP_DURATION_S: f32 = 1.0;
+/// Slow tremolo frequency (Hz) swelling the rumble amplitude.
+const RUMBLE_TREMOLO_HZ: f32 = 0.5;
+/// One-pole time constant (s) for the per-sample slews of charge and amplitude.
+/// Glides frequency/volume smoothly between the ECS's per-frame updates and
+/// across charge resets, so there are no clicks or sudden jumps.
+const RUMBLE_SLEW_TAU_S: f32 = 0.03;
+
+// ----------------------------------------------------------------------------
+// Procedural rumble audio
+// ----------------------------------------------------------------------------
+
+fn load_f32(a: &AtomicU32) -> f32 {
+    f32::from_bits(a.load(Ordering::Relaxed))
+}
+
+/// Lock-free state driving the rumble synth. The ECS writes it each frame
+/// (charge level, whether charging, and the live [`RumbleConfig`]); the audio
+/// thread reads it per sample. f32s are stored as bits in [`AtomicU32`].
+#[derive(Debug, Default)]
+pub(super) struct RumbleShared {
+    /// Charge level, `0..1`.
+    charge: AtomicU32,
+    /// 1 while charging, 0 otherwise — gates the amplitude to silence when idle.
+    active: AtomicU32,
+    base_hz: AtomicU32,
+    min_volume: AtomicU32,
+    max_volume: AtomicU32,
+    min_speed: AtomicU32,
+    max_speed: AtomicU32,
+}
+
+impl RumbleShared {
+    /// Push the current charge state and config into the shared atomics.
+    fn store(&self, config: &RumbleConfig, active: bool, charge: f32) {
+        self.charge.store(charge.to_bits(), Ordering::Relaxed);
+        self.active.store(u32::from(active), Ordering::Relaxed);
+        self.base_hz
+            .store(config.base_hz.to_bits(), Ordering::Relaxed);
+        self.min_volume
+            .store(config.min_volume.to_bits(), Ordering::Relaxed);
+        self.max_volume
+            .store(config.max_volume.to_bits(), Ordering::Relaxed);
+        self.min_speed
+            .store(config.min_speed.to_bits(), Ordering::Relaxed);
+        self.max_speed
+            .store(config.max_speed.to_bits(), Ordering::Relaxed);
+    }
+}
+
+/// Custom Bevy audio source for the charge rumble: an endless, real-time synth
+/// whose frequency and volume track the shared charge level. Registered via
+/// `add_audio_source`, played by a single persistent [`AudioPlayer`] spawned at
+/// startup (silent until charging).
+#[derive(Asset, TypePath, Clone)]
+pub(super) struct RumbleAudio {
+    shared: Arc<RumbleShared>,
+}
+
+impl Decodable for RumbleAudio {
+    type DecoderItem = f32;
+    type Decoder = RumbleDecoder;
+
+    fn decoder(&self) -> Self::Decoder {
+        let sr = RUMBLE_SAMPLE_RATE as f32;
+        RumbleDecoder {
+            shared: self.shared.clone(),
+            slew: 1.0 - (-1.0 / (RUMBLE_SLEW_TAU_S * sr)).exp(),
+            charge: 0.0,
+            env: 0.0,
+            phase_fund: 0.0,
+            phase_sub: 0.0,
+            phase_trem: 0.0,
+        }
+    }
+}
+
+/// The rodio [`Source`] behind [`RumbleAudio`]: an infinite mono f32 synth.
+///
+/// Each partial keeps its own accumulating phase, so frequency changes stay
+/// click-free (no recompute-from-absolute-time discontinuity). The fundamental
+/// phase also yields the octave and third harmonic (integer multiples wrap
+/// cleanly); the subharmonic needs its own accumulator. `charge` and `env` are
+/// one-pole slewed toward their targets, so pitch/volume glide smoothly and the
+/// idle→charging→idle gate never clicks.
+pub(super) struct RumbleDecoder {
+    shared: Arc<RumbleShared>,
+    slew: f32,
+    charge: f32,
+    env: f32,
+    phase_fund: f32,
+    phase_sub: f32,
+    phase_trem: f32,
+}
+
+impl Iterator for RumbleDecoder {
+    type Item = f32;
+
+    fn next(&mut self) -> Option<f32> {
+        use std::f32::consts::TAU;
+
+        let sr = RUMBLE_SAMPLE_RATE as f32;
+        let active = self.shared.active.load(Ordering::Relaxed) != 0;
+        let target_charge = load_f32(&self.shared.charge).clamp(0.0, 1.0);
+        let base_hz = load_f32(&self.shared.base_hz);
+        let min_volume = load_f32(&self.shared.min_volume);
+        let max_volume = load_f32(&self.shared.max_volume);
+        let min_speed = load_f32(&self.shared.min_speed);
+        let max_speed = load_f32(&self.shared.max_speed);
+
+        self.charge += (target_charge - self.charge) * self.slew;
+        let target_amp = if active {
+            lerp(min_volume, max_volume, self.charge)
+        } else {
+            0.0
+        };
+        self.env += (target_amp - self.env) * self.slew;
+
+        let freq = base_hz * lerp(min_speed, max_speed, self.charge);
+        self.phase_fund = (self.phase_fund + freq / sr).fract();
+        self.phase_sub = (self.phase_sub + 0.5 * freq / sr).fract();
+        self.phase_trem = (self.phase_trem + RUMBLE_TREMOLO_HZ / sr).fract();
+
+        let fund = self.phase_fund * TAU;
+        // Fundamental + octave + 3rd harmonic off the fundamental phase (integer
+        // multiples wrap cleanly); subharmonic off its own phase.
+        let mix = 0.60 * fund.sin()
+            + 0.30 * (2.0 * fund).sin()
+            + 0.15 * (3.0 * fund).sin()
+            + 0.20 * (self.phase_sub * TAU).sin();
+        let tremolo = 1.0 - 0.30 * (self.phase_trem * TAU).sin();
+
+        Some((mix * tremolo * self.env).clamp(-1.0, 1.0))
+    }
+}
+
+impl Source for RumbleDecoder {
+    fn current_frame_len(&self) -> Option<usize> {
+        None
+    }
+    fn channels(&self) -> u16 {
+        1
+    }
+    fn sample_rate(&self) -> u32 {
+        RUMBLE_SAMPLE_RATE
+    }
+    fn total_duration(&self) -> Option<Duration> {
+        None
+    }
+}
 
 // ----------------------------------------------------------------------------
 // Resources
 // ----------------------------------------------------------------------------
 
-/// Handles to the two audio sources used by the charge mechanic.
-/// Populated once at startup.
+/// Charge-mechanic audio: the shared rumble-synth state (written each frame) and
+/// the one-shot whoosh sample. Populated once at startup.
 #[derive(Resource)]
 pub(super) struct ChargeAudio {
-    /// 1-second seamless rumble loop synthesized at startup.
-    pub rumble: Handle<AudioSource>,
+    /// Shared state driving the persistent rumble synth voice.
+    pub rumble: Arc<RumbleShared>,
     /// Whoosh sample loaded from `assets/…whoosh-long-bamboo-stick…`.
     pub whoosh: Handle<AudioSource>,
 }
 
 // ============================================================================
-// Startup: synthesize the rumble loop, load the whoosh sample
+// Startup: spawn the persistent rumble voice, load the whoosh sample
 // ============================================================================
 
 pub(super) fn setup_charge_audio(
-    config: Res<YeetConfig>,
     asset_server: Res<AssetServer>,
-    mut audio_sources: ResMut<Assets<AudioSource>>,
+    mut rumble_sources: ResMut<Assets<RumbleAudio>>,
     mut commands: Commands,
 ) {
-    let rumble_wav = generate_rumble_wav(config.rumble.base_hz);
-    let rumble = audio_sources.add(AudioSource {
-        bytes: Arc::from(rumble_wav.into_boxed_slice()),
+    // One persistent, endless synth voice. It's silent (amplitude gated off)
+    // until the ECS marks it active while charging, so it never needs
+    // spawning/despawning — no start/stop clicks.
+    let shared = Arc::new(RumbleShared::default());
+    let source = rumble_sources.add(RumbleAudio {
+        shared: shared.clone(),
     });
+    commands.spawn((AudioPlayer(source), PlaybackSettings::ONCE));
+
     let whoosh = asset_server.load(WHOOSH_ASSET_PATH);
-    commands.insert_resource(ChargeAudio { rumble, whoosh });
-}
-
-/// Synthesize a 1-second seamless rumble loop as 16-bit mono PCM and
-/// wrap it in a minimal WAV header so rodio can decode it the same way
-/// it would a file-loaded sample.
-///
-/// The mix is a sub-bass sine + octave + subharmonic + 3rd harmonic
-/// with a slow tremolo. Every frequency is a positive integer Hz, so
-/// each sine completes a whole number of cycles in 1 s and returns to
-/// zero at the loop boundary — no click on wrap.
-fn generate_rumble_wav(base_hz: f32) -> Vec<u8> {
-    use std::f32::consts::TAU;
-
-    let num_samples = (RUMBLE_SAMPLE_RATE as f32 * RUMBLE_LOOP_DURATION_S) as usize;
-    let mut samples_i16 = Vec::with_capacity(num_samples);
-    for i in 0..num_samples {
-        let t = i as f32 / RUMBLE_SAMPLE_RATE as f32;
-        let f = base_hz;
-        // Fundamental + octave + subharmonic + 3rd harmonic.
-        let mix = 0.60 * (TAU * f * t).sin()
-            + 0.30 * (TAU * (2.0 * f) * t).sin()
-            + 0.20 * (TAU * (0.5 * f) * t).sin()
-            + 0.15 * (TAU * (3.0 * f) * t).sin();
-        // 0.5 Hz tremolo — slow swell. sin(2π·0.5·t) is zero at t=0 and
-        // t=1.0, preserving loop continuity.
-        let tremolo = 1.0 - 0.30 * (TAU * 0.5 * t).sin();
-        let amp = (mix * tremolo * 0.70).clamp(-1.0, 1.0);
-        samples_i16.push((amp * i16::MAX as f32) as i16);
-    }
-    samples_to_wav_bytes(RUMBLE_SAMPLE_RATE, &samples_i16)
-}
-
-/// Wrap a mono 16-bit PCM sample buffer in a minimal RIFF/WAVE header.
-fn samples_to_wav_bytes(sample_rate: u32, samples: &[i16]) -> Vec<u8> {
-    let data_size = (samples.len() * 2) as u32;
-    let chunk_size = 36 + data_size;
-    let byte_rate = sample_rate * 2;
-
-    let mut wav = Vec::with_capacity(44 + data_size as usize);
-    wav.extend_from_slice(b"RIFF");
-    wav.extend_from_slice(&chunk_size.to_le_bytes());
-    wav.extend_from_slice(b"WAVE");
-    wav.extend_from_slice(b"fmt ");
-    wav.extend_from_slice(&16u32.to_le_bytes()); // fmt chunk size
-    wav.extend_from_slice(&1u16.to_le_bytes()); // PCM format
-    wav.extend_from_slice(&1u16.to_le_bytes()); // mono
-    wav.extend_from_slice(&sample_rate.to_le_bytes());
-    wav.extend_from_slice(&byte_rate.to_le_bytes());
-    wav.extend_from_slice(&2u16.to_le_bytes()); // block align (1 channel × 16-bit)
-    wav.extend_from_slice(&16u16.to_le_bytes()); // bits per sample
-    wav.extend_from_slice(b"data");
-    wav.extend_from_slice(&data_size.to_le_bytes());
-    for sample in samples {
-        wav.extend_from_slice(&sample.to_le_bytes());
-    }
-    wav
+    commands.insert_resource(ChargeAudio {
+        rumble: shared,
+        whoosh,
+    });
 }
 
 // ============================================================================
@@ -315,12 +423,10 @@ fn find_descendant_by_bone_stem(
 /// Per-frame: tick the cooldown, ramp `point_amount` linearly toward
 /// the input target (0 or 1) over [`POINT_RAMP_DURATION_S`], accumulate
 /// `charge_seconds` while held off-cooldown, drive the right arm's
-/// rotation toward the camera look direction, and manage the looping
-/// rumble audio entity (spawn on first held tick, drive volume/speed
-/// by charge each frame, despawn on release/cooldown).
+/// rotation toward the camera look direction, and feed the charge state
+/// into the rumble synth.
 #[allow(clippy::type_complexity, clippy::too_many_arguments)]
 pub(super) fn apply_arm_pointing(
-    mut commands: Commands,
     config: Res<YeetConfig>,
     time: Res<Time>,
     actions: Query<&ActionState<CameraAction>>,
@@ -328,7 +434,6 @@ pub(super) fn apply_arm_pointing(
     logical_query: Query<(&FpsController, &WorldPosition), With<LogicalPlayer>>,
     parents: Query<&ChildOf>,
     global_transforms: Query<&GlobalTransform>,
-    mut sinks: Query<&mut AudioSink>,
     mut body_query: Query<&mut BodyVisual>,
     mut transforms: Query<&mut Transform, Without<LogicalPlayer>>,
 ) {
@@ -370,13 +475,10 @@ pub(super) fn apply_arm_pointing(
         }
         let charge_ratio = body.charge_seconds / config.max_charge_duration_s;
 
-        // Rumble audio lifecycle.
+        // Feed the rumble synth.
         update_rumble_audio(
             &config.rumble,
-            &mut commands,
-            body.as_mut(),
             charge_audio.as_deref(),
-            &mut sinks,
             pointing,
             charge_ratio,
         );
@@ -464,47 +566,17 @@ pub(super) fn apply_arm_pointing(
     }
 }
 
-/// Spawn / update / despawn the looping rumble audio for one body.
+/// Push the charge state and config into the shared rumble-synth state; the
+/// persistent voice reads it on the audio thread (see [`RumbleDecoder`]). When
+/// not pointing, `active = false` fades the synth to silence.
 fn update_rumble_audio(
     rumble: &RumbleConfig,
-    commands: &mut Commands,
-    body: &mut BodyVisual,
     charge_audio: Option<&ChargeAudio>,
-    sinks: &mut Query<&mut AudioSink>,
     pointing: bool,
     charge_ratio: f32,
 ) {
-    let Some(audio) = charge_audio else {
-        return;
-    };
-
-    if pointing {
-        // Spawn on first held tick.
-        if body.rumble_audio_entity.is_none() {
-            let entity = commands
-                .spawn((
-                    AudioPlayer::new(audio.rumble.clone()),
-                    PlaybackSettings::LOOP
-                        .with_volume(Volume::Linear(rumble.min_volume))
-                        .with_speed(rumble.min_speed),
-                ))
-                .id();
-            body.rumble_audio_entity = Some(entity);
-        }
-        // Update the sink's volume + speed each frame. The sink is
-        // inserted by Bevy on a later tick than the spawn, so it may
-        // not be queryable for the first frame; that's fine — the
-        // initial PlaybackSettings cover the gap.
-        if let Some(entity) = body.rumble_audio_entity
-            && let Ok(mut sink) = sinks.get_mut(entity)
-        {
-            let volume = lerp(rumble.min_volume, rumble.max_volume, charge_ratio);
-            let speed = lerp(rumble.min_speed, rumble.max_speed, charge_ratio);
-            sink.set_volume(Volume::Linear(volume));
-            sink.set_speed(speed);
-        }
-    } else if let Some(entity) = body.rumble_audio_entity.take() {
-        commands.entity(entity).despawn();
+    if let Some(audio) = charge_audio {
+        audio.rumble.store(rumble, pointing, charge_ratio);
     }
 }
 
