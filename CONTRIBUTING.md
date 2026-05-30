@@ -87,6 +87,34 @@ Within each module, organize code as follows:
 2. **Private implementation below** - constants, helper functions, and internal types
 3. **Order by use** - private items should appear in the order they're called/used by the public API (topological order)
 
+### Configuration and tunable values
+
+Prefer hot-reloadable config over init-only config over hardcoded constants. When
+you reach for a `const`, ask whether the value is genuinely structural or merely a
+tuning knob that someone will want to iterate on.
+
+- **Hot-reloadable config (default, preferred).** Any value that affects "feel",
+  appearance, or behaviour someone might want to tune lives in a per-domain TOML
+  under `client/veldera/assets/config/`, backed by a `ConfigPlugin<C>` (the config
+  type is both an `Asset` and a mirror `Resource`). Native builds watch the file
+  and apply edits live; consumers read `config::Config<C>` (or the mirror
+  `Resource`) and get the new value on the next frame. This is the normal case, so
+  do not document or comment that a value is hot-reloadable — it is assumed.
+- **Init-only config.** Some values can only be applied at startup or plugin-build
+  time (e.g. a value that sizes a GPU buffer or seeds a one-shot spawn). Keep these
+  in the TOML too, but call out the init-only constraint explicitly in a comment on
+  the field and in the TOML, since it is the exception to hot-reload.
+- **Hardcoded constants (last resort).** Reserve `const` for values that are truly
+  structural and never tuned: bone names, layer masks, hard geometry or precision
+  limits, GPU workgroup sizes, and physical or astronomical constants. Crate-local
+  constants that the host should be able to tune (e.g. shader feel constants) should
+  be lifted into a settings `Resource` fed from the TOML rather than left baked in.
+
+When a value flows into a shader, prefer a uniform sourced from config (retunes
+live) over a `shader_def` (recompiles on change) over a WGSL `const` (requires a
+source edit). Note that `shader_def`s cannot carry floats — int, uint, and bool
+only.
+
 ### Memory and performance
 
 - Use `Arc` or borrows for shared immutable data.
