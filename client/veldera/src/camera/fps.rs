@@ -143,7 +143,7 @@ pub struct RenderPlayer {
 /// `assets/config/camera/fps.toml`. The skeletal rig itself has a separate
 /// compile-time switch,
 /// [`ENABLE_SKELETAL_RAGDOLL`](super::body::ragdoll).
-#[derive(Asset, Resource, TypePath, Clone, Deserialize)]
+#[derive(Default, Asset, Resource, TypePath, Clone, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct FpsConfig {
     /// Master switch for the ragdoll feature. `false` →
@@ -179,21 +179,43 @@ pub struct FpsConfig {
     /// Tolerance (radians) keeping look pitch just shy of straight up/down to
     /// avoid the look basis degenerating at the poles.
     pub angle_epsilon: f32,
-}
 
-impl Default for FpsConfig {
-    fn default() -> Self {
-        Self {
-            enable_ragdoll: true,
-            airborne_threshold_s: 1.0,
-            ground_recovery_s: 0.15,
-            landing_friction: 40.0,
-            crouch_height_ratio: 1.0 / 1.8,
-            min_radius_ratio: 0.05,
-            max_radius_ratio: 0.49,
-            angle_epsilon: 0.001_953_125,
-        }
-    }
+    // ---- Movement tunables ----
+    // Copied into [`FpsController`] each tick by [`fps_controller_prepare`], so
+    // editing `fps.toml` retunes locomotion live.
+    /// Max ground speed while walking (m/s).
+    pub walk_speed: f32,
+    /// Max ground speed while sprinting (m/s).
+    pub run_speed: f32,
+    /// Forward wish-speed scale fed into the move basis.
+    pub forward_speed: f32,
+    /// Sideways wish-speed scale fed into the move basis.
+    pub side_speed: f32,
+    /// Per-tick cap on how much air control can add to wish speed (m/s).
+    pub air_speed_cap: f32,
+    /// Air acceleration (m/s²).
+    pub air_acceleration: f32,
+    /// Hard cap on lateral air speed (m/s); raised so point-yeet launches aren't
+    /// clamped. Normal air movement is bounded by `air_speed_cap`.
+    pub max_air_speed: f32,
+    /// Ground acceleration (m/s²).
+    pub acceleration: f32,
+    /// Ground friction coefficient (normal play; ragdoll uses `landing_friction`).
+    pub friction: f32,
+    /// Surface-normal·up cutoff above which a surface counts as ground.
+    pub traction_normal_cutoff: f32,
+    /// Lateral speed below which ground friction snaps to a full stop (m/s).
+    pub friction_speed_cutoff: f32,
+    /// Upward speed imparted by a jump (m/s).
+    pub jump_speed: f32,
+    /// Max ground speed while crouched (m/s).
+    pub crouched_speed: f32,
+    /// Rate the capsule shrinks when crouching (m/s).
+    pub crouch_speed: f32,
+    /// Rate the capsule grows when uncrouching (m/s).
+    pub uncrouch_speed: f32,
+    /// Minimum control speed used in the ground-friction drop term (m/s).
+    pub stop_speed: f32,
 }
 
 /// Ragdoll state machine for the FPS player.
@@ -225,11 +247,12 @@ pub enum RagdollState {
 /// `radius_ratio` is the capsule radius as a fraction of total height;
 /// it must stay strictly below `0.5` so the capsule has a non-empty
 /// cylindrical segment between its hemispheres.
-#[derive(Resource, Debug, Clone, Copy)]
+#[derive(Resource, Debug, Clone, Copy, Default)]
 pub struct FpsPlayerConfig {
-    /// Total player height in meters (bottom of feet to top of head).
+    /// Total player height in meters (bottom of feet to top of head). Set from
+    /// the loaded character model (and the Camera-tab slider); zero until then.
     pub height: f32,
-    /// Capsule radius as a fraction of `height`.
+    /// Capsule radius as a fraction of `height`. Set from the model.
     pub radius_ratio: f32,
     /// Crouched height as a fraction of upright `height`. Synced from
     /// [`FpsConfig::crouch_height_ratio`] by [`sync_fps_player_geometry`].
@@ -240,18 +263,6 @@ pub struct FpsPlayerConfig {
     /// Maximum allowed `radius_ratio` (slider ceiling + clamp). Synced from
     /// [`FpsConfig::max_radius_ratio`].
     pub max_radius_ratio: f32,
-}
-
-impl Default for FpsPlayerConfig {
-    fn default() -> Self {
-        Self {
-            height: 1.8,
-            radius_ratio: 0.5 / 1.8,
-            crouch_height_ratio: 1.0 / 1.8,
-            min_radius_ratio: 0.05,
-            max_radius_ratio: 0.49,
-        }
-    }
 }
 
 impl FpsPlayerConfig {
@@ -281,9 +292,15 @@ pub struct FpsControllerInput {
 
 /// FPS controller component.
 ///
+/// The movement tunables (speeds, accelerations, friction, jump) are not owned
+/// here: they're copied from the file-backed [`FpsConfig`] every tick by
+/// [`fps_controller_prepare`] via [`FpsController::apply_movement_config`], so
+/// the component's `Default` leaves them zeroed. The remaining fields are
+/// genuine per-tick runtime state.
+///
 /// Note: Gravity is handled radially (toward Earth center) rather than as a configurable field.
 /// Key bindings and sensitivity are managed by the centralized input system.
-#[derive(Component)]
+#[derive(Component, Default)]
 pub struct FpsController {
     pub walk_speed: f32,
     pub run_speed: f32,
@@ -329,47 +346,26 @@ pub struct FpsController {
     pub grounded_time_s: f32,
 }
 
-impl Default for FpsController {
-    fn default() -> Self {
-        Self {
-            // Realistic-ish locomotion speeds chosen to roughly match
-            // Mixamo's reference clip paces (so the feet plant cleanly
-            // rather than ice-skating or motorboating).
-            walk_speed: 3.0,
-            run_speed: 8.0,
-            forward_speed: 30.0,
-            side_speed: 30.0,
-            air_speed_cap: 2.0,
-            air_acceleration: 20.0,
-            // Lifted from the original 15 m/s so the point-yeet
-            // mechanic can launch the player at up to
-            // `MAX_YEET_SPEED_M_S`. Normal-gameplay air movement is
-            // bounded by `air_speed_cap` per-tick, so the new
-            // ceiling only matters for explicit launches.
-            max_air_speed: 200.0,
-            crouched_speed: 2.0,
-            crouch_speed: 6.0,
-            uncrouch_speed: 8.0,
-            height: 1.8,
-            upright_height: 1.8,
-            crouch_height: 1.0,
-            acceleration: 10.0,
-            friction: 10.0,
-            traction_normal_cutoff: 0.7,
-            friction_speed_cutoff: 0.1,
-            pitch: 0.0,
-            yaw: 0.0,
-            ground_tick: 0,
-            stop_speed: 1.0,
-            jump_speed: 4.0,
-            enable_input: true,
-
-            previous_translation: None,
-
-            ragdoll_state: RagdollState::Active,
-            airborne_time_s: 0.0,
-            grounded_time_s: 0.0,
-        }
+impl FpsController {
+    /// Copy the movement tunables from the file-backed [`FpsConfig`]. Called
+    /// each tick by [`fps_controller_prepare`] so `fps.toml` edits apply live.
+    fn apply_movement_config(&mut self, c: &FpsConfig) {
+        self.walk_speed = c.walk_speed;
+        self.run_speed = c.run_speed;
+        self.forward_speed = c.forward_speed;
+        self.side_speed = c.side_speed;
+        self.air_speed_cap = c.air_speed_cap;
+        self.air_acceleration = c.air_acceleration;
+        self.max_air_speed = c.max_air_speed;
+        self.acceleration = c.acceleration;
+        self.friction = c.friction;
+        self.traction_normal_cutoff = c.traction_normal_cutoff;
+        self.friction_speed_cutoff = c.friction_speed_cutoff;
+        self.jump_speed = c.jump_speed;
+        self.crouched_speed = c.crouched_speed;
+        self.crouch_speed = c.crouch_speed;
+        self.uncrouch_speed = c.uncrouch_speed;
+        self.stop_speed = c.stop_speed;
     }
 }
 
@@ -437,6 +433,10 @@ pub fn spawn_fps_player(
                 height,
                 upright_height: height,
                 crouch_height: config.crouch_height(),
+                // Movement tunables are populated from `FpsConfig` on the first
+                // `fps_controller_prepare` tick; `enable_input` is runtime state
+                // that must start enabled.
+                enable_input: true,
                 ..Default::default()
             },
             FpsControllerInput {
@@ -689,6 +689,10 @@ fn fps_controller_prepare(
     let camera_pos = camera.position;
 
     for (input, mut controller, mut collider, mut velocity, position) in query.iter_mut() {
+        // Pull the movement tunables from the file-backed config each tick so
+        // edits to `fps.toml` retune locomotion live.
+        controller.apply_movement_config(&fps_config);
+
         let ecef_pos = camera_pos + position.0.as_dvec3();
         let frame = RadialFrame::from_ecef_position(ecef_pos);
         let local_up = frame.up;
