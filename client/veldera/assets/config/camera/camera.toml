@@ -4,6 +4,17 @@
 min_speed = 10.0
 max_speed = 25000.0
 
+# Starting flycam speed (m/s); the scroll wheel and Camera-tab slider adjust it
+# live between reloads, clamped to [min_speed, max_speed].
+base_speed = 1000.0
+# Speed multiplier while the boost key is held.
+boost_multiplier = 5.0
+# Mouse sensitivity for look rotation (radians per pixel of mouse delta).
+mouse_sensitivity = 0.001
+
+# Teleport-animation style: "Classic" (looks down at Earth) | "HorizonChasing".
+teleport_animation_mode = "Classic"
+
 # Vertical field of view (degrees). Applied on load/reload; the Camera tab FoV
 # slider edits it live between reloads. ~75 vertical ≈ 100 horizontal at 16:9.
 default_fov_deg = 75.0

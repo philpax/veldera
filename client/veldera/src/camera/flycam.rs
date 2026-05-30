@@ -14,7 +14,7 @@ use crate::{
     },
 };
 
-use super::{CameraConfig, CameraModeState, CameraSettings, FlightCamera};
+use super::{CameraConfig, CameraModeState, FlightCamera};
 
 // ============================================================================
 // Plugin
@@ -65,9 +65,8 @@ fn is_follow_entity_mode(state: Res<CameraModeState>) -> bool {
 
 /// Adjust speed with mouse scroll wheel.
 fn adjust_speed_with_scroll(
-    config: Res<CameraConfig>,
     action_query: Query<&ActionState<CameraAction>>,
-    mut settings: ResMut<CameraSettings>,
+    mut config: ResMut<CameraConfig>,
 ) {
     let Ok(action_state) = action_query.single() else {
         return;
@@ -77,15 +76,14 @@ fn adjust_speed_with_scroll(
     if scroll != 0.0 {
         // Adjust speed logarithmically for smooth scaling.
         let factor = 1.1_f32.powf(scroll);
-        settings.base_speed =
-            (settings.base_speed * factor).clamp(config.min_speed, config.max_speed);
+        config.base_speed = (config.base_speed * factor).clamp(config.min_speed, config.max_speed);
     }
 }
 
 /// Handle mouse look rotation.
 fn camera_look(
     action_query: Query<&ActionState<CameraAction>>,
-    settings: Res<CameraSettings>,
+    config: Res<CameraConfig>,
     mut query: Query<(&FloatingOriginCamera, &mut Transform, &mut FlightCamera)>,
 ) {
     let Ok(action_state) = action_query.single() else {
@@ -98,8 +96,8 @@ fn camera_look(
     }
 
     for (origin_camera, mut transform, mut camera) in &mut query {
-        let yaw = -delta.x * settings.mouse_sensitivity;
-        let pitch = -delta.y * settings.mouse_sensitivity;
+        let yaw = -delta.x * config.mouse_sensitivity;
+        let pitch = -delta.y * config.mouse_sensitivity;
 
         // Calculate up vector (from Earth center towards camera) using high-precision position.
         let up = origin_camera.position.normalize().as_vec3();
@@ -138,7 +136,7 @@ fn camera_look(
 fn camera_movement(
     time: Res<Time>,
     action_query: Query<&ActionState<CameraAction>>,
-    settings: Res<CameraSettings>,
+    config: Res<CameraConfig>,
     mut query: Query<(&mut FloatingOriginCamera, &mut Transform, &mut FlightCamera)>,
 ) {
     let Ok(action_state) = action_query.single() else {
@@ -154,9 +152,9 @@ fn camera_movement(
         let speed_factor = ((altitude / 10000.0).max(1.0) + 1.0).powf(1.337) / 6.0;
         let speed_factor = speed_factor.min(2600.0) as f32;
 
-        let mut speed = settings.base_speed * speed_factor;
+        let mut speed = config.base_speed * speed_factor;
         if action_state.pressed(&CameraAction::Sprint) {
-            speed *= settings.boost_multiplier;
+            speed *= config.boost_multiplier;
         }
 
         // Calculate movement directions using high-precision up vector.

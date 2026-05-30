@@ -20,7 +20,7 @@ use crate::{
     },
 };
 
-use super::{CameraModeState, CameraSettings, FlightCamera};
+use super::{CameraConfig, CameraModeState, FlightCamera};
 
 // ============================================================================
 // Radial frame
@@ -615,7 +615,7 @@ fn clear_input(mut query: Query<&mut FpsControllerInput>) {
 
 fn fps_controller_input(
     action_query: Query<&ActionState<CameraAction>>,
-    settings: Res<CameraSettings>,
+    camera_config: Res<CameraConfig>,
     config: Res<FpsConfig>,
     mut query: Query<(&FpsController, &mut FpsControllerInput)>,
 ) {
@@ -628,7 +628,8 @@ fn fps_controller_input(
         .iter_mut()
         .filter(|(controller, _)| controller.enable_input)
     {
-        let mouse_delta = action_state.axis_pair(&CameraAction::Look) * settings.mouse_sensitivity;
+        let mouse_delta =
+            action_state.axis_pair(&CameraAction::Look) * camera_config.mouse_sensitivity;
 
         // Look behaviour is unchanged while ragdolling — the camera
         // stays on the normal eye path, so the player can still look

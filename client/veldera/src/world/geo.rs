@@ -11,7 +11,7 @@ use serde::Deserialize;
 use crate::{
     async_runtime::TaskSpawner,
     camera::{
-        CameraMode, CameraModeState, CameraSettings, FlightCamera, FpsPlayerConfig, LogicalPlayer,
+        CameraConfig, CameraMode, CameraModeState, FlightCamera, FpsPlayerConfig, LogicalPlayer,
         RadialFrame, RenderPlayer, TeleportAnimationMode, direction_to_yaw_pitch, spawn_fps_player,
     },
     config,
@@ -312,7 +312,7 @@ impl TeleportAnimation {
 ///
 /// (The geocoding request throttle stays compiled in — it's an external API
 /// politeness floor, not a gameplay knob.)
-#[derive(Asset, Resource, TypePath, Clone, Deserialize)]
+#[derive(Default, Asset, Resource, TypePath, Clone, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct GeoConfig {
     /// Extra delay (s) after terrain physics is detected at the destination
@@ -346,24 +346,8 @@ pub struct GeoConfig {
     pub spawn_height_above_ground_m: f32,
 }
 
-impl Default for GeoConfig {
-    fn default() -> Self {
-        Self {
-            physics_settle_delay: 0.2,
-            physics_wait_timeout: 5.0,
-            teleport_ascent_end: 0.05,
-            teleport_descent_start: 0.95,
-            arc: TeleportArc::default(),
-            velocity_sample_dt: 0.002,
-            ground_ray_start_height_m: 1000.0,
-            ground_ray_max_distance_m: 2000.0,
-            spawn_height_above_ground_m: 2.0,
-        }
-    }
-}
-
 /// Tuning for the teleport flight arc.
-#[derive(Clone, Deserialize)]
+#[derive(Default, Clone, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct TeleportArc {
     /// Normalized time `[0, 1]` of the altitude apex; the arc ascends to the
@@ -377,53 +361,11 @@ pub struct TeleportArc {
     pub duration: DurationBands,
 }
 
-impl Default for TeleportArc {
-    fn default() -> Self {
-        Self {
-            apex_t: 0.4,
-            classic: ApexBands {
-                short_m: 10_000.0,
-                city_m: 100_000.0,
-                regional_m: 1_000_000.0,
-                continental_m: 10_000_000.0,
-                min_apex_m: 500.0,
-                short_apex_m: 5_000.0,
-                city_apex_m: 100_000.0,
-                regional_apex_m: 500_000.0,
-                continental_apex_m: 3_000_000.0,
-                max_apex_m: 8_000_000.0,
-            },
-            horizon: ApexBands {
-                short_m: 10_000.0,
-                city_m: 100_000.0,
-                regional_m: 1_000_000.0,
-                continental_m: 10_000_000.0,
-                min_apex_m: 120.0,
-                short_apex_m: 600.0,
-                city_apex_m: 6_000.0,
-                regional_apex_m: 30_000.0,
-                continental_apex_m: 90_000.0,
-                max_apex_m: 180_000.0,
-            },
-            duration: DurationBands {
-                very_short_m: 100.0,
-                short_m: 1_000.0,
-                medium_m: 100_000.0,
-                long_m: 20_000_000.0,
-                min_s: 2.0,
-                short_s: 5.0,
-                medium_s: 10.0,
-                max_s: 15.0,
-            },
-        }
-    }
-}
-
 /// Piecewise-linear apex-altitude table, keyed by great-circle surface distance.
 /// The apex altitude is interpolated between the `*_apex_m` values across the
 /// `*_m` distance breakpoints (all metres); beyond `continental_m` it ramps to
 /// `max_apex_m` over one more `continental_m` of distance.
-#[derive(Clone, Deserialize)]
+#[derive(Default, Clone, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct ApexBands {
     pub short_m: f64,
@@ -438,15 +380,9 @@ pub struct ApexBands {
     pub max_apex_m: f64,
 }
 
-impl Default for ApexBands {
-    fn default() -> Self {
-        TeleportArc::default().classic
-    }
-}
-
 /// Piecewise-linear distance → duration table (distances in metres, durations in
 /// seconds).
-#[derive(Clone, Deserialize)]
+#[derive(Default, Clone, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct DurationBands {
     pub very_short_m: f64,
@@ -457,12 +393,6 @@ pub struct DurationBands {
     pub short_s: f32,
     pub medium_s: f32,
     pub max_s: f32,
-}
-
-impl Default for DurationBands {
-    fn default() -> Self {
-        TeleportArc::default().duration
-    }
 }
 
 /// State machine for the teleportation animation.
@@ -856,7 +786,7 @@ fn poll_teleport(
     config: Res<GeoConfig>,
     mut teleport_state: ResMut<TeleportState>,
     mut animation: ResMut<TeleportAnimation>,
-    settings: Res<CameraSettings>,
+    camera_config: Res<CameraConfig>,
     camera_mode: Res<CameraModeState>,
     camera_query: Query<(Entity, &FloatingOriginCamera, &FlightCamera)>,
     logical_player_query: Query<Entity, With<LogicalPlayer>>,
@@ -911,7 +841,7 @@ fn poll_teleport(
                         &config.arc,
                         start_position,
                         target_position,
-                        settings.teleport_animation_mode,
+                        camera_config.teleport_animation_mode,
                     );
                     let duration =
                         ArcTrajectory::compute_duration(&config.arc.duration, surface_distance);
@@ -943,7 +873,7 @@ fn poll_teleport(
                     // orient_end: Final orientation at the destination.
                     // Classic mode looks north; horizon-chasing looks along the
                     // arrival travel direction so the descent doesn't require a yaw turn.
-                    let end_direction = match settings.teleport_animation_mode {
+                    let end_direction = match camera_config.teleport_animation_mode {
                         TeleportAnimationMode::Classic => target_frame.north,
                         TeleportAnimationMode::HorizonChasing => {
                             // Travel tangent at the target, continuing in the same
@@ -984,7 +914,7 @@ fn poll_teleport(
                         camera_mode: camera_mode.current(),
                         state: AnimationState::Flying,
                         arrival_woosh_played: false,
-                        animation_mode: settings.teleport_animation_mode,
+                        animation_mode: camera_config.teleport_animation_mode,
                     });
 
                     tracing::info!(

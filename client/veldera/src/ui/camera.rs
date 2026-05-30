@@ -7,8 +7,8 @@ use bevy_egui::egui;
 
 use crate::{
     camera::{
-        BodyConfig, BodyTuning, CameraConfig, CameraMode, CameraModeState, CameraSettings,
-        CharacterMetrics, FlightCamera, FollowCameraConfig, FollowEntityTarget, FpsPlayerConfig,
+        BodyConfig, BodyTuning, CameraConfig, CameraMode, CameraModeState, CharacterMetrics,
+        FlightCamera, FollowCameraConfig, FollowEntityTarget, FpsPlayerConfig,
         TeleportAnimationMode,
     },
     world::floating_origin::FloatingOriginCamera,
@@ -17,8 +17,7 @@ use crate::{
 /// Resources for camera display and control.
 #[derive(SystemParam)]
 pub(super) struct CameraParams<'w, 's> {
-    pub settings: ResMut<'w, CameraSettings>,
-    pub config: Res<'w, CameraConfig>,
+    pub config: ResMut<'w, CameraConfig>,
     pub body_config: Res<'w, BodyConfig>,
     pub camera_mode: Res<'w, CameraModeState>,
     pub player_config: ResMut<'w, FpsPlayerConfig>,
@@ -33,6 +32,9 @@ pub(super) struct CameraParams<'w, 's> {
             &'static FlightCamera,
         ),
     >,
+    /// Live FoV is owned by the camera's `Projection`; the slider edits it
+    /// directly (a `camera.toml` reload re-applies the configured default).
+    pub projection_query: Query<'w, 's, &'static mut Projection, With<FloatingOriginCamera>>,
     pub follow_target_query: Query<'w, 's, &'static FollowEntityTarget>,
     pub follow_config_query: Query<'w, 's, &'static mut FollowCameraConfig>,
 }
@@ -56,15 +58,13 @@ pub(super) fn render_camera_tab(ui: &mut egui::Ui, camera: &mut CameraParams) {
 
     // Speed slider (only in flycam mode).
     if camera.camera_mode.is_flycam() {
+        let (min_speed, max_speed) = (camera.config.min_speed, camera.config.max_speed);
         ui.horizontal(|ui| {
             ui.label("Speed:");
             ui.add(
-                egui::Slider::new(
-                    &mut camera.settings.base_speed,
-                    camera.config.min_speed..=camera.config.max_speed,
-                )
-                .logarithmic(true)
-                .suffix(" m/s"),
+                egui::Slider::new(&mut camera.config.base_speed, min_speed..=max_speed)
+                    .logarithmic(true)
+                    .suffix(" m/s"),
             );
         });
 
@@ -88,7 +88,7 @@ pub(super) fn render_camera_tab(ui: &mut egui::Ui, camera: &mut CameraParams) {
     // Teleport animation mode selector.
     ui.horizontal(|ui| {
         ui.label("Teleport style:");
-        let current_label = match camera.settings.teleport_animation_mode {
+        let current_label = match camera.config.teleport_animation_mode {
             TeleportAnimationMode::Classic => "Classic",
             TeleportAnimationMode::HorizonChasing => "Horizon",
         };
@@ -96,12 +96,12 @@ pub(super) fn render_camera_tab(ui: &mut egui::Ui, camera: &mut CameraParams) {
             .selected_text(current_label)
             .show_ui(ui, |ui| {
                 ui.selectable_value(
-                    &mut camera.settings.teleport_animation_mode,
+                    &mut camera.config.teleport_animation_mode,
                     TeleportAnimationMode::Classic,
                     "Classic",
                 );
                 ui.selectable_value(
-                    &mut camera.settings.teleport_animation_mode,
+                    &mut camera.config.teleport_animation_mode,
                     TeleportAnimationMode::HorizonChasing,
                     "Horizon",
                 );
@@ -110,22 +110,34 @@ pub(super) fn render_camera_tab(ui: &mut egui::Ui, camera: &mut CameraParams) {
 }
 
 /// Render vertical FoV slider. The slider operates in degrees because
-/// that's how everyone thinks about FoV; the camera resource stores
-/// radians.
+/// that's how everyone thinks about FoV; the camera's `Projection` stores
+/// radians. Edits the live `Projection` directly; a `camera.toml` reload
+/// re-applies the configured default.
 fn render_fov_slider(ui: &mut egui::Ui, camera: &mut CameraParams) {
-    let mut fov_deg = camera.settings.fov_radians.to_degrees();
+    let (min_fov_deg, max_fov_deg) = (camera.config.min_fov_deg, camera.config.max_fov_deg);
+    // Use the first camera's current FoV as the slider value.
+    let mut fov_deg = camera
+        .projection_query
+        .iter()
+        .find_map(|proj| match proj {
+            Projection::Perspective(p) => Some(p.fov.to_degrees()),
+            _ => None,
+        })
+        .unwrap_or(min_fov_deg);
     ui.horizontal(|ui| {
         ui.label("FoV:");
         let response = ui.add(
-            egui::Slider::new(
-                &mut fov_deg,
-                camera.config.min_fov_deg..=camera.config.max_fov_deg,
-            )
-            .step_by(1.0)
-            .suffix("\u{00b0}"),
+            egui::Slider::new(&mut fov_deg, min_fov_deg..=max_fov_deg)
+                .step_by(1.0)
+                .suffix("\u{00b0}"),
         );
         if response.changed() {
-            camera.settings.fov_radians = fov_deg.to_radians();
+            let fov = fov_deg.to_radians();
+            for mut proj in &mut camera.projection_query {
+                if let Projection::Perspective(p) = &mut *proj {
+                    p.fov = fov;
+                }
+            }
         }
     });
 }

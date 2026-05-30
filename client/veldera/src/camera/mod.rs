@@ -53,34 +53,34 @@ pub use fps::{
 
 /// Hot-reloadable flight-camera tuning, loaded from
 /// `assets/config/camera/camera.toml`.
-#[derive(Asset, Resource, TypePath, Clone, Deserialize)]
+#[derive(Default, Asset, Resource, TypePath, Clone, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct CameraConfig {
     /// Minimum base speed (m/s); lower clamp on the scroll-adjusted fly speed.
     pub min_speed: f32,
     /// Maximum base speed (m/s); upper clamp on the scroll-adjusted fly speed.
     pub max_speed: f32,
+    /// Current flycam base movement speed (m/s). Seeded from the file, then
+    /// adjusted live by the scroll wheel and the Camera-tab slider.
+    pub base_speed: f32,
+    /// Flycam speed multiplier while the boost key is held.
+    pub boost_multiplier: f32,
+    /// Mouse sensitivity for look rotation (radians per pixel of mouse delta).
+    pub mouse_sensitivity: f32,
     /// Default vertical field of view (degrees). ~75° vertical gives ~100°
     /// horizontal at 16:9 — wider than Quake-style 90° horizontal, keeps the
-    /// first-person body from feeling oppressively large.
+    /// first-person body from feeling oppressively large. Applied to every
+    /// camera when `camera.toml` (re)loads or a camera spawns; the Camera-tab
+    /// slider then edits the live `Projection` between reloads.
     pub default_fov_deg: f32,
     /// Minimum vertical FoV slider value (degrees).
     pub min_fov_deg: f32,
     /// Maximum vertical FoV slider value (degrees). Beyond this, fish-eye
     /// distortion gets unpleasant.
     pub max_fov_deg: f32,
-}
-
-impl Default for CameraConfig {
-    fn default() -> Self {
-        Self {
-            min_speed: 10.0,
-            max_speed: 25_000.0,
-            default_fov_deg: 75.0,
-            min_fov_deg: 30.0,
-            max_fov_deg: 120.0,
-        }
-    }
+    /// Which teleport-animation style to use. Seeded from the file; toggled
+    /// live from the Camera tab.
+    pub teleport_animation_mode: TeleportAnimationMode,
 }
 
 // ============================================================================
@@ -213,45 +213,13 @@ enum CameraModeTransition {
 // ============================================================================
 
 /// Which style of teleport animation to use.
-#[derive(Default, PartialEq, Eq, Clone, Copy, Debug)]
+#[derive(Default, PartialEq, Eq, Clone, Copy, Debug, Deserialize)]
 pub enum TeleportAnimationMode {
     /// Classic Earth-looking mode: camera looks down at Earth during cruise.
     #[default]
     Classic,
     /// Horizon-chasing mode: camera faces the direction of travel with Earth below.
     HorizonChasing,
-}
-
-/// Settings for camera movement.
-#[derive(Resource)]
-pub struct CameraSettings {
-    /// Base movement speed in meters per second.
-    pub base_speed: f32,
-    /// Speed multiplier when boost key is held.
-    pub boost_multiplier: f32,
-    /// Mouse sensitivity for look rotation.
-    pub mouse_sensitivity: f32,
-    /// Vertical field of view, in radians. Applied to every
-    /// `Projection::Perspective` on entities carrying
-    /// `FloatingOriginCamera` each frame `CameraSettings` is changed.
-    pub fov_radians: f32,
-    /// Which teleport animation style to use.
-    pub teleport_animation_mode: TeleportAnimationMode,
-}
-
-impl Default for CameraSettings {
-    fn default() -> Self {
-        Self {
-            base_speed: 1000.0,
-            boost_multiplier: 5.0,
-            mouse_sensitivity: 0.001,
-            // Mirrors `CameraConfig::default_fov_deg`; a `Default` impl can't
-            // read the config resource. `sync_fov_from_config` overwrites this
-            // once `config/camera/camera.toml` loads.
-            fov_radians: 75.0_f32.to_radians(),
-            teleport_animation_mode: TeleportAnimationMode::default(),
-        }
-    }
 }
 
 /// Pending altitude change requests.
@@ -352,7 +320,6 @@ impl Plugin for CameraControllerPlugin {
             config::paths::CAMERA,
         ))
         .register_type::<follow::FollowCameraConfig>()
-        .init_resource::<CameraSettings>()
         .init_resource::<CameraModeState>()
         .init_resource::<CameraModeTransitions>()
         .init_resource::<AltitudeRequest>()
@@ -368,40 +335,46 @@ impl Plugin for CameraControllerPlugin {
         .add_systems(
             Update,
             (
-                sync_fov_from_config,
+                apply_camera_fov,
                 process_mode_transitions,
                 process_altitude_request,
                 process_heading_request,
                 process_translate_request,
-                sync_camera_fov,
             )
                 .chain(),
         );
     }
 }
 
-/// Apply [`CameraConfig::default_fov_deg`] to [`CameraSettings`] whenever the
-/// config (re)loads, so editing `camera.toml` updates the FoV live. The UI
-/// slider still edits `fov_radians` directly between reloads.
-fn sync_fov_from_config(config: Res<CameraConfig>, mut settings: ResMut<CameraSettings>) {
-    if config.is_changed() {
-        settings.fov_radians = config.default_fov_deg.to_radians();
-    }
-}
-
-/// Push `CameraSettings::fov_radians` into the floating-origin camera's
-/// `Projection::Perspective` whenever the settings change. Lets the UI
-/// FoV slider take effect on the live camera.
-fn sync_camera_fov(
-    settings: Res<CameraSettings>,
+/// Apply [`CameraConfig::default_fov_deg`] to every floating-origin camera's
+/// `Projection::Perspective` when `camera.toml` (re)loads or a camera spawns.
+///
+/// Keyed on the config *asset* reload (and newly-spawned cameras) rather than
+/// `CameraConfig::is_changed`, so live runtime edits to other fields (the
+/// scroll-adjusted `base_speed`, the teleport-style toggle) don't reset the
+/// FoV. The Camera-tab slider edits the live `Projection` directly between
+/// reloads; a file reload then re-applies the configured default.
+fn apply_camera_fov(
+    config: Res<CameraConfig>,
+    mut events: MessageReader<AssetEvent<CameraConfig>>,
+    new_cameras: Query<(), Added<FloatingOriginCamera>>,
     mut query: Query<&mut Projection, With<FloatingOriginCamera>>,
 ) {
-    if !settings.is_changed() {
+    let config_reloaded = events.read().any(|e| {
+        matches!(
+            e,
+            AssetEvent::Modified { .. } | AssetEvent::LoadedWithDependencies { .. }
+        )
+    });
+    // `default_fov_deg <= 0` means the config hasn't loaded yet (derived
+    // zero default); leave the camera's placeholder FoV until it does.
+    if (!config_reloaded && new_cameras.is_empty()) || config.default_fov_deg <= 0.0 {
         return;
     }
+    let fov = config.default_fov_deg.to_radians();
     for mut proj in &mut query {
         if let Projection::Perspective(p) = &mut *proj {
-            p.fov = settings.fov_radians;
+            p.fov = fov;
         }
     }
 }
