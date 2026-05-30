@@ -172,17 +172,13 @@ fn resolve_launch_and_spawn_camera(
         return;
     }
 
-    // Wait until the launch config asset resolves; fall back to defaults if it
-    // fails to load (e.g. the file is missing).
-    let config = match asset_server.load_state(handle.0.id()) {
-        bevy::asset::LoadState::Loaded => {
+    // Wait until the launch config asset resolves (a failed load panics inside
+    // `poll_config_load` — the shipped `launch.toml` is missing or malformed).
+    let config = match config::poll_load(&asset_server, &handle.0, config::paths::LAUNCH) {
+        config::ConfigLoadState::Ready => {
             launch_configs.get(&handle.0).cloned().unwrap_or_default()
         }
-        bevy::asset::LoadState::Failed(_) => {
-            tracing::warn!("launch config failed to load; using built-in defaults");
-            LaunchConfig::default()
-        }
-        _ => return,
+        config::ConfigLoadState::Loading => return,
     };
 
     let resolved = params.resolve(&config);
