@@ -24,6 +24,9 @@ pub const LOD: &str = "config/world/lod.toml";
 pub const MOON: &str = "config/world/moon.toml";
 pub const TIME_OF_DAY: &str = "config/world/time_of_day.toml";
 
+// Vehicle (global behaviour; per-vehicle physics lives in .scn.ron files).
+pub const VEHICLE: &str = "config/vehicle/vehicle.toml";
+
 // Physics.
 pub const PHYSICS: &str = "config/physics/physics.toml";
 pub const PROJECTILE: &str = "config/physics/projectile.toml";

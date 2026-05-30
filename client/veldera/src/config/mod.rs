@@ -68,9 +68,13 @@ where
 
 /// Strong handle keeping the config asset loaded and identifying it in
 /// [`AssetEvent`]s.
+///
+/// Exposed (crate-internal) so init-time consumers that must wait for a config
+/// to load — e.g. the body-asset request, which reads the glTF path from
+/// config — can poll its load state via the [`AssetServer`].
 #[derive(Resource)]
-struct ConfigHandle<C: Asset> {
-    handle: Handle<C>,
+pub(crate) struct ConfigHandle<C: Asset> {
+    pub(crate) handle: Handle<C>,
 }
 
 /// Copies the loaded asset into the mirror [`Resource`] on initial load and on

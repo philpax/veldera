@@ -90,6 +90,15 @@ pub struct LodTuning {
     /// right under the player; kept small so nodes behind the camera aren't
     /// rendered for no benefit.
     pub force_visible_radius: f64,
+    /// BFS-skip tolerance: camera moves below this distance (m) reuse the
+    /// previous frame's traversal instead of re-walking the octree.
+    pub bfs_pos_epsilon: f64,
+    /// BFS-skip tolerance: view directions whose dot product is at least this
+    /// are treated as unchanged.
+    pub bfs_view_dir_dot_threshold: f32,
+    /// BFS-skip tolerance: lead-vector changes below this length (m) are
+    /// treated as unchanged.
+    pub bfs_lead_epsilon: f64,
 }
 
 impl Default for LodTuning {
@@ -99,6 +108,9 @@ impl Default for LodTuning {
             unload_grace_period_secs: 3.0,
             proximity_loading_max_altitude: 1000.0,
             force_visible_radius: 50.0,
+            bfs_pos_epsilon: 0.5,
+            bfs_view_dir_dot_threshold: 0.999_85,
+            bfs_lead_epsilon: 1.0,
         }
     }
 }
@@ -435,28 +447,20 @@ struct BfsSignature {
 }
 
 impl BfsSignature {
-    /// Position threshold below which we treat the camera as stationary.
-    /// Half a step at human scale.
-    const POS_EPSILON: f64 = 0.5;
-    /// Rotational threshold (1° = cos ≈ 0.99985).
-    const VIEW_DIR_DOT_THRESHOLD: f32 = 0.999_85;
-    /// Lead-vector delta threshold in metres.
-    const LEAD_EPSILON: f64 = 1.0;
-
-    fn matches(&self, other: &Self) -> bool {
+    fn matches(&self, other: &Self, tuning: &LodTuning) -> bool {
         if self.bulks_version != other.bulks_version
             || self.nodes_completed_version != other.nodes_completed_version
             || (self.keep_loaded_radius - other.keep_loaded_radius).abs() > 0.0
         {
             return false;
         }
-        if self.camera_pos.distance(other.camera_pos) >= Self::POS_EPSILON {
+        if self.camera_pos.distance(other.camera_pos) >= tuning.bfs_pos_epsilon {
             return false;
         }
-        if self.view_dir.dot(other.view_dir) < Self::VIEW_DIR_DOT_THRESHOLD {
+        if self.view_dir.dot(other.view_dir) < tuning.bfs_view_dir_dot_threshold {
             return false;
         }
-        if (self.lead - other.lead).length() >= Self::LEAD_EPSILON {
+        if (self.lead - other.lead).length() >= tuning.bfs_lead_epsilon {
             return false;
         }
         true
@@ -992,7 +996,7 @@ fn update_lod_requests(
     let can_skip_bfs = scratch
         .last_bfs_signature
         .as_ref()
-        .is_some_and(|last| last.matches(&current_signature));
+        .is_some_and(|last| last.matches(&current_signature, &tuning));
 
     if !can_skip_bfs {
         // Single walk that evaluates render's screen-space-error

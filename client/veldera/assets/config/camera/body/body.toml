@@ -1,6 +1,10 @@
 # First-person body tuning. Eye height/forward *values* come from the character
-# model; this is the cross-fade timing, the Camera-tab slider bounds, and the
-# head-lock clamp.
+# model; this is the cross-fade timing, the Camera-tab slider bounds, the
+# head-lock clamp, and the character model path.
+
+# Character glTF, relative to assets/. Must have a Mixamo-compatible skeleton
+# (the controller depends on its bone names), so it's read once at startup.
+gltf_path = "characters/leonard.glb"
 
 # Eye cross-fade when entering FPS mode: default duration, and slider upper bound (s).
 default_eye_lerp_duration_s = 0.3

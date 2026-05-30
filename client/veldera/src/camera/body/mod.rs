@@ -54,16 +54,17 @@ use crate::{
 // Public constants
 // ============================================================================
 
-/// Path to the character glTF, relative to the asset root.
-pub const BODY_GLTF_PATH: &str = "characters/leonard.glb";
-
 /// Hot-reloadable first-person body tuning, loaded from
 /// `assets/config/camera/body/body.toml`. Eye height/forward *values* come from
 /// the character model ([`CharacterMetrics`]); this carries the cross-fade
-/// timing, the Camera-tab slider bounds, and the head-lock clamp.
+/// timing, the Camera-tab slider bounds, the head-lock clamp, and the glTF path.
 #[derive(Asset, Resource, TypePath, Clone, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct BodyConfig {
+    /// Character glTF path, relative to the asset root. Read once at startup
+    /// (the request waits for this config to load); the model must carry a
+    /// Mixamo-compatible skeleton, so this isn't hot-swappable mid-session.
+    pub gltf_path: String,
     /// Default eye cross-fade duration when entering FPS mode (s); seeds
     /// [`BodyTuning::eye_lerp_duration_s`].
     pub default_eye_lerp_duration_s: f32,
@@ -82,6 +83,7 @@ pub struct BodyConfig {
 impl Default for BodyConfig {
     fn default() -> Self {
         Self {
+            gltf_path: "characters/leonard.glb".to_string(),
             default_eye_lerp_duration_s: 0.3,
             max_eye_lerp_duration_s: 2.0,
             eye_height_slider: [-0.5, 3.0],
@@ -259,7 +261,8 @@ impl Plugin for BodyPlugin {
         .init_resource::<BodyTuning>()
         .init_resource::<BodyAssets>()
         .init_resource::<EyeLerp>()
-        .add_systems(Startup, (request_body_asset, arm_point::setup_charge_audio))
+        .add_systems(Startup, arm_point::setup_charge_audio)
+        .add_systems(Update, request_body_asset)
         .add_systems(
             Update,
             (
@@ -381,16 +384,35 @@ pub struct EyeOffset {
 // Startup: ask the asset server for the glTF
 // ============================================================================
 
-fn request_body_asset(asset_server: Res<AssetServer>, mut assets: ResMut<BodyAssets>) {
-    assets.gltf = asset_server.load_with_settings(
-        BODY_GLTF_PATH,
-        |s: &mut bevy::gltf::GltfLoaderSettings| {
+/// Request the character glTF once the body config resolves, using its
+/// `gltf_path`. Runs every frame until it succeeds; the config-driven path is
+/// why this waits rather than loading at startup.
+fn request_body_asset(
+    mut requested: Local<bool>,
+    asset_server: Res<AssetServer>,
+    config_handle: Res<crate::config::ConfigHandle<BodyConfig>>,
+    body_configs: Res<Assets<BodyConfig>>,
+    mut assets: ResMut<BodyAssets>,
+) {
+    if *requested {
+        return;
+    }
+    let gltf_path = match asset_server.load_state(config_handle.handle.id()) {
+        bevy::asset::LoadState::Loaded => body_configs
+            .get(&config_handle.handle)
+            .map(|c| c.gltf_path.clone())
+            .unwrap_or_else(|| BodyConfig::default().gltf_path),
+        bevy::asset::LoadState::Failed(_) => BodyConfig::default().gltf_path,
+        _ => return,
+    };
+    assets.gltf =
+        asset_server.load_with_settings(gltf_path, |s: &mut bevy::gltf::GltfLoaderSettings| {
             // We need the raw `gltf::Gltf` so we can read the document-level
             // `extras` field — Bevy doesn't surface root extras on its own
             // `Gltf` asset.
             s.include_source = true;
-        },
-    );
+        });
+    *requested = true;
 }
 
 // ============================================================================

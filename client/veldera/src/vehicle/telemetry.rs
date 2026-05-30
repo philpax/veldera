@@ -10,12 +10,6 @@ use std::{
 
 use bevy::prelude::*;
 
-/// Enable telemetry logging to `telemetry.csv` for debugging physics issues.
-pub const EMIT_TELEMETRY: bool = true;
-
-/// Telemetry output file path.
-const TELEMETRY_PATH: &str = "telemetry.csv";
-
 /// Snapshot of all physics state for telemetry logging.
 pub struct TelemetrySnapshot {
     pub elapsed: f32,
@@ -49,19 +43,26 @@ pub trait TelemetryOutput: Send + Sync {
     fn write_row(&mut self, row: &str);
 }
 
-/// File-based output (default behavior).
-#[derive(Default)]
-pub struct FileTelemetryOutput;
+/// File-based output (default behavior). Writes to the configured CSV path.
+pub struct FileTelemetryOutput {
+    path: String,
+}
+
+impl FileTelemetryOutput {
+    pub fn new(path: impl Into<String>) -> Self {
+        Self { path: path.into() }
+    }
+}
 
 impl TelemetryOutput for FileTelemetryOutput {
     fn write_header(&mut self, header: &str) {
-        if let Ok(mut file) = File::create(TELEMETRY_PATH) {
+        if let Ok(mut file) = File::create(&self.path) {
             let _ = writeln!(file, "{}", header);
         }
     }
 
     fn write_row(&mut self, row: &str) {
-        if let Ok(mut file) = OpenOptions::new().append(true).open(TELEMETRY_PATH) {
+        if let Ok(mut file) = OpenOptions::new().append(true).open(&self.path) {
             let _ = writeln!(file, "{}", row);
         }
     }
@@ -113,14 +114,14 @@ macro_rules! define_telemetry {
             output.write_row(line);
         }
 
-        /// Reset telemetry file (call when entering a vehicle).
-        pub fn reset_telemetry() {
-            reset_telemetry_to(&mut FileTelemetryOutput);
+        /// Reset the telemetry CSV at `path` (call when entering a vehicle).
+        pub fn reset_telemetry(path: &str) {
+            reset_telemetry_to(&mut FileTelemetryOutput::new(path));
         }
 
-        /// Write telemetry data to CSV file.
-        pub fn emit_telemetry($snapshot: &TelemetrySnapshot) {
-            emit_telemetry_to($snapshot, &mut FileTelemetryOutput);
+        /// Write telemetry data to the CSV at `path`.
+        pub fn emit_telemetry($snapshot: &TelemetrySnapshot, path: &str) {
+            emit_telemetry_to($snapshot, &mut FileTelemetryOutput::new(path));
         }
     };
 }

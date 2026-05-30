@@ -14,3 +14,10 @@ proximity_loading_max_altitude = 1000.0
 # Radius forcing loaded nodes visible (bypassing frustum culling) right under the
 # player as a safety net (m). Kept small so off-screen nodes aren't drawn.
 force_visible_radius = 50.0
+
+# BFS-skip tolerances: when the camera moves/turns less than these between
+# frames, the octree traversal is reused instead of re-walked. Larger = cheaper
+# but more pop-in lag.
+bfs_pos_epsilon = 0.5             # camera move (m)
+bfs_view_dir_dot_threshold = 0.99985  # view-direction dot (≈1° at 0.99985)
+bfs_lead_epsilon = 1.0            # lead-vector change (m)

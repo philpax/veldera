@@ -7,12 +7,13 @@ use avian3d::prelude::*;
 use bevy::prelude::*;
 
 use super::{
+    VehicleConfig,
     components::{
         GameLayer, Vehicle, VehicleDragConfig, VehicleHoverConfig, VehicleInput,
         VehicleMovementConfig, VehicleState,
     },
     core::{self, VehicleFrame, VehiclePhysicsParams, VehicleSimInput, VehicleSimState},
-    telemetry::{self, EMIT_TELEMETRY, TelemetrySnapshot},
+    telemetry::{self, TelemetrySnapshot},
 };
 use crate::{
     camera::{CameraModeState, RadialFrame},
@@ -20,9 +21,6 @@ use crate::{
     world::floating_origin::{FloatingOriginCamera, WorldPosition},
 };
 use leafwing_input_manager::prelude::*;
-
-/// Jump cooldown in seconds.
-const JUMP_COOLDOWN: f32 = 2.0;
 
 /// Capture vehicle input from action state.
 pub fn vehicle_input_system(
@@ -110,6 +108,7 @@ fn copy_sim_state_back(state: &mut VehicleState, sim_state: &VehicleSimState) {
 pub fn vehicle_physics_system(
     time: Res<Time<Fixed>>,
     physics_config: Res<crate::physics::PhysicsConfig>,
+    vehicle_config: Res<VehicleConfig>,
     spatial_query: SpatialQuery,
     camera_query: Query<&FloatingOriginCamera>,
     mut query: Query<(
@@ -176,6 +175,9 @@ pub fn vehicle_physics_system(
             computed_inertia,
             local_up,
             gravity,
+            vehicle_config.jump_cooldown,
+            vehicle_config.emit_telemetry,
+            &vehicle_config.telemetry_path,
         );
     }
 }
@@ -202,6 +204,9 @@ fn vehicle_physics_inner(
     computed_inertia: &ComputedAngularInertia,
     local_up: Vec3,
     gravity: f32,
+    jump_cooldown: f32,
+    emit_telemetry: bool,
+    telemetry_path: &str,
 ) {
     let scale = vehicle.scale;
     let target_altitude = hover_config.target_altitude;
@@ -330,7 +335,7 @@ fn vehicle_physics_inner(
     let mut sim_state = build_sim_state(state, altitude_ratio);
 
     // Handle jump cooldown.
-    let can_jump = input.jump && state.grounded && (elapsed - state.last_jump_time) > JUMP_COOLDOWN;
+    let can_jump = input.jump && state.grounded && (elapsed - state.last_jump_time) > jump_cooldown;
     if can_jump {
         state.last_jump_time = elapsed;
     }
@@ -370,7 +375,7 @@ fn vehicle_physics_inner(
     state.mass = mass;
 
     // Telemetry logging.
-    if EMIT_TELEMETRY {
+    if emit_telemetry {
         let snapshot = TelemetrySnapshot {
             elapsed,
             dt,
@@ -394,7 +399,7 @@ fn vehicle_physics_inner(
             time_grounded: state.time_grounded,
             time_since_grounded: state.time_since_grounded,
         };
-        telemetry::emit_telemetry(&snapshot);
+        telemetry::emit_telemetry(&snapshot, telemetry_path);
     }
 }
 

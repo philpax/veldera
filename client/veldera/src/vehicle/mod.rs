@@ -15,12 +15,14 @@ use bevy::{
     color::palettes::css,
     gizmos::config::{GizmoConfig, GizmoConfigGroup, GizmoConfigStore},
     prelude::*,
+    reflect::TypePath,
     scene::SceneInstanceReady,
 };
 use glam::DVec3;
 use leafwing_input_manager::prelude::*;
+use serde::Deserialize;
 
-use crate::input::CameraAction;
+use crate::{config, input::CameraAction};
 
 pub use components::{
     GameLayer, Vehicle, VehicleDragConfig, VehicleHoverConfig, VehicleInput, VehicleModel,
@@ -37,6 +39,40 @@ use crate::{
     world::floating_origin::{FloatingOriginCamera, WorldPosition},
 };
 
+/// Hot-reloadable global vehicle tuning, loaded from
+/// `assets/config/vehicle/vehicle.toml`. Per-vehicle physics (hover/movement/
+/// drag) lives in each vehicle's `.scn.ron`; this is the cross-vehicle behaviour.
+#[derive(Asset, Resource, TypePath, Clone, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct VehicleConfig {
+    /// Maximum distance (m) from a vehicle at which the player can enter it.
+    pub entry_distance: f64,
+    /// Minimum look `dot(toward_vehicle)` required to enter (must be roughly
+    /// facing the vehicle).
+    pub look_threshold: f64,
+    /// Scale applied to hover-force debug gizmos.
+    pub force_gizmo_scale: f32,
+    /// Cooldown (s) between vehicle jumps.
+    pub jump_cooldown: f32,
+    /// Whether to log vehicle physics telemetry to CSV while driving.
+    pub emit_telemetry: bool,
+    /// Path of the telemetry CSV (relative to the working directory).
+    pub telemetry_path: String,
+}
+
+impl Default for VehicleConfig {
+    fn default() -> Self {
+        Self {
+            entry_distance: 10.0,
+            look_threshold: 0.7,
+            force_gizmo_scale: 0.000_05,
+            jump_cooldown: 2.0,
+            emit_telemetry: true,
+            telemetry_path: "telemetry.csv".to_string(),
+        }
+    }
+}
+
 /// Gizmo config group for vehicle debug visualization.
 #[derive(Default, Reflect, GizmoConfigGroup)]
 pub struct VehicleDebugGizmos;
@@ -47,29 +83,32 @@ pub struct VehiclePlugin;
 impl Plugin for VehiclePlugin {
     fn build(&self, app: &mut App) {
         // Register reflectable types for scene serialization.
-        app.init_gizmo_group::<VehicleDebugGizmos>()
-            .register_type::<Vehicle>()
-            .register_type::<VehicleHoverConfig>()
-            .register_type::<VehicleMovementConfig>()
-            .register_type::<VehicleDragConfig>()
-            .register_type::<VehiclePhysicsConfig>()
-            .register_type::<VehicleModel>()
-            .init_resource::<VehicleDefinitions>()
-            .init_resource::<VehicleActions>()
-            .init_resource::<PendingVehicleSpawn>()
-            .init_resource::<VehicleFolderLoader>()
-            .add_systems(
-                Startup,
-                (start_loading_vehicle_folder, configure_vehicle_debug_gizmos),
-            )
-            .add_systems(FixedPreUpdate, physics::vehicle_physics_system)
-            .add_systems(
-                Update,
-                (
-                    physics::vehicle_input_system.run_if(physics::is_follow_entity_mode),
-                    physics::process_vehicle_right_request,
-                ),
-            );
+        app.add_plugins(config::ConfigPlugin::<VehicleConfig>::new(
+            config::paths::VEHICLE,
+        ))
+        .init_gizmo_group::<VehicleDebugGizmos>()
+        .register_type::<Vehicle>()
+        .register_type::<VehicleHoverConfig>()
+        .register_type::<VehicleMovementConfig>()
+        .register_type::<VehicleDragConfig>()
+        .register_type::<VehiclePhysicsConfig>()
+        .register_type::<VehicleModel>()
+        .init_resource::<VehicleDefinitions>()
+        .init_resource::<VehicleActions>()
+        .init_resource::<PendingVehicleSpawn>()
+        .init_resource::<VehicleFolderLoader>()
+        .add_systems(
+            Startup,
+            (start_loading_vehicle_folder, configure_vehicle_debug_gizmos),
+        )
+        .add_systems(FixedPreUpdate, physics::vehicle_physics_system)
+        .add_systems(
+            Update,
+            (
+                physics::vehicle_input_system.run_if(physics::is_follow_entity_mode),
+                physics::process_vehicle_right_request,
+            ),
+        );
 
         app.add_systems(
             Update,
@@ -304,6 +343,7 @@ struct PendingVehicleSpawn {
 #[allow(clippy::too_many_arguments)]
 fn process_vehicle_actions(
     mut commands: Commands,
+    config: Res<VehicleConfig>,
     mut actions: ResMut<VehicleActions>,
     mut pending_spawn: ResMut<PendingVehicleSpawn>,
     mut mode_transitions: ResMut<CameraModeTransitions>,
@@ -317,6 +357,7 @@ fn process_vehicle_actions(
     if let Some(vehicle_index) = actions.spawn_vehicle.take() {
         spawn_vehicle_scene(
             &mut commands,
+            &config,
             &mut pending_spawn,
             &definitions,
             &asset_server,
@@ -339,6 +380,7 @@ fn process_vehicle_actions(
 #[allow(clippy::too_many_arguments)]
 fn spawn_vehicle_scene(
     commands: &mut Commands,
+    config: &VehicleConfig,
     pending_spawn: &mut PendingVehicleSpawn,
     definitions: &VehicleDefinitions,
     asset_server: &AssetServer,
@@ -353,8 +395,8 @@ fn spawn_vehicle_scene(
     };
 
     // Reset telemetry file for this session.
-    if telemetry::EMIT_TELEMETRY {
-        telemetry::reset_telemetry();
+    if config.emit_telemetry {
+        telemetry::reset_telemetry(&config.telemetry_path);
     }
 
     // Despawn any existing vehicles.
@@ -503,13 +545,6 @@ fn on_vehicle_scene_ready(
 // Vehicle mode toggle
 // ============================================================================
 
-/// Distance threshold for entering a vehicle (meters).
-const VEHICLE_ENTRY_DISTANCE: f64 = 10.0;
-
-/// Minimum dot product for "looking at" a vehicle (cosine of angle).
-/// 0.7 is approximately 45 degrees.
-const VEHICLE_LOOK_THRESHOLD: f64 = 0.7;
-
 /// Toggle vehicle mode with E key.
 ///
 /// When following a vehicle, E exits to the previous camera mode.
@@ -517,6 +552,7 @@ const VEHICLE_LOOK_THRESHOLD: f64 = 0.7;
 fn toggle_vehicle_mode(
     action_query: Query<&ActionState<CameraAction>>,
     state: Res<CameraModeState>,
+    config: Res<VehicleConfig>,
     mut actions: ResMut<VehicleActions>,
     mut mode_transitions: ResMut<CameraModeTransitions>,
     camera_query: Query<(&FloatingOriginCamera, &Transform)>,
@@ -550,14 +586,14 @@ fn toggle_vehicle_mode(
                 let distance = to_vehicle.length();
 
                 // Must be within range.
-                if distance > VEHICLE_ENTRY_DISTANCE {
+                if distance > config.entry_distance {
                     return None;
                 }
 
                 // Must be looking at it (dot product of normalized vectors).
                 let dir_to_vehicle = to_vehicle.normalize();
                 let dot = look_dir.dot(dir_to_vehicle);
-                if dot < VEHICLE_LOOK_THRESHOLD {
+                if dot < config.look_threshold {
                     return None;
                 }
 
@@ -576,14 +612,12 @@ fn toggle_vehicle_mode(
 // Hover gizmos
 // ============================================================================
 
-/// Scale factor for force visualization (meters per Newton).
-const FORCE_GIZMO_SCALE: f32 = 0.00005;
-
 /// Draw gizmos showing hover raycast and force.
 ///
 /// Uses the physics `Position` component for accurate placement that stays
 /// synchronized with the physics simulation.
 fn draw_thruster_gizmos(
+    config: Res<VehicleConfig>,
     mut gizmos: Gizmos<VehicleDebugGizmos>,
     vehicle_query: Query<(&Position, &Transform, &VehicleState)>,
 ) {
@@ -600,7 +634,7 @@ fn draw_thruster_gizmos(
             gizmos.sphere(Isometry3d::from_translation(ground_pos), 0.1, css::ORANGE);
 
             // Draw hover force vector (upward from vehicle center).
-            let force_length = state.hover_force.length() * FORCE_GIZMO_SCALE;
+            let force_length = state.hover_force.length() * config.force_gizmo_scale;
             let force_end = vehicle_pos + local_up * force_length;
             gizmos.arrow(vehicle_pos, force_end, css::LIME);
         } else {
