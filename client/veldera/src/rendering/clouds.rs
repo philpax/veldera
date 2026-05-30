@@ -19,7 +19,7 @@ use bevy_egui::{EguiTextureHandle, EguiUserTextures};
 pub use bevy_pbr_clouds_planet::CloudDebugMode;
 use bevy_pbr_clouds_planet::{
     CLIMATE_MAP_HEIGHT, CLIMATE_MAP_WIDTH, CloudCameraEcef, CloudClimateMap, CloudEarthTopography,
-    CloudLayers, CloudSimStatePreview, CloudsPlanetPlugin,
+    CloudLayers, CloudPlanetSettings, CloudSimStatePreview, CloudsPlanetPlugin,
 };
 use serde::Deserialize;
 
@@ -45,6 +45,18 @@ impl Default for CloudConfig {
     }
 }
 
+/// Hot-reloadable cloud *engine* settings, loaded from
+/// `assets/config/rendering/cloud_engine.toml`. Wraps the cloud crate's
+/// [`CloudPlanetSettings`] (per-frame raymarch thresholds: shadow footprint,
+/// teleport threshold, primary-march altitude LOD, luminance weights), kept
+/// separate from the per-layer [`CloudConfig`] above because it tunes the
+/// renderer rather than the clouds themselves. Applied to the crate's
+/// [`CloudPlanetSettings`] resource by [`apply_cloud_engine_config`], which the
+/// crate mirrors into the render world each frame.
+#[derive(Asset, Resource, TypePath, Clone, Default, Deserialize)]
+#[serde(transparent)]
+pub struct CloudEngineConfig(pub CloudPlanetSettings);
+
 /// Path the climate model expects for the planet topography. The
 /// `bake_earth_topography` tool produces this; if missing the climate
 /// ocean path falls back to "everywhere is land".
@@ -59,9 +71,12 @@ pub struct CloudIntegrationPlugin;
 
 impl Plugin for CloudIntegrationPlugin {
     fn build(&self, app: &mut App) {
-        app.add_plugins(CloudsPlanetPlugin)
+        app.add_plugins(CloudsPlanetPlugin::default())
             .add_plugins(config::ConfigPlugin::<CloudConfig>::new(
                 config::paths::CLOUDS,
+            ))
+            .add_plugins(config::ConfigPlugin::<CloudEngineConfig>::new(
+                config::paths::CLOUD_ENGINE,
             ))
             .init_resource::<CloudClimateAssets>()
             .add_systems(Startup, load_climate_assets)
@@ -69,6 +84,7 @@ impl Plugin for CloudIntegrationPlugin {
                 Update,
                 (
                     apply_cloud_config,
+                    apply_cloud_engine_config,
                     sync_cloud_world_time,
                     sync_cloud_camera_ecef,
                     sync_cloud_topography,
@@ -247,6 +263,20 @@ fn apply_cloud_config(config: Res<CloudConfig>, mut clouds: Query<&mut CloudLaye
         *layers = config.0.clone();
         layers.world_time_seconds = world_time;
     }
+}
+
+/// Apply [`CloudEngineConfig`] to the cloud crate's [`CloudPlanetSettings`]
+/// resource when the config (re)loads, so editing `cloud_engine.toml` retunes
+/// the renderer without a restart. The crate mirrors the resource into the
+/// render world each frame.
+fn apply_cloud_engine_config(
+    config: Res<CloudEngineConfig>,
+    mut settings: ResMut<CloudPlanetSettings>,
+) {
+    if !config.is_changed() {
+        return;
+    }
+    *settings = config.0;
 }
 
 fn sync_cloud_world_time(time_state: Res<TimeOfDayState>, mut clouds: Query<&mut CloudLayers>) {

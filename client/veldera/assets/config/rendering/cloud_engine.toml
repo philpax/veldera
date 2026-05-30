@@ -1,0 +1,32 @@
+# Cloud renderer engine thresholds (per-frame, hot-reloadable). These tune the
+# raymarcher rather than the clouds themselves — the per-layer cloud parameters
+# live in clouds.toml.
+#
+# The cloud crate's fixed dimensions (3D noise resolution, climate-map and
+# shadow-map sizes, mip count) and shader-coupled array sizes (max layers,
+# denoise iterations) are NOT here: they size GPU textures allocated once at
+# startup or bake into the shaders, so they're compile-time constants in
+# bevy_pbr_clouds_planet/src/constants.rs.
+
+# Half-side of the square cloud-shadow footprint, in metres (the shadow map
+# covers 2× this on each side, centred on the camera). Ground outside it is
+# treated as unshadowed.
+shadow_footprint_m = 100000.0
+
+# Camera-position jump (metres) beyond which the temporal history buffer is
+# invalidated. Catches teleports; smaller motions reproject normally.
+teleport_threshold_m = 5000.0
+
+# Primary-march step-count altitude LOD. Below `start_alt` the count stays at
+# the quality tier's base; from `start_alt` to `full_alt` it smoothstep-ramps
+# down to `floor` × base, keeping the empty-step cost roughly constant from any
+# altitude. A `floor` much below ~0.5 collapses `dt` so far that cloud caps read
+# as a brown wash at sunset.
+primary_steps_lod_start_alt_m = 10000.0
+primary_steps_lod_full_alt_m = 200000.0
+primary_steps_lod_floor = 0.6
+
+# Luminance weights used to pick the brightest above-horizon atmospheric light
+# (for fog colour and the temporal camera-light). Rec.709 by default; rarely
+# changed.
+rec709_luma = [0.2126, 0.7152, 0.0722]

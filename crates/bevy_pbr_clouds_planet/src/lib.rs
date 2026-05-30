@@ -31,6 +31,7 @@ pub mod inspect;
 mod node;
 mod noise;
 mod resources;
+mod settings;
 
 use bevy::{
     app::{App, Plugin},
@@ -47,6 +48,7 @@ use bevy::{
     render::{
         Render, RenderApp, RenderStartup, RenderSystems,
         extract_component::{ExtractComponent, ExtractComponentPlugin, UniformComponentPlugin},
+        extract_resource::ExtractResourcePlugin,
         render_graph::{RenderGraphExt, ViewNodeRunner},
         render_resource::{
             DownlevelFlags, SpecializedRenderPipelines, TextureFormat, TextureUsages,
@@ -77,12 +79,21 @@ use resources::{
 };
 
 pub use constants::{CLIMATE_MAP_HEIGHT, CLIMATE_MAP_WIDTH, MAX_CLOUD_LAYERS};
+pub use settings::CloudPlanetSettings;
 
 /// Plugin that registers the volumetric-cloud render pipeline.
 ///
 /// Add this **after** [`bevy_pbr_atmosphere_planet::SphericalAtmospherePlugin`]
 /// — clouds depend on the atmosphere's per-view LUT textures.
-pub struct CloudsPlanetPlugin;
+#[derive(Default)]
+pub struct CloudsPlanetPlugin {
+    /// Initial engine settings (shadow footprint, teleport threshold,
+    /// primary-march altitude LOD, luminance weights). The render world
+    /// mirrors this resource every frame via [`ExtractResourcePlugin`], so a
+    /// host that hot-reloads config can write the main-world
+    /// [`CloudPlanetSettings`] to retune at runtime.
+    pub settings: CloudPlanetSettings,
+}
 
 impl Plugin for CloudsPlanetPlugin {
     fn build(&self, app: &mut App) {
@@ -105,12 +116,13 @@ impl Plugin for CloudsPlanetPlugin {
         embedded_asset!(app, "shaders/sim_step.wgsl");
         embedded_asset!(app, "shaders/poisson_jacobi.wgsl");
 
-        app.add_plugins((
+        app.insert_resource(self.settings).add_plugins((
             ExtractComponentPlugin::<CloudLayers>::default(),
             ExtractComponentPlugin::<CloudCameraEcef>::default(),
             ExtractComponentPlugin::<CloudEarthTopography>::default(),
             ExtractComponentPlugin::<CloudClimateMap>::default(),
             ExtractComponentPlugin::<CloudSimStatePreview>::default(),
+            ExtractResourcePlugin::<CloudPlanetSettings>::default(),
             UniformComponentPlugin::<GpuCloudUniform>::default(),
             inspect::CloudInspectPlugin,
         ));

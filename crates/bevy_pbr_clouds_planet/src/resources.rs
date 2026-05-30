@@ -32,12 +32,8 @@ use bevy_pbr_atmosphere_planet::{
 };
 
 use crate::{
-    CloudCameraEcef, CloudLayers, MAX_CLOUD_LAYERS,
-    constants::{
-        PRIMARY_STEPS_LOD_FLOOR, PRIMARY_STEPS_LOD_FULL_ALT_M, PRIMARY_STEPS_LOD_START_ALT_M,
-        REC709_LUMA, SHADOW_FOOTPRINT_M, SHADOW_MAP_SIZE, TELEPORT_THRESHOLD_M,
-    },
-    noise::NoiseTextures,
+    CloudCameraEcef, CloudLayers, CloudPlanetSettings, MAX_CLOUD_LAYERS,
+    constants::SHADOW_MAP_SIZE, noise::NoiseTextures,
 };
 
 /// Per-view uniform consumed by the cloud raymarch and composite shaders.
@@ -1164,6 +1160,7 @@ pub struct CloudPrevFrame {
 pub(super) fn prepare_cloud_uniforms(
     mut commands: Commands,
     atmosphere_lights: Res<ExtractedAtmosphereLights>,
+    settings: Res<CloudPlanetSettings>,
     inspect_cursor: Res<crate::inspect::CloudInspectCursor>,
     layers: Query<(
         Entity,
@@ -1247,15 +1244,15 @@ pub(super) fn prepare_cloud_uniforms(
         // `primary_steps` over that span means the per-step density-
         // sample cost (still incurred even on empty steps for the
         // early-out check) dominates. Smoothly scale steps down to
-        // [`PRIMARY_STEPS_LOD_FLOOR`] of the base by orbital altitude
+        // `settings.primary_steps_lod_floor` of the base by orbital altitude
         // so the empty-step tax is roughly constant per frame
         // regardless of camera altitude.
         let primary_lod = {
-            let t = ((camera_altitude_m - PRIMARY_STEPS_LOD_START_ALT_M)
-                / (PRIMARY_STEPS_LOD_FULL_ALT_M - PRIMARY_STEPS_LOD_START_ALT_M))
+            let t = ((camera_altitude_m - settings.primary_steps_lod_start_alt_m)
+                / (settings.primary_steps_lod_full_alt_m - settings.primary_steps_lod_start_alt_m))
                 .clamp(0.0, 1.0);
             let s = t * t * (3.0 - 2.0 * t);
-            1.0 - s * (1.0 - PRIMARY_STEPS_LOD_FLOOR)
+            1.0 - s * (1.0 - settings.primary_steps_lod_floor)
         };
         let max_primary_steps =
             ((quality.primary_steps() as f32 * primary_lod).round() as u32).max(32);
@@ -1285,7 +1282,7 @@ pub(super) fn prepare_cloud_uniforms(
                 if elevation < -0.1 {
                     continue;
                 }
-                let lum = light.color.dot(REC709_LUMA);
+                let lum = light.color.dot(settings.rec709_luma);
                 if lum > best_lum {
                     best_lum = lum;
                     best_elevation = elevation;
@@ -1384,7 +1381,7 @@ pub(super) fn prepare_cloud_uniforms(
             forward_unnorm.normalize_or_zero()
         };
         let right = up.cross(forward).normalize_or_zero();
-        let footprint = SHADOW_FOOTPRINT_M;
+        let footprint = settings.shadow_footprint_m;
         let scale = 0.5 / footprint;
         // M * vec4(world, 1) = vec4(u, v, _, 1) where:
         //   u = dot(right, world - centre) * scale + 0.5
@@ -1423,7 +1420,7 @@ pub(super) fn prepare_cloud_uniforms(
             if elev < -0.05 {
                 continue;
             }
-            let lum = l.color.dot(REC709_LUMA);
+            let lum = l.color.dot(settings.rec709_luma);
             if lum > best_lum {
                 best_lum = lum;
                 dominant_elev = elev;
@@ -1431,7 +1428,7 @@ pub(super) fn prepare_cloud_uniforms(
         }
 
         let teleported = prev.initialised
-            && current_camera_ecef.distance(prev.camera_ecef) > TELEPORT_THRESHOLD_M;
+            && current_camera_ecef.distance(prev.camera_ecef) > settings.teleport_threshold_m;
         let history_valid = prev.initialised && !teleported;
 
         // ---- Climate sim time-bookkeeping ----
@@ -1545,7 +1542,7 @@ pub(super) fn prepare_cloud_uniforms(
                 let mut best_lum: f32 = 0.0;
                 for i in 0..(atmosphere_lights.0.count as usize) {
                     let l = &atmosphere_lights.0.lights[i];
-                    let lum = l.color.dot(REC709_LUMA);
+                    let lum = l.color.dot(settings.rec709_luma);
                     if lum > best_lum {
                         best_lum = lum;
                         sun_dir = l.direction_to_light;

@@ -1,12 +1,27 @@
-//! Crate-wide tuning constants for cloud rendering.
+//! Crate-wide compile-time constants for cloud rendering.
 //!
-//! Anything semantically a "knob" — dimensions, thresholds, LOD bands,
-//! coefficients — lives here. Per-shader workgroup sizes stay with
-//! their dispatching code (they must literally match the
+//! Everything here is fixed at build time because it either bakes into a
+//! WGSL shader or sizes an allocate-once GPU texture / array:
+//!
+//! - **Texture dimensions** ([`NOISE_RES`], [`CLIMATE_MAP_WIDTH`],
+//!   [`CLIMATE_MAP_HEIGHT`], [`SHADOW_MAP_SIZE`], [`NOISE_MIP_COUNT`]) size
+//!   textures allocated at `RenderStartup` / first-frame prepare. They are
+//!   not exposed as runtime config: the textures are created once before
+//!   any host config could load, and [`NOISE_RES`] in particular is also
+//!   hard-coded in `shaders/noise_bake.wgsl` and the mip-LOD math in
+//!   `shaders/functions.wgsl`, so changing it requires matching shader edits
+//!   and a restart.
+//! - **Shader-coupled array sizes** ([`MAX_CLOUD_LAYERS`],
+//!   [`DENOISE_ITERATIONS_MAX`]) must match a WGSL array length / the number
+//!   of authored shader entry points, and back `const`-generic array sizes
+//!   on the Rust side.
+//!
+//! Per-frame thresholds the host *can* tune live (shadow footprint, teleport
+//! threshold, primary-march altitude LOD, luminance weights) live in
+//! [`crate::settings::CloudPlanetSettings`] instead. Per-shader workgroup
+//! sizes stay with their dispatching code (they must literally match the
 //! `@workgroup_size` declaration in the corresponding WGSL file).
 //! Shader-side constants live in `shaders/constants.wgsl`.
-
-use glam::Vec3;
 
 // ---- Layer / camera ------------------------------------------------
 
@@ -45,12 +60,6 @@ pub const NOISE_MIP_COUNT: u32 = 8;
 /// Side length of the square cloud-shadow texture, in texels.
 pub const SHADOW_MAP_SIZE: u32 = 1024;
 
-/// Half-side of the shadow map's world footprint, in metres. The
-/// footprint is a square `2 * SHADOW_FOOTPRINT_M` on each side
-/// centred on the camera. Texels outside this fall back to "no
-/// shadow" (transmittance = 1) in the apply pass.
-pub const SHADOW_FOOTPRINT_M: f32 = 100_000.0;
-
 // ---- Denoise -------------------------------------------------------
 
 /// Maximum number of edge-avoiding A-Trous wavelet iterations
@@ -61,36 +70,3 @@ pub const SHADOW_FOOTPRINT_M: f32 = 100_000.0;
 /// many to actually dispatch (must be **odd** so the ping-pong
 /// lands the final result in `denoise_scratch`).
 pub const DENOISE_ITERATIONS_MAX: usize = 5;
-
-// ---- Temporal pass -------------------------------------------------
-
-/// Camera-position delta (metres) above which the temporal history
-/// buffer is invalidated. Tracks teleports / large jumps; smaller
-/// motions reproject normally.
-pub const TELEPORT_THRESHOLD_M: f32 = 5_000.0;
-
-// ---- Primary-steps altitude LOD ------------------------------------
-
-/// Camera altitude (metres) below which the primary-march step count
-/// stays at the quality tier's base value. Above this, the count
-/// smoothly ramps down toward [`PRIMARY_STEPS_LOD_FLOOR`].
-pub const PRIMARY_STEPS_LOD_START_ALT_M: f32 = 10_000.0;
-
-/// Camera altitude (metres) above which the primary-march step count
-/// is at its [`PRIMARY_STEPS_LOD_FLOOR`] multiple of the base. The
-/// ramp from [`PRIMARY_STEPS_LOD_START_ALT_M`] to here is
-/// smoothstepped.
-pub const PRIMARY_STEPS_LOD_FULL_ALT_M: f32 = 200_000.0;
-
-/// Floor multiplier on `quality.primary_steps()` at full orbital
-/// altitude. Lower values (tested 0.25) collapse `dt` to ~2.5 km,
-/// coarse enough that one dense sample dominates a ray's colour and
-/// the whole cloud cap reads as a brown wash at sunset.
-pub const PRIMARY_STEPS_LOD_FLOOR: f32 = 0.6;
-
-// ---- Lighting / colour ---------------------------------------------
-
-/// Rec.709 luminance coefficients. Used by the fog-colour and
-/// temporal-camera-light selection logic to pick the brightest
-/// above-horizon atmospheric light by luminance.
-pub const REC709_LUMA: Vec3 = Vec3::new(0.2126, 0.7152, 0.0722);
