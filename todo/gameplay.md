@@ -1,0 +1,3 @@
+- shouldn't be able to shoot projectiles when in camera transition or after switching camera modes or when deselecting ui lock
+- landmarks: a list of landmarks around the world that the user can travel on, to be stored remotely at some point. initially extracted from Wikipedia, maybe?
+- openstreetmap embedded ui map

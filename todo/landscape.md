@@ -1,0 +1,3 @@
+- actual water tiles: will need to bring in a shader and potentially find and mask out the world tiles that correspond to water. use existing elevation map for this?
+- consider modifying the meshes to make way for roads in proximity - probably need to get local road data from OSM, but even then, can we do that kind of modification to the collision meshes? seems potentially quite gnarly
+- OSM roads: spawn light poles along the way

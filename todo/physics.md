@@ -1,0 +1,4 @@
+- collision tiles are still a bit wonky, especially when walking
+- preserve velocity on camera<->fps transition
+- ragdolls: limbs seem to swing after yeeting in a non-realistic way - would expect them to hang in one direction. Maybe worth loosening the torso so that it can hang behind in the direction of motion?
+- physics viz with restraint to make it easier to focus on specific layers / distances

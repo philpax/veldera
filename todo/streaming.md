@@ -1,0 +1,2 @@
+- LoD vis in-world to make it obvious where the tiles are
+- investigate if we're doing any kind of file caching for rocktree

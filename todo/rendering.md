@@ -1,0 +1,2 @@
+- webgpu on web if possible
+- light pollution map? that is, find light pollution, use this to vary the ambient light level
