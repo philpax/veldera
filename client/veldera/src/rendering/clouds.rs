@@ -19,7 +19,7 @@ use bevy_egui::{EguiTextureHandle, EguiUserTextures};
 pub use bevy_pbr_clouds_planet::CloudDebugMode;
 use bevy_pbr_clouds_planet::{
     CLIMATE_MAP_HEIGHT, CLIMATE_MAP_WIDTH, CloudCameraEcef, CloudClimateMap, CloudEarthTopography,
-    CloudLayers, CloudPlanetSettings, CloudSimStatePreview, CloudsPlanetPlugin,
+    CloudLayers, CloudPlanetSettings, CloudSimStatePreview, CloudWorldTime, CloudsPlanetPlugin,
 };
 use serde::Deserialize;
 
@@ -33,8 +33,7 @@ use crate::{
 /// [`CloudLayers`] (the same type the Atmosphere debug tab edits) so the whole
 /// layer stack — quality, raymarch/denoise knobs, climate + sim, god rays, and
 /// each sub-layer — is editable from one file. Applied to the live `CloudLayers`
-/// component by [`apply_cloud_config`]; the runtime `world_time_seconds` is
-/// preserved across reloads.
+/// component by [`apply_cloud_config`].
 #[derive(Asset, Resource, TypePath, Clone, Default, Deserialize)]
 #[serde(transparent)]
 pub struct CloudConfig(pub CloudLayers);
@@ -240,23 +239,14 @@ fn sync_cloud_camera_ecef(
     }
 }
 
-/// Pushes `day_of_year * 86400 + utc_seconds` into every camera's
-/// [`CloudLayers::world_time_seconds`]. Wraps the value modulo ~12 days
-/// so f32 stays precise (per-frame wind offsets wrap modulo the noise
-/// tile, so the once-every-12-day boundary is invisible at any sane
-/// time-of-day speed).
 /// Apply [`CloudConfig`] to every live [`CloudLayers`] when the config
-/// (re)loads, so editing `clouds.toml` updates the sky without a restart. The
-/// runtime `world_time_seconds` is preserved (it's driven by the world clock in
-/// [`sync_cloud_world_time`], which runs right after this).
+/// (re)loads, so editing `clouds.toml` updates the sky without a restart.
 fn apply_cloud_config(config: Res<CloudConfig>, mut clouds: Query<&mut CloudLayers>) {
     if !config.is_changed() {
         return;
     }
     for mut layers in &mut clouds {
-        let world_time = layers.world_time_seconds;
         *layers = config.0.clone();
-        layers.world_time_seconds = world_time;
     }
 }
 
@@ -274,10 +264,11 @@ fn apply_cloud_engine_config(
     *settings = config.0;
 }
 
-fn sync_cloud_world_time(time_state: Res<TimeOfDayState>, mut clouds: Query<&mut CloudLayers>) {
+/// Pushes `day_of_year * 86400 + utc_seconds` into [`CloudWorldTime`]. Wraps the
+/// value modulo ~12 days so f32 stays precise (per-frame wind offsets wrap
+/// modulo the noise tile, so the once-every-12-day boundary is invisible at any
+/// sane time-of-day speed).
+fn sync_cloud_world_time(time_state: Res<TimeOfDayState>, mut time: ResMut<CloudWorldTime>) {
     let absolute = f64::from(time_state.day_of_year()) * 86400.0 + time_state.current_utc_seconds();
-    let wrapped = (absolute.rem_euclid(1_000_000.0)) as f32;
-    for mut cloud in &mut clouds {
-        cloud.world_time_seconds = wrapped;
-    }
+    time.0 = (absolute.rem_euclid(1_000_000.0)) as f32;
 }

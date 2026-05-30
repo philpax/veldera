@@ -40,6 +40,7 @@ use bevy::{
     ecs::{
         component::Component,
         query::{QueryItem, With},
+        resource::Resource,
         schedule::IntoScheduleConfigs,
         system::lifetimeless::Read,
     },
@@ -48,7 +49,7 @@ use bevy::{
     render::{
         Render, RenderApp, RenderStartup, RenderSystems,
         extract_component::{ExtractComponent, ExtractComponentPlugin, UniformComponentPlugin},
-        extract_resource::ExtractResourcePlugin,
+        extract_resource::{ExtractResource, ExtractResourcePlugin},
         render_graph::{RenderGraphExt, ViewNodeRunner},
         render_resource::{
             DownlevelFlags, SpecializedRenderPipelines, TextureFormat, TextureUsages,
@@ -116,16 +117,19 @@ impl Plugin for CloudsPlanetPlugin {
         embedded_asset!(app, "shaders/sim_step.wgsl");
         embedded_asset!(app, "shaders/poisson_jacobi.wgsl");
 
-        app.insert_resource(self.settings).add_plugins((
-            ExtractComponentPlugin::<CloudLayers>::default(),
-            ExtractComponentPlugin::<CloudCameraEcef>::default(),
-            ExtractComponentPlugin::<CloudEarthTopography>::default(),
-            ExtractComponentPlugin::<CloudClimateMap>::default(),
-            ExtractComponentPlugin::<CloudSimStatePreview>::default(),
-            ExtractResourcePlugin::<CloudPlanetSettings>::default(),
-            UniformComponentPlugin::<GpuCloudUniform>::default(),
-            inspect::CloudInspectPlugin,
-        ));
+        app.insert_resource(self.settings)
+            .init_resource::<CloudWorldTime>()
+            .add_plugins((
+                ExtractComponentPlugin::<CloudLayers>::default(),
+                ExtractComponentPlugin::<CloudCameraEcef>::default(),
+                ExtractComponentPlugin::<CloudEarthTopography>::default(),
+                ExtractComponentPlugin::<CloudClimateMap>::default(),
+                ExtractComponentPlugin::<CloudSimStatePreview>::default(),
+                ExtractResourcePlugin::<CloudPlanetSettings>::default(),
+                ExtractResourcePlugin::<CloudWorldTime>::default(),
+                UniformComponentPlugin::<GpuCloudUniform>::default(),
+                inspect::CloudInspectPlugin,
+            ));
     }
 
     fn finish(&self, app: &mut App) {
@@ -353,10 +357,11 @@ impl CloudQuality {
 /// Type tag for a cloud sub-layer. Mostly for UI display; the renderer
 /// doesn't dispatch on it — every sub-layer goes through the same shader
 /// with its own parameters.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Default, Clone, Copy, Debug, PartialEq, Eq)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub enum CloudLayerKind {
     /// Mid-altitude (~1.5-5 km) puffy cumulus / stratocumulus.
+    #[default]
     Stratocumulus,
     /// High-altitude (~9-12 km) thin, wispy cirrus. Forward-peaked phase,
     /// large noise tile, low density.
@@ -383,7 +388,7 @@ impl CloudLayerKind {
 /// each sample. With non-overlapping layers (the typical case for a
 /// stratocumulus + cirrus combo) this is a no-op since only one layer
 /// contributes density at any given altitude.
-#[derive(Clone, Debug)]
+#[derive(Default, Clone, Debug)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 #[cfg_attr(feature = "serde", serde(default))]
 pub struct CloudSubLayer {
@@ -522,18 +527,12 @@ impl CloudSubLayer {
     }
 }
 
-impl Default for CloudSubLayer {
-    fn default() -> Self {
-        Self::stratocumulus()
-    }
-}
-
 /// Container component placed on a camera. Holds up to [`MAX_CLOUD_LAYERS`]
 /// cloud sub-layers, plus shared rendering settings.
 ///
 /// Heights inside each sub-layer are altitudes above the planet surface
 /// (above [`SphericalAtmosphere::bottom_radius`]).
-#[derive(Clone, Component, Debug)]
+#[derive(Default, Clone, Component, Debug)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 #[cfg_attr(feature = "serde", serde(default))]
 #[require(Camera3d, Hdr)]
@@ -543,19 +542,6 @@ pub struct CloudLayers {
     pub layers: Vec<CloudSubLayer>,
     /// Quality tier; controls sample counts and resolution scale.
     pub quality: CloudQuality,
-    /// Absolute world time the cloud state is derived from, in seconds.
-    /// Wind offsets, domain warp, and weather drift are pure functions
-    /// of this value, so jumping it (e.g. moving a time-of-day slider)
-    /// jumps the cloud state too — there's no hidden accumulator.
-    ///
-    /// Set this every frame from your world clock. The recommended
-    /// value is `day_of_year * 86400 + utc_seconds`, optionally wrapped
-    /// modulo a safe number (e.g. 1e6) to keep f32 precision.
-    ///
-    /// Runtime state, not configuration: skipped by serde so the world clock
-    /// (not a config file) drives it.
-    #[cfg_attr(feature = "serde", serde(skip))]
-    pub world_time_seconds: f32,
     /// Debug visualisation mode. See [`CloudDebugMode`].
     pub debug_mode: CloudDebugMode,
     /// Volumetric god-ray / light-shaft settings. See [`GodRaysSettings`].
@@ -683,7 +669,7 @@ pub struct CloudLayers {
 /// The result blends with the per-layer base `coverage` according to
 /// `latitude_strength` and `ocean_strength`. Set `enabled = false` to
 /// keep the legacy uniform-coverage behaviour.
-#[derive(Clone, Copy, Debug)]
+#[derive(Default, Clone, Copy, Debug)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 #[cfg_attr(feature = "serde", serde(default))]
 pub struct ClimateSettings {
@@ -716,25 +702,6 @@ pub struct ClimateSettings {
     pub itcz_north_bias_deg: f32,
 }
 
-impl Default for ClimateSettings {
-    fn default() -> Self {
-        Self {
-            enabled: true,
-            // High default — the latitude bands are the *whole point*
-            // of the climate model; defaulting to a soft blend
-            // produces a planet that's almost as flat-cloudy as it
-            // would be without the model. 0.85 lets the bands
-            // dominate while leaving 15 % of the layer's own coverage
-            // bleeding through (so the band edges aren't perfect
-            // walls).
-            latitude_strength: 0.85,
-            ocean_strength: 0.5,
-            itcz_seasonal_shift_deg: 12.0,
-            itcz_north_bias_deg: 5.0,
-        }
-    }
-}
-
 /// Tunable knobs for the stateful climate simulation that runs on top
 /// of [`ClimateSettings`].
 ///
@@ -751,7 +718,7 @@ impl Default for ClimateSettings {
 ///
 /// Set `enabled = false` to revert the runtime to sampling the
 /// static climate directly.
-#[derive(Clone, Copy, Debug)]
+#[derive(Default, Clone, Copy, Debug)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 #[cfg_attr(feature = "serde", serde(default))]
 pub struct ClimateSimSettings {
@@ -813,45 +780,13 @@ pub struct ClimateSimSettings {
     pub vorticity_damping_seconds: f32,
 }
 
-impl Default for ClimateSimSettings {
-    fn default() -> Self {
-        Self {
-            enabled: true,
-            dt_seconds: 60.0,
-            tau_seconds: 86_400.0,
-            wind_speed: 1.0,
-            wind_meander: 0.5,
-            coriolis: true,
-            max_steps_per_frame: 4,
-            vorticity_enabled: true,
-            // The streamfunction-derived wind perturbation runs
-            // through `wind_ms_to_uv_per_s` (same path as the
-            // analytic wind), so this knob is in m/s-per-ψ-gradient
-            // units. At equilibrium ω≈1 the Poisson solve produces
-            // ψ peaks of ~100 in our discrete units, gradient ~50k
-            // per UV — 0.0002 lands the resulting perturbation in
-            // the ~10 m/s range, comparable to the analytic trades.
-            vorticity_strength: 0.0002,
-            // Forcing rate (per-second). Calibrated against the
-            // texel-scale climate gradient and the damping τ so
-            // that equilibrium ω lands at ~1 (FP16-safe). The
-            // climate gradient is taken in per-texel units (not
-            // per-UV) so this number is sane.
-            vorticity_forcing: 0.00008,
-            // 1 day — same order as Held-Suarez momentum damping
-            // (k_s = 1/day at the surface).
-            vorticity_damping_seconds: 86_400.0,
-        }
-    }
-}
-
 /// Tunable knobs for the additive volumetric god-rays pass.
 ///
 /// The pass runs after the cloud composite, ray-marching from the camera
 /// toward each pixel's surface and accumulating sun radiance modulated
 /// by the cloud-shadow map at every step. Set `enabled = false` to skip
 /// the dispatch entirely.
-#[derive(Clone, Copy, Debug)]
+#[derive(Default, Clone, Copy, Debug)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 #[cfg_attr(feature = "serde", serde(default))]
 pub struct GodRaysSettings {
@@ -879,32 +814,12 @@ pub struct GodRaysSettings {
     pub hg_g: f32,
 }
 
-impl Default for GodRaysSettings {
-    fn default() -> Self {
-        Self {
-            enabled: true,
-            num_steps: 24,
-            max_distance: 100_000.0,
-            scatter_rate: 2.0e-5,
-            atmo_scale_height: 8_000.0,
-            hg_g: 0.7,
-        }
-    }
-}
-
-impl Default for CloudLayers {
-    fn default() -> Self {
-        Self::stratocumulus_only()
-    }
-}
-
 impl CloudLayers {
     /// Single stratocumulus layer, no cirrus, no fog.
     pub fn stratocumulus_only() -> Self {
         Self {
             layers: vec![CloudSubLayer::stratocumulus()],
             quality: CloudQuality::default(),
-            world_time_seconds: 0.0,
             debug_mode: CloudDebugMode::Off,
             god_rays: GodRaysSettings::default(),
             shadow_intensity: 1.0,
@@ -931,7 +846,6 @@ impl CloudLayers {
         Self {
             layers: vec![CloudSubLayer::stratocumulus(), CloudSubLayer::cirrus()],
             quality: CloudQuality::default(),
-            world_time_seconds: 0.0,
             debug_mode: CloudDebugMode::Off,
             god_rays: GodRaysSettings::default(),
             shadow_intensity: 1.0,
@@ -964,7 +878,6 @@ impl CloudLayers {
                 CloudSubLayer::ground_fog(),
             ],
             quality: CloudQuality::default(),
-            world_time_seconds: 0.0,
             debug_mode: CloudDebugMode::Off,
             god_rays: GodRaysSettings::default(),
             shadow_intensity: 1.0,
@@ -1107,6 +1020,18 @@ impl ExtractComponent for CloudCameraEcef {
         Some(*item)
     }
 }
+
+/// Absolute world time the cloud state is derived from, in seconds.
+///
+/// Wind offsets, domain warp, and weather drift are pure functions of this
+/// value, so jumping it (e.g. moving a time-of-day slider) jumps the cloud
+/// state too — there's no hidden accumulator. A global runtime resource,
+/// separate from the [`CloudLayers`] configuration: set it every frame from
+/// your world clock. The recommended value is `day_of_year * 86400 +
+/// utc_seconds`, optionally wrapped modulo a safe number (e.g. 1e6) to keep f32
+/// precision. Mirrored into the render world each frame via [`ExtractResource`].
+#[derive(Resource, ExtractResource, Clone, Copy, Debug, Default)]
+pub struct CloudWorldTime(pub f32);
 
 /// Equirectangular topography of the planet, used by the climate model
 /// to differentiate ocean from land in coverage modulation.

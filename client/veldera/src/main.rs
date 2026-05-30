@@ -37,7 +37,7 @@ use rendering::{
     atmosphere::{
         AtmosphereBundle, AtmosphereConfig, AtmosphereIntegrationPlugin, AtmosphericLight,
     },
-    clouds::{CloudConfig, CloudIntegrationPlugin},
+    clouds::{CloudConfig, CloudEngineConfig, CloudIntegrationPlugin},
     terrain_material::TerrainMaterialPlugin,
 };
 use ui::DebugUiPlugin;
@@ -159,6 +159,7 @@ fn resolve_launch_and_spawn_camera(
     camera: config::Config<CameraConfig>,
     atmosphere: config::Config<AtmosphereConfig>,
     clouds: config::Config<CloudConfig>,
+    cloud_engine: config::Config<CloudEngineConfig>,
 
     params: Res<LaunchParams>,
 ) {
@@ -166,14 +167,29 @@ fn resolve_launch_and_spawn_camera(
         return;
     }
 
-    let (Some(launch_cfg), Some(camera_cfg), Some(atmosphere_cfg), Some(clouds_cfg)) =
-        (launch.get(), camera.get(), atmosphere.get(), clouds.get())
+    let (
+        Some(launch_cfg),
+        Some(camera_cfg),
+        Some(atmosphere_cfg),
+        Some(clouds_cfg),
+        Some(cloud_engine_cfg),
+    ) = (
+        launch.get(),
+        camera.get(),
+        atmosphere.get(),
+        clouds.get(),
+        cloud_engine.get(),
+    )
     else {
         return;
     };
 
     let resolved = params.resolve(launch_cfg);
     let medium = media.add(ScatteringMedium::default());
+    // The cloud engine settings are a global resource the renderer reads every
+    // frame; install them from config now (before any `CloudLayers` exists) so
+    // the zeroed default is never live.
+    commands.insert_resource(cloud_engine_cfg.0);
     spawn_camera(
         &mut commands,
         &resolved,

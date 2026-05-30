@@ -21,7 +21,7 @@ use bevy::{ecs::resource::Resource, render::extract_resource::ExtractResource};
 use glam::Vec3;
 
 /// Per-frame cloud-rendering thresholds the host can tune at runtime.
-#[derive(Resource, ExtractResource, Clone, Copy, Debug, PartialEq)]
+#[derive(Resource, ExtractResource, Clone, Copy, Debug, PartialEq, Default)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 #[cfg_attr(feature = "serde", serde(default, deny_unknown_fields))]
 pub struct CloudPlanetSettings {
@@ -58,15 +58,8 @@ pub struct CloudPlanetSettings {
     pub rec709_luma: Vec3,
 }
 
-impl Default for CloudPlanetSettings {
-    fn default() -> Self {
-        Self {
-            shadow_footprint_m: 100_000.0,
-            teleport_threshold_m: 5_000.0,
-            primary_steps_lod_start_alt_m: 10_000.0,
-            primary_steps_lod_full_alt_m: 200_000.0,
-            primary_steps_lod_floor: 0.6,
-            rec709_luma: Vec3::new(0.2126, 0.7152, 0.0722),
-        }
-    }
-}
+// `CloudPlanetSettings` derives a zeroed `Default`: the host supplies real
+// values from config before any clouds are rendered (the camera waits for
+// `cloud_engine.toml` and inserts this resource at spawn). The zeroed value is
+// never live — `prepare_cloud_uniforms` only reads it for cameras that have
+// `CloudLayers`, which aren't created until the config has loaded.

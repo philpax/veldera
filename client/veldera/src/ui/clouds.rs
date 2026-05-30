@@ -7,12 +7,13 @@
 use bevy::{ecs::system::SystemParam, prelude::*};
 use bevy_egui::egui;
 use bevy_pbr_clouds_planet::{
-    CloudDebugMode, CloudLayerKind, CloudLayers, CloudQuality, CloudShadowBakeDiag,
+    CloudDebugMode, CloudLayerKind, CloudLayers, CloudQuality, CloudShadowBakeDiag, CloudWorldTime,
 };
 
 #[derive(SystemParam)]
 pub(super) struct CloudParams<'w, 's> {
     pub cloud_query: Query<'w, 's, &'static mut CloudLayers>,
+    pub world_time: Res<'w, CloudWorldTime>,
 }
 
 /// Currently-selected sub-tab inside the Atmosphere panel.
@@ -83,13 +84,14 @@ pub(super) fn render_atmosphere_tab(
         return;
     }
 
+    let world_time = clouds.world_time.0;
     let Ok(mut cloud) = clouds.cloud_query.single_mut() else {
         ui.label("No CloudLayers found on any camera.");
         return;
     };
 
     match subtab {
-        AtmosphereSubTab::Overview => render_overview(ui, &mut cloud),
+        AtmosphereSubTab::Overview => render_overview(ui, &mut cloud, world_time),
         AtmosphereSubTab::Layers => render_layers(ui, &mut cloud),
         AtmosphereSubTab::Shadows => render_shadows(ui, &mut cloud, shadow_diag),
         AtmosphereSubTab::GodRays => render_god_rays(ui, &mut cloud),
@@ -98,7 +100,7 @@ pub(super) fn render_atmosphere_tab(
     }
 }
 
-fn render_overview(ui: &mut egui::Ui, cloud: &mut CloudLayers) {
+fn render_overview(ui: &mut egui::Ui, cloud: &mut CloudLayers, world_time: f32) {
     ui.label("Quality:");
     ui.horizontal(|ui| {
         for tier in [CloudQuality::Low, CloudQuality::Medium, CloudQuality::High] {
@@ -241,8 +243,7 @@ fn render_overview(ui: &mut egui::Ui, cloud: &mut CloudLayers) {
     ui.separator();
 
     ui.label(format!(
-        "World time: {:.1} s (wind / weather derive from this; set the world clock to move clouds)",
-        cloud.world_time_seconds,
+        "World time: {world_time:.1} s (wind / weather derive from this; set the world clock to move clouds)",
     ));
 
     ui.separator();

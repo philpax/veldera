@@ -32,7 +32,7 @@ use bevy_pbr_atmosphere_planet::{
 };
 
 use crate::{
-    CloudCameraEcef, CloudLayers, CloudPlanetSettings, MAX_CLOUD_LAYERS,
+    CloudCameraEcef, CloudLayers, CloudPlanetSettings, CloudWorldTime, MAX_CLOUD_LAYERS,
     constants::SHADOW_MAP_SIZE, noise::NoiseTextures,
 };
 
@@ -369,7 +369,7 @@ impl CloudStreamfunctionTextures {
 #[derive(Component, Clone, Copy, Default, Debug)]
 pub struct CloudSimState {
     /// World time (seconds since some epoch — same scale as
-    /// `CloudLayers::world_time_seconds`) that the current sim state
+    /// `CloudWorldTime`) that the current sim state
     /// corresponds to.
     pub sim_world_time: f64,
     /// Ping-pong index; bit 0 selects read vs write.
@@ -1140,7 +1140,7 @@ pub(crate) struct CloudBindGroups {
 /// for the next frame's pickup).
 ///
 /// Note: wind offsets and the shader's `time_seconds` are derived
-/// directly from `CloudLayers::world_time_seconds`, NOT accumulated
+/// directly from `CloudWorldTime`, NOT accumulated
 /// here, so jumping the world clock also jumps the cloud state.
 #[derive(Component, Clone, Copy, Default)]
 pub struct CloudPrevFrame {
@@ -1161,6 +1161,7 @@ pub(super) fn prepare_cloud_uniforms(
     mut commands: Commands,
     atmosphere_lights: Res<ExtractedAtmosphereLights>,
     settings: Res<CloudPlanetSettings>,
+    world_time: Res<CloudWorldTime>,
     inspect_cursor: Res<crate::inspect::CloudInspectCursor>,
     layers: Query<(
         Entity,
@@ -1183,6 +1184,7 @@ pub(super) fn prepare_cloud_uniforms(
     // that night-time cloud shadows follow the moon instead of
     // degenerating because the (below-horizon) sun was picked.
 
+    let world_time = world_time.0;
     for (
         entity,
         cloud,
@@ -1197,7 +1199,6 @@ pub(super) fn prepare_cloud_uniforms(
     ) in &layers
     {
         let quality = cloud.quality;
-        let world_time = cloud.world_time_seconds;
         let full_size = camera
             .and_then(|c| c.physical_target_size)
             .unwrap_or(UVec2::splat(1));

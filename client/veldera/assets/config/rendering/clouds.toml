@@ -4,7 +4,7 @@
 #
 # `quality` is intentionally omitted so it stays platform-adaptive (High on
 # native, Low on web); set it explicitly (`quality = "Low" | "Medium" | "High"`)
-# to override. `world_time_seconds` is runtime state, driven by the world clock.
+# to override.
 
 # --- Debug / shadows --------------------------------------------------------
 debug_mode = "Off"          # "Off" | "ShellHit" | "Noise" | ... (see CloudDebugMode)
