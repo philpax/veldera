@@ -42,7 +42,7 @@ use crate::{
 /// Hot-reloadable global vehicle tuning, loaded from
 /// `assets/config/vehicle/vehicle.toml`. Per-vehicle physics (hover/movement/
 /// drag) lives in each vehicle's `.scn.ron`; this is the cross-vehicle behaviour.
-#[derive(Asset, Resource, TypePath, Clone, Deserialize)]
+#[derive(Default, Asset, Resource, TypePath, Clone, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct VehicleConfig {
     /// Maximum distance (m) from a vehicle at which the player can enter it.
@@ -58,19 +58,6 @@ pub struct VehicleConfig {
     pub emit_telemetry: bool,
     /// Path of the telemetry CSV (relative to the working directory).
     pub telemetry_path: String,
-}
-
-impl Default for VehicleConfig {
-    fn default() -> Self {
-        Self {
-            entry_distance: 10.0,
-            look_threshold: 0.7,
-            force_gizmo_scale: 0.000_05,
-            jump_cooldown: 2.0,
-            emit_telemetry: true,
-            telemetry_path: "telemetry.csv".to_string(),
-        }
-    }
 }
 
 /// Gizmo config group for vehicle debug visualization.

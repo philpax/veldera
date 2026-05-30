@@ -55,7 +55,7 @@ use crate::{
 /// Note: [`RumbleConfig::base_hz`] only takes effect on restart — the rumble
 /// loop is synthesized once at startup (see [`generate_rumble_wav`]). The volume
 /// and speed ranges, applied to the live audio sink each frame, hot-reload.
-#[derive(Asset, Resource, TypePath, Clone, Deserialize)]
+#[derive(Default, Asset, Resource, TypePath, Clone, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct YeetConfig {
     /// Seconds for the arm to fully raise / lower (linear ramp on `point_amount`).
@@ -80,24 +80,8 @@ pub struct YeetConfig {
     pub rumble: RumbleConfig,
 }
 
-impl Default for YeetConfig {
-    fn default() -> Self {
-        Self {
-            point_ramp_duration_s: 0.5,
-            max_charge_duration_s: 10.0,
-            min_yeet_speed_m_s: 5.0,
-            max_yeet_speed_m_s: 150.0,
-            cooldown_s: 3.0,
-            ground_detach_m_s: 3.0,
-            downward_detach_threshold: -0.5,
-            aim_distance_m: 10.0,
-            rumble: RumbleConfig::default(),
-        }
-    }
-}
-
 /// Charge-rumble audio parameters.
-#[derive(Clone, Deserialize)]
+#[derive(Default, Clone, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct RumbleConfig {
     /// Fundamental frequency (Hz); sub-bass, harmonics add the menace.
@@ -111,18 +95,6 @@ pub struct RumbleConfig {
     pub min_speed: f32,
     /// Playback speed at full charge (doubling = +1 octave).
     pub max_speed: f32,
-}
-
-impl Default for RumbleConfig {
-    fn default() -> Self {
-        Self {
-            base_hz: 50.0,
-            min_volume: 0.05,
-            max_volume: 0.6,
-            min_speed: 0.5,
-            max_speed: 1.5,
-        }
-    }
 }
 
 /// Path to the whoosh asset (looked up via `AssetServer`).

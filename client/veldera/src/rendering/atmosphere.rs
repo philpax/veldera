@@ -29,20 +29,12 @@ use veldera_constants::{ATMOSPHERE_TOP_RADIUS_M, EARTH_RADIUS_M};
 /// shared atmosphere height, so they stay compiled in; the ground albedo is a
 /// free visual ("climate") knob and lives here. It's applied to the
 /// [`SphericalAtmosphere`] component by [`apply_atmosphere_config`].
-#[derive(Asset, Resource, TypePath, Clone, Deserialize)]
+#[derive(Default, Asset, Resource, TypePath, Clone, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct AtmosphereConfig {
     /// Ground albedo (linear RGB, 0–1) the sky bounces light off. Higher =
     /// brighter horizon and more multiple-scattering fill.
     pub ground_albedo: [f32; 3],
-}
-
-impl Default for AtmosphereConfig {
-    fn default() -> Self {
-        Self {
-            ground_albedo: [0.3, 0.3, 0.3],
-        }
-    }
 }
 
 /// Plugin that integrates spherical atmosphere with floating origin cameras.

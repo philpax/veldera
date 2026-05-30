@@ -376,7 +376,7 @@ pub fn local_to_utc(local_seconds: f64, local_date: SimpleDate, lon_deg: f64) ->
 /// Hot-reloadable time-of-day tuning, loaded from
 /// `assets/config/world/time_of_day.toml`. The day-period boundaries (local
 /// hours, 0–24) drive the WebGL fallback sky-colour gradient.
-#[derive(Asset, Resource, TypePath, Clone, Deserialize)]
+#[derive(Default, Asset, Resource, TypePath, Clone, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct TimeOfDayConfig {
     /// Hour at which night begins fading toward dawn.
@@ -391,19 +391,6 @@ pub struct TimeOfDayConfig {
     pub sunset_end: f64,
     /// Hour at which the dusk (orange→night) blend ends.
     pub dusk_end: f64,
-}
-
-impl Default for TimeOfDayConfig {
-    fn default() -> Self {
-        Self {
-            dawn_start: 5.0,
-            dawn_end: 6.5,
-            sunrise_end: 8.0,
-            sunset_start: 17.0,
-            sunset_end: 18.5,
-            dusk_end: 20.0,
-        }
-    }
 }
 
 /// Gets the current UTC time as seconds since midnight.

@@ -21,7 +21,7 @@ use crate::{
 
 /// Hot-reloadable locomotion-blend tuning, loaded from
 /// `assets/config/camera/body/locomotion.toml`. All speeds are metres/second.
-#[derive(Asset, Resource, TypePath, Clone, Deserialize)]
+#[derive(Default, Asset, Resource, TypePath, Clone, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct LocomotionConfig {
     /// Speeds below this are "idle" — no directional clip contributes. Above it
@@ -37,17 +37,6 @@ pub struct LocomotionConfig {
     /// vertical velocity rather than `ground_tick` (which drops for a single
     /// tick when cresting uneven ground and would spam the jump-loop pose).
     pub airborne_vertical_m_s: f32,
-}
-
-impl Default for LocomotionConfig {
-    fn default() -> Self {
-        Self {
-            deadzone_m_s: 0.3,
-            walk_ref_m_s: 3.0,
-            run_ref_m_s: 8.0,
-            airborne_vertical_m_s: 2.0,
-        }
-    }
 }
 
 /// Eight-way direction labels — match the clip names from the Mixamo

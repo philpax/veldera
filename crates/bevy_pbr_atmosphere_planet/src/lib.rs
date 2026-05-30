@@ -331,7 +331,7 @@ impl Default for SphericalAtmosphereCamera {
         // Default to Earth surface level at the "origin" (arbitrary point).
         Self {
             local_up: Vec3::Y,
-            camera_radius: 6_371_000.0,
+            camera_radius: veldera_constants::EARTH_RADIUS_M,
         }
     }
 }

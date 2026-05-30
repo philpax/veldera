@@ -58,7 +58,7 @@ use crate::{
 /// `assets/config/camera/body/body.toml`. Eye height/forward *values* come from
 /// the character model ([`CharacterMetrics`]); this carries the cross-fade
 /// timing, the Camera-tab slider bounds, the head-lock clamp, and the glTF path.
-#[derive(Asset, Resource, TypePath, Clone, Deserialize)]
+#[derive(Default, Asset, Resource, TypePath, Clone, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct BodyConfig {
     /// Character glTF path, relative to the asset root. Read once at startup
@@ -78,19 +78,6 @@ pub struct BodyConfig {
     /// Maximum head-lock compensation before clamping (m). Caps how far the
     /// rendered body root is shifted to keep the head pinned to the camera.
     pub head_lock_max_delta_m: f32,
-}
-
-impl Default for BodyConfig {
-    fn default() -> Self {
-        Self {
-            gltf_path: "characters/leonard.glb".to_string(),
-            default_eye_lerp_duration_s: 0.3,
-            max_eye_lerp_duration_s: 2.0,
-            eye_height_slider: [-0.5, 3.0],
-            eye_forward_offset_slider: [-0.5, 0.5],
-            head_lock_max_delta_m: 0.5,
-        }
-    }
 }
 
 // ============================================================================
@@ -121,28 +108,19 @@ pub struct CharacterMetrics {
 /// [`CharacterMetrics`] when the glTF finishes loading, then editable via
 /// the Camera debug tab. `eye_offset` reads from here, not from
 /// `CharacterMetrics`.
-#[derive(Resource)]
+#[derive(Resource, Default)]
 pub struct BodyTuning {
+    /// Set from the model on load (and editable via the Camera tab).
     pub eye_height_m: f32,
+    /// Set from the model on load (and editable via the Camera tab).
     pub eye_forward_offset_m: f32,
+    /// Seeded from `BodyConfig::default_eye_lerp_duration_s` by
+    /// `sync_body_config` once `body.toml` loads; zero until then.
     pub eye_lerp_duration_s: f32,
     /// Set true the first time we populate from `CharacterMetrics`; lets
     /// the UI offer a "reset to model defaults" button and prevents
     /// re-overwriting any tweaks the user has made after load.
     pub initialised_from_model: bool,
-}
-
-impl Default for BodyTuning {
-    fn default() -> Self {
-        Self {
-            eye_height_m: 0.0,
-            eye_forward_offset_m: 0.0,
-            // Mirrors `BodyConfig::default_eye_lerp_duration_s`; `sync_body_config`
-            // applies the config value once `body.toml` loads.
-            eye_lerp_duration_s: 0.3,
-            initialised_from_model: false,
-        }
-    }
 }
 
 /// Seed [`BodyTuning::eye_lerp_duration_s`] from [`BodyConfig`] whenever the

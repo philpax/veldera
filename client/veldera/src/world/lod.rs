@@ -71,7 +71,7 @@ use veldera_constants::EARTH_RADIUS_M_F64;
 /// streaming churn and pop-in, and to observe the performance/quality impact at
 /// runtime. The `keep_loaded_radius` and `unload_grace_period_secs` knobs are
 /// also exposed as sliders in the Streaming diagnostics tab.
-#[derive(Asset, Resource, TypePath, Debug, Clone, Copy, Deserialize)]
+#[derive(Default, Asset, Resource, TypePath, Debug, Clone, Copy, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct LodTuning {
     /// Keeps nearby tiles loaded even when frustum-culled, so a 360° turn
@@ -99,20 +99,6 @@ pub struct LodTuning {
     /// BFS-skip tolerance: lead-vector changes below this length (m) are
     /// treated as unchanged.
     pub bfs_lead_epsilon: f64,
-}
-
-impl Default for LodTuning {
-    fn default() -> Self {
-        Self {
-            keep_loaded_radius: 250.0,
-            unload_grace_period_secs: 3.0,
-            proximity_loading_max_altitude: 1000.0,
-            force_visible_radius: 50.0,
-            bfs_pos_epsilon: 0.5,
-            bfs_view_dir_dot_threshold: 0.999_85,
-            bfs_lead_epsilon: 1.0,
-        }
-    }
 }
 
 /// Plugin for LOD management and frustum culling.

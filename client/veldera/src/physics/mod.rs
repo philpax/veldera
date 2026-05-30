@@ -66,7 +66,7 @@ pub const PHYSICS_FINEST_DEPTH: usize = rocktree_decode::MAX_LEVEL - 1;
 /// Hot-reloadable terrain-collider streaming tuning, loaded from
 /// `assets/config/physics/streaming.toml`. Lets you trade physics fidelity
 /// against load for performance/quality experiments at runtime.
-#[derive(Asset, Resource, TypePath, Clone, Deserialize)]
+#[derive(Default, Asset, Resource, TypePath, Clone, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct PhysicsStreamingConfig {
     /// Maximum distance from the camera at which colliders are loaded (m), and
@@ -92,36 +92,15 @@ pub struct PhysicsStreamingConfig {
     pub velocity_smoothing: f64,
 }
 
-impl Default for PhysicsStreamingConfig {
-    fn default() -> Self {
-        Self {
-            range: 1000.0,
-            bands: vec![(50.0, 0), (150.0, 1), (400.0, 2), (1000.0, 3)],
-            lead_time: 1.0,
-            max_lead: 200.0,
-            lead_speed_epsilon: 0.1,
-            velocity_smoothing: 0.25,
-        }
-    }
-}
-
 /// Hot-reloadable global physics tuning, loaded from
 /// `assets/config/physics/physics.toml`. Drives the manually-applied gravity for
 /// the radial-gravity system, the FPS controller, and vehicles (Avian's built-in
 /// gravity stays zero — we integrate radial gravity ourselves).
-#[derive(Asset, Resource, TypePath, Clone, Deserialize)]
+#[derive(Default, Asset, Resource, TypePath, Clone, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct PhysicsConfig {
     /// Gravitational acceleration magnitude (m/s²).
     pub gravity: f32,
-}
-
-impl Default for PhysicsConfig {
-    fn default() -> Self {
-        Self {
-            gravity: veldera_constants::GRAVITY,
-        }
-    }
 }
 
 /// Return the target physics LoD depth for a node at `effective_distance_m`,
@@ -198,31 +177,18 @@ pub struct PhysicsState {
 /// Lives separate from [`PhysicsState`]'s `last_camera_position` because
 /// the two are sampled in different schedules (PhysicsState is read by the
 /// fixed-step origin shift; this is read by the variable-rate LOD update).
-#[derive(Resource)]
+#[derive(Resource, Default)]
 pub struct MotionTracker {
     last_camera_pos: Option<DVec3>,
     last_camera_time: Option<f64>,
     smoothed_velocity: DVec3,
     /// Lead parameters cached from [`PhysicsStreamingConfig`] each tick by
     /// [`update_motion_tracker`], so [`MotionTracker::lead`] (called from
-    /// several places in the LoD walk) needs no extra argument.
+    /// several places in the LoD walk) needs no extra argument. Seeded to zero
+    /// (no lead) until the first [`update_motion_tracker`] tick populates them.
     lead_time: f64,
     max_lead: f64,
     lead_speed_epsilon: f64,
-}
-
-impl Default for MotionTracker {
-    fn default() -> Self {
-        let cfg = PhysicsStreamingConfig::default();
-        Self {
-            last_camera_pos: None,
-            last_camera_time: None,
-            smoothed_velocity: DVec3::ZERO,
-            lead_time: cfg.lead_time,
-            max_lead: cfg.max_lead,
-            lead_speed_epsilon: cfg.lead_speed_epsilon,
-        }
-    }
 }
 
 impl MotionTracker {

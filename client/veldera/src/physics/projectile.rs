@@ -32,7 +32,7 @@ pub struct FireSoundHandle(Handle<AudioSource>);
 
 /// Hot-reloadable projectile tuning, loaded from
 /// `assets/config/physics/projectile.toml`.
-#[derive(Asset, Resource, TypePath, Clone, Deserialize)]
+#[derive(Default, Asset, Resource, TypePath, Clone, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct ProjectileConfig {
     /// Base projectile radius (m), multiplied by a random scale per shot.
@@ -45,18 +45,6 @@ pub struct ProjectileConfig {
     pub speed: f32,
     /// Minimum time between spawns (s).
     pub fire_debounce_secs: f32,
-}
-
-impl Default for ProjectileConfig {
-    fn default() -> Self {
-        Self {
-            radius_base: 1.0,
-            radius_min_scale: 0.5,
-            radius_max_scale: 1.5,
-            speed: 50.0,
-            fire_debounce_secs: 0.2,
-        }
-    }
 }
 
 /// Tracks time since last projectile spawn for debouncing.

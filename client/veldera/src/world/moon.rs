@@ -28,7 +28,7 @@ use crate::{
 pub struct Moon;
 
 /// Hot-reloadable lunar tuning, loaded from `assets/config/world/moon.toml`.
-#[derive(Asset, Resource, TypePath, Clone, Deserialize)]
+#[derive(Default, Asset, Resource, TypePath, Clone, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct MoonConfig {
     /// Peak full-moon illuminance at zenith (lux); scaled by the illuminated
@@ -43,15 +43,6 @@ pub struct MoonConfig {
     /// Moon's angular diameter from Earth's surface (radians). 0.5181° ≈ 9.043e-3.
     /// Applied to the lunar disk each frame.
     pub angular_diameter: f32,
-}
-
-impl Default for MoonConfig {
-    fn default() -> Self {
-        Self {
-            illuminance_full_lux: 3.0,
-            angular_diameter: 0.009_043,
-        }
-    }
 }
 
 /// Plugin that drives the Moon's transform and brightness each frame.

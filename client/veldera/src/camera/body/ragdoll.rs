@@ -83,7 +83,7 @@ use crate::{
 /// stays compiled in — it's structural, not a tunable value. Defaults below are
 /// the values these constants held before externalization, so behaviour is
 /// unchanged until the TOML is edited.
-#[derive(Asset, Resource, TypePath, Clone, Deserialize)]
+#[derive(Default, Asset, Resource, TypePath, Clone, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct RagdollConfig {
     /// Master switch for the skeletal rig. `false` → the state machine still
@@ -122,32 +122,10 @@ pub struct RagdollConfig {
     pub joint_limits: RagdollJointLimits,
 }
 
-impl Default for RagdollConfig {
-    fn default() -> Self {
-        Self {
-            enable_skeletal: true,
-            torso_radius_m: 0.12,
-            leg_radius_m: 0.08,
-            arm_radius_m: 0.05,
-            shoulder_radius_m: 0.06,
-            leaf_radius_m: 0.06,
-            min_capsule_length_m: 0.02,
-            bone_density_kg_per_m3: 5000.0,
-            linear_damping: 10.0,
-            angular_damping: 120.0,
-            bone_friction: 2.0,
-            joint_compliance: 1e-6,
-            anchor_correction_tau_s: 0.04,
-            bone_max_rel_speed_m_s: 12.0,
-            joint_limits: RagdollJointLimits::default(),
-        }
-    }
-}
-
 /// Swing-cone and twist half-angles (degrees) per limb region, keyed by the
 /// child bone hanging off each joint. Proximal limbs (upper arm/thigh) get the
 /// widest cone, mid limbs (forearm/shin) a tighter one, extremities the least.
-#[derive(Clone, Deserialize)]
+#[derive(Default, Clone, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct RagdollJointLimits {
     /// Upper arms and thighs (`LeftArm`, `RightArm`, `LeftUpLeg`, `RightUpLeg`).
@@ -159,19 +137,6 @@ pub struct RagdollJointLimits {
     /// Everything else (hands, feet).
     pub extremity_swing_deg: f32,
     pub extremity_twist_deg: f32,
-}
-
-impl Default for RagdollJointLimits {
-    fn default() -> Self {
-        Self {
-            proximal_swing_deg: 70.0,
-            proximal_twist_deg: 25.0,
-            mid_swing_deg: 75.0,
-            mid_twist_deg: 10.0,
-            extremity_swing_deg: 40.0,
-            extremity_twist_deg: 15.0,
-        }
-    }
 }
 
 /// All bone names in the ragdoll table are `&'static str` constants,
