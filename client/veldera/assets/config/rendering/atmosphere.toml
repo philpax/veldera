@@ -6,3 +6,24 @@
 # Linear RGB (0–1) the sky bounces light off. Higher = brighter horizon and more
 # multiple-scattering fill light.
 ground_albedo = [0.3, 0.3, 0.3]
+
+# Atmosphere LUT/ray-march settings.
+[settings]
+# LUT texture sizes ([width, height], and [x, y, z] for the 3D aerial-view LUT).
+transmittance_lut_size = [256, 128]
+multiscattering_lut_size = [32, 32]
+sky_view_lut_size = [400, 200]
+aerial_view_lut_size = [32, 32, 32]
+# Ray-march sample counts when baking each LUT / rendering the sky.
+transmittance_lut_samples = 40
+multiscattering_lut_dirs = 64
+multiscattering_lut_samples = 20
+sky_view_lut_samples = 16
+aerial_view_lut_samples = 10
+sky_max_samples = 16
+# Maximum distance (m) the aerial-view LUT covers along the view frustum.
+aerial_view_lut_max_distance = 32000.0
+# Conversion factor between scene units and metres.
+scene_units_to_m = 1.0
+# Render method: "LookupTexture" (fast, default) | "Raymarched" (slower, accurate).
+rendering_method = "LookupTexture"

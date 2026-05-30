@@ -22,7 +22,6 @@ use bevy::{
     camera::Exposure,
     core_pipeline::tonemapping::Tonemapping,
     light::{GlobalAmbientLight, SunDisk, light_consts::lux},
-    pbr::ScatteringMedium,
     post_process::bloom::Bloom,
     prelude::*,
     render::view::Hdr,
@@ -32,7 +31,7 @@ use camera::{CameraControllerPlugin, CameraMode, CameraModeTransitions, FlightCa
 use input::InputPlugin;
 use launch_params::{LaunchConfig, LaunchParams, ResolvedLaunch};
 use rendering::{
-    atmosphere::{AtmosphereBundle, AtmosphereIntegrationPlugin, AtmosphericLight},
+    atmosphere::{AtmosphereIntegrationPlugin, AtmosphericLight},
     clouds::CloudIntegrationPlugin,
     terrain_material::TerrainMaterialPlugin,
 };
@@ -164,7 +163,6 @@ fn resolve_launch_and_spawn_camera(
     handle: Res<LaunchConfigHandle>,
     launch_configs: Res<Assets<LaunchConfig>>,
     params: Res<LaunchParams>,
-    mut media: ResMut<Assets<ScatteringMedium>>,
     mut transitions: ResMut<CameraModeTransitions>,
     mut time_state: ResMut<TimeOfDayState>,
 ) {
@@ -173,7 +171,7 @@ fn resolve_launch_and_spawn_camera(
     }
 
     // Wait until the launch config asset resolves (a failed load panics inside
-    // `poll_config_load` — the shipped `launch.toml` is missing or malformed).
+    // `poll_load` — the shipped `launch.toml` is missing or malformed).
     let config = match config::poll_load(&asset_server, &handle.0, config::paths::LAUNCH) {
         config::ConfigLoadState::Ready => {
             launch_configs.get(&handle.0).cloned().unwrap_or_default()
@@ -182,7 +180,7 @@ fn resolve_launch_and_spawn_camera(
     };
 
     let resolved = params.resolve(&config);
-    spawn_camera(&mut commands, &mut media, &resolved);
+    spawn_camera(&mut commands, &resolved);
 
     match resolved.camera_mode {
         CameraMode::Flycam => {}
@@ -208,11 +206,10 @@ fn resolve_launch_and_spawn_camera(
 }
 
 /// Spawn the floating-origin camera at the resolved launch position.
-fn spawn_camera(
-    commands: &mut Commands,
-    media: &mut Assets<ScatteringMedium>,
-    resolved: &ResolvedLaunch,
-) {
+///
+/// The atmosphere is *not* added here: `insert_atmosphere_when_ready` adds it
+/// once `atmosphere.toml` has loaded, so the settings come from config.
+fn spawn_camera(commands: &mut Commands, resolved: &ResolvedLaunch) {
     let radius = veldera_constants::EARTH_RADIUS_M_F64 + resolved.altitude;
     let start_position = lat_lon_to_ecef(resolved.lat, resolved.lon, radius);
 
@@ -234,9 +231,6 @@ fn spawn_camera(
     let pitch = (resolved.pitch_deg as f32).to_radians();
     let horizontal = north * heading.cos() + east * heading.sin();
     let start_direction = (horizontal * pitch.cos() + up * pitch.sin()).normalize();
-
-    // Earth's scattering medium for the atmosphere (Earth-like Rayleigh + Mie).
-    let earth_medium = media.add(ScatteringMedium::default());
 
     // The camera's Transform is always at the origin; everything else is
     // rendered relative to it via the floating-origin system. The clear color is
@@ -275,8 +269,8 @@ fn spawn_camera(
         },
         // Spatial audio listener for 3D sound.
         SpatialListener::default(),
-        // Spherical atmosphere for Earth.
-        AtmosphereBundle::earth(earth_medium, start_position),
+        // The atmosphere (`AtmosphereBundle`) is added by
+        // `insert_atmosphere_when_ready` once `atmosphere.toml` has loaded.
         // Cloud layers; the actual stack is applied from `clouds.toml` by
         // `apply_cloud_config` on the first frame, so this is just a placeholder.
         CloudLayers::default(),

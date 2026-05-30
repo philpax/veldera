@@ -35,7 +35,9 @@ bevy = { version = "0.18.0", default-features = false, features = [
   "webgl2"
 ] }
 bevy_egui = "0.39"
-bevy_pbr_atmosphere_planet = { path = "../../crates/bevy_pbr_atmosphere_planet" }
+bevy_pbr_atmosphere_planet = { path = "../../crates/bevy_pbr_atmosphere_planet", features = [
+  "serde",
+] }
 bevy_pbr_clouds_planet = { path = "../../crates/bevy_pbr_clouds_planet", features = [
   "serde",
 ] }

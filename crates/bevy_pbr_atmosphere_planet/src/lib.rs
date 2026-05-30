@@ -363,8 +363,10 @@ impl ExtractComponent for SphericalAtmosphereCamera {
 /// The aerial-view lut is a 3d LUT fit to the view frustum, which stores the luminance
 /// scattered towards the camera at each point (RGB channels), alongside the average
 /// transmittance to that point (A channel).
-#[derive(Clone, Component, Reflect)]
+#[derive(Clone, Component, Reflect, Default)]
 #[reflect(Clone, Default)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+#[cfg_attr(feature = "serde", serde(default, deny_unknown_fields))]
 pub struct AtmosphereSettings {
     /// The size of the transmittance LUT.
     pub transmittance_lut_size: UVec2,
@@ -416,26 +418,6 @@ pub struct AtmosphereSettings {
 
     /// The rendering method to use for the atmosphere.
     pub rendering_method: AtmosphereMode,
-}
-
-impl Default for AtmosphereSettings {
-    fn default() -> Self {
-        Self {
-            transmittance_lut_size: UVec2::new(256, 128),
-            transmittance_lut_samples: 40,
-            multiscattering_lut_size: UVec2::new(32, 32),
-            multiscattering_lut_dirs: 64,
-            multiscattering_lut_samples: 20,
-            sky_view_lut_size: UVec2::new(400, 200),
-            sky_view_lut_samples: 16,
-            aerial_view_lut_size: UVec3::new(32, 32, 32),
-            aerial_view_lut_samples: 10,
-            aerial_view_lut_max_distance: 3.2e4,
-            scene_units_to_m: 1.0,
-            sky_max_samples: 16,
-            rendering_method: AtmosphereMode::LookupTexture,
-        }
-    }
 }
 
 /// GPU-compatible version of [`AtmosphereSettings`].
@@ -504,6 +486,7 @@ fn configure_camera_depth_usages(
 /// Selects how the atmosphere is rendered.
 #[repr(u32)]
 #[derive(Clone, Default, Reflect, Copy)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub enum AtmosphereMode {
     /// High-performance solution using lookup textures to approximate scattering.
     #[default]
