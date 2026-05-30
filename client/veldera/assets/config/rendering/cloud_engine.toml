@@ -30,3 +30,34 @@ primary_steps_lod_floor = 0.6
 # (for fog colour and the temporal camera-light). Rec.709 by default; rarely
 # changed.
 rec709_luma = [0.2126, 0.7152, 0.0722]
+
+# Raymarch "feel" constants (formerly baked into shaders/constants.wgsl). These
+# flow into the cloud uniform each frame, so edits hot-reload without a shader
+# recompile. All distances are in metres.
+
+# Maximum distance the cloud march walks from the camera.
+cloud_march_max_distance = 200000.0
+# Aerial-perspective LUT max range; mirrors the atmosphere crate's
+# aerial_view_lut_max_distance.
+aerial_lut_max_distance = 32000.0
+# Fade range past aerial_lut_max_distance over which aerial perspective fades out
+# (avoids the LUT's saturated far-edge tint).
+aerial_lut_fade_range = 18000.0
+# Earth-shine intensity multiplier on the upward sky-view sample.
+earth_shine_multiplier = 3.0
+# Twilight smoothstep band in cos(sun-elevation) space (lo, hi).
+twilight_band_lo = -0.05
+twilight_band_hi = 0.0
+# Terminator wrap: lit = saturate(mu_light * slope + intercept) for the analytic
+# orbital shader.
+terminator_wrap_slope = 0.9
+terminator_wrap_intercept = 0.1
+# Per-sample shading morph distances: full shading below near, simple above far,
+# mixed between.
+shade_morph_near_m = 20000.0
+shade_morph_far_m = 80000.0
+# Wrenninge multi-scatter octave coefficients (optical-depth attenuation, light
+# contribution, HG eccentricity scale per octave).
+wrenninge_attenuation = 0.55
+wrenninge_contribution = 0.9
+wrenninge_eccentricity = 0.6

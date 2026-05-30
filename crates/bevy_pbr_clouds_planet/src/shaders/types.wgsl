@@ -152,4 +152,19 @@ struct CloudUniform {
     sim_vorticity_damping_seconds: f32,
     pad_sim_0: u32,
     pad_sim_1: u32,
+    // Raymarch feel constants (formerly module-level `const`s in constants.wgsl).
+    // Keep this order in lockstep with `GpuCloudUniform` in resources.rs.
+    cloud_march_max_distance: f32,
+    aerial_lut_max_distance: f32,
+    aerial_lut_fade_range: f32,
+    earth_shine_multiplier: f32,
+    twilight_band_lo: f32,
+    twilight_band_hi: f32,
+    terminator_wrap_slope: f32,
+    terminator_wrap_intercept: f32,
+    shade_morph_near_m: f32,
+    shade_morph_far_m: f32,
+    wrenninge_attenuation: f32,
+    wrenninge_contribution: f32,
+    wrenninge_eccentricity: f32,
 }

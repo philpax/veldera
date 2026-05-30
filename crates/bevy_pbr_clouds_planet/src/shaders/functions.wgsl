@@ -8,9 +8,6 @@
     noise_3d, cloud_sampler, lut_sampler, climate_map,
 };
 #import bevy_pbr_clouds_planet::climate::climate_coverage_at;
-#import bevy_pbr_clouds_planet::constants::{
-    CLOUD_MARCH_MAX_DISTANCE, AERIAL_LUT_MAX_DISTANCE,
-};
 
 // World-space ray direction for a screen UV. Mirrors the atmosphere's
 // `uv_to_ray_direction`: build the homogeneous near-plane position, divide
@@ -78,10 +75,10 @@ fn sample_sky_view(local_r: f32, dir_as: vec3<f32>) -> vec3<f32> {
 // Returns the un-fade value (caller handles per-slice fade if needed).
 fn sample_aerial_inscattering(uv: vec2<f32>, t: f32) -> vec3<f32> {
     // Atmosphere uses `aerial_view_lut_max_distance`, but that uniform isn't
-    // in our bind group; we mirror it as `AERIAL_LUT_MAX_DISTANCE` in
+    // in our bind group; we mirror it as `cloud.aerial_lut_max_distance` in
     // constants.wgsl. The texture stores log(inscattering); recover with exp.
     let num_slices = f32(textureDimensions(aerial_view_lut).z);
-    let max_distance = AERIAL_LUT_MAX_DISTANCE;
+    let max_distance = cloud.aerial_lut_max_distance;
     let depth = saturate(t / max_distance - 0.5 / num_slices);
     let sample = textureSampleLevel(aerial_view_lut, lut_sampler, vec3(uv, depth), 0.0);
     let t_slice = max_distance / num_slices;
@@ -459,6 +456,6 @@ fn cloud_shell_segment(pos_world: vec3<f32>, ray_dir: vec3<f32>) -> vec2<f32> {
     if ground.x > 0.0 {
         t_end = min(t_end, ground.x);
     }
-    t_end = min(t_end, t_start + CLOUD_MARCH_MAX_DISTANCE);
+    t_end = min(t_end, t_start + cloud.cloud_march_max_distance);
     return vec2(t_start, t_end);
 }

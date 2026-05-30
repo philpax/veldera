@@ -99,7 +99,6 @@ pub struct CloudsPlanetPlugin {
 
 impl Plugin for CloudsPlanetPlugin {
     fn build(&self, app: &mut App) {
-        load_shader_library!(app, "shaders/constants.wgsl");
         load_shader_library!(app, "shaders/types.wgsl");
         load_shader_library!(app, "shaders/bindings.wgsl");
         load_shader_library!(app, "shaders/climate.wgsl");

@@ -39,14 +39,6 @@ fn depth_to_camera_dist(uv: vec2<f32>, depth: f32) -> f32 {
     sample_cloud_density, sample_layer_density, sample_light_optical_depth,
     cloud_shell_segment, sample_layer_density_breakdown, LayerDensityBreakdown,
 };
-#import bevy_pbr_clouds_planet::constants::{
-    AERIAL_LUT_MAX_DISTANCE, AERIAL_LUT_FADE_RANGE,
-    EARTH_SHINE_MULTIPLIER,
-    TWILIGHT_BAND_LO, TWILIGHT_BAND_HI,
-    TERMINATOR_WRAP_SLOPE, TERMINATOR_WRAP_INTERCEPT,
-    SHADE_MORPH_NEAR_M, SHADE_MORPH_FAR_M,
-    WRENNINGE_ATTENUATION, WRENNINGE_CONTRIBUTION, WRENNINGE_ECCENTRICITY,
-};
 
 // Stable per-pixel hash → `[0, 1)` float. Used to give each pixel a
 // fixed sub-step offset on `t_first` so adjacent pixels' world-snap
@@ -152,14 +144,14 @@ fn shade_simple(sample_pos: vec3<f32>) -> vec3<f32> {
     let local_r = length(sample_pos);
     let sample_up = sample_pos / max(local_r, 1.0);
     let up_as = direction_world_to_atmosphere(sample_up, atmosphere_transforms.local_up);
-    let earth_shine = sample_sky_view(local_r, up_as) * EARTH_SHINE_MULTIPLIER;
+    let earth_shine = sample_sky_view(local_r, up_as) * cloud.earth_shine_multiplier;
     var radiance = earth_shine;
     for (var li: u32 = 0u; li < atmosphere_lights.count; li = li + 1u) {
         let light = atmosphere_lights.lights[li];
         let mu_light = dot(light.direction_to_light, sample_up);
-        let twilight = smoothstep(TWILIGHT_BAND_LO, TWILIGHT_BAND_HI, mu_light);
+        let twilight = smoothstep(cloud.twilight_band_lo, cloud.twilight_band_hi, mu_light);
         let atmo_t = sample_transmittance(local_r, mu_light) * twilight;
-        let lit = saturate(mu_light * TERMINATOR_WRAP_SLOPE + TERMINATOR_WRAP_INTERCEPT);
+        let lit = saturate(mu_light * cloud.terminator_wrap_slope + cloud.terminator_wrap_intercept);
         radiance = radiance + light.color * atmo_t * lit;
     }
     return radiance;
@@ -181,13 +173,13 @@ fn shade_full(
     let local_r = length(sample_pos);
     let sample_up = sample_pos / max(local_r, 1.0);
     let up_as = direction_world_to_atmosphere(sample_up, atmosphere_transforms.local_up);
-    let earth_shine = sample_sky_view(local_r, up_as) * EARTH_SHINE_MULTIPLIER;
+    let earth_shine = sample_sky_view(local_r, up_as) * cloud.earth_shine_multiplier;
     var radiance = earth_shine;
     for (var li: u32 = 0u; li < atmosphere_lights.count; li = li + 1u) {
         let light = atmosphere_lights.lights[li];
         let light_dir_ws = light.direction_to_light;
         let mu_light = dot(light_dir_ws, sample_up);
-        let twilight = smoothstep(TWILIGHT_BAND_LO, TWILIGHT_BAND_HI, mu_light);
+        let twilight = smoothstep(cloud.twilight_band_lo, cloud.twilight_band_hi, mu_light);
         let atmo_t = sample_transmittance(local_r, mu_light) * twilight;
         let tau_light = sample_light_optical_depth(sample_pos, sample_pos_local, light_dir_ws);
         let cos_theta = dot(ray_dir_ws, light_dir_ws);
@@ -207,9 +199,9 @@ fn shade_full(
                 let cloud_t_n = exp(-tau_light * attenuation);
                 let phase_n = dual_henyey_greenstein_layer_eccentric(li2, cos_theta, eccentricity);
                 octave_sum = octave_sum + (cloud_t_n * phase_n * contribution);
-                attenuation = attenuation * WRENNINGE_ATTENUATION;
-                contribution = contribution * WRENNINGE_CONTRIBUTION;
-                eccentricity = eccentricity * WRENNINGE_ECCENTRICITY;
+                attenuation = attenuation * cloud.wrenninge_attenuation;
+                contribution = contribution * cloud.wrenninge_contribution;
+                eccentricity = eccentricity * cloud.wrenninge_eccentricity;
             }
             multi_layer_sum = multi_layer_sum + octave_sum * weight;
         }
@@ -501,7 +493,7 @@ fn main(@builtin(global_invocation_id) idx: vec3<u32>) {
             // sampled the same way at every distance — only lighting
             // morphs.
             let distance_t = saturate(
-                (t - SHADE_MORPH_NEAR_M) / (SHADE_MORPH_FAR_M - SHADE_MORPH_NEAR_M),
+                (t - cloud.shade_morph_near_m) / (cloud.shade_morph_far_m - cloud.shade_morph_near_m),
             );
             let morph = distance_t * distance_t * (3.0 - 2.0 * distance_t);
             var radiance: vec3<f32>;
@@ -602,14 +594,14 @@ fn main(@builtin(global_invocation_id) idx: vec3<u32>) {
     // Apply aerial perspective at the cloud's mid-distance.
     //
     // The atmosphere's aerial-view LUT only covers the first
-    // `AERIAL_LUT_MAX_DISTANCE`; sampling past that clamps to the
+    // `cloud.aerial_lut_max_distance`; sampling past that clamps to the
     // LUT's far edge, which is the saturated orange/red of light
     // scattered through that much atmosphere. From orbital altitudes
     // every cloud sample is way beyond LUT range, so without a fade
     // the entire cloud cap gets tinted with that orange. Fade AP out
-    // across `AERIAL_LUT_FADE_RANGE` past the LUT's far edge.
+    // across `cloud.aerial_lut_fade_range` past the LUT's far edge.
     let t_mid = mix(t_start, t_end, 0.5);
-    let ap_fade = saturate(1.0 - (t_mid - AERIAL_LUT_MAX_DISTANCE) / AERIAL_LUT_FADE_RANGE);
+    let ap_fade = saturate(1.0 - (t_mid - cloud.aerial_lut_max_distance) / cloud.aerial_lut_fade_range);
     let aerial = sample_aerial_inscattering(uv, t_mid);
     inscattering = inscattering + aerial * (1.0 - transmittance) * ap_fade;
 

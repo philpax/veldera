@@ -56,6 +56,36 @@ pub struct CloudPlanetSettings {
     /// above-horizon atmospheric light by luminance for the fog colour and
     /// temporal-camera-light selection. Rarely changed from the standard.
     pub rec709_luma: Vec3,
+
+    // ---- Raymarch feel constants (formerly `shaders/constants.wgsl`) ----
+    // Copied into the cloud uniform each frame by `prepare_cloud_uniforms`, so
+    // they hot-reload. All in metres unless noted.
+    /// Maximum cloud-march distance from the camera (m).
+    pub cloud_march_max_distance: f32,
+    /// Aerial-perspective LUT max range (m); mirrors the atmosphere crate's
+    /// `aerial_view_lut_max_distance`.
+    pub aerial_lut_max_distance: f32,
+    /// Fade range past `aerial_lut_max_distance` (m) over which aerial
+    /// perspective is faded out (avoids the LUT's saturated far-edge tint).
+    pub aerial_lut_fade_range: f32,
+    /// Earth-shine intensity multiplier on the upward sky-view sample.
+    pub earth_shine_multiplier: f32,
+    /// Twilight smoothstep band in `cos(sun-elevation)` space (lo, hi).
+    pub twilight_band_lo: f32,
+    pub twilight_band_hi: f32,
+    /// Terminator-wrap `lit = saturate(mu_light * slope + intercept)` for the
+    /// analytic orbital shader.
+    pub terminator_wrap_slope: f32,
+    pub terminator_wrap_intercept: f32,
+    /// Per-sample shading morph distances (m): full shading below `near`, simple
+    /// above `far`, mixed between.
+    pub shade_morph_near_m: f32,
+    pub shade_morph_far_m: f32,
+    /// Wrenninge multi-scatter octave coefficients (optical-depth attenuation,
+    /// light contribution, HG eccentricity scale per octave).
+    pub wrenninge_attenuation: f32,
+    pub wrenninge_contribution: f32,
+    pub wrenninge_eccentricity: f32,
 }
 
 // `CloudPlanetSettings` derives a zeroed `Default`: the host supplies real

@@ -274,6 +274,24 @@ pub struct GpuCloudUniform {
     pub sim_vorticity_damping_seconds: f32,
     pub pad_sim_0: u32,
     pub pad_sim_1: u32,
+
+    // Raymarch feel constants (formerly `shaders/constants.wgsl`), sourced from
+    // `CloudPlanetSettings` each frame so they hot-reload. See that struct for
+    // per-field documentation. Appended after the sim block; keep this order in
+    // lockstep with `CloudUniform` in `shaders/types.wgsl`.
+    pub cloud_march_max_distance: f32,
+    pub aerial_lut_max_distance: f32,
+    pub aerial_lut_fade_range: f32,
+    pub earth_shine_multiplier: f32,
+    pub twilight_band_lo: f32,
+    pub twilight_band_hi: f32,
+    pub terminator_wrap_slope: f32,
+    pub terminator_wrap_intercept: f32,
+    pub shade_morph_near_m: f32,
+    pub shade_morph_far_m: f32,
+    pub wrenninge_attenuation: f32,
+    pub wrenninge_contribution: f32,
+    pub wrenninge_eccentricity: f32,
 }
 
 /// Per-view storage texture written by the raymarch pass and read by the
@@ -1636,6 +1654,19 @@ pub(super) fn prepare_cloud_uniforms(
             sim_vorticity_damping_seconds: cloud.sim.vorticity_damping_seconds.max(60.0),
             pad_sim_0: 0,
             pad_sim_1: 0,
+            cloud_march_max_distance: settings.cloud_march_max_distance,
+            aerial_lut_max_distance: settings.aerial_lut_max_distance,
+            aerial_lut_fade_range: settings.aerial_lut_fade_range,
+            earth_shine_multiplier: settings.earth_shine_multiplier,
+            twilight_band_lo: settings.twilight_band_lo,
+            twilight_band_hi: settings.twilight_band_hi,
+            terminator_wrap_slope: settings.terminator_wrap_slope,
+            terminator_wrap_intercept: settings.terminator_wrap_intercept,
+            shade_morph_near_m: settings.shade_morph_near_m,
+            shade_morph_far_m: settings.shade_morph_far_m,
+            wrenninge_attenuation: settings.wrenninge_attenuation,
+            wrenninge_contribution: settings.wrenninge_contribution,
+            wrenninge_eccentricity: settings.wrenninge_eccentricity,
         });
 
         commands.entity(entity).insert(CloudPrevFrame {

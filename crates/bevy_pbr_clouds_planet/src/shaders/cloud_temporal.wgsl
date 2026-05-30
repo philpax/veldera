@@ -23,7 +23,6 @@
 #import bevy_pbr_atmosphere_planet::types::AtmosphereTransforms;
 #import bevy_pbr_clouds_planet::types::CloudUniform;
 #import bevy_render::maths::ray_sphere_intersect;
-#import bevy_pbr_clouds_planet::constants::CLOUD_MARCH_MAX_DISTANCE;
 
 @group(0) @binding(0) var<uniform> cloud: CloudUniform;
 @group(0) @binding(1) var<uniform> atmosphere_transforms: AtmosphereTransforms;
@@ -96,7 +95,7 @@ fn cloud_shell_segment(pos_world: vec3<f32>, ray_dir: vec3<f32>) -> vec2<f32> {
         t_start = inner.y;
         t_end = outer.y;
     }
-    t_end = min(t_end, t_start + CLOUD_MARCH_MAX_DISTANCE);
+    t_end = min(t_end, t_start + cloud.cloud_march_max_distance);
     return vec2(t_start, t_end);
 }
 
