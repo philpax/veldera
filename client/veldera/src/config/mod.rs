@@ -71,15 +71,24 @@ where
 
 /// Strong handle keeping the config asset loaded and identifying it in
 /// [`AssetEvent`]s.
-///
-/// Exposed (crate-internal) so init-time consumers that must wait for a config
-/// to load — e.g. the body-asset request, which reads the glTF path from
-/// config — can poll its load state via the [`AssetServer`].
 #[derive(Resource)]
-pub(crate) struct ConfigHandle<C: Asset> {
-    pub(crate) handle: Handle<C>,
+pub struct ConfigHandle<C: Asset> {
+    pub handle: Handle<C>,
     /// Asset path, retained for diagnostics (e.g. the initial-load panic).
-    path: &'static str,
+    pub path: &'static str,
+}
+
+/// A system parameter to ease requesting a configuration.
+#[derive(bevy::ecs::system::SystemParam)]
+pub struct Config<'w, C: Asset> {
+    pub handle: Res<'w, ConfigHandle<C>>,
+    pub assets: Res<'w, Assets<C>>,
+}
+impl<C: Asset> Config<'_, C> {
+    /// Get the config, if available.
+    pub fn get(&self) -> Option<&C> {
+        self.assets.get(&self.handle.handle)
+    }
 }
 
 /// Copies the loaded asset into the mirror [`Resource`] on initial load and on
@@ -128,39 +137,23 @@ fn mirror_loaded_config<C>(
     }
 
     // Fail hard on a failed *initial* load; tolerate failed reloads (the loader
-    // logs them and the last-good value persists). The `Ready`/`Loading` result
-    // is irrelevant here — the event loop above does the mirroring — so we call
-    // this only for its panic-on-failure side effect.
+    // logs them and the last-good value persists). Consumers read the value via
+    // `Config::get` once it's available, so the only thing the load state is
+    // needed for is surfacing an initial failure.
     if !*loaded_once {
-        poll_load(&asset_server, &handle.handle, handle.path);
+        panic_if_load_failed(&asset_server, &handle.handle, handle.path);
     }
 }
 
-/// Load state of a deferred config consumer.
-pub(crate) enum ConfigLoadState {
-    /// The asset is still loading; the caller should retry next frame.
-    Loading,
-    /// The asset has loaded and can be read.
-    Ready,
-}
-
-/// Poll a config asset's load state, panicking if the load failed.
+/// Panic if a config asset's load has failed.
 ///
 /// A missing or malformed shipped config is a packaging/authoring error the
 /// game can't sensibly run without (the TOML is the source of truth), so a
-/// failure aborts. Used by deferred consumers that must wait for a config
-/// before acting (the launch resolver, the body-asset request) and by
-/// [`mirror_loaded_config`] for its initial-load check.
-pub(crate) fn poll_load<A: Asset>(
-    asset_server: &AssetServer,
-    handle: &Handle<A>,
-    path: &str,
-) -> ConfigLoadState {
-    match asset_server.load_state(handle.id()) {
-        bevy::asset::LoadState::Loaded => ConfigLoadState::Ready,
-        bevy::asset::LoadState::Failed(err) => {
-            panic!("failed to load config `{path}`: {err}")
-        }
-        _ => ConfigLoadState::Loading,
+/// failed load aborts. Consumers obtain the loaded value via [`Config::get`];
+/// this is just the eager failure check [`mirror_loaded_config`] runs before the
+/// first successful load.
+fn panic_if_load_failed<A: Asset>(asset_server: &AssetServer, handle: &Handle<A>, path: &str) {
+    if let bevy::asset::LoadState::Failed(err) = asset_server.load_state(handle.id()) {
+        panic!("failed to load config `{path}`: {err}");
     }
 }

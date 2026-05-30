@@ -22,17 +22,22 @@ use bevy::{
     camera::Exposure,
     core_pipeline::tonemapping::Tonemapping,
     light::{GlobalAmbientLight, SunDisk, light_consts::lux},
+    pbr::ScatteringMedium,
     post_process::bloom::Bloom,
     prelude::*,
     render::view::Hdr,
 };
 use bevy_pbr_clouds_planet::CloudLayers;
-use camera::{CameraControllerPlugin, CameraMode, CameraModeTransitions, FlightCamera};
+use camera::{
+    CameraConfig, CameraControllerPlugin, CameraMode, CameraModeTransitions, FlightCamera,
+};
 use input::InputPlugin;
 use launch_params::{LaunchConfig, LaunchParams, ResolvedLaunch};
 use rendering::{
-    atmosphere::{AtmosphereIntegrationPlugin, AtmosphericLight},
-    clouds::CloudIntegrationPlugin,
+    atmosphere::{
+        AtmosphereBundle, AtmosphereConfig, AtmosphereIntegrationPlugin, AtmosphericLight,
+    },
+    clouds::{CloudConfig, CloudIntegrationPlugin},
     terrain_material::TerrainMaterialPlugin,
 };
 use ui::DebugUiPlugin;
@@ -67,18 +72,12 @@ impl Plugin for AppPlugin {
             CloudIntegrationPlugin,
             vehicle::VehiclePlugin,
         ))
-        .add_plugins(bevy_common_assets::toml::TomlAssetPlugin::<LaunchConfig>::new(&["toml"]))
+        .add_plugins(config::ConfigPlugin::<LaunchConfig>::new(
+            config::paths::LAUNCH,
+        ))
         .add_systems(Startup, setup_scene)
         .add_systems(Update, resolve_launch_and_spawn_camera)
         .add_plugins(physics::PhysicsIntegrationPlugin);
-
-        // Request the launch config now; `resolve_launch_and_spawn_camera`
-        // spawns the camera once it has resolved.
-        let handle = app
-            .world()
-            .resource::<AssetServer>()
-            .load::<LaunchConfig>(config::paths::LAUNCH);
-        app.insert_resource(LaunchConfigHandle(handle));
     }
 }
 
@@ -147,40 +146,42 @@ fn setup_scene(mut commands: Commands) {
     ));
 }
 
-/// Strong handle to the launch config asset, kept so it loads and can be polled.
-#[derive(Resource)]
-struct LaunchConfigHandle(Handle<LaunchConfig>);
-
-/// Once the launch config has loaded (or failed), resolve the launch parameters
-/// (CLI overrides win, else config defaults), spawn the camera at the resolved
-/// position, apply the initial camera mode, and apply any date-time override.
-/// Runs every frame until it succeeds; the camera doesn't exist until then.
+/// Create the camera once the relevant config assets have loaded.
 #[allow(clippy::too_many_arguments)]
 fn resolve_launch_and_spawn_camera(
     mut commands: Commands,
     mut spawned: Local<bool>,
-    asset_server: Res<AssetServer>,
-    handle: Res<LaunchConfigHandle>,
-    launch_configs: Res<Assets<LaunchConfig>>,
-    params: Res<LaunchParams>,
     mut transitions: ResMut<CameraModeTransitions>,
     mut time_state: ResMut<TimeOfDayState>,
+    mut media: ResMut<Assets<ScatteringMedium>>,
+
+    launch: config::Config<LaunchConfig>,
+    camera: config::Config<CameraConfig>,
+    atmosphere: config::Config<AtmosphereConfig>,
+    clouds: config::Config<CloudConfig>,
+
+    params: Res<LaunchParams>,
 ) {
     if *spawned {
         return;
     }
 
-    // Wait until the launch config asset resolves (a failed load panics inside
-    // `poll_load` — the shipped `launch.toml` is missing or malformed).
-    let config = match config::poll_load(&asset_server, &handle.0, config::paths::LAUNCH) {
-        config::ConfigLoadState::Ready => {
-            launch_configs.get(&handle.0).cloned().unwrap_or_default()
-        }
-        config::ConfigLoadState::Loading => return,
+    let (Some(launch_cfg), Some(camera_cfg), Some(atmosphere_cfg), Some(clouds_cfg)) =
+        (launch.get(), camera.get(), atmosphere.get(), clouds.get())
+    else {
+        return;
     };
 
-    let resolved = params.resolve(&config);
-    spawn_camera(&mut commands, &resolved);
+    let resolved = params.resolve(launch_cfg);
+    let medium = media.add(ScatteringMedium::default());
+    spawn_camera(
+        &mut commands,
+        &resolved,
+        camera_cfg.default_fov_deg,
+        atmosphere_cfg,
+        medium,
+        clouds_cfg.0.clone(),
+    );
 
     match resolved.camera_mode {
         CameraMode::Flycam => {}
@@ -205,11 +206,14 @@ fn resolve_launch_and_spawn_camera(
     *spawned = true;
 }
 
-/// Spawn the floating-origin camera at the resolved launch position.
-///
-/// The atmosphere is *not* added here: `insert_atmosphere_when_ready` adds it
-/// once `atmosphere.toml` has loaded, so the settings come from config.
-fn spawn_camera(commands: &mut Commands, resolved: &ResolvedLaunch) {
+fn spawn_camera(
+    commands: &mut Commands,
+    resolved: &ResolvedLaunch,
+    fov_deg: f32,
+    atmosphere: &AtmosphereConfig,
+    medium: Handle<ScatteringMedium>,
+    clouds: CloudLayers,
+) {
     let radius = veldera_constants::EARTH_RADIUS_M_F64 + resolved.altitude;
     let start_position = lat_lon_to_ecef(resolved.lat, resolved.lon, radius);
 
@@ -240,12 +244,10 @@ fn spawn_camera(commands: &mut Commands, resolved: &ResolvedLaunch) {
         Camera::default(),
         Transform::from_translation(Vec3::ZERO).looking_to(start_direction, up),
         Projection::Perspective(PerspectiveProjection {
-            // Initial FoV placeholder; `apply_camera_fov` writes
-            // `config/camera/camera.toml`'s `default_fov_deg` here once it loads
-            // (and on every reload), and the Camera tab slider
-            // (`client/veldera/src/ui/camera.rs`) edits this `Projection`
-            // directly between reloads.
-            fov: 75.0_f32.to_radians(),
+            // From `camera.toml`'s `default_fov_deg` (resolved before spawn).
+            // `apply_camera_fov` re-applies it on reload and the Camera tab
+            // slider edits this `Projection` directly between reloads.
+            fov: fov_deg.to_radians(),
             near: 1.0,
             far: 100_000_000.0, // 100,000 km to see the whole Earth.
             ..Default::default()
@@ -269,11 +271,11 @@ fn spawn_camera(commands: &mut Commands, resolved: &ResolvedLaunch) {
         },
         // Spatial audio listener for 3D sound.
         SpatialListener::default(),
-        // The atmosphere (`AtmosphereBundle`) is added by
-        // `insert_atmosphere_when_ready` once `atmosphere.toml` has loaded.
-        // Cloud layers; the actual stack is applied from `clouds.toml` by
-        // `apply_cloud_config` on the first frame, so this is just a placeholder.
-        CloudLayers::default(),
+        // Atmosphere and cloud layers, both built from their configs (resolved
+        // before spawn). `apply_atmosphere_config` / `apply_cloud_config` handle
+        // later live edits.
+        AtmosphereBundle::from_config(atmosphere, medium, start_position),
+        clouds,
         // Input map for camera actions.
         input::default_camera_input_map(),
     ));

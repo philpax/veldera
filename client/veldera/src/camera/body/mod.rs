@@ -368,31 +368,24 @@ pub struct EyeOffset {
 fn request_body_asset(
     mut requested: Local<bool>,
     asset_server: Res<AssetServer>,
-    config_handle: Res<config::ConfigHandle<BodyConfig>>,
-    body_configs: Res<Assets<BodyConfig>>,
+    body_config: config::Config<BodyConfig>,
     mut assets: ResMut<BodyAssets>,
 ) {
     if *requested {
         return;
     }
-    // Wait for `body.toml` (a failed load panics inside `config::poll_load`).
-    let gltf_path =
-        match config::poll_load(&asset_server, &config_handle.handle, config::paths::BODY) {
-            config::ConfigLoadState::Ready => {
-                let Some(body_config) = body_configs.get(&config_handle.handle) else {
-                    return;
-                };
-                body_config.gltf_path.clone()
-            }
-            config::ConfigLoadState::Loading => return,
-        };
-    assets.gltf =
-        asset_server.load_with_settings(gltf_path, |s: &mut bevy::gltf::GltfLoaderSettings| {
+    let Some(body_config) = body_config.get() else {
+        return;
+    };
+    assets.gltf = asset_server.load_with_settings(
+        &body_config.gltf_path,
+        |s: &mut bevy::gltf::GltfLoaderSettings| {
             // We need the raw `gltf::Gltf` so we can read the document-level
             // `extras` field — Bevy doesn't surface root extras on its own
             // `Gltf` asset.
             s.include_source = true;
-        });
+        },
+    );
     *requested = true;
 }
 

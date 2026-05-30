@@ -342,29 +342,17 @@ impl Plugin for CameraControllerPlugin {
     }
 }
 
-/// Apply [`CameraConfig::default_fov_deg`] to every floating-origin camera's
-/// `Projection::Perspective` when `camera.toml` (re)loads or a camera spawns.
-///
-/// Keyed on the config *asset* reload (and newly-spawned cameras) rather than
-/// `CameraConfig::is_changed`, so live runtime edits to other fields (the
-/// scroll-adjusted `base_speed`, the teleport-style toggle) don't reset the
-/// FoV. The Camera-tab slider edits the live `Projection` directly between
-/// reloads; a file reload then re-applies the configured default.
+/// Re-apply [`CameraConfig::default_fov_deg`] to every floating-origin camera's
+/// `Projection::Perspective` when `camera.toml` is edited.
 fn apply_camera_fov(
     config: Res<CameraConfig>,
     mut events: MessageReader<AssetEvent<CameraConfig>>,
-    new_cameras: Query<(), Added<FloatingOriginCamera>>,
     mut query: Query<&mut Projection, With<FloatingOriginCamera>>,
 ) {
-    let config_reloaded = events.read().any(|e| {
-        matches!(
-            e,
-            AssetEvent::Modified { .. } | AssetEvent::LoadedWithDependencies { .. }
-        )
-    });
-    // `default_fov_deg <= 0` means the config hasn't loaded yet (derived
-    // zero default); leave the camera's placeholder FoV until it does.
-    if (!config_reloaded && new_cameras.is_empty()) || config.default_fov_deg <= 0.0 {
+    if !events
+        .read()
+        .any(|e| matches!(e, AssetEvent::Modified { .. }))
+    {
         return;
     }
     let fov = config.default_fov_deg.to_radians();

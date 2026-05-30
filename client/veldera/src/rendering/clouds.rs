@@ -56,11 +56,12 @@ pub struct CloudEngineConfig(pub CloudPlanetSettings);
 /// ocean path falls back to "everywhere is land".
 const EARTH_TOPOGRAPHY_PATH: &str = "world/earth_topography.png";
 
-/// Plugin that registers the cloud renderer and provides a default
-/// [`CloudLayers`] configuration. Also drives the cloud system's world
-/// time directly from the time-of-day clock, so wind / weather drift /
-/// cloud evolution is a pure function of in-world time — moving the
-/// time slider jumps the cloud state to match.
+/// Plugin that registers the cloud renderer and drives it from config. The
+/// [`CloudLayers`] component is built from `clouds.toml` at camera spawn (the
+/// camera waits for the config); [`apply_cloud_config`] handles later edits.
+/// Also drives the cloud system's world time directly from the time-of-day
+/// clock, so wind / weather drift / cloud evolution is a pure function of
+/// in-world time — moving the time slider jumps the cloud state to match.
 pub struct CloudIntegrationPlugin;
 
 impl Plugin for CloudIntegrationPlugin {

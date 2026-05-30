@@ -29,9 +29,9 @@ use veldera_constants::{ATMOSPHERE_TOP_RADIUS_M, EARTH_RADIUS_M};
 /// shared atmosphere height, so they stay compiled in. Everything tunable lives
 /// here: the ground albedo (a free visual "climate" knob) plus the LUT sizes,
 /// ray-march sample counts, aerial-view range, and render method that make up
-/// the crate's [`AtmosphereSettings`]. The atmosphere is created from this
-/// config once it loads (see [`insert_atmosphere_when_ready`]) and re-applied on
-/// every reload by [`apply_atmosphere_config`].
+/// the crate's [`AtmosphereSettings`]. The atmosphere is built from this config
+/// when the camera spawns (which waits for it) and re-applied on every reload by
+/// [`apply_atmosphere_config`].
 #[derive(Default, Asset, Resource, TypePath, Clone, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct AtmosphereConfig {
@@ -53,8 +53,6 @@ impl Plugin for AtmosphereIntegrationPlugin {
             .add_plugins(config::ConfigPlugin::<AtmosphereConfig>::new(
                 config::paths::ATMOSPHERE,
             ))
-            // Create the atmosphere on the camera once its config has loaded.
-            .add_systems(Update, insert_atmosphere_when_ready)
             // Run in PostUpdate to ensure camera position is fully updated.
             // This prevents frame-lag artifacts during camera movement.
             .add_systems(
@@ -233,9 +231,9 @@ impl AtmosphereBundle {
     ///
     /// The bottom/top radii are physical constants; the ground albedo and the
     /// [`AtmosphereSettings`] (LUT sizes, sample counts, render method) come
-    /// straight from `config`, which is why the atmosphere waits for the config
-    /// to load before being created.
-    fn from_config(
+    /// straight from `config`, which is why the camera waits for the config to
+    /// load before being spawned.
+    pub fn from_config(
         config: &AtmosphereConfig,
         medium: Handle<ScatteringMedium>,
         initial_ecef: glam::DVec3,
@@ -259,47 +257,11 @@ impl AtmosphereBundle {
     }
 }
 
-/// Add the [`AtmosphereBundle`] to the floating-origin camera once
-/// `atmosphere.toml` has loaded, building it from the config. Runs every frame
-/// until it succeeds for each camera; the `Without<SphericalAtmosphere>` filter
-/// makes it idempotent. A failed config load panics inside
-/// [`config::poll_load`].
-#[allow(clippy::type_complexity)]
-fn insert_atmosphere_when_ready(
-    mut commands: Commands,
-    asset_server: Res<AssetServer>,
-    handle: Res<config::ConfigHandle<AtmosphereConfig>>,
-    configs: Res<Assets<AtmosphereConfig>>,
-    mut media: ResMut<Assets<ScatteringMedium>>,
-    cameras: Query<(Entity, &FloatingOriginCamera), (With<Camera3d>, Without<SphericalAtmosphere>)>,
-) {
-    if cameras.is_empty() {
-        return;
-    }
-    match config::poll_load(&asset_server, &handle.handle, config::paths::ATMOSPHERE) {
-        config::ConfigLoadState::Loading => return,
-        config::ConfigLoadState::Ready => {}
-    }
-    let Some(config) = configs.get(&handle.handle) else {
-        return;
-    };
-    for (entity, floating_camera) in &cameras {
-        let medium = media.add(ScatteringMedium::default());
-        commands
-            .entity(entity)
-            .insert(AtmosphereBundle::from_config(
-                config,
-                medium,
-                floating_camera.position,
-            ));
-    }
-}
-
 /// Apply [`AtmosphereConfig`] to the live atmosphere components whenever the
 /// config reloads, so editing `atmosphere.toml` updates the ground albedo and
 /// the [`AtmosphereSettings`] (LUT sizes, samples, render method) without
-/// restarting. [`insert_atmosphere_when_ready`] does the initial build; this
-/// handles subsequent edits.
+/// restarting. The camera spawn does the initial build; this handles subsequent
+/// edits.
 fn apply_atmosphere_config(
     config: Res<AtmosphereConfig>,
     mut atmospheres: Query<&mut SphericalAtmosphere>,
