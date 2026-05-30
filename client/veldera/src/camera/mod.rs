@@ -37,7 +37,6 @@ use serde::Deserialize;
 
 use crate::{
     config,
-    launch_params::LaunchParams,
     world::floating_origin::{FloatingOriginCamera, WorldPosition},
 };
 
@@ -92,7 +91,7 @@ impl Default for CameraConfig {
 ///
 /// Use `CameraModeTransition` events to change modes rather than modifying
 /// `CameraModeState` directly.
-#[derive(Default, PartialEq, Eq, Clone, Copy, Debug)]
+#[derive(Default, PartialEq, Eq, Clone, Copy, Debug, Deserialize)]
 #[cfg_attr(not(target_family = "wasm"), derive(clap::ValueEnum))]
 pub enum CameraMode {
     /// Free-flight camera (default).
@@ -366,7 +365,6 @@ impl Plugin for CameraControllerPlugin {
             input::CameraInputPlugin,
             body::BodyPlugin,
         ))
-        .add_systems(PostStartup, apply_initial_camera_mode)
         .add_systems(
             Update,
             (
@@ -411,26 +409,6 @@ fn sync_camera_fov(
 // ============================================================================
 // Initial mode setup
 // ============================================================================
-
-/// Apply the initial camera mode from launch params.
-fn apply_initial_camera_mode(
-    mut transitions: ResMut<CameraModeTransitions>,
-    params: Res<LaunchParams>,
-) {
-    match params.camera_mode {
-        CameraMode::Flycam => {
-            // Already set up by setup_scene.
-        }
-        CameraMode::FpsController => {
-            transitions.request_fps_controller();
-        }
-        CameraMode::FollowEntity => {
-            // FollowEntity mode requires a target entity, which isn't available
-            // at startup. Stay in Flycam.
-            tracing::warn!("Cannot start in FollowEntity mode without a target; staying in Flycam");
-        }
-    }
-}
 
 // ============================================================================
 // Mode transitions

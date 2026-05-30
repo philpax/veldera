@@ -5,6 +5,9 @@
 //! in one place. Paths are relative to the `assets/` root and mirror the source
 //! module layout under `assets/config/`.
 
+// Launch (default spawn position + camera mode; read once at startup).
+pub const LAUNCH: &str = "config/launch.toml";
+
 // Camera.
 pub const CAMERA: &str = "config/camera/camera.toml";
 pub const FPS: &str = "config/camera/fps.toml";

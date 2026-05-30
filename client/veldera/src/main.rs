@@ -27,9 +27,9 @@ use bevy::{
     prelude::*,
     render::view::Hdr,
 };
-use camera::{CameraControllerPlugin, FlightCamera};
+use camera::{CameraControllerPlugin, CameraMode, CameraModeTransitions, FlightCamera};
 use input::InputPlugin;
-use launch_params::LaunchParams;
+use launch_params::{LaunchConfig, LaunchParams, ResolvedLaunch};
 use rendering::{
     atmosphere::{AtmosphereBundle, AtmosphereIntegrationPlugin, AtmosphericLight},
     clouds::{CloudIntegrationPlugin, earth_stratocumulus},
@@ -67,17 +67,26 @@ impl Plugin for AppPlugin {
             CloudIntegrationPlugin,
             vehicle::VehiclePlugin,
         ))
-        .add_systems(Startup, (setup_scene, apply_datetime_override))
+        .add_plugins(bevy_common_assets::toml::TomlAssetPlugin::<LaunchConfig>::new(&["toml"]))
+        .add_systems(Startup, setup_scene)
+        .add_systems(Update, resolve_launch_and_spawn_camera)
         .add_plugins(physics::PhysicsIntegrationPlugin);
+
+        // Request the launch config now; `resolve_launch_and_spawn_camera`
+        // spawns the camera once it has resolved.
+        let handle = app
+            .world()
+            .resource::<AssetServer>()
+            .load::<LaunchConfig>(config::paths::LAUNCH);
+        app.insert_resource(LaunchConfigHandle(handle));
     }
 }
 
-/// Set up the initial 3D scene with camera.
-fn setup_scene(
-    mut commands: Commands,
-    mut media: ResMut<Assets<ScatteringMedium>>,
-    params: Res<LaunchParams>,
-) {
+/// Set up the launch-independent parts of the scene (ambient + sun + moon).
+///
+/// The camera depends on the resolved launch parameters, so it's spawned later
+/// by [`resolve_launch_and_spawn_camera`] once the launch config has loaded.
+fn setup_scene(mut commands: Commands) {
     // Ambient calibrated against the EV clamp floor: enough that surfaces
     // remain readable through twilight and moonless night, but low enough
     // that photogrammetry textures (which bake in their captured-day
@@ -88,72 +97,6 @@ fn setup_scene(
         brightness: 50.0,
         affects_lightmapped_meshes: true,
     });
-
-    // Convert launch parameters to ECEF position.
-    let radius = veldera_constants::EARTH_RADIUS_M_F64 + params.altitude;
-    let start_position = lat_lon_to_ecef(params.lat, params.lon, radius);
-
-    // Compute initial viewing direction: look north along the surface.
-    let up = start_position.normalize().as_vec3();
-    let start_direction = {
-        let world_north = Vec3::Z;
-        let north = (world_north - up * world_north.dot(up)).normalize_or_zero();
-        // At the poles, north is degenerate; fall back to an arbitrary tangent.
-        if north.length_squared() < 0.001 {
-            Vec3::X
-        } else {
-            north
-        }
-    };
-
-    // Create Earth's scattering medium for atmosphere.
-    // Use default which provides proper Earth-like Rayleigh and Mie scattering.
-    let earth_medium = media.add(ScatteringMedium::default());
-
-    // Spawn a 3D camera at the origin (floating origin system handles positioning).
-    // The camera's Transform is always at origin; everything else is rendered relative to it.
-    // Note: clear_color is set dynamically by the time-of-day system.
-    commands.spawn((
-        Camera3d::default(),
-        Camera::default(),
-        Transform::from_translation(Vec3::ZERO).looking_to(start_direction, up),
-        Projection::Perspective(PerspectiveProjection {
-            // Initial FoV placeholder; `sync_fov_from_config` applies
-            // `config/camera/camera.toml`'s `default_fov_deg` once it loads and
-            // `sync_camera_fov` then copies the `CameraSettings` value here, so
-            // the Camera tab slider (`client/veldera/src/ui/camera.rs`) takes
-            // effect live without rebuilding the camera entity.
-            fov: 75.0_f32.to_radians(),
-            near: 1.0,
-            far: 100_000_000.0, // 100,000 km to see the whole Earth.
-            ..Default::default()
-        }),
-        // Use ACES filmic tonemapping for HDR atmosphere.
-        Tonemapping::AcesFitted,
-        // HDR is required for atmosphere rendering.
-        Hdr,
-        // Fixed exposure calibrated for daytime. With CPU sun extinction
-        // dimming the sun's `DirectionalLight.color` through twilight, the
-        // scene naturally darkens as the sun sets — no eye-adaptation curve
-        // needed. Night is intentionally dark; lift it with explicit lights
-        // (street lights, etc.) rather than cranking exposure sensitivity.
-        Exposure { ev100: 13.0 },
-        // Bloom gives the sun a natural glow.
-        Bloom::NATURAL,
-        // High-precision camera position for floating origin system.
-        FloatingOriginCamera::new(start_position),
-        FlightCamera {
-            direction: start_direction,
-        },
-        // Spatial audio listener for 3D sound.
-        SpatialListener::default(),
-        // Spherical atmosphere for Earth.
-        AtmosphereBundle::earth(earth_medium, start_position),
-        // Default stratocumulus cloud layer (Phase 1: single shell).
-        earth_stratocumulus(),
-        // Input map for camera actions.
-        input::default_camera_input_map(),
-    ));
 
     // Directional light representing the sun (required for atmosphere).
     // Uses RAW_SUNLIGHT illuminance which is the pre-scattering sunlight value,
@@ -202,21 +145,140 @@ fn setup_scene(
         },
         Transform::default(),
     ));
-
-    tracing::info!(
-        "Scene setup complete at ({:.2}\u{00b0}, {:.2}\u{00b0}, {:.0}m)",
-        params.lat,
-        params.lon,
-        params.altitude,
-    );
 }
 
-/// Apply the date-time override from launch parameters, if provided.
-fn apply_datetime_override(params: Res<LaunchParams>, mut time_state: ResMut<TimeOfDayState>) {
-    if let Some(dt) = params.datetime {
+/// Strong handle to the launch config asset, kept so it loads and can be polled.
+#[derive(Resource)]
+struct LaunchConfigHandle(Handle<LaunchConfig>);
+
+/// Once the launch config has loaded (or failed), resolve the launch parameters
+/// (CLI overrides win, else config defaults), spawn the camera at the resolved
+/// position, apply the initial camera mode, and apply any date-time override.
+/// Runs every frame until it succeeds; the camera doesn't exist until then.
+#[allow(clippy::too_many_arguments)]
+fn resolve_launch_and_spawn_camera(
+    mut commands: Commands,
+    mut spawned: Local<bool>,
+    asset_server: Res<AssetServer>,
+    handle: Res<LaunchConfigHandle>,
+    launch_configs: Res<Assets<LaunchConfig>>,
+    params: Res<LaunchParams>,
+    mut media: ResMut<Assets<ScatteringMedium>>,
+    mut transitions: ResMut<CameraModeTransitions>,
+    mut time_state: ResMut<TimeOfDayState>,
+) {
+    if *spawned {
+        return;
+    }
+
+    // Wait until the launch config asset resolves; fall back to defaults if it
+    // fails to load (e.g. the file is missing).
+    let config = match asset_server.load_state(handle.0.id()) {
+        bevy::asset::LoadState::Loaded => {
+            launch_configs.get(&handle.0).cloned().unwrap_or_default()
+        }
+        bevy::asset::LoadState::Failed(_) => {
+            tracing::warn!("launch config failed to load; using built-in defaults");
+            LaunchConfig::default()
+        }
+        _ => return,
+    };
+
+    let resolved = params.resolve(&config);
+    spawn_camera(&mut commands, &mut media, &resolved);
+
+    match resolved.camera_mode {
+        CameraMode::Flycam => {}
+        CameraMode::FpsController => transitions.request_fps_controller(),
+        CameraMode::FollowEntity => {
+            tracing::warn!("Cannot start in FollowEntity mode without a target; staying in Flycam")
+        }
+    }
+
+    if let Some(dt) = resolved.datetime {
         time_state.set_override_utc(dt.date, dt.seconds);
         tracing::info!("Time override set to {dt} UTC");
     }
+
+    tracing::info!(
+        "Spawned camera at ({:.2}\u{00b0}, {:.2}\u{00b0}, {:.0}m), mode {:?}",
+        resolved.lat,
+        resolved.lon,
+        resolved.altitude,
+        resolved.camera_mode,
+    );
+    *spawned = true;
+}
+
+/// Spawn the floating-origin camera at the resolved launch position.
+fn spawn_camera(
+    commands: &mut Commands,
+    media: &mut Assets<ScatteringMedium>,
+    resolved: &ResolvedLaunch,
+) {
+    let radius = veldera_constants::EARTH_RADIUS_M_F64 + resolved.altitude;
+    let start_position = lat_lon_to_ecef(resolved.lat, resolved.lon, radius);
+
+    // Initial viewing direction: look north along the surface.
+    let up = start_position.normalize().as_vec3();
+    let start_direction = {
+        let world_north = Vec3::Z;
+        let north = (world_north - up * world_north.dot(up)).normalize_or_zero();
+        // At the poles, north is degenerate; fall back to an arbitrary tangent.
+        if north.length_squared() < 0.001 {
+            Vec3::X
+        } else {
+            north
+        }
+    };
+
+    // Earth's scattering medium for the atmosphere (Earth-like Rayleigh + Mie).
+    let earth_medium = media.add(ScatteringMedium::default());
+
+    // The camera's Transform is always at the origin; everything else is
+    // rendered relative to it via the floating-origin system. The clear color is
+    // set dynamically by the time-of-day system.
+    commands.spawn((
+        Camera3d::default(),
+        Camera::default(),
+        Transform::from_translation(Vec3::ZERO).looking_to(start_direction, up),
+        Projection::Perspective(PerspectiveProjection {
+            // Initial FoV placeholder; `sync_fov_from_config` applies
+            // `config/camera/camera.toml`'s `default_fov_deg` once it loads and
+            // `sync_camera_fov` then copies the `CameraSettings` value here, so
+            // the Camera tab slider (`client/veldera/src/ui/camera.rs`) takes
+            // effect live without rebuilding the camera entity.
+            fov: 75.0_f32.to_radians(),
+            near: 1.0,
+            far: 100_000_000.0, // 100,000 km to see the whole Earth.
+            ..Default::default()
+        }),
+        // Use ACES filmic tonemapping for HDR atmosphere.
+        Tonemapping::AcesFitted,
+        // HDR is required for atmosphere rendering.
+        Hdr,
+        // Fixed exposure calibrated for daytime. With CPU sun extinction
+        // dimming the sun's `DirectionalLight.color` through twilight, the
+        // scene naturally darkens as the sun sets — no eye-adaptation curve
+        // needed. Night is intentionally dark; lift it with explicit lights
+        // (street lights, etc.) rather than cranking exposure sensitivity.
+        Exposure { ev100: 13.0 },
+        // Bloom gives the sun a natural glow.
+        Bloom::NATURAL,
+        // High-precision camera position for floating origin system.
+        FloatingOriginCamera::new(start_position),
+        FlightCamera {
+            direction: start_direction,
+        },
+        // Spatial audio listener for 3D sound.
+        SpatialListener::default(),
+        // Spherical atmosphere for Earth.
+        AtmosphereBundle::earth(earth_medium, start_position),
+        // Default stratocumulus cloud layer.
+        earth_stratocumulus(),
+        // Input map for camera actions.
+        input::default_camera_input_map(),
+    ));
 }
 
 fn main() {

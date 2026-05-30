@@ -5,44 +5,90 @@
 
 use std::fmt;
 
-use bevy::prelude::*;
+use bevy::{prelude::*, reflect::TypePath};
+use serde::Deserialize;
 
 use crate::{
     camera::CameraMode,
-    world::time_of_day::{SimpleDate, seconds_to_hms},
+    world::time_of_day::{SimpleDate, local_to_utc, seconds_to_hms},
 };
 
-/// Default starting latitude (NYC).
-const DEFAULT_LAT: f64 = 40.7;
-/// Default starting longitude (NYC).
-const DEFAULT_LON: f64 = -74.0;
-/// Default starting altitude in meters.
-const DEFAULT_ALTITUDE: f64 = 200.0;
-
-/// Launch parameters for the viewer.
-#[derive(Resource, Debug)]
+/// CLI/URL launch overrides. Each spatial field is `None` when the user didn't
+/// specify it, in which case it falls back to [`LaunchConfig`] during
+/// [`LaunchParams::resolve`].
+#[derive(Resource, Debug, Default)]
 pub struct LaunchParams {
-    /// Starting latitude in degrees.
+    /// Starting latitude in degrees, if overridden on the command line.
+    pub lat: Option<f64>,
+    /// Starting longitude in degrees, if overridden.
+    pub lon: Option<f64>,
+    /// Starting altitude above sea level in meters, if overridden.
+    pub altitude: Option<f64>,
+    /// Initial camera mode, if overridden.
+    pub camera_mode: Option<CameraMode>,
+    /// Optional UTC date-time override.
+    pub datetime: Option<DateTimeOverride>,
+    /// Optional local-time override at the spawn longitude, converted to UTC
+    /// during [`LaunchParams::resolve`] (it needs the resolved longitude).
+    pub datetime_local: Option<DateTimeOverride>,
+}
+
+/// Hot-reloadable default launch parameters, loaded from
+/// `assets/config/launch.toml`. Read once at startup (CLI args take precedence);
+/// editing the file affects the next launch, not the running session.
+#[derive(Asset, Resource, TypePath, Clone, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct LaunchConfig {
+    /// Default starting latitude in degrees.
+    pub default_lat: f64,
+    /// Default starting longitude in degrees.
+    pub default_lon: f64,
+    /// Default starting altitude above sea level in meters.
+    pub default_altitude: f64,
+    /// Default initial camera mode.
+    pub default_camera_mode: CameraMode,
+}
+
+impl Default for LaunchConfig {
+    fn default() -> Self {
+        // New York City.
+        Self {
+            default_lat: 40.7,
+            default_lon: -74.0,
+            default_altitude: 200.0,
+            default_camera_mode: CameraMode::default(),
+        }
+    }
+}
+
+/// Launch parameters with CLI overrides resolved against [`LaunchConfig`].
+#[derive(Debug, Clone, Copy)]
+pub struct ResolvedLaunch {
     pub lat: f64,
-    /// Starting longitude in degrees.
     pub lon: f64,
-    /// Starting altitude above sea level in meters.
     pub altitude: f64,
-    /// Initial camera mode.
     pub camera_mode: CameraMode,
-    /// Optional UTC date-time override (puts the time system in override mode).
-    #[allow(dead_code)]
     pub datetime: Option<DateTimeOverride>,
 }
 
-impl Default for LaunchParams {
-    fn default() -> Self {
-        Self {
-            lat: DEFAULT_LAT,
-            lon: DEFAULT_LON,
-            altitude: DEFAULT_ALTITUDE,
-            camera_mode: CameraMode::default(),
-            datetime: None,
+impl LaunchParams {
+    /// Resolve overrides against the config defaults: each CLI value wins if
+    /// present, otherwise the config default is used. The local date-time
+    /// override is converted to UTC using the resolved longitude.
+    pub fn resolve(&self, config: &LaunchConfig) -> ResolvedLaunch {
+        let lon = self.lon.unwrap_or(config.default_lon);
+        let datetime = self.datetime.or_else(|| {
+            self.datetime_local.map(|local| {
+                let (seconds, date) = local_to_utc(local.seconds, local.date, lon);
+                DateTimeOverride { date, seconds }
+            })
+        });
+        ResolvedLaunch {
+            lat: self.lat.unwrap_or(config.default_lat),
+            lon,
+            altitude: self.altitude.unwrap_or(config.default_altitude),
+            camera_mode: self.camera_mode.unwrap_or(config.default_camera_mode),
+            datetime,
         }
     }
 }
@@ -137,21 +183,21 @@ mod native {
     #[derive(Parser)]
     #[command(about = "3D viewer for Google Earth mesh data")]
     struct CliArgs {
-        /// Starting latitude in degrees.
-        #[arg(long, default_value_t = DEFAULT_LAT)]
-        lat: f64,
+        /// Starting latitude in degrees (overrides config default).
+        #[arg(long, allow_hyphen_values(true))]
+        lat: Option<f64>,
 
-        /// Starting longitude in degrees.
-        #[arg(long, default_value_t = DEFAULT_LON)]
-        lon: f64,
+        /// Starting longitude in degrees (overrides config default).
+        #[arg(long, allow_hyphen_values(true))]
+        lon: Option<f64>,
 
-        /// Starting altitude above sea level in meters.
-        #[arg(long, default_value_t = DEFAULT_ALTITUDE)]
-        altitude: f64,
+        /// Starting altitude above sea level in meters (overrides config default).
+        #[arg(long)]
+        altitude: Option<f64>,
 
-        /// Initial camera mode.
-        #[arg(long, value_enum, default_value_t = CameraMode::default())]
-        mode: CameraMode,
+        /// Initial camera mode (overrides config default).
+        #[arg(long, value_enum)]
+        mode: Option<CameraMode>,
 
         /// UTC date-time override (format: YYYY-MM-DDTHH:MM:SS).
         #[arg(long, value_parser = parse_datetime, conflicts_with = "datetime_local")]
@@ -166,25 +212,17 @@ mod native {
     }
 
     pub fn parse() -> LaunchParams {
-        use crate::world::time_of_day::local_to_utc;
-
         let args = CliArgs::parse();
-        // Local → UTC conversion uses the longitude-derived solar
-        // offset (the same one [`utc_to_local`] uses for the UI
-        // clock display), so `--datetime-local` round-trips with
-        // what the in-game "Local" readout shows.
-        let datetime = args.datetime.or_else(|| {
-            args.datetime_local.map(|local| {
-                let (seconds, date) = local_to_utc(local.seconds, local.date, args.lon);
-                DateTimeOverride { date, seconds }
-            })
-        });
+        // `datetime_local` is kept raw here and converted to UTC in
+        // `LaunchParams::resolve`, which has the resolved longitude (it may come
+        // from the config rather than `--lon`).
         LaunchParams {
             lat: args.lat,
             lon: args.lon,
             altitude: args.altitude,
             camera_mode: args.mode,
-            datetime,
+            datetime: args.datetime,
+            datetime_local: args.datetime_local,
         }
     }
 }
