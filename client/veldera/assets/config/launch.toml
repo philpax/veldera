@@ -1,6 +1,7 @@
-# Default launch parameters: where the camera starts and in which mode. CLI args
-# (--lat/--lon/--altitude/--mode) override these per-run. Read once at startup;
-# editing this affects the next launch, not the running session.
+# Default launch parameters: where the camera starts, where it looks, and in
+# which mode. CLI args (--lat/--lon/--altitude/--mode/--heading/--pitch) override
+# these per-run. Read once at startup; editing this affects the next launch, not
+# the running session.
 
 # Default spawn position (degrees / metres above sea level). Defaults to NYC.
 default_lat = 40.7
@@ -10,3 +11,9 @@ default_altitude = 200.0
 # Default camera mode: "Flycam" | "FpsController" | "FollowEntity".
 # (FollowEntity needs a target, so it falls back to Flycam at startup.)
 default_camera_mode = "Flycam"
+
+# Default initial look direction. Heading is degrees clockwise from north
+# (0 = north, 90 = east); pitch is degrees above the horizon (negative looks
+# down). 0/0 looks level toward north along the surface.
+default_heading_deg = 0.0
+default_pitch_deg = 0.0

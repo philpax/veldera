@@ -293,18 +293,14 @@ impl TranslateRequest {
 }
 
 /// Marker component for the camera entity that should be controlled.
+///
+/// Has no `Default`: the initial direction comes from the resolved launch
+/// heading/pitch at spawn (see `spawn_camera`), so every construction site
+/// supplies an explicit `direction`.
 #[derive(Component)]
 pub struct FlightCamera {
     /// Current direction the camera is facing (normalized).
     pub direction: Vec3,
-}
-
-impl Default for FlightCamera {
-    fn default() -> Self {
-        Self {
-            direction: Vec3::new(0.219_862, 0.419_329, 0.312_226).normalize(),
-        }
-    }
 }
 
 // ============================================================================

@@ -26,6 +26,10 @@ pub struct LaunchParams {
     pub altitude: Option<f64>,
     /// Initial camera mode, if overridden.
     pub camera_mode: Option<CameraMode>,
+    /// Initial look heading in degrees clockwise from north, if overridden.
+    pub heading: Option<f64>,
+    /// Initial look pitch in degrees above the horizon, if overridden.
+    pub pitch: Option<f64>,
     /// Optional UTC date-time override.
     pub datetime: Option<DateTimeOverride>,
     /// Optional local-time override at the spawn longitude, converted to UTC
@@ -36,7 +40,7 @@ pub struct LaunchParams {
 /// Hot-reloadable default launch parameters, loaded from
 /// `assets/config/launch.toml`. Read once at startup (CLI args take precedence);
 /// editing the file affects the next launch, not the running session.
-#[derive(Asset, Resource, TypePath, Clone, Deserialize)]
+#[derive(Default, Asset, Resource, TypePath, Clone, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct LaunchConfig {
     /// Default starting latitude in degrees.
@@ -47,18 +51,10 @@ pub struct LaunchConfig {
     pub default_altitude: f64,
     /// Default initial camera mode.
     pub default_camera_mode: CameraMode,
-}
-
-impl Default for LaunchConfig {
-    fn default() -> Self {
-        // New York City.
-        Self {
-            default_lat: 40.7,
-            default_lon: -74.0,
-            default_altitude: 200.0,
-            default_camera_mode: CameraMode::default(),
-        }
-    }
+    /// Default initial look heading, in degrees clockwise from north.
+    pub default_heading_deg: f64,
+    /// Default initial look pitch, in degrees above the horizon.
+    pub default_pitch_deg: f64,
 }
 
 /// Launch parameters with CLI overrides resolved against [`LaunchConfig`].
@@ -68,6 +64,10 @@ pub struct ResolvedLaunch {
     pub lon: f64,
     pub altitude: f64,
     pub camera_mode: CameraMode,
+    /// Initial look heading in degrees clockwise from north.
+    pub heading_deg: f64,
+    /// Initial look pitch in degrees above the horizon.
+    pub pitch_deg: f64,
     pub datetime: Option<DateTimeOverride>,
 }
 
@@ -88,6 +88,8 @@ impl LaunchParams {
             lon,
             altitude: self.altitude.unwrap_or(config.default_altitude),
             camera_mode: self.camera_mode.unwrap_or(config.default_camera_mode),
+            heading_deg: self.heading.unwrap_or(config.default_heading_deg),
+            pitch_deg: self.pitch.unwrap_or(config.default_pitch_deg),
             datetime,
         }
     }
@@ -199,6 +201,16 @@ mod native {
         #[arg(long, value_enum)]
         mode: Option<CameraMode>,
 
+        /// Initial look heading in degrees clockwise from north (overrides
+        /// config default).
+        #[arg(long, allow_hyphen_values(true))]
+        heading: Option<f64>,
+
+        /// Initial look pitch in degrees above the horizon (overrides config
+        /// default).
+        #[arg(long, allow_hyphen_values(true))]
+        pitch: Option<f64>,
+
         /// UTC date-time override (format: YYYY-MM-DDTHH:MM:SS).
         #[arg(long, value_parser = parse_datetime, conflicts_with = "datetime_local")]
         datetime: Option<DateTimeOverride>,
@@ -221,6 +233,8 @@ mod native {
             lon: args.lon,
             altitude: args.altitude,
             camera_mode: args.mode,
+            heading: args.heading,
+            pitch: args.pitch,
             datetime: args.datetime,
             datetime_local: args.datetime_local,
         }

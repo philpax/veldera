@@ -27,12 +27,13 @@ use bevy::{
     prelude::*,
     render::view::Hdr,
 };
+use bevy_pbr_clouds_planet::CloudLayers;
 use camera::{CameraControllerPlugin, CameraMode, CameraModeTransitions, FlightCamera};
 use input::InputPlugin;
 use launch_params::{LaunchConfig, LaunchParams, ResolvedLaunch};
 use rendering::{
     atmosphere::{AtmosphereBundle, AtmosphereIntegrationPlugin, AtmosphericLight},
-    clouds::{CloudIntegrationPlugin, earth_stratocumulus},
+    clouds::CloudIntegrationPlugin,
     terrain_material::TerrainMaterialPlugin,
 };
 use ui::DebugUiPlugin;
@@ -42,7 +43,7 @@ use world::{
     geo::GeoPlugin,
     loader::DataLoaderPlugin,
     lod::LodPlugin,
-    moon::{Moon, MoonConfig, MoonPlugin},
+    moon::{Moon, MoonPlugin},
     time_of_day::{Sun, TimeOfDayPlugin, TimeOfDayState},
 };
 
@@ -138,9 +139,9 @@ fn setup_scene(mut commands: Commands) {
             base_color: LinearRgba::new(1.0, 0.96, 0.9, 1.0),
         },
         SunDisk {
-            // Initial value; `update_moon` applies `MoonConfig::angular_diameter`
-            // from config each frame.
-            angular_size: MoonConfig::default().angular_diameter,
+            // Seeded to zero; `update_moon` applies `MoonConfig::angular_diameter`
+            // from config every frame, so this initial value is never displayed.
+            angular_size: 0.0,
             intensity: 1.0,
         },
         Transform::default(),
@@ -219,18 +220,24 @@ fn spawn_camera(
     let radius = veldera_constants::EARTH_RADIUS_M_F64 + resolved.altitude;
     let start_position = lat_lon_to_ecef(resolved.lat, resolved.lon, radius);
 
-    // Initial viewing direction: look north along the surface.
+    // Initial viewing direction from the resolved launch heading/pitch, taken in
+    // the local east-north-up frame at the spawn point.
     let up = start_position.normalize().as_vec3();
-    let start_direction = {
+    let north = {
         let world_north = Vec3::Z;
-        let north = (world_north - up * world_north.dot(up)).normalize_or_zero();
+        let projected = (world_north - up * world_north.dot(up)).normalize_or_zero();
         // At the poles, north is degenerate; fall back to an arbitrary tangent.
-        if north.length_squared() < 0.001 {
+        if projected.length_squared() < 0.001 {
             Vec3::X
         } else {
-            north
+            projected
         }
     };
+    let east = north.cross(up).normalize_or_zero();
+    let heading = (resolved.heading_deg as f32).to_radians();
+    let pitch = (resolved.pitch_deg as f32).to_radians();
+    let horizontal = north * heading.cos() + east * heading.sin();
+    let start_direction = (horizontal * pitch.cos() + up * pitch.sin()).normalize();
 
     // Earth's scattering medium for the atmosphere (Earth-like Rayleigh + Mie).
     let earth_medium = media.add(ScatteringMedium::default());
@@ -243,11 +250,11 @@ fn spawn_camera(
         Camera::default(),
         Transform::from_translation(Vec3::ZERO).looking_to(start_direction, up),
         Projection::Perspective(PerspectiveProjection {
-            // Initial FoV placeholder; `sync_fov_from_config` applies
-            // `config/camera/camera.toml`'s `default_fov_deg` once it loads and
-            // `sync_camera_fov` then copies the `CameraSettings` value here, so
-            // the Camera tab slider (`client/veldera/src/ui/camera.rs`) takes
-            // effect live without rebuilding the camera entity.
+            // Initial FoV placeholder; `apply_camera_fov` writes
+            // `config/camera/camera.toml`'s `default_fov_deg` here once it loads
+            // (and on every reload), and the Camera tab slider
+            // (`client/veldera/src/ui/camera.rs`) edits this `Projection`
+            // directly between reloads.
             fov: 75.0_f32.to_radians(),
             near: 1.0,
             far: 100_000_000.0, // 100,000 km to see the whole Earth.
@@ -274,8 +281,9 @@ fn spawn_camera(
         SpatialListener::default(),
         // Spherical atmosphere for Earth.
         AtmosphereBundle::earth(earth_medium, start_position),
-        // Default stratocumulus cloud layer.
-        earth_stratocumulus(),
+        // Cloud layers; the actual stack is applied from `clouds.toml` by
+        // `apply_cloud_config` on the first frame, so this is just a placeholder.
+        CloudLayers::default(),
         // Input map for camera actions.
         input::default_camera_input_map(),
     ));

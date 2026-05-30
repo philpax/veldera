@@ -35,15 +35,9 @@ use crate::{
 /// each sub-layer — is editable from one file. Applied to the live `CloudLayers`
 /// component by [`apply_cloud_config`]; the runtime `world_time_seconds` is
 /// preserved across reloads.
-#[derive(Asset, Resource, TypePath, Clone, Deserialize)]
+#[derive(Asset, Resource, TypePath, Clone, Default, Deserialize)]
 #[serde(transparent)]
 pub struct CloudConfig(pub CloudLayers);
-
-impl Default for CloudConfig {
-    fn default() -> Self {
-        Self(earth_stratocumulus())
-    }
-}
 
 /// Hot-reloadable cloud *engine* settings, loaded from
 /// `assets/config/rendering/cloud_engine.toml`. Wraps the cloud crate's
@@ -285,13 +279,4 @@ fn sync_cloud_world_time(time_state: Res<TimeOfDayState>, mut clouds: Query<&mut
     for mut cloud in &mut clouds {
         cloud.world_time_seconds = wrapped;
     }
-}
-
-/// Convenience constructor: stratocumulus + cirrus (the default
-/// "good-weather sky" preset for Earth).
-///
-/// Drop this onto the same camera entity that already owns
-/// `AtmosphereBundle::earth(...)`.
-pub fn earth_stratocumulus() -> CloudLayers {
-    CloudLayers::stratocumulus_with_cirrus()
 }
