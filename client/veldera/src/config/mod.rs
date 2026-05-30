@@ -119,7 +119,11 @@ fn mirror_loaded_config<C>(
         if let Some(loaded) = assets.get(id) {
             *current = loaded.clone();
             *loaded_once = true;
-            tracing::info!("loaded config {} from `{}`", core::any::type_name::<C>(), handle.path);
+            tracing::info!(
+                "loaded config {} from `{}`",
+                core::any::type_name::<C>(),
+                handle.path
+            );
         }
     }
 
