@@ -21,7 +21,8 @@ use crate::{
     CloudLayers,
     constants::SHADOW_MAP_SIZE,
     resources::{
-        CloudBindGroups, CloudPipelines, CloudRenderPipelineIds, CloudTextures, GpuCloudUniform,
+        CloudBindGroups, CloudPipelines, CloudRenderPipelineIds, CloudShadowBakePipeline,
+        CloudTextures, GpuCloudUniform,
     },
 };
 
@@ -375,9 +376,9 @@ impl ViewNode for CloudShadowBakeNode {
         >,
         world: &World,
     ) -> Result<(), NodeRunError> {
-        let pipelines = world.resource::<CloudPipelines>();
+        let shadow_bake = world.resource::<CloudShadowBakePipeline>();
         let pipeline_cache = world.resource::<PipelineCache>();
-        let Some(bake_pipeline) = pipeline_cache.get_compute_pipeline(pipelines.shadow_bake) else {
+        let Some(bake_pipeline) = pipeline_cache.get_compute_pipeline(shadow_bake.id) else {
             return Ok(());
         };
 

@@ -36,3 +36,4 @@ pub const PHYSICS_STREAMING: &str = "config/physics/streaming.toml";
 pub const ATMOSPHERE: &str = "config/rendering/atmosphere.toml";
 pub const CLOUDS: &str = "config/rendering/clouds.toml";
 pub const CLOUD_ENGINE: &str = "config/rendering/cloud_engine.toml";
+pub const CLOUD_SHADER: &str = "config/rendering/cloud_shader.toml";

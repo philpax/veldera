@@ -74,13 +74,14 @@ use noise::{
     NoisePipeline, NoiseTextures,
 };
 use resources::{
-    GpuCloudUniform, prepare_cloud_bind_groups, prepare_cloud_history_textures,
-    prepare_cloud_shadow_textures, prepare_cloud_sim_textures, prepare_cloud_textures,
-    prepare_cloud_uniforms, queue_cloud_render_pipelines,
+    CloudShadowBakePipeline, GpuCloudUniform, prepare_cloud_bind_groups,
+    prepare_cloud_history_textures, prepare_cloud_shadow_textures, prepare_cloud_sim_textures,
+    prepare_cloud_textures, prepare_cloud_uniforms, queue_cloud_render_pipelines,
+    update_shadow_bake_pipeline,
 };
 
 pub use constants::{CLIMATE_MAP_HEIGHT, CLIMATE_MAP_WIDTH, MAX_CLOUD_LAYERS};
-pub use settings::CloudPlanetSettings;
+pub use settings::{CloudPlanetSettings, CloudShaderParams};
 
 /// Plugin that registers the volumetric-cloud render pipeline.
 ///
@@ -119,6 +120,7 @@ impl Plugin for CloudsPlanetPlugin {
 
         app.insert_resource(self.settings)
             .init_resource::<CloudWorldTime>()
+            .init_resource::<CloudShaderParams>()
             .add_plugins((
                 ExtractComponentPlugin::<CloudLayers>::default(),
                 ExtractComponentPlugin::<CloudCameraEcef>::default(),
@@ -126,6 +128,7 @@ impl Plugin for CloudsPlanetPlugin {
                 ExtractComponentPlugin::<CloudClimateMap>::default(),
                 ExtractComponentPlugin::<CloudSimStatePreview>::default(),
                 ExtractResourcePlugin::<CloudPlanetSettings>::default(),
+                ExtractResourcePlugin::<CloudShaderParams>::default(),
                 ExtractResourcePlugin::<CloudWorldTime>::default(),
                 UniformComponentPlugin::<GpuCloudUniform>::default(),
                 inspect::CloudInspectPlugin,
@@ -169,6 +172,7 @@ impl Plugin for CloudsPlanetPlugin {
             .init_resource::<NoiseDownsamplePipeline>()
             .init_resource::<CloudBindGroupLayouts>()
             .init_resource::<CloudPipelines>()
+            .init_resource::<CloudShadowBakePipeline>()
             .init_resource::<SpecializedRenderPipelines<CloudBindGroupLayouts>>()
             .add_systems(RenderStartup, noise::create_noise_textures)
             .add_systems(
@@ -178,6 +182,7 @@ impl Plugin for CloudsPlanetPlugin {
                         .before(RenderSystems::PrepareResources)
                         .after(RenderSystems::PrepareAssets),
                     queue_cloud_render_pipelines.in_set(RenderSystems::Queue),
+                    update_shadow_bake_pipeline.in_set(RenderSystems::Queue),
                     prepare_cloud_textures.in_set(RenderSystems::PrepareResources),
                     prepare_cloud_history_textures.in_set(RenderSystems::PrepareResources),
                     prepare_cloud_shadow_textures.in_set(RenderSystems::PrepareResources),

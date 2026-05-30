@@ -32,8 +32,8 @@ use bevy_pbr_atmosphere_planet::{
 };
 
 use crate::{
-    CloudCameraEcef, CloudLayers, CloudPlanetSettings, CloudWorldTime, MAX_CLOUD_LAYERS,
-    constants::SHADOW_MAP_SIZE, noise::NoiseTextures,
+    CloudCameraEcef, CloudLayers, CloudPlanetSettings, CloudShaderParams, CloudWorldTime,
+    MAX_CLOUD_LAYERS, constants::SHADOW_MAP_SIZE, noise::NoiseTextures,
 };
 
 /// Per-view uniform consumed by the cloud raymarch and composite shaders.
@@ -857,7 +857,6 @@ pub struct CloudPipelines {
     /// hard-coded per pipeline.
     pub denoise: [CachedComputePipelineId; crate::constants::DENOISE_ITERATIONS_MAX],
     pub temporal: CachedComputePipelineId,
-    pub shadow_bake: CachedComputePipelineId,
     pub climate_bake: CachedComputePipelineId,
     pub sim_step: CachedComputePipelineId,
     pub poisson_jacobi: CachedComputePipelineId,
@@ -869,7 +868,6 @@ impl FromWorld for CloudPipelines {
         let layouts = world.resource::<CloudBindGroupLayouts>();
         let raymarch_shader = load_embedded_asset!(world, "shaders/cloud_raymarch.wgsl");
         let temporal_shader = load_embedded_asset!(world, "shaders/cloud_temporal.wgsl");
-        let shadow_bake_shader = load_embedded_asset!(world, "shaders/cloud_shadow_bake.wgsl");
 
         let raymarch = pipeline_cache.queue_compute_pipeline(ComputePipelineDescriptor {
             label: Some("cloud_raymarch_pipeline".into()),
@@ -905,13 +903,6 @@ impl FromWorld for CloudPipelines {
             ..Default::default()
         });
 
-        let shadow_bake = pipeline_cache.queue_compute_pipeline(ComputePipelineDescriptor {
-            label: Some("cloud_shadow_bake_pipeline".into()),
-            layout: vec![layouts.shadow_bake.clone()],
-            shader: shadow_bake_shader,
-            ..Default::default()
-        });
-
         let sim_step_shader = load_embedded_asset!(world, "shaders/sim_step.wgsl");
         let sim_step = pipeline_cache.queue_compute_pipeline(ComputePipelineDescriptor {
             label: Some("cloud_sim_step_pipeline".into()),
@@ -932,12 +923,82 @@ impl FromWorld for CloudPipelines {
             raymarch,
             denoise,
             temporal,
-            shadow_bake,
             climate_bake,
             sim_step,
             poisson_jacobi,
         }
     }
+}
+
+/// The cloud-shadow bake compute pipeline, kept separate from [`CloudPipelines`]
+/// because it's parametrised by a `shader_def` (`SHADOW_STEPS`) sourced from
+/// [`CloudShaderParams`]. Re-specialised — i.e. re-queued, which recompiles —
+/// whenever the param changes (see [`update_shadow_bake_pipeline`]); the
+/// `PipelineCache` dedups identical descriptors so a steady value is free.
+#[derive(Resource)]
+pub(super) struct CloudShadowBakePipeline {
+    layout: BindGroupLayoutDescriptor,
+    shader: bevy::asset::Handle<bevy::shader::Shader>,
+    /// The currently-built pipeline, read by [`crate::node::CloudShadowBakeNode`].
+    pub id: CachedComputePipelineId,
+    /// `shadow_steps` the current `id` was built for.
+    steps: u32,
+}
+
+fn shadow_bake_descriptor(
+    layout: &BindGroupLayoutDescriptor,
+    shader: &bevy::asset::Handle<bevy::shader::Shader>,
+    shadow_steps: u32,
+) -> ComputePipelineDescriptor {
+    ComputePipelineDescriptor {
+        label: Some("cloud_shadow_bake_pipeline".into()),
+        layout: vec![layout.clone()],
+        shader: shader.clone(),
+        shader_defs: vec![bevy::shader::ShaderDefVal::UInt(
+            "SHADOW_STEPS".into(),
+            shadow_steps,
+        )],
+        ..Default::default()
+    }
+}
+
+impl FromWorld for CloudShadowBakePipeline {
+    fn from_world(world: &mut World) -> Self {
+        let layout = world
+            .resource::<CloudBindGroupLayouts>()
+            .shadow_bake
+            .clone();
+        let shader = load_embedded_asset!(world, "shaders/cloud_shadow_bake.wgsl");
+        // Seed with the default so the pipeline exists before the host config
+        // has resolved; `update_shadow_bake_pipeline` re-queues if it differs.
+        let steps = CloudShaderParams::default().shadow_steps;
+        let id = world
+            .resource::<PipelineCache>()
+            .queue_compute_pipeline(shadow_bake_descriptor(&layout, &shader, steps));
+        Self {
+            layout,
+            shader,
+            id,
+            steps,
+        }
+    }
+}
+
+/// Re-queue the shadow-bake pipeline when `shadow_steps` changes, recompiling it
+/// with the new `SHADOW_STEPS` def. Compares values (not change-detection) since
+/// the extracted resource reads as changed every frame.
+pub(super) fn update_shadow_bake_pipeline(
+    params: Res<CloudShaderParams>,
+    pipeline_cache: Res<PipelineCache>,
+    mut pipeline: ResMut<CloudShadowBakePipeline>,
+) {
+    if params.shadow_steps == pipeline.steps {
+        return;
+    }
+    let descriptor =
+        shadow_bake_descriptor(&pipeline.layout, &pipeline.shader, params.shadow_steps);
+    pipeline.id = pipeline_cache.queue_compute_pipeline(descriptor);
+    pipeline.steps = params.shadow_steps;
 }
 
 /// Which MSAA-specialised render pipeline to fetch.

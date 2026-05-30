@@ -1,0 +1,10 @@
+# Cloud shader knobs injected into the WGSL as `shader_defs` (compile-time
+# constants), rather than read per-frame from a uniform. Editing a value here
+# re-specialises (recompiles) the affected pipeline on reload — a one-off rebuild
+# cost — so this is for "change it and see the impact" experiments, not live
+# sliders. Values must be integers (shader-defs can't carry floats).
+
+# Cone-march steps the cloud-shadow bake takes per texel (injected as
+# `#{SHADOW_STEPS}` into cloud_shadow_bake.wgsl). Higher = smoother shadows at
+# more GPU cost.
+shadow_steps = 32

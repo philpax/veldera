@@ -19,7 +19,8 @@ use bevy_egui::{EguiTextureHandle, EguiUserTextures};
 pub use bevy_pbr_clouds_planet::CloudDebugMode;
 use bevy_pbr_clouds_planet::{
     CLIMATE_MAP_HEIGHT, CLIMATE_MAP_WIDTH, CloudCameraEcef, CloudClimateMap, CloudEarthTopography,
-    CloudLayers, CloudPlanetSettings, CloudSimStatePreview, CloudWorldTime, CloudsPlanetPlugin,
+    CloudLayers, CloudPlanetSettings, CloudShaderParams, CloudSimStatePreview, CloudWorldTime,
+    CloudsPlanetPlugin,
 };
 use serde::Deserialize;
 
@@ -50,6 +51,17 @@ pub struct CloudConfig(pub CloudLayers);
 #[serde(transparent)]
 pub struct CloudEngineConfig(pub CloudPlanetSettings);
 
+/// Hot-reloadable cloud *shader* knobs, loaded from
+/// `assets/config/rendering/cloud_shader.toml`. Wraps the cloud crate's
+/// [`CloudShaderParams`], which are injected into the WGSL as `shader_defs`
+/// (not read from a uniform). Editing this re-specialises the affected pipeline
+/// — a recompile, not a per-frame cost — so it's for "edit and see the impact"
+/// experiments rather than live sliders. Applied to the crate's
+/// [`CloudShaderParams`] resource by [`apply_cloud_shader_config`].
+#[derive(Asset, Resource, TypePath, Clone, Default, Deserialize)]
+#[serde(transparent)]
+pub struct CloudShaderConfig(pub CloudShaderParams);
+
 /// Path the climate model expects for the planet topography. The
 /// `bake_earth_topography` tool produces this; if missing the climate
 /// ocean path falls back to "everywhere is land".
@@ -72,6 +84,9 @@ impl Plugin for CloudIntegrationPlugin {
             .add_plugins(config::ConfigPlugin::<CloudEngineConfig>::new(
                 config::paths::CLOUD_ENGINE,
             ))
+            .add_plugins(config::ConfigPlugin::<CloudShaderConfig>::new(
+                config::paths::CLOUD_SHADER,
+            ))
             .init_resource::<CloudClimateAssets>()
             .add_systems(Startup, load_climate_assets)
             .add_systems(
@@ -79,6 +94,7 @@ impl Plugin for CloudIntegrationPlugin {
                 (
                     apply_cloud_config,
                     apply_cloud_engine_config,
+                    apply_cloud_shader_config,
                     sync_cloud_world_time,
                     sync_cloud_camera_ecef,
                     sync_cloud_topography,
@@ -262,6 +278,19 @@ fn apply_cloud_engine_config(
         return;
     }
     *settings = config.0;
+}
+
+/// Apply [`CloudShaderConfig`] to the cloud crate's [`CloudShaderParams`]
+/// resource when the config (re)loads. The crate mirrors it into the render
+/// world, where a change re-specialises the affected pipeline (a recompile).
+fn apply_cloud_shader_config(
+    config: Res<CloudShaderConfig>,
+    mut params: ResMut<CloudShaderParams>,
+) {
+    if !config.is_changed() {
+        return;
+    }
+    *params = config.0;
 }
 
 /// Pushes `day_of_year * 86400 + utc_seconds` into [`CloudWorldTime`]. Wraps the

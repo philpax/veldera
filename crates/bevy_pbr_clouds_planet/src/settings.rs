@@ -63,3 +63,25 @@ pub struct CloudPlanetSettings {
 // `cloud_engine.toml` and inserts this resource at spawn). The zeroed value is
 // never live — `prepare_cloud_uniforms` only reads it for cameras that have
 // `CloudLayers`, which aren't created until the config has loaded.
+
+/// Cloud shader knobs injected as `shader_defs` (so they parametrise the WGSL
+/// and stay in sync with the host) rather than read per-frame from a uniform.
+///
+/// Changing one re-specialises the affected pipeline — a rebuild, not a
+/// per-frame cost — so these are for "edit the config, see the impact" tuning,
+/// not live sliders. Loaded from `cloud_shader.toml` by the host and mirrored
+/// into the render world via [`ExtractResource`].
+#[derive(Resource, ExtractResource, Clone, Copy, Debug, PartialEq, Eq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+#[cfg_attr(feature = "serde", serde(default, deny_unknown_fields))]
+pub struct CloudShaderParams {
+    /// Cone-march steps the cloud-shadow bake takes per texel. Higher = smoother
+    /// shadows, more cost. Injected as `#{SHADOW_STEPS}` into `cloud_shadow_bake.wgsl`.
+    pub shadow_steps: u32,
+}
+
+impl Default for CloudShaderParams {
+    fn default() -> Self {
+        Self { shadow_steps: 32 }
+    }
+}

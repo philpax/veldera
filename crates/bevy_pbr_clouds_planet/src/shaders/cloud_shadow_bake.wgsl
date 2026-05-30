@@ -31,7 +31,9 @@
 // climate-modulated shadows match what the main raymarch renders.
 @group(0) @binding(7) var climate_map: texture_2d<f32>;
 
-const SHADOW_STEPS: u32 = 32u;
+// Injected from `CloudShaderParams::shadow_steps` (see the host crate); edit
+// `cloud_shader.toml` and the pipeline recompiles with the new value.
+const SHADOW_STEPS: u32 = #{SHADOW_STEPS}u;
 
 // Cone-march parameters. `CONE_RATIO` is `tan(half-angle)` for the
 // cone the ray jitters into around the central sun-direction axis,
