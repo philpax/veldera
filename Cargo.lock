@@ -6828,6 +6828,7 @@ dependencies = [
  "veldera_constants",
  "veldera_geo",
  "veldera_input",
+ "veldera_sky",
  "wasm-bindgen",
  "web-time",
 ]
@@ -6881,6 +6882,22 @@ name = "veldera_input"
 version = "0.1.0"
 dependencies = [
  "bevy",
+]
+
+[[package]]
+name = "veldera_sky"
+version = "0.1.0"
+dependencies = [
+ "bevy",
+ "chrono",
+ "glam",
+ "js-sys",
+ "serde",
+ "veldera_atmosphere",
+ "veldera_config",
+ "veldera_constants",
+ "veldera_geo",
+ "web-time",
 ]
 
 [[package]]

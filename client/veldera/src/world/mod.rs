@@ -6,9 +6,11 @@
 //! reach for `crate::world::{coords, floating_origin}`.
 
 pub use veldera_geo::{coords, floating_origin};
+// `moon`/`time_of_day` now live in the `veldera_sky` engine crate; re-exported
+// here so the modules that still reach for `crate::world::{moon, time_of_day}`
+// resolve unchanged.
+pub use veldera_sky::{moon, time_of_day};
 
 pub mod geo;
 pub mod loader;
 pub mod lod;
-pub mod moon;
-pub mod time_of_day;

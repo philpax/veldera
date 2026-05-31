@@ -58,6 +58,7 @@ veldera_config = { path = "../../crates/config" }
 veldera_constants = { path = "../../crates/constants" }
 veldera_geo = { path = "../../crates/geo" }
 veldera_input = { path = "../../crates/input" }
+veldera_sky = { path = "../../crates/sky" }
 # For geocoding API responses and character metric extras parsing.
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"

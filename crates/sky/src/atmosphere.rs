@@ -19,8 +19,9 @@ use veldera_atmosphere::{
     compute_sun_transmittance,
 };
 
-use crate::{config, world::floating_origin::FloatingOriginCamera};
+use veldera_config::ConfigPlugin;
 use veldera_constants::{ATMOSPHERE_TOP_RADIUS_M, EARTH_RADIUS_M};
+use veldera_geo::floating_origin::FloatingOriginCamera;
 
 /// Hot-reloadable atmosphere tuning, loaded from
 /// `assets/config/rendering/atmosphere.toml`.
@@ -45,14 +46,22 @@ pub struct AtmosphereConfig {
 }
 
 /// Plugin that integrates spherical atmosphere with floating origin cameras.
-pub struct AtmosphereIntegrationPlugin;
+pub struct AtmosphereIntegrationPlugin {
+    /// Asset path of the atmosphere config TOML (app-supplied).
+    pub config_path: &'static str,
+}
+
+impl AtmosphereIntegrationPlugin {
+    /// Create the plugin, loading its config from `config_path`.
+    pub const fn new(config_path: &'static str) -> Self {
+        Self { config_path }
+    }
+}
 
 impl Plugin for AtmosphereIntegrationPlugin {
     fn build(&self, app: &mut App) {
         app.add_plugins(veldera_atmosphere::SphericalAtmospherePlugin)
-            .add_plugins(config::ConfigPlugin::<AtmosphereConfig>::new(
-                config::paths::ATMOSPHERE,
-            ))
+            .add_plugins(ConfigPlugin::<AtmosphereConfig>::new(self.config_path))
             // Run in PostUpdate to ensure camera position is fully updated.
             // This prevents frame-lag artifacts during camera movement.
             .add_systems(

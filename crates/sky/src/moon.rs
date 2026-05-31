@@ -11,17 +11,16 @@
 //! scattering and the per-light disk rendering (via `sun_disk_*` fields on
 //! `DirectionalLight`) are handled by the existing atmosphere shader, and
 //! atmospheric extinction is applied by the system in
-//! [`crate::rendering::atmosphere`] the same way it is for the Sun.
+//! [`crate::atmosphere`] the same way it is for the Sun.
 //!
 //! [Meeus]: https://en.wikipedia.org/wiki/Astronomical_algorithms
 
 use bevy::{light::SunDisk, prelude::*, reflect::TypePath};
 use serde::Deserialize;
 
-use crate::{
-    config,
-    world::time_of_day::{SECONDS_PER_HOUR, TimeOfDayState, days_since_j2000},
-};
+use veldera_config::ConfigPlugin;
+
+use crate::time_of_day::{SECONDS_PER_HOUR, TimeOfDayState, days_since_j2000};
 
 /// Marker for the lunar `DirectionalLight`.
 #[derive(Component)]
@@ -46,11 +45,21 @@ pub struct MoonConfig {
 }
 
 /// Plugin that drives the Moon's transform and brightness each frame.
-pub struct MoonPlugin;
+pub struct MoonPlugin {
+    /// Asset path of the moon config TOML (app-supplied).
+    pub config_path: &'static str,
+}
+
+impl MoonPlugin {
+    /// Create the plugin, loading its config from `config_path`.
+    pub const fn new(config_path: &'static str) -> Self {
+        Self { config_path }
+    }
+}
 
 impl Plugin for MoonPlugin {
     fn build(&self, app: &mut App) {
-        app.add_plugins(config::ConfigPlugin::<MoonConfig>::new(config::paths::MOON))
+        app.add_plugins(ConfigPlugin::<MoonConfig>::new(self.config_path))
             .add_systems(Update, update_moon);
     }
 }

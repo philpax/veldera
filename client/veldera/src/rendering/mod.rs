@@ -1,8 +1,11 @@
 //! Rendering systems and materials.
 //!
-//! Contains mesh conversion, terrain materials, and atmosphere integration.
+//! Contains mesh conversion and terrain materials. The atmosphere integration
+//! now lives in the [`veldera_sky`] engine crate, re-exported here so
+//! `crate::rendering::atmosphere` resolves unchanged.
 
-pub mod atmosphere;
+pub use veldera_sky::atmosphere;
+
 pub mod clouds;
 pub mod mesh;
 pub mod terrain_material;

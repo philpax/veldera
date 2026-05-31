@@ -9,21 +9,27 @@ use serde::Deserialize;
 use veldera_constants::AXIAL_TILT_DEG;
 use web_time::Instant;
 
-use crate::{
-    config,
-    world::{coords::ecef_to_lat_lon, floating_origin::FloatingOriginCamera},
-};
+use veldera_config::ConfigPlugin;
+use veldera_geo::{coords::ecef_to_lat_lon, floating_origin::FloatingOriginCamera};
 
 /// Plugin for the time-of-day system.
-pub struct TimeOfDayPlugin;
+pub struct TimeOfDayPlugin {
+    /// Asset path of the time-of-day config TOML (app-supplied).
+    pub config_path: &'static str,
+}
+
+impl TimeOfDayPlugin {
+    /// Create the plugin, loading its config from `config_path`.
+    pub const fn new(config_path: &'static str) -> Self {
+        Self { config_path }
+    }
+}
 
 impl Plugin for TimeOfDayPlugin {
     fn build(&self, app: &mut App) {
-        app.add_plugins(config::ConfigPlugin::<TimeOfDayConfig>::new(
-            config::paths::TIME_OF_DAY,
-        ))
-        .init_resource::<TimeOfDayState>()
-        .add_systems(Update, (update_sky_color, update_sun_direction));
+        app.add_plugins(ConfigPlugin::<TimeOfDayConfig>::new(self.config_path))
+            .init_resource::<TimeOfDayState>()
+            .add_systems(Update, (update_sky_color, update_sun_direction));
     }
 }
 
