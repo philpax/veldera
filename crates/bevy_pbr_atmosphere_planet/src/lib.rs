@@ -14,6 +14,7 @@
 //! - The atmosphere LUT coordinate system adapts to the camera's position on the sphere
 //! - Designed to integrate with floating origin camera systems for large-scale planets
 
+mod embedded;
 mod environment;
 mod node;
 mod resources;

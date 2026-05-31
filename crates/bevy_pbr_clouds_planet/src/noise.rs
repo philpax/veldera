@@ -20,7 +20,6 @@
 //! frames.
 
 use bevy::{
-    asset::load_embedded_asset,
     ecs::{
         resource::Resource,
         system::{Res, ResMut},
@@ -141,7 +140,7 @@ impl FromWorld for NoisePipeline {
     fn from_world(world: &mut World) -> Self {
         let pipeline_cache = world.resource::<PipelineCache>();
         let layout = world.resource::<NoiseBindGroupLayout>().layout.clone();
-        let shader = load_embedded_asset!(world, "shaders/noise_bake.wgsl");
+        let shader = crate::embedded::noise_bake(world.resource());
         let pipeline = pipeline_cache.queue_compute_pipeline(ComputePipelineDescriptor {
             label: Some("cloud_noise_bake_pipeline".into()),
             layout: vec![layout],
@@ -171,7 +170,7 @@ impl FromWorld for NoiseDownsamplePipeline {
             .resource::<NoiseDownsampleBindGroupLayout>()
             .layout
             .clone();
-        let shader = load_embedded_asset!(world, "shaders/noise_downsample.wgsl");
+        let shader = crate::embedded::noise_downsample(world.resource());
         let pipeline = pipeline_cache.queue_compute_pipeline(ComputePipelineDescriptor {
             label: Some("cloud_noise_downsample_pipeline".into()),
             layout: vec![layout],

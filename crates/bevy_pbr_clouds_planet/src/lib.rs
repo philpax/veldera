@@ -27,6 +27,7 @@
 //! [`CloudLayers`] component.
 
 pub mod constants;
+mod embedded;
 pub mod inspect;
 mod node;
 mod noise;

@@ -19,7 +19,7 @@
 //!   supported (yet).
 
 use bevy::{
-    asset::{AssetServer, Assets, Handle, RenderAssetUsages, load_embedded_asset},
+    asset::{AssetServer, Assets, Handle, RenderAssetUsages},
     ecs::{
         component::Component,
         entity::Entity,
@@ -216,7 +216,7 @@ pub(crate) fn init_atmosphere_probe_pipeline(
     let environment = pipeline_cache.queue_compute_pipeline(ComputePipelineDescriptor {
         label: Some("atmosphere_environment_pipeline".into()),
         layout: vec![layouts.environment.clone()],
-        shader: load_embedded_asset!(asset_server.as_ref(), "shaders/environment.wgsl"),
+        shader: crate::embedded::environment(asset_server.as_ref()),
         ..default()
     });
     commands.insert_resource(AtmosphereProbePipeline { environment });
