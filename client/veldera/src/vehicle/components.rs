@@ -2,26 +2,7 @@
 //!
 //! All vehicle components use `Reflect` for serialization in scene files.
 
-use avian3d::prelude::PhysicsLayer;
 use bevy::prelude::*;
-
-/// Collision layers for vehicle physics.
-///
-/// Used to separate vehicle colliders from ground for raycasting purposes.
-/// The hover raycast should only hit ground, not the vehicle's own mesh colliders.
-#[derive(PhysicsLayer, Clone, Copy, Debug, Default)]
-pub enum GameLayer {
-    /// Ground and terrain surfaces.
-    #[default]
-    Ground,
-    /// Vehicle bodies and their mesh colliders.
-    Vehicle,
-    /// Per-bone ragdoll rigid bodies. Configured to collide with
-    /// [`Ground`](Self::Ground) only — not with each other (joints
-    /// would fight collision response at the anchor points) and not
-    /// with the player's kinematic capsule.
-    Ragdoll,
-}
 
 /// Vehicle marker with metadata.
 #[derive(Component, Reflect, Clone)]

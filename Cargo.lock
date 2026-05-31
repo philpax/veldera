@@ -6825,6 +6825,7 @@ dependencies = [
  "veldera_constants",
  "veldera_geo",
  "veldera_input",
+ "veldera_physics",
  "veldera_places",
  "veldera_sky",
  "wasm-bindgen",
@@ -6889,6 +6890,21 @@ name = "veldera_input"
 version = "0.1.0"
 dependencies = [
  "bevy",
+]
+
+[[package]]
+name = "veldera_physics"
+version = "0.1.0"
+dependencies = [
+ "avian3d",
+ "bevy",
+ "glam",
+ "rocktree",
+ "rocktree-decode",
+ "serde",
+ "tracing",
+ "veldera_config",
+ "veldera_geo",
 ]
 
 [[package]]

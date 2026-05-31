@@ -14,6 +14,7 @@ use serde::Deserialize;
 use crate::{
     config,
     input::CameraAction,
+    physics::ManualGravity,
     world::{
         coords::RadialFrame,
         floating_origin::{FloatingOrigin, FloatingOriginCamera, WorldPosition},
@@ -366,6 +367,9 @@ pub fn spawn_fps_player(
     commands
         .spawn((
             LogicalPlayer,
+            // The controller integrates radial gravity itself (see
+            // `fps_controller_move`), so opt out of the engine's radial gravity.
+            ManualGravity,
             Transform::from_translation(physics_pos),
             WorldPosition::from_dvec3(ecef_pos),
             RigidBody::Kinematic,

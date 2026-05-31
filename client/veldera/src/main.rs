@@ -84,7 +84,7 @@ impl Plugin for AppPlugin {
         ))
         .add_systems(Startup, setup_scene)
         .add_systems(Update, resolve_launch_and_spawn_camera)
-        .add_plugins(physics::PhysicsIntegrationPlugin);
+        .add_plugins(physics::PhysicsPlugin);
     }
 }
 

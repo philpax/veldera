@@ -7,10 +7,10 @@ use avian3d::prelude::*;
 use bevy::prelude::*;
 
 use super::{
-    VehicleConfig,
+    GameLayer, VehicleConfig,
     components::{
-        GameLayer, Vehicle, VehicleDragConfig, VehicleHoverConfig, VehicleInput,
-        VehicleMovementConfig, VehicleState,
+        Vehicle, VehicleDragConfig, VehicleHoverConfig, VehicleInput, VehicleMovementConfig,
+        VehicleState,
     },
     core::{self, VehicleFrame, VehiclePhysicsParams, VehicleSimInput, VehicleSimState},
     telemetry::{self, TelemetrySnapshot},

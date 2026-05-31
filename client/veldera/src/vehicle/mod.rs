@@ -25,9 +25,10 @@ use serde::Deserialize;
 use crate::{config, input::CameraAction};
 
 pub use components::{
-    GameLayer, Vehicle, VehicleDragConfig, VehicleHoverConfig, VehicleInput, VehicleModel,
+    Vehicle, VehicleDragConfig, VehicleHoverConfig, VehicleInput, VehicleModel,
     VehicleMovementConfig, VehiclePhysicsConfig, VehicleState,
 };
+pub use veldera_physics::GameLayer;
 
 use crate::{
     camera::{CameraModeState, CameraModeTransitions, FlightCamera, FollowedEntity},

@@ -9,7 +9,7 @@ use crate::world::{
     floating_origin::{FloatingOriginCamera, WorldPosition},
 };
 
-use super::{CameraModeState, FlightCamera};
+use super::{CameraModeState, CameraModeTransitions, FlightCamera};
 
 // ============================================================================
 // Plugin
@@ -22,7 +22,8 @@ impl Plugin for FollowCameraPlugin {
     fn build(&self, app: &mut App) {
         app.add_systems(
             Update,
-            follow_entity_camera_system.run_if(is_follow_entity_mode),
+            (follow_entity_camera_system, exit_follow_on_missing_target)
+                .run_if(is_follow_entity_mode),
         );
     }
 }
@@ -30,6 +31,24 @@ impl Plugin for FollowCameraPlugin {
 /// Run condition: FollowEntity mode is active.
 fn is_follow_entity_mode(state: Res<CameraModeState>) -> bool {
     state.is_follow_entity()
+}
+
+/// Exit follow mode when the followed entity no longer exists.
+///
+/// The physics engine despawns out-of-range entities without knowing about
+/// camera modes, so this gameplay-side guard returns the camera to its prior
+/// mode once its target is gone (e.g. a followed vehicle that drove out of
+/// physics range was cleaned up).
+fn exit_follow_on_missing_target(
+    mut transitions: ResMut<CameraModeTransitions>,
+    camera_query: Query<&FollowEntityTarget>,
+    followed_query: Query<(), With<FollowedEntity>>,
+) {
+    for follow in &camera_query {
+        if followed_query.get(follow.target).is_err() {
+            transitions.request_exit();
+        }
+    }
 }
 
 // ============================================================================
