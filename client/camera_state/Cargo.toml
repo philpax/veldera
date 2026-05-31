@@ -1,0 +1,18 @@
+[package]
+name = "veldera_game_camera_state"
+version = "0.1.0"
+edition.workspace = true
+repository.workspace = true
+license.workspace = true
+description = "Camera-mode state for the Veldera client: the CameraMode enum, mode-state machine data, and transition request queue, shared below the mode machine"
+
+[dependencies]
+bevy = { version = "0.18.0", default-features = false }
+serde = { version = "1", features = ["derive"] }
+
+# `CameraMode` is parseable as a CLI launch argument on native.
+[target.'cfg(not(target_family = "wasm"))'.dependencies]
+clap = { version = "4", features = ["derive"] }
+
+[lints]
+workspace = true

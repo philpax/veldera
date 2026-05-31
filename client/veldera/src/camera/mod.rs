@@ -38,7 +38,6 @@ mod input;
 
 use avian3d::prelude::*;
 use bevy::prelude::*;
-use serde::Deserialize;
 
 use crate::{
     config,
@@ -59,129 +58,13 @@ use veldera_camera::{
 };
 
 // ============================================================================
-// Camera mode
+// Camera mode (data types live in the veldera_game_camera_state crate, below
+// this machine in the gameplay graph; re-exported so `crate::camera::*` paths
+// resolve unchanged).
 // ============================================================================
 
-/// Camera mode enumeration.
-///
-/// Use [`CameraModeTransitions`] to change modes rather than modifying
-/// [`CameraModeState`] directly.
-#[derive(Default, PartialEq, Eq, Clone, Copy, Debug, Deserialize)]
-#[cfg_attr(not(target_family = "wasm"), derive(clap::ValueEnum))]
-pub enum CameraMode {
-    /// Free-flight camera (default).
-    #[default]
-    Flycam,
-    /// First-person controller with physics.
-    FpsController,
-    /// Camera follows a target entity.
-    #[cfg_attr(not(target_family = "wasm"), clap(skip))]
-    FollowEntity,
-}
-
-/// Camera mode state machine.
-///
-/// Tracks the current mode and the mode to return to when exiting FollowEntity.
-#[derive(Resource)]
-pub struct CameraModeState {
-    /// Current camera mode.
-    current: CameraMode,
-    /// Mode to return to when exiting FollowEntity mode.
-    /// Only set when current mode is FollowEntity.
-    return_mode: Option<CameraMode>,
-}
-
-impl Default for CameraModeState {
-    fn default() -> Self {
-        Self {
-            current: CameraMode::Flycam,
-            return_mode: None,
-        }
-    }
-}
-
-impl CameraModeState {
-    /// Get the current camera mode.
-    pub fn current(&self) -> CameraMode {
-        self.current
-    }
-
-    /// Get the mode that will be restored when exiting FollowEntity.
-    #[allow(dead_code)]
-    pub fn return_mode(&self) -> Option<CameraMode> {
-        self.return_mode
-    }
-
-    /// Check if the current mode is Flycam.
-    pub fn is_flycam(&self) -> bool {
-        self.current == CameraMode::Flycam
-    }
-
-    /// Check if the current mode is FpsController.
-    pub fn is_fps_controller(&self) -> bool {
-        self.current == CameraMode::FpsController
-    }
-
-    /// Check if the current mode is FollowEntity.
-    pub fn is_follow_entity(&self) -> bool {
-        self.current == CameraMode::FollowEntity
-    }
-}
-
-/// Camera mode transition requests.
-///
-/// Use the methods on this resource to request mode transitions.
-/// The transition system will process them and handle all necessary
-/// setup and teardown.
-#[derive(Resource, Default)]
-pub struct CameraModeTransitions {
-    /// Pending transitions to process.
-    pending: Vec<CameraModeTransition>,
-}
-
-impl CameraModeTransitions {
-    /// Request transition to Flycam mode.
-    pub fn request_flycam(&mut self) {
-        self.pending.push(CameraModeTransition::ToFlycam);
-    }
-
-    /// Request transition to FpsController mode.
-    pub fn request_fps_controller(&mut self) {
-        self.pending.push(CameraModeTransition::ToFpsController);
-    }
-
-    /// Request transition to FollowEntity mode.
-    pub fn request_follow_entity(&mut self, target: Entity) {
-        self.pending
-            .push(CameraModeTransition::ToFollowEntity { target });
-    }
-
-    /// Request to exit the current mode (returns to previous mode from FollowEntity).
-    pub fn request_exit(&mut self) {
-        self.pending.push(CameraModeTransition::ExitCurrentMode);
-    }
-
-    /// Take all pending transitions for processing.
-    fn take(&mut self) -> Vec<CameraModeTransition> {
-        std::mem::take(&mut self.pending)
-    }
-}
-
-/// Internal transition request type.
-#[derive(Debug, Clone)]
-enum CameraModeTransition {
-    /// Transition to Flycam mode.
-    ToFlycam,
-    /// Transition to FpsController mode.
-    ToFpsController,
-    /// Transition to FollowEntity mode, following the specified entity.
-    ToFollowEntity {
-        /// The entity to follow.
-        target: Entity,
-    },
-    /// Exit the current mode.
-    ExitCurrentMode,
-}
+use veldera_game_camera_state::CameraModeTransition;
+pub use veldera_game_camera_state::{CameraMode, CameraModeState, CameraModeTransitions};
 
 // ============================================================================
 // Plugin
@@ -315,7 +198,7 @@ fn transition_to_flycam(
         (With<fps::LogicalPlayer>, Without<FloatingOriginCamera>),
     >,
 ) {
-    match state.current {
+    match state.current() {
         CameraMode::Flycam => {
             return;
         }
@@ -332,8 +215,7 @@ fn transition_to_flycam(
         }
     }
 
-    state.current = CameraMode::Flycam;
-    state.return_mode = None;
+    state.set(CameraMode::Flycam, None);
     tracing::info!("Transitioned to Flycam mode");
 }
 
@@ -346,7 +228,7 @@ fn transition_to_fps_controller(
     player_config: &fps::FpsPlayerConfig,
     camera_query: &Query<(Entity, &FloatingOriginCamera, Option<&FlightCamera>)>,
 ) {
-    match state.current {
+    match state.current() {
         CameraMode::Flycam => {
             if let Ok((camera_entity, camera, flight_camera)) = camera_query.single() {
                 fps::setup_from_flycam(
@@ -375,8 +257,7 @@ fn transition_to_fps_controller(
         }
     }
 
-    state.current = CameraMode::FpsController;
-    state.return_mode = None;
+    state.set(CameraMode::FpsController, None);
     tracing::info!("Transitioned to FpsController mode");
 }
 
@@ -393,9 +274,9 @@ fn transition_to_follow_entity(
     >,
     target: Entity,
 ) {
-    let return_mode = state.current;
+    let return_mode = state.current();
 
-    match state.current {
+    match state.current() {
         CameraMode::Flycam => {
             // Just add the follow target; FlightCamera will be inactive.
         }
@@ -420,8 +301,7 @@ fn transition_to_follow_entity(
             .insert(FollowEntityTarget { target });
     }
 
-    state.current = CameraMode::FollowEntity;
-    state.return_mode = Some(return_mode);
+    state.set(CameraMode::FollowEntity, Some(return_mode));
     tracing::info!(
         "Transitioned to FollowEntity mode (return: {:?})",
         return_mode
@@ -441,7 +321,7 @@ fn exit_current_mode(
         (With<fps::LogicalPlayer>, Without<FloatingOriginCamera>),
     >,
 ) {
-    match state.current {
+    match state.current() {
         CameraMode::Flycam => {
             // Nothing to exit to.
         }
@@ -455,7 +335,7 @@ fn exit_current_mode(
             );
         }
         CameraMode::FollowEntity => {
-            let return_mode = state.return_mode.unwrap_or(CameraMode::Flycam);
+            let return_mode = state.return_mode().unwrap_or(CameraMode::Flycam);
             match return_mode {
                 CameraMode::Flycam => {
                     transition_to_flycam(

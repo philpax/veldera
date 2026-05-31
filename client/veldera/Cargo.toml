@@ -58,6 +58,7 @@ veldera_constants = { path = "../../crates/constants" }
 veldera_async = { path = "../../crates/async" }
 veldera_camera = { path = "../../crates/camera" }
 veldera_engine = { path = "../../crates/engine" }
+veldera_game_camera_state = { path = "../camera_state" }
 veldera_game_input = { path = "../input" }
 veldera_geo = { path = "../../crates/geo" }
 veldera_physics = { path = "../../crates/physics" }

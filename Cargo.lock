@@ -6823,6 +6823,7 @@ dependencies = [
  "veldera_config",
  "veldera_constants",
  "veldera_engine",
+ "veldera_game_camera_state",
  "veldera_game_input",
  "veldera_geo",
  "veldera_physics",
@@ -6907,6 +6908,15 @@ dependencies = [
  "veldera_physics",
  "veldera_sky",
  "veldera_terrain",
+]
+
+[[package]]
+name = "veldera_game_camera_state"
+version = "0.1.0"
+dependencies = [
+ "bevy",
+ "clap",
+ "serde",
 ]
 
 [[package]]
