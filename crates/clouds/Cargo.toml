@@ -7,16 +7,16 @@ repository.workspace = true
 description = "Volumetric clouds for spherical planets, coupled with veldera_atmosphere"
 
 [dependencies]
-bevy = { version = "0.18.0", default-features = false, features = [
+bevy = { workspace = true, features = [
     "bevy_render",
     "bevy_core_pipeline",
     "bevy_pbr",
     "bevy_asset",
 ] }
-veldera_atmosphere = { path = "../atmosphere" }
-glam = "0.30"
-serde = { version = "1", features = ["derive"], optional = true }
-tracing = "0.1"
+veldera_atmosphere = { workspace = true }
+glam = { workspace = true }
+serde = { workspace = true, features = ["derive"], optional = true }
+tracing = { workspace = true }
 
 [features]
 # Derive serde on the public cloud configuration types so they can be loaded

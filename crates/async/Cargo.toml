@@ -7,11 +7,11 @@ license.workspace = true
 description = "Platform-agnostic async task spawning for native (Tokio) and WASM (Bevy task pool) Veldera builds"
 
 [dependencies]
-bevy = { version = "0.18.0", default-features = false }
+bevy = { workspace = true }
 
 [target.'cfg(not(target_family = "wasm"))'.dependencies]
-bevy-tokio-tasks = "0.18"
-tokio = { version = "1", features = ["rt"] }
+bevy-tokio-tasks = { workspace = true }
+tokio = { workspace = true, features = ["rt"] }
 
 [lints]
 workspace = true

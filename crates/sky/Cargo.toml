@@ -7,26 +7,26 @@ license.workspace = true
 description = "Sky integration for Veldera: time-of-day, sun/moon, and atmosphere/cloud rendering driven from the floating-origin camera"
 
 [dependencies]
-bevy = { version = "0.18.0", default-features = false, features = [
+bevy = { workspace = true, features = [
     "bevy_render",
     "bevy_core_pipeline",
     "bevy_pbr",
     "bevy_asset",
 ] }
 # `SimpleDate` interops with `chrono::NaiveDate` for date-picker widgets.
-chrono = { version = "0.4", default-features = false }
-glam = "0.30"
-serde = { version = "1", features = ["derive"] }
-web-time = "1"
-veldera_atmosphere = { path = "../atmosphere", features = ["serde"] }
-veldera_clouds = { path = "../clouds", features = ["serde"] }
-veldera_config = { path = "../config" }
-veldera_constants = { path = "../constants" }
-veldera_geo = { path = "../geo" }
+chrono = { workspace = true }
+glam = { workspace = true }
+serde = { workspace = true, features = ["derive"] }
+web-time = { workspace = true }
+veldera_atmosphere = { workspace = true, features = ["serde"] }
+veldera_clouds = { workspace = true, features = ["serde"] }
+veldera_config = { workspace = true }
+veldera_constants = { workspace = true }
+veldera_geo = { workspace = true }
 
 # On wasm, `time_of_day` reads the wall clock via the JS `Date` API.
 [target.'cfg(target_family = "wasm")'.dependencies]
-js-sys = "0.3"
+js-sys = { workspace = true }
 
 [lints]
 workspace = true

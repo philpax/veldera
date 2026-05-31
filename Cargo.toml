@@ -8,6 +8,72 @@ edition = "2024"
 repository = "https://github.com/philpax/veldera"
 license = "MIT"
 
+[workspace.dependencies]
+# Engine crates (crates/).
+veldera_async = { path = "crates/async" }
+veldera_atmosphere = { path = "crates/atmosphere" }
+veldera_camera = { path = "crates/camera" }
+veldera_clouds = { path = "crates/clouds" }
+veldera_config = { path = "crates/config" }
+veldera_constants = { path = "crates/constants" }
+veldera_engine = { path = "crates/engine" }
+veldera_geo = { path = "crates/geo" }
+veldera_input = { path = "crates/input" }
+veldera_physics = { path = "crates/physics" }
+veldera_sky = { path = "crates/sky" }
+veldera_terrain = { path = "crates/terrain" }
+# Extras.
+veldera_places = { path = "extras/places" }
+# Gameplay crates (client/).
+veldera_game_camera = { path = "client/camera" }
+veldera_game_camera_state = { path = "client/camera_state" }
+veldera_game_input = { path = "client/input" }
+veldera_game_player = { path = "client/player" }
+veldera_game_teleport = { path = "client/teleport" }
+veldera_game_ui = { path = "client/ui" }
+veldera_game_vehicle = { path = "client/vehicle" }
+# Rocktree (Google Earth mesh streaming).
+rocktree = { path = "rocktree/rocktree" }
+rocktree-decode = { path = "rocktree/rocktree-decode" }
+rocktree-proto = { path = "rocktree/rocktree-proto" }
+# External — versions are unified here; crates select features per-use.
+async-channel = "2"
+avian3d = "0.6"
+bevy = { version = "0.18.0", default-features = false }
+bevy_common_assets = { version = "0.15", features = ["toml"] }
+bevy_egui = "0.39"
+bevy-tokio-tasks = "0.18"
+chrono = { version = "0.4", default-features = false }
+clap = { version = "4", features = ["derive"] }
+console_error_panic_hook = "0.1"
+egui_dock = "0.18"
+egui_extras = { version = "0.33.3", features = ["datepicker"] }
+egui_plot = "0.34.0"
+glam = "0.30"
+gltf = { version = "1.4", default-features = false }
+gltf-json = "1.4"
+image = { version = "0.25.9", default-features = false }
+js-sys = "0.3"
+leafwing-input-manager = "0.20"
+png = "0.18.1"
+proptest = "1"
+prost = "0.13"
+prost-build = "0.13"
+rand = "0.9"
+reqwest = "0.13"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+texture2ddecoder = "0.1.2"
+tiff = "0.11.3"
+tokio = "1"
+tracing = "0.1"
+tracing-subscriber = "0.3"
+tracing-wasm = "0.2"
+ufbx = "0.11"
+urlencoding = "2"
+wasm-bindgen = "0.2"
+web-time = "1"
+
 [workspace.lints.clippy]
 all = { level = "warn", priority = -1 }
 missing_errors_doc = "allow"

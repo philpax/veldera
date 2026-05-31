@@ -7,12 +7,12 @@ repository.workspace = true
 description = "Convert a directory of Mixamo FBX files into a single skinned glTF binary with embedded animations"
 
 [dependencies]
-ufbx = "0.11"
-gltf-json = { version = "1.4", features = ["names", "extras"] }
-gltf = { version = "1.4", default-features = false, features = ["names", "utils", "import", "extras"] }
-serde_json = "1"
-image = { version = "0.25", default-features = false, features = ["png", "jpeg"] }
-serde = { version = "1", features = ["derive"] }
+ufbx = { workspace = true }
+gltf-json = { workspace = true, features = ["names", "extras"] }
+gltf = { workspace = true, features = ["names", "utils", "import", "extras"] }
+serde_json = { workspace = true }
+image = { workspace = true, features = ["png", "jpeg"] }
+serde = { workspace = true, features = ["derive"] }
 
 [lints]
 workspace = true

@@ -7,16 +7,16 @@ license.workspace = true
 description = "Floating-origin freelook flight camera for Veldera: WASD/mouse-look movement and a viewer request API (altitude, heading, translate)"
 
 [dependencies]
-bevy = { version = "0.18.0", default-features = false, features = [
+bevy = { workspace = true, features = [
     "bevy_asset",
     "bevy_render",
 ] }
-glam = "0.30"
-serde = { version = "1", features = ["derive"] }
-veldera_config = { path = "../config" }
-veldera_constants = { path = "../constants" }
-veldera_geo = { path = "../geo" }
-veldera_input = { path = "../input" }
+glam = { workspace = true }
+serde = { workspace = true, features = ["derive"] }
+veldera_config = { workspace = true }
+veldera_constants = { workspace = true }
+veldera_geo = { workspace = true }
+veldera_input = { workspace = true }
 
 [lints]
 workspace = true

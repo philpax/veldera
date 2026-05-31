@@ -7,7 +7,7 @@ license.workspace = true
 description = "Abstract input-intent layer: engine systems read intent resources, apps supply the bindings"
 
 [dependencies]
-bevy = { version = "0.18.0", default-features = false }
+bevy = { workspace = true }
 
 [lints]
 workspace = true

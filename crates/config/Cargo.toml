@@ -7,10 +7,10 @@ license.workspace = true
 description = "Hot-reloadable, file-backed TOML configuration plumbing for Bevy apps"
 
 [dependencies]
-bevy = { version = "0.18.0", default-features = false, features = ["bevy_asset"] }
-bevy_common_assets = { version = "0.15", features = ["toml"] }
-serde = { version = "1", features = ["derive"] }
-tracing = "0.1"
+bevy = { workspace = true, features = ["bevy_asset"] }
+bevy_common_assets = { workspace = true, features = ["toml"] }
+serde = { workspace = true, features = ["derive"] }
+tracing = { workspace = true }
 
 [lints]
 workspace = true

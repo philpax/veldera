@@ -7,22 +7,22 @@ license.workspace = true
 description = "Camera mode state machine for the Veldera client: switches between the engine freelook camera, the first-person controller, and a follow rig"
 
 [dependencies]
-avian3d = "0.6"
-bevy = { version = "0.18.0", default-features = false, features = [
+avian3d = { workspace = true }
+bevy = { workspace = true, features = [
     "bevy_render",
     "bevy_window",
 ] }
-bevy_egui = "0.39"
-glam = "0.30"
-leafwing-input-manager = "0.20"
-tracing = "0.1"
-veldera_camera = { path = "../../crates/camera" }
-veldera_constants = { path = "../../crates/constants" }
-veldera_geo = { path = "../../crates/geo" }
-veldera_game_camera_state = { path = "../camera_state" }
-veldera_game_input = { path = "../input" }
-veldera_game_player = { path = "../player" }
-veldera_game_teleport = { path = "../teleport" }
+bevy_egui = { workspace = true }
+glam = { workspace = true }
+leafwing-input-manager = { workspace = true }
+tracing = { workspace = true }
+veldera_camera = { workspace = true }
+veldera_constants = { workspace = true }
+veldera_geo = { workspace = true }
+veldera_game_camera_state = { workspace = true }
+veldera_game_input = { workspace = true }
+veldera_game_player = { workspace = true }
+veldera_game_teleport = { workspace = true }
 
 [lints]
 workspace = true

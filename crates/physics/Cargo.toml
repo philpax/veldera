@@ -7,19 +7,19 @@ license.workspace = true
 description = "Avian-based physics integration for Veldera: radial gravity, floating-origin shifting, and rocktree terrain colliders"
 
 [dependencies]
-avian3d = "0.6"
-bevy = { version = "0.18.0", default-features = false, features = [
+avian3d = { workspace = true }
+bevy = { workspace = true, features = [
     "bevy_asset",
     "bevy_gizmos",
     "bevy_render",
 ] }
-glam = "0.30"
-serde = { version = "1", features = ["derive"] }
-tracing = "0.1"
-rocktree = { path = "../../rocktree/rocktree" }
-rocktree-decode = { path = "../../rocktree/rocktree-decode" }
-veldera_config = { path = "../config" }
-veldera_geo = { path = "../geo" }
+glam = { workspace = true }
+serde = { workspace = true, features = ["derive"] }
+tracing = { workspace = true }
+rocktree = { workspace = true }
+rocktree-decode = { workspace = true }
+veldera_config = { workspace = true }
+veldera_geo = { workspace = true }
 
 [lints]
 workspace = true

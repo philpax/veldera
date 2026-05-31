@@ -7,8 +7,8 @@ license.workspace = true
 description = "Floating-origin and ECEF coordinate primitives for planet-scale Veldera worlds"
 
 [dependencies]
-bevy = { version = "0.18.0", default-features = false }
-glam = "0.30"
+bevy = { workspace = true }
+glam = { workspace = true }
 
 [lints]
 workspace = true

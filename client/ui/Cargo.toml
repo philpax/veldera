@@ -7,36 +7,36 @@ license.workspace = true
 description = "Debug UI for the Veldera client: the egui dock shell and per-subsystem diagnostic/tuning panels"
 
 [dependencies]
-bevy = { version = "0.18.0", default-features = false, features = [
+bevy = { workspace = true, features = [
     "bevy_asset",
     "bevy_core_pipeline",
     "bevy_pbr",
     "bevy_render",
     "bevy_window",
 ] }
-bevy_egui = "0.39"
-egui_dock = "0.18"
-egui_extras = { version = "0.33.3", features = ["datepicker"] }
-egui_plot = "0.34.0"
-chrono = { version = "0.4", default-features = false }
-glam = "0.30"
-leafwing-input-manager = "0.20"
-veldera_async = { path = "../../crates/async" }
-veldera_atmosphere = { path = "../../crates/atmosphere", features = ["serde"] }
-veldera_clouds = { path = "../../crates/clouds", features = ["serde"] }
-veldera_constants = { path = "../../crates/constants" }
-veldera_engine = { path = "../../crates/engine" }
-veldera_geo = { path = "../../crates/geo" }
-veldera_physics = { path = "../../crates/physics" }
-veldera_places = { path = "../../extras/places" }
-veldera_sky = { path = "../../crates/sky" }
-veldera_terrain = { path = "../../crates/terrain" }
-veldera_game_camera = { path = "../camera" }
-veldera_game_camera_state = { path = "../camera_state" }
-veldera_game_input = { path = "../input" }
-veldera_game_player = { path = "../player" }
-veldera_game_teleport = { path = "../teleport" }
-veldera_game_vehicle = { path = "../vehicle" }
+bevy_egui = { workspace = true }
+egui_dock = { workspace = true }
+egui_extras = { workspace = true, features = ["datepicker"] }
+egui_plot = { workspace = true }
+chrono = { workspace = true }
+glam = { workspace = true }
+leafwing-input-manager = { workspace = true }
+veldera_async = { workspace = true }
+veldera_atmosphere = { workspace = true, features = ["serde"] }
+veldera_clouds = { workspace = true, features = ["serde"] }
+veldera_constants = { workspace = true }
+veldera_engine = { workspace = true }
+veldera_geo = { workspace = true }
+veldera_physics = { workspace = true }
+veldera_places = { workspace = true }
+veldera_sky = { workspace = true }
+veldera_terrain = { workspace = true }
+veldera_game_camera = { workspace = true }
+veldera_game_camera_state = { workspace = true }
+veldera_game_input = { workspace = true }
+veldera_game_player = { workspace = true }
+veldera_game_teleport = { workspace = true }
+veldera_game_vehicle = { workspace = true }
 
 [lints]
 workspace = true

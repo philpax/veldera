@@ -7,25 +7,21 @@ license.workspace = true
 description = "Geocoding and elevation lookup services for Veldera, backed by OpenStreetMap Nominatim and Open Elevation"
 
 [dependencies]
-bevy = { version = "0.18.0", default-features = false }
+bevy = { workspace = true }
 # Platform-agnostic async channel for delivering results back to the main thread.
-async-channel = "2"
-serde = { version = "1", features = ["derive"] }
+async-channel = { workspace = true }
+serde = { workspace = true, features = ["derive"] }
 # For URL encoding geocoding queries.
-urlencoding = "2"
-veldera_async = { path = "../../crates/async" }
+urlencoding = { workspace = true }
+veldera_async = { workspace = true }
 
 # Geocoding/elevation HTTP requests (native).
-[target.'cfg(not(target_family = "wasm"))'.dependencies.reqwest]
-version = "0.12"
-default-features = false
-features = ["json", "rustls-tls"]
+[target.'cfg(not(target_family = "wasm"))'.dependencies]
+reqwest = { workspace = true, features = ["json"] }
 
 # Geocoding/elevation HTTP requests (WASM).
-[target.'cfg(target_family = "wasm")'.dependencies.reqwest]
-version = "0.12"
-default-features = false
-features = ["json"]
+[target.'cfg(target_family = "wasm")'.dependencies]
+reqwest = { workspace = true, features = ["json"] }
 
 [lints]
 workspace = true

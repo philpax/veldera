@@ -8,11 +8,11 @@ license.workspace = true
 
 [dependencies]
 # Platform-agnostic async channel (replaces tokio::sync::mpsc).
-async-channel = "2"
+async-channel = { workspace = true }
 # Physics engine.
-avian3d = "0.6"
+avian3d = { workspace = true }
 # Base Bevy features that work on both native and WASM.
-bevy = { version = "0.18.0", default-features = false, features = [
+bevy = { workspace = true, features = [
   "bevy_animation",
   "bevy_asset",
   "bevy_core_pipeline",
@@ -34,54 +34,54 @@ bevy = { version = "0.18.0", default-features = false, features = [
   "wav",
   "webgl2"
 ] }
-bevy_egui = "0.39"
-veldera_atmosphere = { path = "../../crates/atmosphere", features = [
+bevy_egui = { workspace = true }
+veldera_atmosphere = { workspace = true, features = [
   "serde",
 ] }
-veldera_clouds = { path = "../../crates/clouds", features = [
+veldera_clouds = { workspace = true, features = [
   "serde",
 ] }
-egui_dock = "0.18"
-egui_extras = { version = "0.33.3", features = ["datepicker"] }
+egui_dock = { workspace = true }
+egui_extras = { workspace = true, features = ["datepicker"] }
 # Pulled in transitively via egui_extras's datepicker feature; declared
 # directly so we can convert between `SimpleDate` and `NaiveDate` in the
 # location UI.
-chrono = { version = "0.4", default-features = false }
-egui_plot = "0.34.0"
-glam = "0.30"
-leafwing-input-manager = "0.20"
+chrono = { workspace = true }
+egui_plot = { workspace = true }
+glam = { workspace = true }
+leafwing-input-manager = { workspace = true }
 # Random number generation.
-rand = "0.9"
-rocktree-decode = { path = "../../rocktree/rocktree-decode" }
-veldera_config = { path = "../../crates/config" }
-veldera_constants = { path = "../../crates/constants" }
-veldera_async = { path = "../../crates/async" }
-veldera_camera = { path = "../../crates/camera" }
-veldera_engine = { path = "../../crates/engine" }
-veldera_game_camera = { path = "../camera" }
-veldera_game_camera_state = { path = "../camera_state" }
-veldera_game_input = { path = "../input" }
-veldera_game_player = { path = "../player" }
-veldera_game_teleport = { path = "../teleport" }
-veldera_game_vehicle = { path = "../vehicle" }
-veldera_game_ui = { path = "../ui" }
-veldera_geo = { path = "../../crates/geo" }
-veldera_physics = { path = "../../crates/physics" }
-veldera_places = { path = "../../extras/places" }
-veldera_sky = { path = "../../crates/sky" }
-veldera_terrain = { path = "../../crates/terrain" }
+rand = { workspace = true }
+rocktree-decode = { workspace = true }
+veldera_config = { workspace = true }
+veldera_constants = { workspace = true }
+veldera_async = { workspace = true }
+veldera_camera = { workspace = true }
+veldera_engine = { workspace = true }
+veldera_game_camera = { workspace = true }
+veldera_game_camera_state = { workspace = true }
+veldera_game_input = { workspace = true }
+veldera_game_player = { workspace = true }
+veldera_game_teleport = { workspace = true }
+veldera_game_vehicle = { workspace = true }
+veldera_game_ui = { workspace = true }
+veldera_geo = { workspace = true }
+veldera_physics = { workspace = true }
+veldera_places = { workspace = true }
+veldera_sky = { workspace = true }
+veldera_terrain = { workspace = true }
 # For geocoding API responses and character metric extras parsing.
-serde = { version = "1", features = ["derive"] }
-serde_json = "1"
-tracing = "0.1"
+serde = { workspace = true, features = ["derive"] }
+serde_json = { workspace = true }
+tracing = { workspace = true }
 # Cross-platform time support.
-web-time = "1"
+web-time = { workspace = true }
 # Serde-backed asset loaders; we use the TOML one for hot-reloadable configs.
-bevy_common_assets = { version = "0.15", features = ["toml"] }
+bevy_common_assets = { workspace = true, features = ["toml"] }
 
 # Native: Additional Bevy features and Tokio runtime.
 [target.'cfg(not(target_family = "wasm"))'.dependencies]
-bevy = { version = "0.18.0", default-features = false, features = [
+bevy = { workspace = true, features = [
   "bevy_animation",
   "bevy_asset",
   "bevy_core_pipeline",
@@ -106,14 +106,14 @@ bevy = { version = "0.18.0", default-features = false, features = [
   "trace",
   "x11"
 ] }
-clap = { version = "4", features = ["derive"] }
+clap = { workspace = true, features = ["derive"] }
 
 # WASM: Panic hook and tracing for browser console.
 [target.'cfg(target_family = "wasm")'.dependencies]
-console_error_panic_hook = "0.1"
-js-sys = "0.3"
-tracing-wasm = "0.2"
-wasm-bindgen = "0.2"
+console_error_panic_hook = { workspace = true }
+js-sys = { workspace = true }
+tracing-wasm = { workspace = true }
+wasm-bindgen = { workspace = true }
 
 [features]
 default = ["webgpu"]

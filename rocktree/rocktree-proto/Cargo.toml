@@ -7,8 +7,8 @@ repository.workspace = true
 description = "Generated protobuf types for Google Earth rocktree protocol"
 
 [dependencies]
-prost = "0.13"
-prost-build = "0.13"
+prost = { workspace = true }
+prost-build = { workspace = true }
 
 [lints]
 workspace = true

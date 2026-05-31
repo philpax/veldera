@@ -7,22 +7,22 @@ repository.workspace = true
 description = "High-level async client for fetching and decoding Google Earth mesh data"
 
 [dependencies]
-rocktree-proto = { path = "../rocktree-proto" }
-rocktree-decode = { path = "../rocktree-decode" }
-prost = "0.13"
-glam = "0.30"
-tracing = "0.1"
+rocktree-proto = { workspace = true }
+rocktree-decode = { workspace = true }
+prost = { workspace = true }
+glam = { workspace = true }
+tracing = { workspace = true }
 
 [target.'cfg(not(target_family = "wasm"))'.dependencies]
-reqwest = { version = "0.12", default-features = false, features = ["rustls-tls"] }
+reqwest = { workspace = true }
 
 [target.'cfg(target_family = "wasm")'.dependencies]
-reqwest = { version = "0.12", default-features = false }
+reqwest = { workspace = true }
 
 [dev-dependencies]
-tracing-subscriber = "0.3"
-tokio = { version = "1", features = ["rt-multi-thread", "macros"] }
-serde_json = "1"
+tracing-subscriber = { workspace = true }
+tokio = { workspace = true, features = ["rt-multi-thread", "macros"] }
+serde_json = { workspace = true }
 
 [features]
 default = []

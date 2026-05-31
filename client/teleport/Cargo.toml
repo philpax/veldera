@@ -7,23 +7,23 @@ license.workspace = true
 description = "Cinematic fly-to-location teleport for the Veldera client: animates the camera to a searched place and respawns the player on arrival"
 
 [dependencies]
-async-channel = "2"
-avian3d = "0.6"
-bevy = { version = "0.18.0", default-features = false, features = [
+async-channel = { workspace = true }
+avian3d = { workspace = true }
+bevy = { workspace = true, features = [
     "bevy_asset",
     "bevy_audio",
 ] }
-glam = "0.30"
-serde = { version = "1", features = ["derive"] }
-tracing = "0.1"
-veldera_async = { path = "../../crates/async" }
-veldera_camera = { path = "../../crates/camera" }
-veldera_config = { path = "../../crates/config" }
-veldera_constants = { path = "../../crates/constants" }
-veldera_geo = { path = "../../crates/geo" }
-veldera_places = { path = "../../extras/places" }
-veldera_game_camera_state = { path = "../camera_state" }
-veldera_game_player = { path = "../player" }
+glam = { workspace = true }
+serde = { workspace = true, features = ["derive"] }
+tracing = { workspace = true }
+veldera_async = { workspace = true }
+veldera_camera = { workspace = true }
+veldera_config = { workspace = true }
+veldera_constants = { workspace = true }
+veldera_geo = { workspace = true }
+veldera_places = { workspace = true }
+veldera_game_camera_state = { workspace = true }
+veldera_game_player = { workspace = true }
 
 [lints]
 workspace = true

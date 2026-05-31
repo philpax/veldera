@@ -7,8 +7,8 @@ license.workspace = true
 description = "First-person player for the Veldera client: character controller, animated body avatar, ragdoll rig, and the charged-yeet launch mechanic"
 
 [dependencies]
-avian3d = "0.6"
-bevy = { version = "0.18.0", default-features = false, features = [
+avian3d = { workspace = true }
+bevy = { workspace = true, features = [
     "bevy_animation",
     "bevy_asset",
     "bevy_core_pipeline",
@@ -19,19 +19,19 @@ bevy = { version = "0.18.0", default-features = false, features = [
     "bevy_scene",
     "gltf_animation",
 ] }
-glam = "0.30"
-leafwing-input-manager = "0.20"
-rand = "0.9"
-serde = { version = "1", features = ["derive"] }
-serde_json = "1"
-tracing = "0.1"
-veldera_camera = { path = "../../crates/camera" }
-veldera_config = { path = "../../crates/config" }
-veldera_constants = { path = "../../crates/constants" }
-veldera_geo = { path = "../../crates/geo" }
-veldera_physics = { path = "../../crates/physics" }
-veldera_game_camera_state = { path = "../camera_state" }
-veldera_game_input = { path = "../input" }
+glam = { workspace = true }
+leafwing-input-manager = { workspace = true }
+rand = { workspace = true }
+serde = { workspace = true, features = ["derive"] }
+serde_json = { workspace = true }
+tracing = { workspace = true }
+veldera_camera = { workspace = true }
+veldera_config = { workspace = true }
+veldera_constants = { workspace = true }
+veldera_geo = { workspace = true }
+veldera_physics = { workspace = true }
+veldera_game_camera_state = { workspace = true }
+veldera_game_input = { workspace = true }
 
 [lints]
 workspace = true

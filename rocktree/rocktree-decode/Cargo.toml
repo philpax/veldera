@@ -7,13 +7,13 @@ repository.workspace = true
 description = "Decode packed mesh data from Google Earth protobuf messages"
 
 [dependencies]
-rocktree-proto = { path = "../rocktree-proto" }
-glam = "0.30"
-image = { version = "0.25.9", default-features = false, features = ["jpeg"] }
-texture2ddecoder = "0.1.2"
+rocktree-proto = { workspace = true }
+glam = { workspace = true }
+image = { workspace = true, features = ["jpeg"] }
+texture2ddecoder = { workspace = true }
 
 [dev-dependencies]
-proptest = "1"
+proptest = { workspace = true }
 
 [lints]
 workspace = true

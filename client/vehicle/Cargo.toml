@@ -7,8 +7,8 @@ license.workspace = true
 description = "Hovercraft vehicle system for the Veldera client: PID-controlled hover physics, scene-defined vehicles, and follow-camera entry/exit"
 
 [dependencies]
-avian3d = "0.6"
-bevy = { version = "0.18.0", default-features = false, features = [
+avian3d = { workspace = true }
+bevy = { workspace = true, features = [
     "bevy_asset",
     "bevy_gizmos",
     "bevy_gltf",
@@ -17,17 +17,17 @@ bevy = { version = "0.18.0", default-features = false, features = [
     "bevy_render",
     "bevy_scene",
 ] }
-glam = "0.30"
-leafwing-input-manager = "0.20"
-serde = { version = "1", features = ["derive"] }
-tracing = "0.1"
-veldera_config = { path = "../../crates/config" }
-veldera_geo = { path = "../../crates/geo" }
-veldera_physics = { path = "../../crates/physics" }
-veldera_game_camera = { path = "../camera" }
-veldera_game_camera_state = { path = "../camera_state" }
-veldera_game_input = { path = "../input" }
-veldera_game_player = { path = "../player" }
+glam = { workspace = true }
+leafwing-input-manager = { workspace = true }
+serde = { workspace = true, features = ["derive"] }
+tracing = { workspace = true }
+veldera_config = { workspace = true }
+veldera_geo = { workspace = true }
+veldera_physics = { workspace = true }
+veldera_game_camera = { workspace = true }
+veldera_game_camera_state = { workspace = true }
+veldera_game_input = { workspace = true }
+veldera_game_player = { workspace = true }
 
 [lints]
 workspace = true

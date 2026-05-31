@@ -7,22 +7,22 @@ license.workspace = true
 description = "Umbrella facade for the Veldera engine: re-exports every engine crate and bundles the always-on infrastructure into an EnginePlugins group"
 
 [dependencies]
-bevy = { version = "0.18.0", default-features = false, features = ["bevy_asset"] }
-veldera_async = { path = "../async" }
-veldera_camera = { path = "../camera" }
-veldera_config = { path = "../config" }
-veldera_constants = { path = "../constants" }
-veldera_geo = { path = "../geo" }
-veldera_input = { path = "../input" }
-veldera_physics = { path = "../physics" }
-veldera_sky = { path = "../sky" }
-veldera_terrain = { path = "../terrain" }
+bevy = { workspace = true, features = ["bevy_asset"] }
+veldera_async = { workspace = true }
+veldera_camera = { workspace = true }
+veldera_config = { workspace = true }
+veldera_constants = { workspace = true }
+veldera_geo = { workspace = true }
+veldera_input = { workspace = true }
+veldera_physics = { workspace = true }
+veldera_sky = { workspace = true }
+veldera_terrain = { workspace = true }
 
 # The CPU profiler's tracing layer is native-only (`tracing-subscriber` is not
 # compiled on wasm; the profiler degrades to an empty stub there).
 [target.'cfg(not(target_family = "wasm"))'.dependencies]
-tracing = "0.1"
-tracing-subscriber = "0.3"
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
 
 [lints]
 workspace = true
