@@ -1,0 +1,48 @@
+[package]
+name = "veldera_reference"
+version = "0.1.0"
+edition.workspace = true
+repository.workspace = true
+license.workspace = true
+description = "Freelook reference client for Veldera: a minimal Earth viewer built on the engine crates only (no gameplay), proving the engine boundary is clean"
+
+[dependencies]
+bevy = { workspace = true, features = [
+  "bevy_asset",
+  "bevy_core_pipeline",
+  "bevy_gizmos",
+  "bevy_gizmos_render",
+  "bevy_mesh",
+  "bevy_pbr",
+  "bevy_post_process",
+  "bevy_render",
+  "bevy_window",
+  "bevy_winit",
+  "jpeg",
+  "png",
+  "reflect_auto_register",
+  "tonemapping_luts",
+  "webgl2",
+  "zstd_rust",
+] }
+veldera_async = { workspace = true }
+veldera_camera = { workspace = true }
+veldera_clouds = { workspace = true, features = ["serde"] }
+veldera_config = { workspace = true }
+veldera_constants = { workspace = true }
+veldera_engine = { workspace = true }
+veldera_geo = { workspace = true }
+veldera_input = { workspace = true }
+veldera_physics = { workspace = true }
+veldera_sky = { workspace = true }
+veldera_terrain = { workspace = true }
+
+[target.'cfg(not(target_family = "wasm"))'.dependencies]
+bevy = { workspace = true, features = ["file_watcher", "multi_threaded", "x11"] }
+
+[features]
+default = ["webgpu"]
+webgpu = ["bevy/webgpu"]
+
+[lints]
+workspace = true

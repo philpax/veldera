@@ -7283,6 +7283,24 @@ dependencies = [
 ]
 
 [[package]]
+name = "veldera_reference"
+version = "0.1.0"
+dependencies = [
+ "bevy",
+ "veldera_async",
+ "veldera_camera",
+ "veldera_clouds",
+ "veldera_config",
+ "veldera_constants",
+ "veldera_engine",
+ "veldera_geo",
+ "veldera_input",
+ "veldera_physics",
+ "veldera_sky",
+ "veldera_terrain",
+]
+
+[[package]]
 name = "veldera_sky"
 version = "0.1.0"
 dependencies = [

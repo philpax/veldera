@@ -15,9 +15,11 @@ The workspace is three tiers; dependencies only ever point *down* the stack.
 - **Clients (`client/`).** `client/veldera` is the game: a thin binary
   (`main` + scene wiring + leftover glue) on top of the gameplay crates, packages
   named `veldera_game_*` (`veldera_game_input`, `_camera_state`, `_player`,
-  `_teleport`, `_camera`, `_vehicle`, `_ui`). `client/reference` is a freelook
-  Earth viewer built on engine crates only — the acid test that the engine
-  boundary is clean.
+  `_teleport`, `_camera`, `_vehicle`, `_ui`).
+- **Reference client (`reference/`, top-level).** A freelook Earth viewer
+  (`veldera_reference`) built on the engine crates only — *no* `client/`
+  dependency. It's the acid test that the engine boundary is clean: spawn over a
+  city, free-fly, nothing else. It symlinks the same `engine_assets/`.
 
 ### Keeping the engine gameplay-agnostic
 

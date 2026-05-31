@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["client/*", "engine/*", "extras/*", "rocktree/*", "tools/*"]
+members = ["client/*", "engine/*", "extras/*", "reference", "rocktree/*", "tools/*"]
 default-members = ["client/veldera"]
 
 [workspace.package]
