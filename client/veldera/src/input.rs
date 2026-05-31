@@ -195,7 +195,9 @@ fn set_actions(
 ///
 /// Disables keyboard-bound camera actions when egui wants keyboard input,
 /// and disables gameplay actions when the cursor is not grabbed.
-/// `ToggleUi` is always kept enabled. Also gates `bevy_egui`'s own
+/// `ToggleUi` stays enabled regardless of cursor-grab state, but is still
+/// suppressed while egui is capturing the keyboard (e.g. typing into a search
+/// box). Also gates `bevy_egui`'s own
 /// input intake — while the cursor is grabbed, egui's pointer and
 /// keyboard systems are turned off so a hidden cursor sitting over a
 /// debug window can't drag it or click buttons.
@@ -267,8 +269,14 @@ fn manage_input_focus(
     }
 
     for mut action_state in &mut camera_query {
-        // ToggleUi is always available.
-        action_state.enable_action(&CameraAction::ToggleUi);
+        // ToggleUi is available in every cursor-grab state, but still yields to
+        // egui when a widget is capturing the keyboard — otherwise typing "q"
+        // into a search box would hide the UI instead of entering the letter.
+        if egui_wants_kb {
+            action_state.disable_action(&CameraAction::ToggleUi);
+        } else {
+            action_state.enable_action(&CameraAction::ToggleUi);
+        }
 
         if !is_grabbed {
             // When cursor is not grabbed, disable all gameplay actions.
