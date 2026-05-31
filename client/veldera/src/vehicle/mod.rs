@@ -42,7 +42,7 @@ use crate::{
 };
 
 /// Hot-reloadable global vehicle tuning, loaded from
-/// `assets/config/vehicle/vehicle.toml`. Per-vehicle physics (hover/movement/
+/// `assets/config/game/vehicle/vehicle.toml`. Per-vehicle physics (hover/movement/
 /// drag) lives in each vehicle's `.scn.ron`; this is the cross-vehicle behaviour.
 #[derive(Default, Asset, Resource, TypePath, Clone, Deserialize)]
 #[serde(default, deny_unknown_fields)]

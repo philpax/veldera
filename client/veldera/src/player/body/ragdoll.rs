@@ -81,7 +81,7 @@ use crate::{
 };
 
 /// Hot-reloadable tuning for the skeletal ragdoll, loaded from
-/// `assets/config/player/body/ragdoll.toml`. The bone topology
+/// `assets/config/game/player/body/ragdoll.toml`. The bone topology
 /// ([`RAGDOLL_BONE_TABLE`], [`RAGDOLL_UPRIGHT_BONES`], [`RAGDOLL_ANCHOR_STEM`])
 /// stays compiled in — it's structural, not a tunable value. Defaults below are
 /// the values these constants held before externalization, so behaviour is

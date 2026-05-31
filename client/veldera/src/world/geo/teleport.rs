@@ -169,7 +169,7 @@ impl TeleportAnimation {
     }
 }
 
-/// Hot-reloadable teleport tuning, loaded from `assets/config/world/geo.toml`.
+/// Hot-reloadable teleport tuning, loaded from `assets/config/game/world/geo.toml`.
 ///
 /// (The geocoding request throttle stays compiled in — it's an external API
 /// politeness floor, not a gameplay knob.)

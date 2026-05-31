@@ -31,7 +31,7 @@ pub struct BounceSoundHandle(Handle<AudioSource>);
 pub struct FireSoundHandle(Handle<AudioSource>);
 
 /// Hot-reloadable projectile tuning, loaded from
-/// `assets/config/physics/projectile.toml`.
+/// `assets/config/game/physics/projectile.toml`.
 #[derive(Default, Asset, Resource, TypePath, Clone, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct ProjectileConfig {

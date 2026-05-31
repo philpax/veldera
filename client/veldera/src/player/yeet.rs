@@ -44,7 +44,7 @@ use crate::{
 // ----------------------------------------------------------------------------
 
 /// Hot-reloadable yeet (arm-point launch) tuning, loaded from
-/// `assets/config/player/yeet.toml`.
+/// `assets/config/game/player/yeet.toml`.
 ///
 /// The rumble is synthesized in real time from these values (see
 /// [`RumbleDecoder`]), so every [`RumbleConfig`] field — `base_hz` included —

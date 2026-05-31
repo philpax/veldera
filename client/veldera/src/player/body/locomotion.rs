@@ -20,7 +20,7 @@ use crate::{
 };
 
 /// Hot-reloadable locomotion-blend tuning, loaded from
-/// `assets/config/player/body/locomotion.toml`. All speeds are metres/second.
+/// `assets/config/game/player/body/locomotion.toml`. All speeds are metres/second.
 #[derive(Default, Asset, Resource, TypePath, Clone, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct LocomotionConfig {

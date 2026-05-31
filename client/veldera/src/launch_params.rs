@@ -38,7 +38,7 @@ pub struct LaunchParams {
 }
 
 /// Hot-reloadable default launch parameters, loaded from
-/// `assets/config/launch.toml`. Read once at startup (CLI args take precedence);
+/// `assets/config/game/launch.toml`. Read once at startup (CLI args take precedence);
 /// editing the file affects the next launch, not the running session.
 #[derive(Default, Asset, Resource, TypePath, Clone, Deserialize)]
 #[serde(default, deny_unknown_fields)]

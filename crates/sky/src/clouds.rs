@@ -28,7 +28,7 @@ use veldera_geo::floating_origin::FloatingOriginCamera;
 use crate::time_of_day::TimeOfDayState;
 
 /// Hot-reloadable cloud configuration, loaded from
-/// `assets/config/rendering/clouds.toml`. Wraps the cloud crate's
+/// `assets/config/engine/rendering/clouds.toml`. Wraps the cloud crate's
 /// [`CloudLayers`] (the same type the Atmosphere debug tab edits) so the whole
 /// layer stack — quality, raymarch/denoise knobs, climate + sim, god rays, and
 /// each sub-layer — is editable from one file. Applied to the live `CloudLayers`
@@ -38,7 +38,7 @@ use crate::time_of_day::TimeOfDayState;
 pub struct CloudConfig(pub CloudLayers);
 
 /// Hot-reloadable cloud *engine* settings, loaded from
-/// `assets/config/rendering/cloud_engine.toml`. Wraps the cloud crate's
+/// `assets/config/engine/rendering/cloud_engine.toml`. Wraps the cloud crate's
 /// [`CloudPlanetSettings`] (per-frame raymarch thresholds: shadow footprint,
 /// teleport threshold, primary-march altitude LOD, luminance weights), kept
 /// separate from the per-layer [`CloudConfig`] above because it tunes the
@@ -50,7 +50,7 @@ pub struct CloudConfig(pub CloudLayers);
 pub struct CloudEngineConfig(pub CloudPlanetSettings);
 
 /// Hot-reloadable cloud *shader* knobs, loaded from
-/// `assets/config/rendering/cloud_shader.toml`. Wraps the cloud crate's
+/// `assets/config/engine/rendering/cloud_shader.toml`. Wraps the cloud crate's
 /// [`CloudShaderParams`], which are injected into the WGSL as `shader_defs`
 /// (not read from a uniform). Editing this re-specialises the affected pipeline
 /// — a recompile, not a per-frame cost — so it's for "edit and see the impact"
@@ -61,7 +61,7 @@ pub struct CloudEngineConfig(pub CloudPlanetSettings);
 pub struct CloudShaderConfig(pub CloudShaderParams);
 
 /// Hot-reloadable cloud *climate* tuning, loaded from
-/// `assets/config/rendering/cloud_climate.toml`. Wraps the cloud crate's
+/// `assets/config/engine/rendering/cloud_climate.toml`. Wraps the cloud crate's
 /// [`CloudClimateSettings`] (latitude bands, ocean/land differentiation,
 /// stratocumulus decks, interior dryness, climate noise), kept separate from
 /// the per-layer [`CloudConfig`] and the renderer [`CloudEngineConfig`] because

@@ -380,7 +380,7 @@ pub fn local_to_utc(local_seconds: f64, local_date: SimpleDate, lon_deg: f64) ->
 }
 
 /// Hot-reloadable time-of-day tuning, loaded from
-/// `assets/config/world/time_of_day.toml`. The day-period boundaries (local
+/// `assets/config/engine/world/time_of_day.toml`. The day-period boundaries (local
 /// hours, 0–24) drive the WebGL fallback sky-colour gradient.
 #[derive(Default, Asset, Resource, TypePath, Clone, Deserialize)]
 #[serde(default, deny_unknown_fields)]

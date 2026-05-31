@@ -49,7 +49,7 @@ pub struct FreelookCameraControl {
 // ============================================================================
 
 /// Hot-reloadable flight-camera tuning, loaded from
-/// `assets/config/camera/camera.toml`.
+/// `assets/config/engine/camera/camera.toml`.
 #[derive(Default, Asset, Resource, TypePath, Clone, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct CameraConfig {

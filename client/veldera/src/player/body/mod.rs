@@ -56,7 +56,7 @@ use crate::{
 // ============================================================================
 
 /// Hot-reloadable first-person body tuning, loaded from
-/// `assets/config/player/body/body.toml`. Eye height/forward *values* come from
+/// `assets/config/game/player/body/body.toml`. Eye height/forward *values* come from
 /// the character model ([`CharacterMetrics`]); this carries the cross-fade
 /// timing, the Camera-tab slider bounds, the head-lock clamp, and the glTF path.
 #[derive(Default, Asset, Resource, TypePath, Clone, Deserialize)]

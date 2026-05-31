@@ -60,7 +60,7 @@ use veldera_physics::{
 };
 
 /// Hot-reloadable LoD streaming parameters, loaded from
-/// `assets/config/world/lod.toml`. Tune these to trade memory and CPU against
+/// `assets/config/engine/world/lod.toml`. Tune these to trade memory and CPU against
 /// streaming churn and pop-in, and to observe the performance/quality impact at
 /// runtime. The `keep_loaded_radius` and `unload_grace_period_secs` knobs are
 /// also exposed as sliders in the Streaming diagnostics tab.

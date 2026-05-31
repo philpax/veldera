@@ -26,7 +26,7 @@ use crate::time_of_day::{SECONDS_PER_HOUR, TimeOfDayState, days_since_j2000};
 #[derive(Component)]
 pub struct Moon;
 
-/// Hot-reloadable lunar tuning, loaded from `assets/config/world/moon.toml`.
+/// Hot-reloadable lunar tuning, loaded from `assets/config/engine/world/moon.toml`.
 #[derive(Default, Asset, Resource, TypePath, Clone, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct MoonConfig {

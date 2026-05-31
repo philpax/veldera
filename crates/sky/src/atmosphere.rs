@@ -24,7 +24,7 @@ use veldera_constants::{ATMOSPHERE_TOP_RADIUS_M, EARTH_RADIUS_M};
 use veldera_geo::floating_origin::FloatingOriginCamera;
 
 /// Hot-reloadable atmosphere tuning, loaded from
-/// `assets/config/rendering/atmosphere.toml`.
+/// `assets/config/engine/rendering/atmosphere.toml`.
 ///
 /// The atmosphere's bottom/top radii are tied to [`EARTH_RADIUS_M`] and the
 /// shared atmosphere height, so they stay compiled in. Everything tunable lives

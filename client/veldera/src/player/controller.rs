@@ -102,7 +102,7 @@ pub struct RenderPlayer {
 }
 
 /// Hot-reloadable ragdoll-trigger tuning for the FPS controller, loaded from
-/// `assets/config/player/fps.toml`. The skeletal rig itself has a separate
+/// `assets/config/game/player/fps.toml`. The skeletal rig itself has a separate
 /// compile-time switch,
 /// [`ENABLE_SKELETAL_RAGDOLL`](super::body::ragdoll).
 #[derive(Default, Asset, Resource, TypePath, Clone, Deserialize)]

@@ -75,7 +75,7 @@ pub struct ManualGravity;
 pub const PHYSICS_FINEST_DEPTH: usize = rocktree_decode::MAX_LEVEL - 1;
 
 /// Hot-reloadable terrain-collider streaming tuning, loaded from
-/// `assets/config/physics/streaming.toml`. Lets you trade physics fidelity
+/// `assets/config/engine/physics/streaming.toml`. Lets you trade physics fidelity
 /// against load for performance/quality experiments at runtime.
 #[derive(Default, Asset, Resource, TypePath, Clone, Deserialize)]
 #[serde(default, deny_unknown_fields)]
@@ -104,7 +104,7 @@ pub struct PhysicsStreamingConfig {
 }
 
 /// Hot-reloadable global physics tuning, loaded from
-/// `assets/config/physics/physics.toml`. Drives the manually-applied gravity for
+/// `assets/config/engine/physics/physics.toml`. Drives the manually-applied gravity for
 /// the radial-gravity system, the FPS controller, and vehicles (Avian's built-in
 /// gravity stays zero — we integrate radial gravity ourselves).
 #[derive(Default, Asset, Resource, TypePath, Clone, Deserialize)]
