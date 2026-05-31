@@ -146,7 +146,7 @@ pub fn convert_texture(rocktree_mesh: &RocktreeMesh) -> Image {
     )
 }
 
-use crate::world::floating_origin::WorldPosition;
+use veldera_geo::floating_origin::WorldPosition;
 
 /// Convert a 4x4 double-precision matrix to `WorldPosition` and Transform.
 ///

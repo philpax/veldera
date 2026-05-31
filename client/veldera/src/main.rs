@@ -65,7 +65,7 @@ impl Plugin for AppPlugin {
             player::PlayerPlugin,
             DataLoaderPlugin,
             GeoPlugin,
-            LodPlugin,
+            LodPlugin::new(config::paths::LOD),
             TimeOfDayPlugin::new(config::paths::TIME_OF_DAY),
             MoonPlugin::new(config::paths::MOON),
             DebugUiPlugin,

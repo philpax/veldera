@@ -5,14 +5,14 @@
 //!
 //! Uses platform-agnostic `async_channel` for communication between async tasks
 //! and the main thread. Task spawning is handled by `TaskSpawner` from the
-//! `async_runtime` module.
+//! [`veldera_async`] crate.
 
 use std::sync::Arc;
 
 use bevy::prelude::*;
 use rocktree::{BulkMetadata, BulkRequest, Client, MemoryCache, Planetoid};
 
-use crate::async_runtime::TaskSpawner;
+use veldera_async::TaskSpawner;
 
 /// Plugin for loading Google Earth data.
 pub struct DataLoaderPlugin;

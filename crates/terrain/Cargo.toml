@@ -1,0 +1,31 @@
+[package]
+name = "veldera_terrain"
+version = "0.1.0"
+edition.workspace = true
+repository.workspace = true
+license.workspace = true
+description = "Streaming terrain for Veldera: rocktree LOD traversal, async data loading, mesh conversion, and the octant-masked terrain material"
+
+[dependencies]
+async-channel = "2"
+avian3d = "0.6"
+bevy = { version = "0.18.0", default-features = false, features = [
+    "bevy_asset",
+    "bevy_core_pipeline",
+    "bevy_mesh",
+    "bevy_pbr",
+    "bevy_render",
+] }
+glam = "0.30"
+serde = { version = "1", features = ["derive"] }
+tracing = "0.1"
+rocktree = { path = "../../rocktree/rocktree" }
+rocktree-decode = { path = "../../rocktree/rocktree-decode" }
+veldera_async = { path = "../async" }
+veldera_config = { path = "../config" }
+veldera_constants = { path = "../constants" }
+veldera_geo = { path = "../geo" }
+veldera_physics = { path = "../physics" }
+
+[lints]
+workspace = true

@@ -6811,7 +6811,6 @@ dependencies = [
  "js-sys",
  "leafwing-input-manager",
  "rand 0.9.2",
- "rocktree",
  "rocktree-decode",
  "serde",
  "serde_json",
@@ -6828,6 +6827,7 @@ dependencies = [
  "veldera_physics",
  "veldera_places",
  "veldera_sky",
+ "veldera_terrain",
  "wasm-bindgen",
  "web-time",
 ]
@@ -6934,6 +6934,25 @@ dependencies = [
  "veldera_constants",
  "veldera_geo",
  "web-time",
+]
+
+[[package]]
+name = "veldera_terrain"
+version = "0.1.0"
+dependencies = [
+ "async-channel",
+ "avian3d",
+ "bevy",
+ "glam",
+ "rocktree",
+ "rocktree-decode",
+ "serde",
+ "tracing",
+ "veldera_async",
+ "veldera_config",
+ "veldera_constants",
+ "veldera_geo",
+ "veldera_physics",
 ]
 
 [[package]]

@@ -52,7 +52,6 @@ glam = "0.30"
 leafwing-input-manager = "0.20"
 # Random number generation.
 rand = "0.9"
-rocktree = { path = "../../rocktree/rocktree" }
 rocktree-decode = { path = "../../rocktree/rocktree-decode" }
 veldera_config = { path = "../../crates/config" }
 veldera_constants = { path = "../../crates/constants" }
@@ -62,6 +61,7 @@ veldera_input = { path = "../../crates/input" }
 veldera_physics = { path = "../../crates/physics" }
 veldera_places = { path = "../../extras/places" }
 veldera_sky = { path = "../../crates/sky" }
+veldera_terrain = { path = "../../crates/terrain" }
 # For geocoding API responses and character metric extras parsing.
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"

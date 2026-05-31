@@ -9,9 +9,9 @@
 //! - **Render rule** refines on screen-space error and frustum-culls,
 //!   producing renderable nodes and the meshes shown on screen.
 //! - **Physics rule** refines on distance-banded target depth (see
-//!   [`PhysicsStreamingConfig::bands`](crate::physics::PhysicsStreamingConfig))
+//!   [`PhysicsStreamingConfig::bands`](veldera_physics::PhysicsStreamingConfig))
 //!   with no frustum culling, producing exactly one terrain collider per region
-//!   within [`PhysicsStreamingConfig::range`](crate::physics::PhysicsStreamingConfig).
+//!   within [`PhysicsStreamingConfig::range`](veldera_physics::PhysicsStreamingConfig).
 //!   If the target depth isn't available
 //!   the deepest loaded ancestor with data is used as a fallback so the
 //!   player can never fall through unloaded ground.
@@ -25,7 +25,7 @@
 //!
 //! Uses platform-agnostic `async_channel` for communication between async tasks
 //! and the main thread. Task spawning is handled by `TaskSpawner` from the
-//! `async_runtime` module.
+//! [`veldera_async`] crate.
 
 use std::{
     collections::{HashMap, HashSet},
@@ -42,29 +42,22 @@ use rocktree_decode::{OctreePath, OrientedBoundingBox};
 use serde::Deserialize;
 
 use crate::{
-    async_runtime::TaskSpawner,
-    config,
-    rendering::{
-        mesh::{
-            RocktreeMeshMarker, convert_mesh, convert_texture,
-            matrix_to_world_position_and_transform,
-        },
-        terrain_material::{TerrainMaterial, TerrainMaterialExtension},
+    loader::LoaderState,
+    mesh::{
+        RocktreeMeshMarker, convert_mesh, convert_texture, matrix_to_world_position_and_transform,
     },
-    world::{floating_origin::FloatingOriginCamera, loader::LoaderState},
-};
-
-use crate::{
-    physics::{
-        MotionTracker, PhysicsStreamingConfig, desired_physics_depth, terrain::TerrainCollider,
-    },
-    vehicle::GameLayer,
-    world::floating_origin::WorldPosition,
+    terrain_material::{TerrainMaterial, TerrainMaterialExtension},
 };
 
 use avian3d::prelude::*;
 
+use veldera_async::TaskSpawner;
+use veldera_config::ConfigPlugin;
 use veldera_constants::EARTH_RADIUS_M_F64;
+use veldera_geo::floating_origin::{FloatingOriginCamera, WorldPosition};
+use veldera_physics::{
+    GameLayer, MotionTracker, PhysicsStreamingConfig, TerrainCollider, desired_physics_depth,
+};
 
 /// Hot-reloadable LoD streaming parameters, loaded from
 /// `assets/config/world/lod.toml`. Tune these to trade memory and CPU against
@@ -102,7 +95,20 @@ pub struct LodTuning {
 }
 
 /// Plugin for LOD management and frustum culling.
-pub struct LodPlugin;
+///
+/// The host supplies the [`LodTuning`] config path so the engine crate stays
+/// free of any particular asset layout.
+pub struct LodPlugin {
+    /// Path to the [`LodTuning`] TOML.
+    pub config_path: &'static str,
+}
+
+impl LodPlugin {
+    /// Create the plugin, loading its tuning config from `config_path`.
+    pub const fn new(config_path: &'static str) -> Self {
+        Self { config_path }
+    }
+}
 
 impl Plugin for LodPlugin {
     fn build(&self, app: &mut App) {
@@ -111,7 +117,7 @@ impl Plugin for LodPlugin {
             .init_resource::<LodSnapshot>()
             .init_resource::<LodSnapshotRequest>()
             .init_resource::<LodScratch>()
-            .add_plugins(config::ConfigPlugin::<LodTuning>::new(config::paths::LOD))
+            .add_plugins(ConfigPlugin::<LodTuning>::new(self.config_path))
             .add_systems(
                 Update,
                 (
@@ -858,14 +864,7 @@ fn unload_obsolete(
 /// Update the frustum from the camera.
 fn update_frustum(
     mut lod_state: ResMut<LodState>,
-    camera_query: Query<
-        (
-            &Transform,
-            &Projection,
-            &crate::world::floating_origin::FloatingOriginCamera,
-        ),
-        With<Camera3d>,
-    >,
+    camera_query: Query<(&Transform, &Projection, &FloatingOriginCamera), With<Camera3d>>,
     windows: Query<&Window>,
 ) {
     let Ok((transform, projection, floating_camera)) = camera_query.single() else {
@@ -1384,7 +1383,7 @@ fn update_physics_colliders(
     mut lod_state: ResMut<LodState>,
     camera_query: Query<&FloatingOriginCamera>,
 ) {
-    use crate::physics::{DebugRender, terrain::create_terrain_collider};
+    use veldera_physics::{DebugRender, terrain::create_terrain_collider};
 
     let Ok(camera) = camera_query.single() else {
         return;
