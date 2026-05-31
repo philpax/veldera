@@ -6,7 +6,7 @@
 # shadow-map sizes, mip count) and shader-coupled array sizes (max layers,
 # denoise iterations) are NOT here: they size GPU textures allocated once at
 # startup or bake into the shaders, so they're compile-time constants in
-# bevy_pbr_clouds_planet/src/constants.rs.
+# clouds/src/constants.rs.
 
 # Half-side of the square cloud-shadow footprint, in metres (the shadow map
 # covers 2× this on each side, centred on the camera). Ground outside it is

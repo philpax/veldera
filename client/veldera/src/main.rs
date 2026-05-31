@@ -28,7 +28,6 @@ use bevy::{
     prelude::*,
     render::view::Hdr,
 };
-use bevy_pbr_clouds_planet::CloudLayers;
 use camera::{
     CameraConfig, CameraControllerPlugin, CameraMode, CameraModeTransitions, FlightCamera,
 };
@@ -42,6 +41,7 @@ use rendering::{
     terrain_material::TerrainMaterialPlugin,
 };
 use ui::DebugUiPlugin;
+use veldera_clouds::CloudLayers;
 use world::{
     coords::lat_lon_to_ecef,
     floating_origin::{FloatingOriginCamera, FloatingOriginPlugin},

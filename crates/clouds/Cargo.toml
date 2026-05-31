@@ -1,0 +1,27 @@
+[package]
+name = "veldera_clouds"
+version = "0.1.0"
+edition.workspace = true
+license = "MIT OR Apache-2.0"
+repository.workspace = true
+description = "Volumetric clouds for spherical planets, coupled with veldera_atmosphere"
+
+[dependencies]
+bevy = { version = "0.18.0", default-features = false, features = [
+    "bevy_render",
+    "bevy_core_pipeline",
+    "bevy_pbr",
+    "bevy_asset",
+] }
+veldera_atmosphere = { path = "../atmosphere" }
+glam = "0.30"
+serde = { version = "1", features = ["derive"], optional = true }
+tracing = "0.1"
+
+[features]
+# Derive serde on the public cloud configuration types so they can be loaded
+# from config files. Pulls in glam's serde impls for the `Vec2` wind field.
+serde = ["dep:serde", "glam/serde"]
+
+[lints]
+workspace = true

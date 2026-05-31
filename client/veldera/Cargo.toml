@@ -35,10 +35,10 @@ bevy = { version = "0.18.0", default-features = false, features = [
   "webgl2"
 ] }
 bevy_egui = "0.39"
-bevy_pbr_atmosphere_planet = { path = "../../crates/bevy_pbr_atmosphere_planet", features = [
+veldera_atmosphere = { path = "../../crates/atmosphere", features = [
   "serde",
 ] }
-bevy_pbr_clouds_planet = { path = "../../crates/bevy_pbr_clouds_planet", features = [
+veldera_clouds = { path = "../../crates/clouds", features = [
   "serde",
 ] }
 egui_dock = "0.18"
@@ -54,7 +54,7 @@ leafwing-input-manager = "0.20"
 rand = "0.9"
 rocktree = { path = "../../rocktree/rocktree" }
 rocktree-decode = { path = "../../rocktree/rocktree-decode" }
-veldera_constants = { path = "../../crates/veldera_constants" }
+veldera_constants = { path = "../../crates/constants" }
 # For geocoding API responses and character metric extras parsing.
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"

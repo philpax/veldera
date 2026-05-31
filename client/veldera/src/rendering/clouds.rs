@@ -15,14 +15,14 @@ use bevy::{
     },
 };
 use bevy_egui::{EguiTextureHandle, EguiUserTextures};
+use serde::Deserialize;
 #[allow(unused_imports)]
-pub use bevy_pbr_clouds_planet::CloudDebugMode;
-use bevy_pbr_clouds_planet::{
+pub use veldera_clouds::CloudDebugMode;
+use veldera_clouds::{
     CLIMATE_MAP_HEIGHT, CLIMATE_MAP_WIDTH, CloudCameraEcef, CloudClimateMap, CloudClimateSettings,
     CloudEarthTopography, CloudLayers, CloudPlanetSettings, CloudShaderParams,
     CloudSimStatePreview, CloudWorldTime, CloudsPlanetPlugin,
 };
-use serde::Deserialize;
 
 use crate::{
     config,

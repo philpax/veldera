@@ -1,5 +1,5 @@
 # Volumetric cloud configuration (the Atmosphere debug tab edits these live).
-# Mirrors bevy_pbr_clouds_planet::CloudLayers. All fields are optional (missing
+# Mirrors veldera_clouds::CloudLayers. All fields are optional (missing
 # ones fall back to code defaults).
 #
 # `quality` is intentionally omitted so it stays platform-adaptive (High on

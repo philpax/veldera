@@ -461,7 +461,7 @@ fn render_compass(
 
     // Local tangent basis at the camera position. Matches the bake /
     // shadow-uniform math (see `cloud_shadow_bake.wgsl` and
-    // `bevy_pbr_clouds_planet::resources`): `world_north` projected
+    // `veldera_clouds::resources`): `world_north` projected
     // onto the tangent plane, falling back to `world_east` near the
     // poles where the projection is degenerate.
     let up = position.normalize().as_vec3();

@@ -12,12 +12,12 @@ use bevy::{
     reflect::TypePath,
     render::{Extract, ExtractSchedule, RenderApp},
 };
-use bevy_pbr_atmosphere_planet::{
+use serde::Deserialize;
+use veldera_atmosphere::{
     AtmosphereSettings, ExtractedAtmosphereLights, GpuAtmosphereLight, MAX_ATMOSPHERE_LIGHTS,
     SphericalAtmosphere, SphericalAtmosphereCamera, SphericalAtmosphereEnvironmentMapLight,
     compute_sun_transmittance,
 };
-use serde::Deserialize;
 
 use crate::{config, world::floating_origin::FloatingOriginCamera};
 use veldera_constants::{ATMOSPHERE_TOP_RADIUS_M, EARTH_RADIUS_M};
@@ -49,7 +49,7 @@ pub struct AtmosphereIntegrationPlugin;
 
 impl Plugin for AtmosphereIntegrationPlugin {
     fn build(&self, app: &mut App) {
-        app.add_plugins(bevy_pbr_atmosphere_planet::SphericalAtmospherePlugin)
+        app.add_plugins(veldera_atmosphere::SphericalAtmospherePlugin)
             .add_plugins(config::ConfigPlugin::<AtmosphereConfig>::new(
                 config::paths::ATMOSPHERE,
             ))

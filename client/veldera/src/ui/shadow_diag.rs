@@ -10,9 +10,9 @@
 
 use bevy::{ecs::system::SystemParam, prelude::*};
 use bevy_egui::egui;
-use bevy_pbr_atmosphere_planet::SphericalAtmosphereCamera;
-use bevy_pbr_clouds_planet::CloudLayers;
 use glam::DVec3;
+use veldera_atmosphere::SphericalAtmosphereCamera;
+use veldera_clouds::CloudLayers;
 
 use crate::world::floating_origin::FloatingOriginCamera;
 

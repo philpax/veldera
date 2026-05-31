@@ -6,7 +6,7 @@
 
 use bevy::{ecs::system::SystemParam, prelude::*};
 use bevy_egui::egui;
-use bevy_pbr_clouds_planet::{
+use veldera_clouds::{
     CloudDebugMode, CloudLayerKind, CloudLayers, CloudQuality, CloudShadowBakeDiag, CloudWorldTime,
 };
 

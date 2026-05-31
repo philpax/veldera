@@ -1,0 +1,222 @@
+#define_import_path veldera_clouds::types
+
+// Maximum cloud sub-layers per camera. Injected as a `shader_def` from the
+// host `MAX_CLOUD_LAYERS` constant (see `layer_shader_defs` in resources.rs),
+// so this can never drift from the Rust array size.
+const MAX_CLOUD_LAYERS: u32 = #{MAX_CLOUD_LAYERS}u;
+
+// Fixed 6-tap cone-march offset pattern, shared by the main raymarch's
+// sun-occlusion cone (`functions.wgsl`) and the shadow bake's cone march
+// (`cloud_shadow_bake.wgsl`) so the two stay identical. Defined here rather
+// than in `functions.wgsl` because the shadow bake can't import that module
+// (it would pull in the full main-pass binding set).
+const CONE_OFFSETS: array<vec3<f32>, 6> = array<vec3<f32>, 6>(
+    vec3<f32>( 0.155,  0.490,  0.000),
+    vec3<f32>( 0.255, -0.290,  0.190),
+    vec3<f32>(-0.220, -0.215,  0.380),
+    vec3<f32>( 0.000,  0.155, -0.420),
+    vec3<f32>(-0.310,  0.080,  0.150),
+    vec3<f32>( 0.430, -0.080, -0.100),
+);
+
+struct CloudSubLayer {
+    inner_radius: f32,
+    outer_radius: f32,
+    coverage: f32,
+    density_scale: f32,
+
+    hg_forward: f32,
+    hg_backward: f32,
+    hg_blend: f32,
+    noise_tile: f32,
+
+    weather_tile: f32,
+    weather_strength: f32,
+    evolution_rate: f32,
+    enabled: u32,
+
+    wind_offset: vec2<f32>,
+    pad_wind: u32,
+
+    // CPU-computed `(camera_ecef / noise_tile).fract()` in f64; added to
+    // the small camera-relative sample offset before noise lookup so the
+    // noise pattern aligns to absolute world space without ever dividing
+    // a 6.4×10⁶ m ECEF coord by a 4 km tile in shader-side f32.
+    noise_uv_offset: vec3<f32>,
+    pad_noise: u32,
+    // CPU-computed `(camera_ecef / warp_tile).fract()` (warp_tile = 4×
+    // noise_tile). The warp lookup uses this so it wraps cleanly at
+    // 16 km boundaries instead of popping 0.25 cycles every 4 km.
+    warp_uv_offset: vec3<f32>,
+    // Per-layer climate-strength multiplier in [0, 1]. Lives in
+    // what would otherwise be vec3 alignment padding.
+    climate_strength: f32,
+}
+
+struct CloudUniform {
+    max_primary_steps: u32,
+    light_steps: u32,
+    octaves: u32,
+    debug_mode: u32,
+
+    buffer_size: vec2<u32>,
+    full_size: vec2<u32>,
+
+    layer_count: u32,
+    time_seconds: f32,
+    // 1 = per-frame sub-pixel jitter on the raymarch ray direction
+    // for TAA-style anti-aliasing; 0 = unjittered.
+    raymarch_jitter: u32,
+    // Scales the per-pixel `t_first` sub-grid jitter (`0..1`).
+    // See `CloudLayers::raymarch_jitter_magnitude`.
+    raymarch_jitter_magnitude: f32,
+    // Scales the TAA Halton sub-pixel jitter window. See
+    // `CloudLayers::raymarch_taa_jitter_magnitude`.
+    raymarch_taa_jitter_magnitude: f32,
+    // 1 = rotate the per-pixel `t_first` hash by the golden ratio
+    // each frame. See `CloudLayers::raymarch_jitter_temporal_rotation`.
+    raymarch_jitter_temporal_rotation: u32,
+    // Cloud-noise mip-LOD bias. See `CloudLayers::raymarch_lod_bias`.
+    raymarch_lod_bias: f32,
+    // World-space spacing between primary-march samples. See
+    // `CloudLayers::primary_step_world_m`.
+    primary_step_world_m: f32,
+
+    // Pixel inspector. The raymarch writes a `CloudInspectData`
+    // entry to the inspect storage buffer when `inspect_active == 1u`
+    // and the current pixel matches the cursor mapped into buffer
+    // space (`vec2<i32>(inspect_cursor * buffer_size)`). See
+    // `inspect.rs` and the `cloud_inspect_buffer` binding in
+    // `bindings.wgsl`.
+    inspect_cursor: vec2<f32>,
+    inspect_active: u32,
+    pad_inspect: u32,
+
+    prev_clip_from_world: mat4x4<f32>,
+
+    prev_camera_ecef: vec3<f32>,
+    frame_index: u32,
+    temporal_history_valid: u32,
+    // Denoise pass edge-stop sigmas — see `CloudLayers::denoise_*`.
+    denoise_sigma_transmittance: f32,
+    denoise_sigma_color: f32,
+    // SVGF variance-modulation strength. Effective transmittance
+    // sigma is `denoise_sigma_transmittance + denoise_variance_strength * stddev`.
+    denoise_variance_strength: f32,
+    // Half-width of the per-layer density smoothstep band. Density
+    // goes from 0 at `coverage - half_width` to 1 at
+    // `coverage + half_width`. Completes the 16-byte block with
+    // the three denoise scalars above. See
+    // `CloudLayers::density_band_half_width`.
+    density_band_half_width: f32,
+
+    layers: array<CloudSubLayer, MAX_CLOUD_LAYERS>,
+
+    // World-to-shadow-UV matrix. Accepts RENDER-world (camera-relative)
+    // positions and outputs (u, v, _, 1); xy are the shadow-map UVs.
+    shadow_from_world: mat4x4<f32>,
+    // Half-side of the shadow map's square footprint, in metres.
+    shadow_footprint: f32,
+    // 0..1 attenuation of the shadow apply pass, smoothstepped from sun
+    // elevation. Goes to 0 once the sun's below the horizon so the
+    // shadow doesn't nonsensically dim pure ambient illumination at
+    // night.
+    shadow_strength: f32,
+    // Padding kept where the CPU-side `fog_extinction` field used to
+    // live (the composite now derives in-cloud extinction GPU-side by
+    // sampling the cloud noise at the camera position).
+    pad_fog_ext: u32,
+    pad_shadow1: u32,
+    // Pre-exposure-multiplied colour the in-cloud fog blends toward.
+    fog_color: vec3<f32>,
+    pad_fog: u32,
+
+    // Volumetric god-rays knobs. See `GodRaysSettings` in lib.rs.
+    god_rays_enabled: u32,
+    god_rays_num_steps: u32,
+    god_rays_max_distance: f32,
+    god_rays_scatter_rate: f32,
+    god_rays_atmo_scale_height: f32,
+    god_rays_hg_g: f32,
+    // Multiplier applied to the apply pass's dimming. See
+    // `CloudLayers::shadow_intensity` in lib.rs.
+    shadow_intensity: f32,
+    // Shadow-bake diagnostic override. 0 = normal density march;
+    // non-zero selects a synthetic test pattern. See
+    // `CloudShadowBakeDiag` in lib.rs.
+    shadow_bake_diag: u32,
+
+    // Earth-aware climate model. See `ClimateSettings` in lib.rs.
+    climate_enabled: u32,
+    climate_latitude_strength: f32,
+    climate_ocean_strength: f32,
+    climate_itcz_center_deg: f32,
+
+    // Climate sim. See `ClimateSimSettings` in lib.rs.
+    sim_enabled: u32,
+    sim_reinit: u32,
+    sim_dt_seconds: f32,
+    sim_tau_seconds: f32,
+    sim_wind_speed: f32,
+    sim_wind_meander: f32,
+    sim_coriolis_enabled: u32,
+    // Phase 2 — vorticity-streamfunction. See `ClimateSimSettings`
+    // for the user-facing knobs these mirror.
+    sim_vorticity_strength: f32,
+    sim_vorticity_forcing: f32,
+    sim_vorticity_damping_seconds: f32,
+    pad_sim_0: u32,
+    pad_sim_1: u32,
+    // Raymarch feel constants (formerly module-level `const`s in constants.wgsl).
+    // Keep this order in lockstep with `GpuCloudUniform` in resources.rs.
+    cloud_march_max_distance: f32,
+    aerial_lut_max_distance: f32,
+    aerial_lut_fade_range: f32,
+    earth_shine_multiplier: f32,
+    twilight_band_lo: f32,
+    twilight_band_hi: f32,
+    terminator_wrap_slope: f32,
+    terminator_wrap_intercept: f32,
+    shade_morph_near_m: f32,
+    shade_morph_far_m: f32,
+    wrenninge_attenuation: f32,
+    wrenninge_contribution: f32,
+    wrenninge_eccentricity: f32,
+    // Scattered raymarch/shadow/temporal feel constants. Keep in lockstep with
+    // `GpuCloudUniform` in resources.rs.
+    world_cell_size: f32,
+    shadow_floor: f32,
+    shadow_cone_ratio: f32,
+    temporal_blend_alpha: f32,
+    jitter_period: u32,
+    equatorial_circumference_m: f32,
+    meridional_circumference_m: f32,
+    // Climate-model tuning (consumed by climate.wgsl's bake functions). Keep in
+    // lockstep with `GpuCloudUniform`; the vec3 is last so it aligns cleanly.
+    climate_subtropical_offset_deg: f32,
+    climate_storm_track_offset_deg: f32,
+    climate_itcz_band_sigma: f32,
+    climate_subtropical_band_sigma: f32,
+    climate_storm_track_band_sigma: f32,
+    climate_baseline: f32,
+    climate_itcz_amp: f32,
+    climate_subtropical_amp: f32,
+    climate_storm_track_amp: f32,
+    climate_ocean_bonus_max: f32,
+    climate_ocean_tropics_amp: f32,
+    climate_ocean_subtropical_amp: f32,
+    climate_ocean_storm_amp: f32,
+    climate_ocean_sea_level_lo: f32,
+    climate_ocean_sea_level_hi: f32,
+    climate_stratocumulus_amp: f32,
+    climate_stratocumulus_lat_sigma: f32,
+    climate_interior_amp: f32,
+    climate_interior_lat_sigma: f32,
+    climate_interior_probe_u: f32,
+    climate_interior_probe_v: f32,
+    climate_noise_amp: f32,
+    climate_noise_evolution: f32,
+    climate_monsoon_amp: f32,
+    climate_monsoon_band_sigma: f32,
+    climate_stratocumulus_east_offsets: vec3<f32>,
+}

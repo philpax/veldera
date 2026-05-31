@@ -1288,28 +1288,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "bevy_pbr_atmosphere_planet"
-version = "0.1.0"
-dependencies = [
- "bevy",
- "glam",
- "serde",
- "tracing",
- "veldera_constants",
-]
-
-[[package]]
-name = "bevy_pbr_clouds_planet"
-version = "0.1.0"
-dependencies = [
- "bevy",
- "bevy_pbr_atmosphere_planet",
- "glam",
- "serde",
- "tracing",
-]
-
-[[package]]
 name = "bevy_picking"
 version = "0.18.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -6824,8 +6802,6 @@ dependencies = [
  "bevy-tokio-tasks",
  "bevy_common_assets",
  "bevy_egui",
- "bevy_pbr_atmosphere_planet",
- "bevy_pbr_clouds_planet",
  "chrono",
  "clap",
  "console_error_panic_hook",
@@ -6846,9 +6822,33 @@ dependencies = [
  "tracing-subscriber",
  "tracing-wasm",
  "urlencoding",
+ "veldera_atmosphere",
+ "veldera_clouds",
  "veldera_constants",
  "wasm-bindgen",
  "web-time",
+]
+
+[[package]]
+name = "veldera_atmosphere"
+version = "0.1.0"
+dependencies = [
+ "bevy",
+ "glam",
+ "serde",
+ "tracing",
+ "veldera_constants",
+]
+
+[[package]]
+name = "veldera_clouds"
+version = "0.1.0"
+dependencies = [
+ "bevy",
+ "glam",
+ "serde",
+ "tracing",
+ "veldera_atmosphere",
 ]
 
 [[package]]

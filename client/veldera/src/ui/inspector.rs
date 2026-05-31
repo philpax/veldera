@@ -5,11 +5,11 @@
 //! `t_start`, `t_end`, world-snap sample indices, integrated
 //! transmittance, etc. The values stream back from the GPU via Bevy's
 //! [`bevy::render::gpu_readback::GpuReadbackPlugin`]; see
-//! `bevy_pbr_clouds_planet::inspect` for the GPU side.
+//! `veldera_clouds::inspect` for the GPU side.
 
 use bevy::{ecs::system::SystemParam, prelude::*, window::PrimaryWindow};
 use bevy_egui::{egui, input::EguiWantsInput};
-use bevy_pbr_clouds_planet::inspect::{CloudInspectCursor, CloudInspectLatest};
+use veldera_clouds::inspect::{CloudInspectCursor, CloudInspectLatest};
 
 /// Resources for the inspector tab.
 #[derive(SystemParam)]
