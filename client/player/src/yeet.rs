@@ -5,7 +5,7 @@
 //! the player along the look direction. It owns the visual arm too only at
 //! arm's length — each frame it publishes an [`ArmPointTarget`] describing how
 //! far and where the arm should point, and the pose system in
-//! [`crate::player::body::arm`] responds to it without knowing this mechanic
+//! [`crate::body::arm`] responds to it without knowing this mechanic
 //! exists.
 //!
 //! Holding the Point action builds up `charge_seconds`, which maps linearly to
@@ -34,11 +34,10 @@ use serde::Deserialize;
 
 use veldera_game_input::CameraAction;
 
+use veldera_geo::{coords::RadialFrame, floating_origin::WorldPosition};
+
 use super::body::ArmPointTarget;
-use crate::{
-    player::{FpsController, LogicalPlayer, RagdollState},
-    world::{coords::RadialFrame, floating_origin::WorldPosition},
-};
+use crate::{FpsController, LogicalPlayer, RagdollState};
 
 // ----------------------------------------------------------------------------
 // Tuning

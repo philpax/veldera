@@ -9,7 +9,7 @@
 //!
 //! This module is a pure *responder*: it knows nothing about input, charge, or
 //! why the arm is pointing. It reads an [`ArmPointTarget`] — established each
-//! frame by whatever owns the gesture (currently [`crate::player::yeet`]) — and
+//! frame by whatever owns the gesture (currently [`crate::yeet`]) — and
 //! poses the cached right-arm rig accordingly. That keeps the visual pose
 //! decoupled from the launch mechanic: the mechanic can be removed without
 //! touching this file.
@@ -27,7 +27,7 @@ use super::{
 };
 
 /// A request for the right-arm point pose, established each frame by whatever
-/// drives the gesture (currently [`crate::player::yeet`]) and consumed by
+/// drives the gesture (currently [`crate::yeet`]) and consumed by
 /// [`apply_arm_pointing`]. The arm system reads only this — it has no knowledge
 /// of *why* it is pointing.
 ///

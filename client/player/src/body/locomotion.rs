@@ -13,11 +13,10 @@ use avian3d::prelude::*;
 use bevy::{animation::graph::AnimationNodeIndex, prelude::*, reflect::TypePath};
 use serde::Deserialize;
 
+use veldera_geo::{coords::RadialFrame, floating_origin::WorldPosition};
+
 use super::{BodyAssets, BodyVisual};
-use crate::{
-    player::{FpsController, FpsPlayerConfig, LogicalPlayer},
-    world::{coords::RadialFrame, floating_origin::WorldPosition},
-};
+use crate::{FpsController, FpsPlayerConfig, LogicalPlayer};
 
 /// Hot-reloadable locomotion-blend tuning, loaded from
 /// `assets/config/game/player/body/locomotion.toml`. All speeds are metres/second.

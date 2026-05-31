@@ -1,0 +1,37 @@
+[package]
+name = "veldera_game_player"
+version = "0.1.0"
+edition.workspace = true
+repository.workspace = true
+license.workspace = true
+description = "First-person player for the Veldera client: character controller, animated body avatar, ragdoll rig, and the charged-yeet launch mechanic"
+
+[dependencies]
+avian3d = "0.6"
+bevy = { version = "0.18.0", default-features = false, features = [
+    "bevy_animation",
+    "bevy_asset",
+    "bevy_core_pipeline",
+    "bevy_gltf",
+    "bevy_mesh",
+    "bevy_pbr",
+    "bevy_render",
+    "bevy_scene",
+    "gltf_animation",
+] }
+glam = "0.30"
+leafwing-input-manager = "0.20"
+rand = "0.9"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tracing = "0.1"
+veldera_camera = { path = "../../crates/camera" }
+veldera_config = { path = "../../crates/config" }
+veldera_constants = { path = "../../crates/constants" }
+veldera_geo = { path = "../../crates/geo" }
+veldera_physics = { path = "../../crates/physics" }
+veldera_game_camera_state = { path = "../camera_state" }
+veldera_game_input = { path = "../input" }
+
+[lints]
+workspace = true

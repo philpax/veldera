@@ -39,9 +39,10 @@ mod input;
 use avian3d::prelude::*;
 use bevy::prelude::*;
 
+use veldera_game_player::controller as fps;
+
 use crate::{
     config,
-    player::controller as fps,
     world::{
         floating_origin::{FloatingOriginCamera, WorldPosition},
         geo::TeleportAnimation,
@@ -109,19 +110,28 @@ fn is_fps_controller_mode(state: Res<CameraModeState>) -> bool {
 }
 
 /// Translate the current camera mode and teleport state into the engine's
-/// [`FreelookCameraControl`] so the freelook camera knows when to act.
+/// [`FreelookCameraControl`] and the player's [`fps::FpsControllerSuppressed`],
+/// so neither rig fights a scripted teleport and only the active mode drives
+/// the view. This is the gameplay glue that keeps both the engine freelook
+/// camera and the player crate ignorant of camera modes and teleports.
 fn sync_freelook_control(
     mode: Res<CameraModeState>,
     teleport: Res<TeleportAnimation>,
     mut control: ResMut<FreelookCameraControl>,
+    mut fps_suppressed: ResMut<fps::FpsControllerSuppressed>,
 ) {
+    let teleporting = teleport.is_active();
     // Freelook input is suppressed during a teleport animation so it doesn't
     // fight the scripted camera path.
-    control.input_active = mode.is_flycam() && !teleport.is_active();
+    control.input_active = mode.is_flycam() && !teleporting;
     // The freelook camera owns the view in every mode except first-person; in
     // FollowEntity mode the follow rig drives the camera position and the
     // freelook origin sync still applies.
     control.view_active = !mode.is_fps_controller();
+    // Likewise, suppress the FPS controller while teleporting so it doesn't
+    // fight the scripted player respawn (replaces the controller's former
+    // direct read of `TeleportAnimation`).
+    fps_suppressed.0 = teleporting;
 }
 
 // ============================================================================

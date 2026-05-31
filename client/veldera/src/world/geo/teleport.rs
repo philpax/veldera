@@ -12,12 +12,13 @@ use bevy::{audio::Volume, prelude::*, reflect::TypePath};
 use glam::DVec3;
 use serde::Deserialize;
 
+use veldera_game_player::{
+    FpsPlayerConfig, LogicalPlayer, RenderPlayer, direction_to_yaw_pitch, spawn_fps_player,
+};
+
 use crate::{
     async_runtime::TaskSpawner,
     camera::{CameraConfig, CameraMode, CameraModeState, FlightCamera, TeleportAnimationMode},
-    player::{
-        FpsPlayerConfig, LogicalPlayer, RenderPlayer, direction_to_yaw_pitch, spawn_fps_player,
-    },
     world::{
         coords::{RadialFrame, lat_lon_to_ecef, slerp_dvec3, smootherstep},
         floating_origin::FloatingOriginCamera,

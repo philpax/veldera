@@ -1,12 +1,12 @@
 //! Body ragdoll: kinematic torso, dynamic limbs.
 //!
-//! While [`RagdollState::Ragdolling`](crate::player::controller::RagdollState)
+//! While [`RagdollState::Ragdolling`](crate::controller::RagdollState)
 //! is active, the torso is held upright and pinned to the controller
 //! while the arms and legs hang and flail under physics.
 //!
 //! The design deliberately decouples the *camera* from the physics.
 //! The camera stays on its normal first-person eye path (see
-//! [`fps_controller_render`](crate::player::controller)) — look behaviour is
+//! [`fps_controller_render`](crate::controller)) — look behaviour is
 //! unchanged during ragdoll. Only the body *model* ragdolls, and it
 //! does so by pinning the torso to the controller and hanging the limbs
 //! off it:
@@ -70,16 +70,14 @@ use avian3d::prelude::*;
 use bevy::{prelude::*, reflect::TypePath};
 use serde::Deserialize;
 
+use veldera_geo::{
+    coords::RadialFrame,
+    floating_origin::{FloatingOriginCamera, WorldPosition},
+};
 use veldera_physics::GameLayer;
 
 use super::{BodyVisual, bones::bone_stem};
-use crate::{
-    player::{FpsController, LogicalPlayer, RagdollState},
-    world::{
-        coords::RadialFrame,
-        floating_origin::{FloatingOriginCamera, WorldPosition},
-    },
-};
+use crate::{FpsController, LogicalPlayer, RagdollState};
 
 /// Hot-reloadable tuning for the skeletal ragdoll, loaded from
 /// `assets/config/game/player/body/ragdoll.toml`. The bone topology
@@ -91,7 +89,7 @@ use crate::{
 #[serde(default, deny_unknown_fields)]
 pub struct RagdollConfig {
     /// Master switch for the skeletal rig. `false` → the state machine still
-    /// runs (if [`FpsConfig::enable_ragdoll`](crate::player::controller::FpsConfig) is
+    /// runs (if [`FpsConfig::enable_ragdoll`](crate::controller::FpsConfig) is
     /// on) but no rig is built; the body keeps animating normally through the
     /// tumble. `true` → on ragdoll entry, spawn a kinematic torso + dynamic
     /// limb capsules and drive the skinned mesh from physics until recovery.

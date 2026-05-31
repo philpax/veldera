@@ -6,7 +6,7 @@
 use bevy::{camera::visibility::NoFrustumCulling, prelude::*};
 
 use super::{BodyConfig, BodyVisual, CharacterMetrics};
-use crate::player::{FpsController, FpsPlayerConfig, LogicalPlayer};
+use crate::{FpsController, FpsPlayerConfig, LogicalPlayer};
 
 // ============================================================================
 // Head bone scale-to-zero

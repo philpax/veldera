@@ -11,34 +11,44 @@ use glam::DVec3;
 use leafwing_input_manager::prelude::*;
 use serde::Deserialize;
 
+use veldera_camera::{CameraConfig, FlightCamera};
+use veldera_config::ConfigPlugin;
+use veldera_game_camera_state::CameraModeState;
 use veldera_game_input::CameraAction;
-use veldera_physics::GameLayer;
-
-use crate::{
-    config,
-    physics::ManualGravity,
-    world::{
-        coords::RadialFrame,
-        floating_origin::{FloatingOrigin, FloatingOriginCamera, WorldPosition},
-        geo::TeleportAnimation,
-    },
+use veldera_geo::{
+    coords::RadialFrame,
+    floating_origin::{FloatingOrigin, FloatingOriginCamera, WorldPosition},
 };
-
-use crate::camera::{CameraConfig, CameraModeState, FlightCamera};
+use veldera_physics::{GameLayer, ManualGravity};
 
 // ============================================================================
 // Plugin
 // ============================================================================
 
-/// Plugin for first-person controller camera mode.
-pub(super) struct FpsControllerPlugin;
+/// Plugin for the first-person controller.
+///
+/// The host supplies the [`FpsConfig`] path and drives
+/// [`FpsControllerSuppressed`] (e.g. from a teleport animation) so the crate
+/// stays free of any particular asset layout or other gameplay system.
+pub struct FpsControllerPlugin {
+    /// Path to the [`FpsConfig`] TOML.
+    pub config_path: &'static str,
+}
+
+impl FpsControllerPlugin {
+    /// Create the plugin, loading its config from `config_path`.
+    pub const fn new(config_path: &'static str) -> Self {
+        Self { config_path }
+    }
+}
 
 impl Plugin for FpsControllerPlugin {
     fn build(&self, app: &mut App) {
-        app.add_plugins(config::ConfigPlugin::<FpsConfig>::new(config::paths::FPS))
+        app.add_plugins(ConfigPlugin::<FpsConfig>::new(self.config_path))
             .init_resource::<DidFixedTimestepRunThisFrame>()
             .init_resource::<PreservedFpsState>()
             .init_resource::<FpsPlayerConfig>()
+            .init_resource::<FpsControllerSuppressed>()
             .add_systems(PreUpdate, clear_fixed_timestep_flag)
             .add_systems(Update, sync_fps_player_geometry)
             .add_systems(
@@ -50,18 +60,18 @@ impl Plugin for FpsControllerPlugin {
                     fps_controller_sync_position,
                 )
                     .chain()
-                    .run_if(is_fps_mode.and(teleport_animation_not_active)),
+                    .run_if(is_fps_mode.and(not_suppressed)),
             )
             .add_systems(
                 RunFixedMainLoop,
                 (
                     (fps_controller_input, fps_controller_look)
                         .chain()
-                        .run_if(teleport_animation_not_active)
+                        .run_if(not_suppressed)
                         .in_set(RunFixedMainLoopSystems::BeforeFixedMainLoop),
                     (
                         clear_input.run_if(did_fixed_timestep_run_this_frame),
-                        fps_controller_render.run_if(teleport_animation_not_active),
+                        fps_controller_render.run_if(not_suppressed),
                         sync_floating_origin_fps,
                     )
                         .chain()
@@ -72,13 +82,21 @@ impl Plugin for FpsControllerPlugin {
     }
 }
 
+/// Host-driven flag that suppresses the FPS controller for a frame.
+///
+/// The first-person client sets this while a teleport animation is playing so
+/// the controller doesn't fight the scripted camera/player path; the crate
+/// itself has no notion of teleports.
+#[derive(Resource, Default)]
+pub struct FpsControllerSuppressed(pub bool);
+
 // ============================================================================
 // Run conditions
 // ============================================================================
 
-/// Run condition: teleport animation is not active.
-fn teleport_animation_not_active(anim: Res<TeleportAnimation>) -> bool {
-    !anim.is_active()
+/// Run condition: the controller is not suppressed by the host.
+fn not_suppressed(suppressed: Res<FpsControllerSuppressed>) -> bool {
+    !suppressed.0
 }
 
 /// Run condition: FPS controller mode is active.
@@ -339,7 +357,7 @@ impl FpsController {
 
 /// Preserved FPS controller state for restoration after FollowEntity mode.
 #[derive(Resource, Default)]
-pub(crate) struct PreservedFpsState {
+pub struct PreservedFpsState {
     /// The yaw angle when entering FollowEntity.
     pub yaw: f32,
     /// The pitch angle when entering FollowEntity.
@@ -440,7 +458,7 @@ pub(super) fn yaw_pitch_to_direction(yaw: f32, pitch: f32, ecef_pos: DVec3) -> V
 }
 
 /// Set up FPS mode from Flycam: spawn logical player at camera position.
-pub(crate) fn setup_from_flycam(
+pub fn setup_from_flycam(
     commands: &mut Commands,
     config: &FpsPlayerConfig,
     camera_entity: Entity,
@@ -462,7 +480,7 @@ pub(crate) fn setup_from_flycam(
 }
 
 /// Set up FPS mode from FollowEntity: spawn logical player at camera position with preserved angles.
-pub(crate) fn setup_from_follow_entity(
+pub fn setup_from_follow_entity(
     commands: &mut Commands,
     config: &FpsPlayerConfig,
     preserved_fps: &mut PreservedFpsState,
@@ -484,7 +502,7 @@ pub(crate) fn setup_from_follow_entity(
 
 /// Clean up FPS mode: despawn logical player, restore FlightCamera.
 #[allow(clippy::type_complexity)]
-pub(crate) fn cleanup(
+pub fn cleanup(
     commands: &mut Commands,
     camera_entity: Entity,
     logical_player_query: &Query<
@@ -515,7 +533,7 @@ pub(crate) fn cleanup(
 
 /// Preserve FPS state and despawn the logical player.
 #[allow(clippy::type_complexity)]
-pub(crate) fn preserve_and_cleanup(
+pub fn preserve_and_cleanup(
     commands: &mut Commands,
     preserved_fps: &mut PreservedFpsState,
     logical_player_query: &Query<
@@ -630,7 +648,7 @@ fn fps_controller_prepare(
     time: Res<Time<Fixed>>,
     player_config: Res<FpsPlayerConfig>,
     fps_config: Res<FpsConfig>,
-    physics_config: Res<crate::physics::PhysicsConfig>,
+    physics_config: Res<veldera_physics::PhysicsConfig>,
     camera_query: Query<&FloatingOriginCamera>,
     mut query: Query<
         (

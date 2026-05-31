@@ -8,7 +8,6 @@ mod camera;
 mod config;
 mod launch_params;
 mod physics;
-mod player;
 mod rendering;
 mod ui;
 mod vehicle;
@@ -41,6 +40,7 @@ use ui::DebugUiPlugin;
 use veldera_clouds::CloudLayers;
 use veldera_engine::{assets, profiler};
 use veldera_game_input::InputPlugin;
+use veldera_game_player::{PlayerConfigPaths, PlayerPlugin};
 use world::{
     coords::lat_lon_to_ecef,
     floating_origin::{FloatingOriginCamera, FloatingOriginPlugin},
@@ -61,7 +61,13 @@ impl Plugin for AppPlugin {
             FloatingOriginPlugin,
             InputPlugin,
             CameraControllerPlugin,
-            player::PlayerPlugin,
+            PlayerPlugin::new(PlayerConfigPaths {
+                fps: config::paths::FPS,
+                body: config::paths::BODY,
+                locomotion: config::paths::LOCOMOTION,
+                ragdoll: config::paths::RAGDOLL,
+                yeet: config::paths::YEET,
+            }),
             DataLoaderPlugin,
             GeoPlugin,
             LodPlugin::new(config::paths::LOD),

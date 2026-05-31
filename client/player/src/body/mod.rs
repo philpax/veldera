@@ -16,7 +16,7 @@
 //! - [`locomotion`] — per-tick clip weight computation + blend over the
 //!   `AnimationPlayer`. Splits locomotion across two Mixamo packs.
 //! - [`arm`] — right-click "raise arm to look direction" pose; the
-//!   yeet-on-release launch lives in [`crate::player::yeet`].
+//!   yeet-on-release launch lives in [`crate::yeet`].
 //! - This file — plugin assembly, asset loading, scene spawn/despawn,
 //!   `AnimationPlayer` install, per-frame `WorldPosition` sync, and the
 //!   eye-offset query the FPS camera consumes.
@@ -44,12 +44,11 @@ use serde::Deserialize;
 
 use bones::{LOWER_BODY_MASK, UPPER_BODY_MASK};
 
-use crate::{
-    camera::CameraModeState,
-    config,
-    player::{FpsController, FpsPlayerConfig, LogicalPlayer},
-    world::{coords::RadialFrame, floating_origin::WorldPosition},
-};
+use veldera_config::{Config, ConfigPlugin};
+use veldera_game_camera_state::CameraModeState;
+use veldera_geo::{coords::RadialFrame, floating_origin::WorldPosition};
+
+use crate::{FpsController, FpsPlayerConfig, LogicalPlayer};
 
 // ============================================================================
 // Public constants
@@ -208,15 +207,28 @@ pub struct BodyVisual {
     pub ragdoll_graph: Option<ragdoll::RagdollGraph>,
 }
 
-pub struct BodyPlugin;
+/// Plugin for the animated body avatar, ragdoll rig, and yeet mechanic.
+///
+/// The host supplies the config-file paths so the crate stays free of any
+/// particular asset layout.
+pub struct BodyPlugin {
+    /// Path to the [`BodyConfig`] TOML.
+    pub body_path: &'static str,
+    /// Path to the [`LocomotionConfig`](locomotion::LocomotionConfig) TOML.
+    pub locomotion_path: &'static str,
+    /// Path to the [`RagdollConfig`](ragdoll::RagdollConfig) TOML.
+    pub ragdoll_path: &'static str,
+    /// Path to the [`YeetConfig`](super::yeet::YeetConfig) TOML.
+    pub yeet_path: &'static str,
+}
 
 impl Plugin for BodyPlugin {
     fn build(&self, app: &mut App) {
         app.add_plugins((
-            config::ConfigPlugin::<ragdoll::RagdollConfig>::new(config::paths::RAGDOLL),
-            config::ConfigPlugin::<locomotion::LocomotionConfig>::new(config::paths::LOCOMOTION),
-            config::ConfigPlugin::<super::yeet::YeetConfig>::new(config::paths::YEET),
-            config::ConfigPlugin::<BodyConfig>::new(config::paths::BODY),
+            ConfigPlugin::<ragdoll::RagdollConfig>::new(self.ragdoll_path),
+            ConfigPlugin::<locomotion::LocomotionConfig>::new(self.locomotion_path),
+            ConfigPlugin::<super::yeet::YeetConfig>::new(self.yeet_path),
+            ConfigPlugin::<BodyConfig>::new(self.body_path),
         ))
         // Register the procedural charge-rumble audio source.
         .add_audio_source::<super::yeet::RumbleAudio>()
@@ -360,7 +372,7 @@ pub struct EyeOffset {
 fn request_body_asset(
     mut requested: Local<bool>,
     asset_server: Res<AssetServer>,
-    body_config: config::Config<BodyConfig>,
+    body_config: Config<BodyConfig>,
     mut assets: ResMut<BodyAssets>,
 ) {
     if *requested {

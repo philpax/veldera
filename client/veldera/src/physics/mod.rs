@@ -14,8 +14,8 @@ use bevy::prelude::*;
 use crate::config;
 
 pub use veldera_physics::{
-    DespawnOutsidePhysicsRange, ManualGravity, PhysicsConfig, PhysicsStreamingConfig,
-    is_physics_debug_enabled, toggle_physics_debug,
+    DespawnOutsidePhysicsRange, PhysicsConfig, PhysicsStreamingConfig, is_physics_debug_enabled,
+    toggle_physics_debug,
 };
 
 /// Plugin wiring the engine physics integration into this client and layering
