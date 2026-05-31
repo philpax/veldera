@@ -6,18 +6,15 @@ use bevy::prelude::*;
 use glam::DVec3;
 use veldera_input::{LookIntent, MovementIntent, ZoomIntent};
 
-use crate::world::{
-    floating_origin::{FloatingOrigin, FloatingOriginCamera},
-    geo::TeleportAnimation,
-};
+use veldera_geo::floating_origin::{FloatingOrigin, FloatingOriginCamera};
 
-use super::{CameraConfig, CameraModeState, FlightCamera};
+use crate::{CameraConfig, FlightCamera, FreelookCameraSet, input_active, view_active};
 
 // ============================================================================
 // Plugin
 // ============================================================================
 
-/// Plugin for flycam camera mode.
+/// Plugin for the freelook flycam movement systems.
 pub(super) struct FlycamPlugin;
 
 impl Plugin for FlycamPlugin {
@@ -25,35 +22,18 @@ impl Plugin for FlycamPlugin {
         app.add_systems(
             Update,
             (
-                adjust_speed_with_scroll.run_if(is_flycam_mode),
-                camera_look.run_if(is_flycam_mode.and(teleport_animation_not_active)),
-                camera_movement.run_if(is_flycam_mode.and(teleport_animation_not_active)),
+                adjust_speed_with_scroll.run_if(input_active),
+                camera_look.run_if(input_active),
+                camera_movement.run_if(input_active),
                 // Sync floating origin AFTER camera systems update their position.
-                // This also runs in FollowEntity mode since follow.rs updates the camera position.
-                sync_floating_origin.run_if(is_flycam_mode.or(is_follow_entity_mode)),
+                // `view_active` also covers FollowEntity mode, where the host's
+                // follow rig updates the camera position.
+                sync_floating_origin.run_if(view_active),
             )
-                .chain(),
+                .chain()
+                .in_set(FreelookCameraSet),
         );
     }
-}
-
-// ============================================================================
-// Run conditions
-// ============================================================================
-
-/// Run condition: teleport animation is not active.
-fn teleport_animation_not_active(anim: Res<TeleportAnimation>) -> bool {
-    !anim.is_active()
-}
-
-/// Run condition: flycam mode is active.
-fn is_flycam_mode(state: Res<CameraModeState>) -> bool {
-    state.is_flycam()
-}
-
-/// Run condition: FollowEntity mode is active.
-fn is_follow_entity_mode(state: Res<CameraModeState>) -> bool {
-    state.is_follow_entity()
 }
 
 // ============================================================================

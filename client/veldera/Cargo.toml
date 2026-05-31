@@ -56,6 +56,7 @@ rocktree-decode = { path = "../../rocktree/rocktree-decode" }
 veldera_config = { path = "../../crates/config" }
 veldera_constants = { path = "../../crates/constants" }
 veldera_async = { path = "../../crates/async" }
+veldera_camera = { path = "../../crates/camera" }
 veldera_geo = { path = "../../crates/geo" }
 veldera_input = { path = "../../crates/input" }
 veldera_physics = { path = "../../crates/physics" }

@@ -6819,6 +6819,7 @@ dependencies = [
  "tracing-wasm",
  "veldera_async",
  "veldera_atmosphere",
+ "veldera_camera",
  "veldera_clouds",
  "veldera_config",
  "veldera_constants",
@@ -6850,6 +6851,19 @@ dependencies = [
  "serde",
  "tracing",
  "veldera_constants",
+]
+
+[[package]]
+name = "veldera_camera"
+version = "0.1.0"
+dependencies = [
+ "bevy",
+ "glam",
+ "serde",
+ "veldera_config",
+ "veldera_constants",
+ "veldera_geo",
+ "veldera_input",
 ]
 
 [[package]]
