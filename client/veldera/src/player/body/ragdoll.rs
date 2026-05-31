@@ -70,10 +70,11 @@ use avian3d::prelude::*;
 use bevy::{prelude::*, reflect::TypePath};
 use serde::Deserialize;
 
+use veldera_physics::GameLayer;
+
 use super::{BodyVisual, bones::bone_stem};
 use crate::{
     player::{FpsController, LogicalPlayer, RagdollState},
-    vehicle::GameLayer,
     world::{
         coords::RadialFrame,
         floating_origin::{FloatingOriginCamera, WorldPosition},

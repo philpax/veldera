@@ -11,6 +11,8 @@ use glam::DVec3;
 use leafwing_input_manager::prelude::*;
 use serde::Deserialize;
 
+use veldera_physics::GameLayer;
+
 use crate::{
     config,
     input::CameraAction,
@@ -385,13 +387,7 @@ pub fn spawn_fps_player(
             // initial velocity and flings them chaotically. Filter
             // only for things the player should actually push
             // through (terrain + vehicles).
-            CollisionLayers::new(
-                [crate::vehicle::GameLayer::Ground],
-                [
-                    crate::vehicle::GameLayer::Ground,
-                    crate::vehicle::GameLayer::Vehicle,
-                ],
-            ),
+            CollisionLayers::new([GameLayer::Ground], [GameLayer::Ground, GameLayer::Vehicle]),
             FpsController {
                 yaw,
                 pitch,
@@ -840,10 +836,8 @@ fn fps_controller_slide(
         // ragdoll entry), catching the capsule on them so it hangs in
         // the air and its path is deflected. The bones must never be
         // obstacles to the controller.
-        let filter = SpatialQueryFilter::from_excluded_entities([entity]).with_mask([
-            crate::vehicle::GameLayer::Ground,
-            crate::vehicle::GameLayer::Vehicle,
-        ]);
+        let filter = SpatialQueryFilter::from_excluded_entities([entity])
+            .with_mask([GameLayer::Ground, GameLayer::Vehicle]);
         let mut ground_hit = false;
         let traction_cutoff = controller.traction_normal_cutoff;
 
