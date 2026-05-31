@@ -3,18 +3,18 @@
   entities: {
     1: (
       components: {
-        "veldera::vehicle::components::Vehicle": (
+        "veldera_game_vehicle::components::Vehicle": (
           name: "Swiftshadow",
           description: "Fast and agile",
           scale: 2,
         ),
-        "veldera::vehicle::components::VehicleHoverConfig": (
+        "veldera_game_vehicle::components::VehicleHoverConfig": (
           target_altitude: 1.75,
           spring: 60000.0,
           damper: 18000.0,
           max_force: 200000.0,
         ),
-        "veldera::vehicle::components::VehicleMovementConfig": (
+        "veldera_game_vehicle::components::VehicleMovementConfig": (
           forward_force: 100000.0,
           backward_force: 40000.0,
           forward_offset: (0.0, 1.2),
@@ -30,20 +30,20 @@
           upright_damper: 8000.0,
           air_control_authority: 0.4,
         ),
-        "veldera::vehicle::components::VehicleDragConfig": (
+        "veldera_game_vehicle::components::VehicleDragConfig": (
           forward_drag: 0.66,
           lateral_drag: 40.0,
           angular_drag: 0.6,
           angular_delay_secs: 0.2,
         ),
-        "veldera::vehicle::components::VehiclePhysicsConfig": (
+        "veldera_game_vehicle::components::VehiclePhysicsConfig": (
           density: 10.0,
         ),
-        "veldera::vehicle::components::VehicleModel": (
+        "veldera_game_vehicle::components::VehicleModel": (
           path: "game/vehicles/craft_racer.glb#Scene0",
           scale: 1.5,
         ),
-        "veldera::camera::follow::FollowCameraConfig": (
+        "veldera_game_camera::follow::FollowCameraConfig": (
           camera_offset: (0.0, 4.5, 20.0),
           look_target_offset: (0.0, 4.5, 12.0),
         ),
