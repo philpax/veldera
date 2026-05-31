@@ -84,5 +84,18 @@ After 1–4, the graph is the DAG above. Remaining engine-facade edges
 - **C9** — thin `client/veldera` binary: `main`, `launch_params`, wiring; delete
   the emptied facade modules.
 
+## Follow-ups (after the split, before deleting this file)
+
+- **Workspace deps.** Add `[workspace.dependencies]` to the root `Cargo.toml`
+  (bevy + its feature sets, avian3d, glam, serde, leafwing, bevy_egui, rand,
+  tracing, the `veldera_*` path crates, …) and convert every member Cargo.toml
+  to `dep = { workspace = true }` (features per-crate via
+  `{ workspace = true, features = [...] }`). One mechanical sweep once all crates
+  exist.
+- **Assets split.** Move the whole `assets/` tree (not just `config/`) into
+  `assets/engine/` and `assets/game/`, mirroring the config split — engine-owned
+  assets (shaders are embedded already; sounds/models the engine needs) vs.
+  gameplay assets. Update asset paths accordingly; keep the single watched root.
+
 Delete this file when the split is complete (and `engine-split.md` once the
 reference client lands).
