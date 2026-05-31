@@ -13,6 +13,16 @@ gameplay starts as a near-total strongly-connected component, so this is mostly
 - Gameplay crates depend *down* the gameplay stack and on the engine crates;
   never up. The binary depends on everything.
 
+## Layout (decided)
+
+Gameplay crates stay flat under `client/` (`client/input`, `client/camera_state`,
+`client/player`, …) alongside the `client/veldera` binary — package names
+`veldera_game_*`. The freelook reference viewer goes at top-level `reference/`
+(a peer of `crates/`, `extras/`, `client/`), not under `client/`. (Nesting all
+client crates under `client/veldera/` was considered but rejected: relocating
+the binary + its `assets/` tree carries runtime risk for little gain at the
+current one-game-plus-viewer scale.)
+
 ## Target gameplay layering (low → high)
 
 ```
@@ -54,8 +64,15 @@ After 1–4, the graph is the DAG above. Remaining engine-facade edges
 - **C1** — GameLayer canonicalization (cycle 1). Trivial, unlocks player/vehicle.
 - **C2** — `client_input` (leaf): `input.rs` bindings + focus.
 - **C3** — `client_camera_state`: the camera-mode data types (cycle 4, part 1).
-- **C4** — `client_player`: controller/body/ragdoll/yeet; add
-  `FpsControllerSuppressed` (cycle 2, player side).
+- **C4** — `client_player` (`veldera_game_player`): controller/body/ragdoll/
+  yeet/locomotion/head/arm/bones (~4,200 LoC). Two inversions + a path param:
+  (a) add an `FpsControllerSuppressed` resource the controller systems gate on
+  instead of reading `TeleportAnimation` (cycle 2, player side); (b) the player
+  plugins take their config paths (FPS/BODY/RAGDOLL/LOCOMOTION/YEET) as
+  constructor params, supplied by the binary, since `config::paths` is client
+  policy. Engine deps: veldera_camera (CameraConfig/FlightCamera),
+  veldera_game_camera_state (CameraModeState), veldera_physics (ManualGravity/
+  GameLayer), veldera_geo, veldera_config, veldera_constants, veldera_game_input.
 - **C5** — `client_teleport`: `world/geo`; set `FpsControllerSuppressed` (cycle 2
   done).
 - **C6** — `client_camera`: transition machine + follow + camera input (cycle 4,
