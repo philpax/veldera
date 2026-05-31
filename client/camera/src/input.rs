@@ -10,8 +10,8 @@ use bevy::{
 use bevy_egui::EguiContexts;
 use leafwing_input_manager::prelude::*;
 
-use crate::world::geo::TeleportAnimation;
 use veldera_game_input::{CameraAction, set_cursor_grab};
+use veldera_game_teleport::TeleportAnimation;
 
 use super::{CameraMode, CameraModeState, CameraModeTransitions};
 

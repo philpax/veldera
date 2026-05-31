@@ -40,14 +40,8 @@ use avian3d::prelude::*;
 use bevy::prelude::*;
 
 use veldera_game_player::controller as fps;
-
-use crate::{
-    config,
-    world::{
-        floating_origin::{FloatingOriginCamera, WorldPosition},
-        geo::TeleportAnimation,
-    },
-};
+use veldera_game_teleport::TeleportAnimation;
+use veldera_geo::floating_origin::{FloatingOriginCamera, WorldPosition};
 
 pub use follow::{FollowCameraConfig, FollowEntityTarget, FollowedEntity};
 pub use veldera_camera::{
@@ -74,12 +68,23 @@ pub use veldera_game_camera_state::{CameraMode, CameraModeState, CameraModeTrans
 /// Plugin for camera controls and mode management.
 ///
 /// Adds the engine [`FreelookCameraPlugin`] and layers the mode state machine,
-/// follow rig, and camera input handling on top.
-pub struct CameraControllerPlugin;
+/// follow rig, and camera input handling on top. The host supplies the
+/// [`CameraConfig`] path for the underlying freelook camera.
+pub struct CameraControllerPlugin {
+    /// Path to the [`CameraConfig`] TOML (forwarded to [`FreelookCameraPlugin`]).
+    pub config_path: &'static str,
+}
+
+impl CameraControllerPlugin {
+    /// Create the plugin, loading the freelook camera config from `config_path`.
+    pub const fn new(config_path: &'static str) -> Self {
+        Self { config_path }
+    }
+}
 
 impl Plugin for CameraControllerPlugin {
     fn build(&self, app: &mut App) {
-        app.add_plugins(FreelookCameraPlugin::new(config::paths::CAMERA))
+        app.add_plugins(FreelookCameraPlugin::new(self.config_path))
             .register_type::<follow::FollowCameraConfig>()
             .init_resource::<CameraModeState>()
             .init_resource::<CameraModeTransitions>()

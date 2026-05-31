@@ -13,12 +13,11 @@ use serde::Deserialize;
 
 use veldera_game_input::CameraAction;
 
-use crate::{
-    camera::CameraModeState,
-    world::{
-        floating_origin::{FloatingOriginCamera, WorldPosition},
-        lod::LodState,
-    },
+use veldera_game_camera_state::CameraModeState;
+
+use crate::world::{
+    floating_origin::{FloatingOriginCamera, WorldPosition},
+    lod::LodState,
 };
 
 use super::DespawnOutsidePhysicsRange;

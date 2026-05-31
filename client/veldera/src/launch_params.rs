@@ -8,10 +8,9 @@ use std::fmt;
 use bevy::{prelude::*, reflect::TypePath};
 use serde::Deserialize;
 
-use crate::{
-    camera::CameraMode,
-    world::time_of_day::{SimpleDate, local_to_utc, seconds_to_hms},
-};
+use veldera_game_camera_state::CameraMode;
+
+use crate::world::time_of_day::{SimpleDate, local_to_utc, seconds_to_hms};
 
 /// CLI/URL launch overrides. Each spatial field is `None` when the user didn't
 /// specify it, in which case it falls back to [`LaunchConfig`] during

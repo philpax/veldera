@@ -4,7 +4,7 @@
 
 use bevy::prelude::*;
 
-use crate::world::{
+use veldera_geo::{
     coords::RadialFrame,
     floating_origin::{FloatingOriginCamera, WorldPosition},
 };

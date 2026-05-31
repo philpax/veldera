@@ -31,10 +31,10 @@ pub use components::{
 };
 use veldera_physics::GameLayer;
 
+use veldera_game_camera::{CameraModeState, CameraModeTransitions, FlightCamera, FollowedEntity};
 use veldera_game_player::{FpsController, LogicalPlayer};
 
 use crate::{
-    camera::{CameraModeState, CameraModeTransitions, FlightCamera, FollowedEntity},
     physics::DespawnOutsidePhysicsRange,
     ui::VehicleTabOpen,
     world::{

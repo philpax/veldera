@@ -5,15 +5,13 @@
 use bevy::{ecs::system::SystemParam, prelude::*};
 use bevy_egui::egui;
 
+use veldera_game_camera::{
+    CameraConfig, CameraMode, CameraModeState, FlightCamera, FollowCameraConfig,
+    FollowEntityTarget, TeleportAnimationMode,
+};
 use veldera_game_player::{BodyConfig, BodyTuning, CharacterMetrics, FpsPlayerConfig};
 
-use crate::{
-    camera::{
-        CameraConfig, CameraMode, CameraModeState, FlightCamera, FollowCameraConfig,
-        FollowEntityTarget, TeleportAnimationMode,
-    },
-    world::floating_origin::FloatingOriginCamera,
-};
+use crate::world::floating_origin::FloatingOriginCamera;
 
 /// Resources for camera display and control.
 #[derive(SystemParam)]

@@ -15,8 +15,9 @@ use super::{
     core::{self, VehicleFrame, VehiclePhysicsParams, VehicleSimInput, VehicleSimState},
     telemetry::{self, TelemetrySnapshot},
 };
+use veldera_game_camera_state::CameraModeState;
+
 use crate::{
-    camera::CameraModeState,
     ui::VehicleRightRequest,
     world::{
         coords::RadialFrame,

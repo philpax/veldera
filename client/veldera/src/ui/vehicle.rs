@@ -10,12 +10,11 @@ use bevy_egui::egui;
 use egui_extras::{Column, TableBuilder};
 use egui_plot::{Line, Plot, PlotPoints};
 
-use crate::{
-    camera::CameraModeState,
-    vehicle::{
-        Vehicle, VehicleActions, VehicleDefinitions, VehicleDragConfig, VehicleHoverConfig,
-        VehicleInput, VehicleMovementConfig, VehicleState,
-    },
+use veldera_game_camera_state::CameraModeState;
+
+use crate::vehicle::{
+    Vehicle, VehicleActions, VehicleDefinitions, VehicleDragConfig, VehicleHoverConfig,
+    VehicleInput, VehicleMovementConfig, VehicleState,
 };
 
 /// Number of samples to keep in vehicle history.

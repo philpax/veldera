@@ -4,7 +4,6 @@
 //! 3D terrain data, with LOD-based loading and frustum culling.
 
 mod async_runtime;
-mod camera;
 mod config;
 mod launch_params;
 mod physics;
@@ -25,9 +24,6 @@ use bevy::{
     prelude::*,
     render::view::Hdr,
 };
-use camera::{
-    CameraConfig, CameraControllerPlugin, CameraMode, CameraModeTransitions, FlightCamera,
-};
 use launch_params::{LaunchConfig, LaunchParams, ResolvedLaunch};
 use rendering::{
     atmosphere::{
@@ -39,6 +35,9 @@ use rendering::{
 use ui::DebugUiPlugin;
 use veldera_clouds::CloudLayers;
 use veldera_engine::{assets, profiler};
+use veldera_game_camera::{
+    CameraConfig, CameraControllerPlugin, CameraMode, CameraModeTransitions, FlightCamera,
+};
 use veldera_game_input::InputPlugin;
 use veldera_game_player::{PlayerConfigPaths, PlayerPlugin};
 use world::{
@@ -60,7 +59,7 @@ impl Plugin for AppPlugin {
             assets::AssetsPlugin,
             FloatingOriginPlugin,
             InputPlugin,
-            CameraControllerPlugin,
+            CameraControllerPlugin::new(config::paths::CAMERA),
             PlayerPlugin::new(PlayerConfigPaths {
                 fps: config::paths::FPS,
                 body: config::paths::BODY,

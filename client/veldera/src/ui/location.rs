@@ -10,9 +10,10 @@ use bevy::{
 use bevy_egui::egui;
 use glam::DVec3;
 
+use veldera_game_camera::{AltitudeRequest, FlightCamera, HeadingRequest, TranslateRequest};
+
 use crate::{
     async_runtime::TaskSpawner,
-    camera::{AltitudeRequest, FlightCamera, HeadingRequest, TranslateRequest},
     world::{
         coords::ecef_to_lat_lon,
         geo::{
