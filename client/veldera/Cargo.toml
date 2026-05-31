@@ -54,6 +54,7 @@ leafwing-input-manager = "0.20"
 rand = "0.9"
 rocktree = { path = "../../rocktree/rocktree" }
 rocktree-decode = { path = "../../rocktree/rocktree-decode" }
+veldera_config = { path = "../../crates/config" }
 veldera_constants = { path = "../../crates/constants" }
 veldera_geo = { path = "../../crates/geo" }
 # For geocoding API responses and character metric extras parsing.

@@ -6824,6 +6824,7 @@ dependencies = [
  "urlencoding",
  "veldera_atmosphere",
  "veldera_clouds",
+ "veldera_config",
  "veldera_constants",
  "veldera_geo",
  "wasm-bindgen",
@@ -6850,6 +6851,16 @@ dependencies = [
  "serde",
  "tracing",
  "veldera_atmosphere",
+]
+
+[[package]]
+name = "veldera_config"
+version = "0.1.0"
+dependencies = [
+ "bevy",
+ "bevy_common_assets",
+ "serde",
+ "tracing",
 ]
 
 [[package]]
