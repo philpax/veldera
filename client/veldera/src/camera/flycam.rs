@@ -4,14 +4,11 @@
 
 use bevy::prelude::*;
 use glam::DVec3;
-use leafwing_input_manager::prelude::*;
+use veldera_input::{LookIntent, MovementIntent, ZoomIntent};
 
-use crate::{
-    input::CameraAction,
-    world::{
-        floating_origin::{FloatingOrigin, FloatingOriginCamera},
-        geo::TeleportAnimation,
-    },
+use crate::world::{
+    floating_origin::{FloatingOrigin, FloatingOriginCamera},
+    geo::TeleportAnimation,
 };
 
 use super::{CameraConfig, CameraModeState, FlightCamera};
@@ -64,15 +61,8 @@ fn is_follow_entity_mode(state: Res<CameraModeState>) -> bool {
 // ============================================================================
 
 /// Adjust speed with mouse scroll wheel.
-fn adjust_speed_with_scroll(
-    action_query: Query<&ActionState<CameraAction>>,
-    mut config: ResMut<CameraConfig>,
-) {
-    let Ok(action_state) = action_query.single() else {
-        return;
-    };
-
-    let scroll = action_state.clamped_value(&CameraAction::AdjustSpeed);
+fn adjust_speed_with_scroll(zoom: Res<ZoomIntent>, mut config: ResMut<CameraConfig>) {
+    let scroll = zoom.delta;
     if scroll != 0.0 {
         // Adjust speed logarithmically for smooth scaling.
         let factor = 1.1_f32.powf(scroll);
@@ -82,15 +72,11 @@ fn adjust_speed_with_scroll(
 
 /// Handle mouse look rotation.
 fn camera_look(
-    action_query: Query<&ActionState<CameraAction>>,
+    look: Res<LookIntent>,
     config: Res<CameraConfig>,
     mut query: Query<(&FloatingOriginCamera, &mut Transform, &mut FlightCamera)>,
 ) {
-    let Ok(action_state) = action_query.single() else {
-        return;
-    };
-
-    let delta = action_state.axis_pair(&CameraAction::Look);
+    let delta = look.delta;
     if delta == Vec2::ZERO {
         return;
     }
@@ -135,14 +121,10 @@ fn camera_look(
 /// Handle WASD + Space/Ctrl movement with shift boost.
 fn camera_movement(
     time: Res<Time>,
-    action_query: Query<&ActionState<CameraAction>>,
+    movement: Res<MovementIntent>,
     config: Res<CameraConfig>,
     mut query: Query<(&mut FloatingOriginCamera, &mut Transform, &mut FlightCamera)>,
 ) {
-    let Ok(action_state) = action_query.single() else {
-        return;
-    };
-
     for (mut origin_camera, mut transform, mut camera) in &mut query {
         // Calculate altitude-based speed using high-precision position.
         let altitude = origin_camera.position.length() - veldera_constants::EARTH_RADIUS_M_F64;
@@ -153,7 +135,7 @@ fn camera_movement(
         let speed_factor = speed_factor.min(2600.0) as f32;
 
         let mut speed = config.base_speed * speed_factor;
-        if action_state.pressed(&CameraAction::Sprint) {
+        if movement.sprint {
             speed *= config.boost_multiplier;
         }
 
@@ -162,32 +144,32 @@ fn camera_movement(
         let forward = camera.direction;
         let right = forward.cross(old_up).normalize();
 
-        // Accumulate movement from dual axis.
-        let move_input = action_state.clamped_axis_pair(&CameraAction::Move);
-        let mut movement = Vec3::ZERO;
+        // Accumulate movement from the planar intent.
+        let move_input = movement.planar;
+        let mut displacement = Vec3::ZERO;
 
         // Forward/backward (Y axis of the virtual DPad).
-        movement += forward * move_input.y;
+        displacement += forward * move_input.y;
         // Strafe left/right (X axis of the virtual DPad).
-        movement += right * move_input.x;
+        displacement += right * move_input.x;
 
         // Ascend/descend relative to camera's local up (not world altitude).
         let camera_up = right.cross(forward).normalize();
-        if action_state.pressed(&CameraAction::Ascend) {
-            movement += camera_up;
+        if movement.ascend {
+            displacement += camera_up;
         }
-        if action_state.pressed(&CameraAction::Descend) {
-            movement -= camera_up;
+        if movement.descend {
+            displacement -= camera_up;
         }
 
-        if movement != Vec3::ZERO {
-            movement = movement.normalize() * speed * time.delta_secs();
+        if displacement != Vec3::ZERO {
+            let displacement = displacement.normalize() * speed * time.delta_secs();
 
             // Apply movement to high-precision position.
             let movement_dvec = DVec3::new(
-                f64::from(movement.x),
-                f64::from(movement.y),
-                f64::from(movement.z),
+                f64::from(displacement.x),
+                f64::from(displacement.y),
+                f64::from(displacement.z),
             );
             let mut new_position = origin_camera.position + movement_dvec;
 

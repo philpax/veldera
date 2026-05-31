@@ -6827,6 +6827,7 @@ dependencies = [
  "veldera_config",
  "veldera_constants",
  "veldera_geo",
+ "veldera_input",
  "wasm-bindgen",
  "web-time",
 ]
@@ -6873,6 +6874,13 @@ version = "0.1.0"
 dependencies = [
  "bevy",
  "glam",
+]
+
+[[package]]
+name = "veldera_input"
+version = "0.1.0"
+dependencies = [
+ "bevy",
 ]
 
 [[package]]

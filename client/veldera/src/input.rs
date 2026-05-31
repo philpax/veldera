@@ -10,6 +10,7 @@ use bevy::{
 };
 use bevy_egui::{EguiContexts, EguiGlobalSettings, EguiInputSystemSettings};
 use leafwing_input_manager::{plugin::InputManagerSystem, prelude::*};
+use veldera_input::{InputIntentPlugin, LookIntent, MovementIntent, ZoomIntent};
 
 // ============================================================================
 // Action enums
@@ -105,11 +106,45 @@ impl Plugin for InputPlugin {
     fn build(&self, app: &mut App) {
         app.add_plugins(InputManagerPlugin::<CameraAction>::default())
             .add_plugins(InputManagerPlugin::<VehicleAction>::default())
+            // The engine reads abstract intents; this app maps `CameraAction`
+            // onto them each frame (after focus gating, so disabled actions
+            // produce no intent).
+            .add_plugins(InputIntentPlugin)
             .add_systems(
                 PreUpdate,
-                manage_input_focus.after(InputManagerSystem::Update),
+                (manage_input_focus, populate_camera_intents)
+                    .chain()
+                    .after(InputManagerSystem::Update),
             );
     }
+}
+
+/// Map the `CameraAction` state onto the engine's input intents.
+///
+/// Runs after [`manage_input_focus`], so any actions disabled by focus gating
+/// read as released here and therefore yield no intent — preserving the
+/// "no input while ungrabbed / typing in egui" behaviour for the freelook
+/// camera now that it consumes intents rather than the action state directly.
+fn populate_camera_intents(
+    action_query: Query<&ActionState<CameraAction>>,
+    mut movement: ResMut<MovementIntent>,
+    mut look: ResMut<LookIntent>,
+    mut zoom: ResMut<ZoomIntent>,
+) {
+    let Ok(action_state) = action_query.single() else {
+        *movement = MovementIntent::default();
+        *look = LookIntent::default();
+        *zoom = ZoomIntent::default();
+        return;
+    };
+    *movement = MovementIntent {
+        planar: action_state.clamped_axis_pair(&CameraAction::Move),
+        ascend: action_state.pressed(&CameraAction::Ascend),
+        descend: action_state.pressed(&CameraAction::Descend),
+        sprint: action_state.pressed(&CameraAction::Sprint),
+    };
+    look.delta = action_state.axis_pair(&CameraAction::Look);
+    zoom.delta = action_state.clamped_value(&CameraAction::AdjustSpeed);
 }
 
 // ============================================================================
