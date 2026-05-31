@@ -94,8 +94,12 @@ After 1–4, the graph is the DAG above. Remaining engine-facade edges
   exist.
 - **Assets split.** Move the whole `assets/` tree (not just `config/`) into
   `assets/engine/` and `assets/game/`, mirroring the config split — engine-owned
-  assets (shaders are embedded already; sounds/models the engine needs) vs.
-  gameplay assets. Update asset paths accordingly; keep the single watched root.
+  assets vs. gameplay assets. Update asset paths accordingly; keep the single
+  watched root. Make `client/veldera/assets/engine` a **symlink** to a top-level
+  `engine_assets/` dir (so engine assets live with the engine and a reference
+  client can symlink the same dir). The web build (`web_build.sh`) must **reify**
+  the symlink — copy the real files into `build/`, since wasm asset serving won't
+  follow symlinks; verify `web_check.sh`/`web_dev.sh` handle it too.
 
 - **CONTRIBUTING.md.** Document the final structure once it settles: the three
   tiers (`crates/` engine, `extras/`, `client/` gameplay + `reference/`), the
