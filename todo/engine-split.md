@@ -27,7 +27,7 @@ read an **abstracted input intent layer**, gameplay owns the bindings.
 Layers, low → high (each depends only on layers below):
 
 There are **three** crate tiers: the engine (`crates/`), reusable
-non-core helpers (`helpers/`), and the clients (`client/`).
+non-core extras (`extras/`), and the clients (`client/`).
 
 ```
 L0 base        constants, geo (coords + floating origin)
@@ -36,16 +36,15 @@ L2 subsystems  atmosphere, clouds (exist), terrain, sky, physics
 L3 rig         camera (freelook)
 L4 umbrella    engine  (re-exports L0–L3, EnginePlugins group, absorbs profiler/diagnostics)
 ---- engine boundary (crates/) ----------------------------------------------
-helpers/       reusable-but-not-core blocks atop the engine, usable by any client
+extras/        reusable-but-not-core blocks atop the engine, usable by any client
                places (geocoding + elevation; pulls reqwest), …
 ---- ------------------------------------------------------------------------
-clients        client/veldera   (gameplay)        → engine + helpers
-               client/reference (freelook viewer) → engine + helpers
+clients        client/veldera   (gameplay)        → engine + extras
+               client/reference (freelook viewer) → engine + extras
 ```
 
-Workspace members add `helpers/*` alongside the existing `crates/*`,
-`client/*`, `rocktree/*`, `tools/*`. (`helpers/` is a working name — `extras/`
-or `middleware/` would read as well; easy to rename.)
+Workspace members add `extras/*` alongside the existing `crates/*`,
+`client/*`, `rocktree/*`, `tools/*`.
 
 Crate dependency sketch (engine):
 
@@ -81,7 +80,7 @@ No cycles: `terrain → physics → geo`, `sky → {atmosphere, clouds, geo}`,
 | `physics/mod.rs`, `physics/gravity.rs` | **physics** | planet gravity + Avian integration |
 | `vehicle::GameLayer` | **physics** | physics layers are engine; move off `vehicle` |
 | `camera/flycam.rs`, flight rig, requests, `CameraConfig` | **camera** | freelook only |
-| `world/geo/{geocoding,elevation}.rs` | **places** (`helpers/`) | reusable place/elevation lookup; reqwest |
+| `world/geo/{geocoding,elevation}.rs` | **places** (`extras/`) | reusable place/elevation lookup; reqwest |
 | `assets.rs` | **engine** support | asset bootstrap |
 | `profiler.rs` | **engine** umbrella | folded in, not a standalone crate |
 | — | **engine** | umbrella facade + `EnginePlugins` |
@@ -230,7 +229,7 @@ possible → run the full gate → commit with reasoning.
 
 - **Support crates.** `veldera_async` is a standalone engine crate; `profiler`
   and asset bootstrap fold into `veldera_engine`. (No `veldera_app_support`.)
-- **Helpers tier.** Reusable-but-not-core blocks live in a third `helpers/`
+- **Extras tier.** Reusable-but-not-core blocks live in a third `extras/`
   crate set, between engine and clients. `veldera_places` (geocoding/elevation,
   pulls `reqwest`) goes there. Any client may use them; the engine never does.
 - **Debug UI.** Each engine subsystem crate owns its egui panel behind a
@@ -243,6 +242,5 @@ possible → run the full gate → commit with reasoning.
 
 ## Remaining smaller calls (decide as we reach them)
 
-- Final name for the `helpers/` tier (`helpers` vs `extras`/`middleware`).
 - Whether `veldera_async`/`assets` bootstrap stay distinct or merge once their
   real surface is known after extraction.
