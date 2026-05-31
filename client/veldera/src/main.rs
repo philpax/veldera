@@ -8,7 +8,6 @@ mod config;
 mod launch_params;
 mod physics;
 mod rendering;
-mod ui;
 mod world;
 
 use async_runtime::AsyncRuntimePlugin;
@@ -31,7 +30,6 @@ use rendering::{
     clouds::{CloudConfig, CloudConfigPaths, CloudEngineConfig, CloudIntegrationPlugin},
     terrain_material::TerrainMaterialPlugin,
 };
-use ui::DebugUiPlugin;
 use veldera_clouds::CloudLayers;
 use veldera_engine::{assets, profiler};
 use veldera_game_camera::{
@@ -39,6 +37,7 @@ use veldera_game_camera::{
 };
 use veldera_game_input::InputPlugin;
 use veldera_game_player::{PlayerConfigPaths, PlayerPlugin};
+use veldera_game_ui::DebugUiPlugin;
 use veldera_game_vehicle::VehiclePlugin;
 use world::{
     coords::lat_lon_to_ecef,

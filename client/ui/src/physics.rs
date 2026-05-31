@@ -5,10 +5,8 @@
 use bevy::{ecs::system::SystemParam, gizmos::config::GizmoConfigStore, prelude::*};
 use bevy_egui::egui;
 
-use crate::{
-    physics::{is_physics_debug_enabled, toggle_physics_debug},
-    world::lod::LodState,
-};
+use veldera_physics::{is_physics_debug_enabled, toggle_physics_debug};
+use veldera_terrain::lod::LodState;
 
 /// Resources for the physics tab.
 #[derive(SystemParam)]

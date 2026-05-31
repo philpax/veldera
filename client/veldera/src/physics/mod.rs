@@ -13,10 +13,7 @@ use bevy::prelude::*;
 
 use crate::config;
 
-pub use veldera_physics::{
-    DespawnOutsidePhysicsRange, PhysicsStreamingConfig, is_physics_debug_enabled,
-    toggle_physics_debug,
-};
+pub use veldera_physics::DespawnOutsidePhysicsRange;
 
 /// Plugin wiring the engine physics integration into this client and layering
 /// the gameplay projectile mechanic on top.

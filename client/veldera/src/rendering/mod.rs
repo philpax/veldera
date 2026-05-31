@@ -7,7 +7,6 @@
 //! unchanged.
 
 pub use veldera_sky::{atmosphere, clouds};
-// `mesh`/`terrain_material` now live in the `veldera_terrain` engine crate;
-// re-exported here so `crate::rendering::{mesh, terrain_material}` resolve
-// unchanged.
-pub use veldera_terrain::{mesh, terrain_material};
+// `terrain_material` lives in the `veldera_terrain` engine crate; re-exported
+// here so `crate::rendering::terrain_material` resolves unchanged.
+pub use veldera_terrain::terrain_material;

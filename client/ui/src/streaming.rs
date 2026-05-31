@@ -14,13 +14,11 @@ use bevy::{ecs::system::SystemParam, prelude::*};
 use bevy_egui::egui;
 use glam::DVec3;
 
-use crate::{
-    physics::PhysicsStreamingConfig,
-    rendering::mesh::RocktreeMeshMarker,
-    world::{
-        coords::RadialFrame,
-        lod::{LodSnapshot, LodSnapshotRequest, LodTuning, SnapshotNode, SnapshotNodeState},
-    },
+use veldera_geo::coords::RadialFrame;
+use veldera_physics::PhysicsStreamingConfig;
+use veldera_terrain::{
+    lod::{LodSnapshot, LodSnapshotRequest, LodTuning, SnapshotNode, SnapshotNodeState},
+    mesh::RocktreeMeshMarker,
 };
 
 /// Resources for the streaming tab.

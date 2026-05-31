@@ -71,11 +71,11 @@ impl Plugin for DebugUiPlugin {
 
 /// Register the cloud crate's climate-preview images with egui so the Climate
 /// debug tab can display them. `veldera_sky` exposes the handles via
-/// [`CloudClimateAssets`](crate::rendering::clouds::CloudClimateAssets) and
+/// [`CloudClimateAssets`](veldera_sky::clouds::CloudClimateAssets) and
 /// stays egui-free; this app-side system does the egui registration once the
 /// handles exist (idempotent via the `registered` latch).
 fn register_cloud_climate_textures(
-    assets: Res<crate::rendering::clouds::CloudClimateAssets>,
+    assets: Res<veldera_sky::clouds::CloudClimateAssets>,
     mut egui_user_textures: ResMut<EguiUserTextures>,
     mut registered: Local<bool>,
 ) {
@@ -162,7 +162,7 @@ fn setup_fonts(mut contexts: EguiContexts, mut commands: Commands) {
     fonts.font_data.insert(
         "GoNoto".into(),
         Arc::new(egui::FontData::from_static(include_bytes!(
-            "../../assets/GoNotoKurrent-Regular.ttf"
+            "../assets/GoNotoKurrent-Regular.ttf"
         ))),
     );
     fonts
@@ -205,7 +205,7 @@ fn debug_ui_system(
     mut inspector_params: inspector::InspectorParams,
     mut shadow_diag_params: shadow_diag::ShadowDiagParams,
     profiler_params: profiler::ProfilerParams,
-    climate_assets: Res<crate::rendering::clouds::CloudClimateAssets>,
+    climate_assets: Res<veldera_sky::clouds::CloudClimateAssets>,
 ) -> Result {
     // Resolve egui image ids BEFORE taking `ctx_mut` (same borrow on
     // `contexts`). Once loading completes these stay stable, so

@@ -14,7 +14,7 @@ use glam::DVec3;
 use veldera_atmosphere::SphericalAtmosphereCamera;
 use veldera_clouds::CloudLayers;
 
-use crate::world::floating_origin::FloatingOriginCamera;
+use veldera_geo::floating_origin::FloatingOriginCamera;
 
 /// Frame-by-frame snapshot of derived camera & shadow-map state.
 #[derive(Default, Clone)]

@@ -11,7 +11,7 @@ use veldera_game_camera::{
 };
 use veldera_game_player::{BodyConfig, BodyTuning, CharacterMetrics, FpsPlayerConfig};
 
-use crate::world::floating_origin::FloatingOriginCamera;
+use veldera_geo::floating_origin::FloatingOriginCamera;
 
 /// Resources for camera display and control.
 #[derive(SystemParam)]

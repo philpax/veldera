@@ -6828,6 +6828,7 @@ dependencies = [
  "veldera_game_input",
  "veldera_game_player",
  "veldera_game_teleport",
+ "veldera_game_ui",
  "veldera_game_vehicle",
  "veldera_geo",
  "veldera_physics",
@@ -6991,6 +6992,36 @@ dependencies = [
  "veldera_game_player",
  "veldera_geo",
  "veldera_places",
+]
+
+[[package]]
+name = "veldera_game_ui"
+version = "0.1.0"
+dependencies = [
+ "bevy",
+ "bevy_egui",
+ "chrono",
+ "egui_dock",
+ "egui_extras",
+ "egui_plot",
+ "glam",
+ "leafwing-input-manager",
+ "veldera_async",
+ "veldera_atmosphere",
+ "veldera_clouds",
+ "veldera_constants",
+ "veldera_engine",
+ "veldera_game_camera",
+ "veldera_game_camera_state",
+ "veldera_game_input",
+ "veldera_game_player",
+ "veldera_game_teleport",
+ "veldera_game_vehicle",
+ "veldera_geo",
+ "veldera_physics",
+ "veldera_places",
+ "veldera_sky",
+ "veldera_terrain",
 ]
 
 [[package]]

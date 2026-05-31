@@ -12,16 +12,13 @@ use glam::DVec3;
 
 use veldera_game_camera::{AltitudeRequest, FlightCamera, HeadingRequest, TranslateRequest};
 
-use crate::{
-    async_runtime::TaskSpawner,
-    world::{
-        coords::ecef_to_lat_lon,
-        geo::{
-            GEOCODING_THROTTLE_SECS, GeocodingState, HttpClient, TeleportAnimation, TeleportState,
-        },
-        moon::compute_moon_state,
-        time_of_day::{SECONDS_PER_HOUR, TimeMode, TimeOfDayState, local_to_utc, seconds_to_hms},
-    },
+use veldera_async::TaskSpawner;
+use veldera_game_teleport::{TeleportAnimation, TeleportState};
+use veldera_geo::coords::ecef_to_lat_lon;
+use veldera_places::{GEOCODING_THROTTLE_SECS, GeocodingState, HttpClient};
+use veldera_sky::{
+    moon::compute_moon_state,
+    time_of_day::{SECONDS_PER_HOUR, TimeMode, TimeOfDayState, local_to_utc, seconds_to_hms},
 };
 
 /// State for the lat/long text input fields.
@@ -340,8 +337,8 @@ pub(super) fn render_location_tab(
                 let before = picked;
                 ui.add(egui_extras::DatePickerButton::new(&mut picked).id_salt("local_date"));
                 if picked != before {
-                    let new_local_date = crate::world::time_of_day::SimpleDate::from_naive(picked);
-                    let (utc_seconds, utc_date) = crate::world::time_of_day::local_to_utc(
+                    let new_local_date = veldera_sky::time_of_day::SimpleDate::from_naive(picked);
+                    let (utc_seconds, utc_date) = veldera_sky::time_of_day::local_to_utc(
                         local_hours * SECONDS_PER_HOUR,
                         new_local_date,
                         lon_deg,
