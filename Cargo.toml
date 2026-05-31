@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["client/*", "crates/*", "extras/*", "rocktree/*", "tools/*"]
+members = ["client/*", "engine/*", "extras/*", "rocktree/*", "tools/*"]
 default-members = ["client/veldera"]
 
 [workspace.package]
@@ -9,19 +9,19 @@ repository = "https://github.com/philpax/veldera"
 license = "MIT"
 
 [workspace.dependencies]
-# Engine crates (crates/).
-veldera_async = { path = "crates/async" }
-veldera_atmosphere = { path = "crates/atmosphere" }
-veldera_camera = { path = "crates/camera" }
-veldera_clouds = { path = "crates/clouds" }
-veldera_config = { path = "crates/config" }
-veldera_constants = { path = "crates/constants" }
-veldera_engine = { path = "crates/engine" }
-veldera_geo = { path = "crates/geo" }
-veldera_input = { path = "crates/input" }
-veldera_physics = { path = "crates/physics" }
-veldera_sky = { path = "crates/sky" }
-veldera_terrain = { path = "crates/terrain" }
+# Engine crates (engine/).
+veldera_async = { path = "engine/async" }
+veldera_atmosphere = { path = "engine/atmosphere" }
+veldera_camera = { path = "engine/camera" }
+veldera_clouds = { path = "engine/clouds" }
+veldera_config = { path = "engine/config" }
+veldera_constants = { path = "engine/constants" }
+veldera_engine = { path = "engine/engine" }
+veldera_geo = { path = "engine/geo" }
+veldera_input = { path = "engine/input" }
+veldera_physics = { path = "engine/physics" }
+veldera_sky = { path = "engine/sky" }
+veldera_terrain = { path = "engine/terrain" }
 # Extras.
 veldera_places = { path = "extras/places" }
 # Gameplay crates (client/).

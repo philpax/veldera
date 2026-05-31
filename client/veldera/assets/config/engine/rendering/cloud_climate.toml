@@ -2,7 +2,7 @@
 # (latitude bands, ocean/land differentiation, stratocumulus decks, interior
 # dryness, and climate noise) that the cloud renderer samples for coverage.
 # Flowed into the cloud uniform each frame, so edits re-tune the next climate
-# bake live. See `crates/clouds/src/shaders/climate.wgsl` for the
+# bake live. See `engine/clouds/src/shaders/climate.wgsl` for the
 # full model reasoning.
 #
 # Sigmas are Gaussian-width coefficients in `exp(-off² · sigma)` (1/degree²);
