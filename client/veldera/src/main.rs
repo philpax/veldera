@@ -9,41 +9,26 @@ mod physics;
 mod world;
 
 // Custom asset loaders and the CPU profiler now live in the engine umbrella.
-use bevy::{
-    audio::SpatialListener,
-    camera::Exposure,
-    core_pipeline::tonemapping::Tonemapping,
-    light::{GlobalAmbientLight, SunDisk, light_consts::lux},
-    pbr::ScatteringMedium,
-    post_process::bloom::Bloom,
-    prelude::*,
-    render::view::Hdr,
-};
+use bevy::{audio::SpatialListener, pbr::ScatteringMedium, prelude::*};
 use launch_params::{LaunchConfig, LaunchParams, ResolvedLaunch};
 use veldera_async::AsyncRuntimePlugin;
 use veldera_clouds::CloudLayers;
-use veldera_engine::{assets, profiler};
+use veldera_engine::{EngineWorldPlugins, assets, profiler, world_camera_bundle};
 use veldera_game_camera::{
-    CameraConfig, CameraControllerPlugin, CameraMode, CameraModeTransitions, FlightCamera,
+    CameraConfig, CameraControllerPlugin, CameraMode, CameraModeTransitions,
 };
 use veldera_game_input::InputPlugin;
 use veldera_game_player::{PlayerConfigPaths, PlayerPlugin};
 use veldera_game_ui::DebugUiPlugin;
 use veldera_game_vehicle::VehiclePlugin;
 use veldera_geo::{
-    coords::lat_lon_to_ecef,
-    floating_origin::{FloatingOriginCamera, FloatingOriginPlugin},
+    coords::{enu_look_direction, lat_lon_to_ecef},
+    floating_origin::FloatingOriginPlugin,
 };
 use veldera_sky::{
-    atmosphere::{
-        AtmosphereBundle, AtmosphereConfig, AtmosphereIntegrationPlugin, AtmosphericLight,
-    },
-    clouds::{CloudConfig, CloudConfigPaths, CloudEngineConfig, CloudIntegrationPlugin},
-    moon::{Moon, MoonPlugin},
-    time_of_day::{Sun, TimeOfDayPlugin, TimeOfDayState},
-};
-use veldera_terrain::{
-    loader::DataLoaderPlugin, lod::LodPlugin, terrain_material::TerrainMaterialPlugin,
+    atmosphere::{AtmosphereBundle, AtmosphereConfig},
+    clouds::{CloudConfig, CloudEngineConfig},
+    time_of_day::TimeOfDayState,
 };
 
 use crate::world::geo::GeoPlugin;
@@ -57,7 +42,7 @@ impl Plugin for AppPlugin {
             assets::AssetsPlugin,
             FloatingOriginPlugin,
             InputPlugin,
-            CameraControllerPlugin::new(config::paths::CAMERA),
+            CameraControllerPlugin::default(),
             PlayerPlugin::new(PlayerConfigPaths {
                 fps: config::paths::FPS,
                 body: config::paths::BODY,
@@ -65,95 +50,19 @@ impl Plugin for AppPlugin {
                 ragdoll: config::paths::RAGDOLL,
                 yeet: config::paths::YEET,
             }),
-            DataLoaderPlugin,
             GeoPlugin,
-            LodPlugin::new(config::paths::LOD),
-            TimeOfDayPlugin::new(config::paths::TIME_OF_DAY),
-            MoonPlugin::new(config::paths::MOON),
             DebugUiPlugin,
-            TerrainMaterialPlugin,
-            AtmosphereIntegrationPlugin::new(config::paths::ATMOSPHERE),
-            CloudIntegrationPlugin::new(CloudConfigPaths {
-                layers: config::paths::CLOUDS,
-                engine: config::paths::CLOUD_ENGINE,
-                shader: config::paths::CLOUD_SHADER,
-                climate: config::paths::CLOUD_CLIMATE,
-                topography: config::paths::CLOUD_TOPOGRAPHY,
-            }),
             VehiclePlugin::new(config::paths::VEHICLE),
         ))
+        // Terrain, physics, sky, atmosphere, clouds, and the celestial lights —
+        // each at its default engine asset path.
+        .add_plugins(EngineWorldPlugins)
         .add_plugins(config::ConfigPlugin::<LaunchConfig>::new(
             config::paths::LAUNCH,
         ))
-        .add_systems(Startup, setup_scene)
         .add_systems(Update, resolve_launch_and_spawn_camera)
         .add_plugins(physics::PhysicsPlugin);
     }
-}
-
-/// Set up the launch-independent parts of the scene (ambient + sun + moon).
-///
-/// The camera depends on the resolved launch parameters, so it's spawned later
-/// by [`resolve_launch_and_spawn_camera`] once the launch config has loaded.
-fn setup_scene(mut commands: Commands) {
-    // Ambient calibrated against the EV clamp floor: enough that surfaces
-    // remain readable through twilight and moonless night, but low enough
-    // that photogrammetry textures (which bake in their captured-day
-    // reflectance) don't look mid-day-bright. During the day this is
-    // dwarfed by direct sun and the env-map IBL.
-    commands.insert_resource(GlobalAmbientLight {
-        color: Color::WHITE,
-        brightness: 50.0,
-        affects_lightmapped_meshes: true,
-    });
-
-    // Directional light representing the sun (required for atmosphere).
-    // Uses RAW_SUNLIGHT illuminance which is the pre-scattering sunlight value,
-    // allowing the atmosphere to properly filter it.
-    //
-    // The sun direction is updated each frame by the time_of_day system based on UTC time.
-    // This creates realistic day/night cycles as you fly around the globe.
-    commands.spawn((
-        Sun,
-        DirectionalLight {
-            color: Color::WHITE,
-            illuminance: lux::RAW_SUNLIGHT,
-            shadows_enabled: true,
-            ..default()
-        },
-        AtmosphericLight {
-            base_color: LinearRgba::WHITE,
-        },
-        Transform::default(),
-    ));
-
-    // Directional light representing the moon. Position, illuminance, and
-    // disk visibility are driven by `MoonPlugin` from UTC date/time.
-    // Atmospheric extinction (including planet occlusion below horizon) is
-    // applied by the same system that handles the sun, via the light's color.
-    commands.spawn((
-        Moon,
-        DirectionalLight {
-            illuminance: 0.0, // updated each frame by `update_moon`.
-            // Shadows from the moon would be expensive and rarely visible;
-            // skip them. We can revisit if night gameplay warrants it.
-            shadows_enabled: false,
-            ..default()
-        },
-        AtmosphericLight {
-            // Slight warm-grey tint — closer to actual lunar surface color
-            // than pure white. Multiplied by extinction transmittance each
-            // frame.
-            base_color: LinearRgba::new(1.0, 0.96, 0.9, 1.0),
-        },
-        SunDisk {
-            // Seeded to zero; `update_moon` applies `MoonConfig::angular_diameter`
-            // from config every frame, so this initial value is never displayed.
-            angular_size: 0.0,
-            intensity: 1.0,
-        },
-        Transform::default(),
-    ));
 }
 
 /// Create the camera once the relevant config assets have loaded.
@@ -241,68 +150,28 @@ fn spawn_camera(
     clouds: CloudLayers,
 ) {
     let radius = veldera_constants::EARTH_RADIUS_M_F64 + resolved.altitude;
-    let start_position = lat_lon_to_ecef(resolved.lat, resolved.lon, radius);
+    let position = lat_lon_to_ecef(resolved.lat, resolved.lon, radius);
+    // Initial viewing direction from the resolved launch heading/pitch, in the
+    // local east-north-up frame at the spawn point.
+    let (direction, up) = enu_look_direction(
+        position,
+        resolved.heading_deg as f32,
+        resolved.pitch_deg as f32,
+    );
 
-    // Initial viewing direction from the resolved launch heading/pitch, taken in
-    // the local east-north-up frame at the spawn point.
-    let up = start_position.normalize().as_vec3();
-    let north = {
-        let world_north = Vec3::Z;
-        let projected = (world_north - up * world_north.dot(up)).normalize_or_zero();
-        // At the poles, north is degenerate; fall back to an arbitrary tangent.
-        if projected.length_squared() < 0.001 {
-            Vec3::X
-        } else {
-            projected
-        }
-    };
-    let east = north.cross(up).normalize_or_zero();
-    let heading = (resolved.heading_deg as f32).to_radians();
-    let pitch = (resolved.pitch_deg as f32).to_radians();
-    let horizontal = north * heading.cos() + east * heading.sin();
-    let start_direction = (horizontal * pitch.cos() + up * pitch.sin()).normalize();
-
-    // The camera's Transform is always at the origin; everything else is
-    // rendered relative to it via the floating-origin system. The clear color is
-    // set dynamically by the time-of-day system.
     commands.spawn((
-        Camera3d::default(),
-        Camera::default(),
-        Transform::from_translation(Vec3::ZERO).looking_to(start_direction, up),
-        Projection::Perspective(PerspectiveProjection {
-            // From `camera.toml`'s `default_fov_deg` (resolved before spawn).
-            // `apply_camera_fov` re-applies it on reload and the Camera tab
-            // slider edits this `Projection` directly between reloads.
-            fov: fov_deg.to_radians(),
-            near: 1.0,
-            far: 100_000_000.0, // 100,000 km to see the whole Earth.
-            ..Default::default()
-        }),
-        // Use ACES filmic tonemapping for HDR atmosphere.
-        Tonemapping::AcesFitted,
-        // HDR is required for atmosphere rendering.
-        Hdr,
-        // Fixed exposure calibrated for daytime. With CPU sun extinction
-        // dimming the sun's `DirectionalLight.color` through twilight, the
-        // scene naturally darkens as the sun sets — no eye-adaptation curve
-        // needed. Night is intentionally dark; lift it with explicit lights
-        // (street lights, etc.) rather than cranking exposure sensitivity.
-        Exposure { ev100: 13.0 },
-        // Bloom gives the sun a natural glow.
-        Bloom::NATURAL,
-        // High-precision camera position for floating origin system.
-        FloatingOriginCamera::new(start_position),
-        FlightCamera {
-            direction: start_direction,
-        },
-        // Spatial audio listener for 3D sound.
-        SpatialListener::default(),
+        // The engine camera rig: camera, projection (from `camera.toml`'s
+        // `default_fov_deg`, resolved before spawn), HDR + ACES + bloom, and the
+        // floating-origin and flight components.
+        world_camera_bundle(position, direction, up, fov_deg),
         // Atmosphere and cloud layers, both built from their configs (resolved
         // before spawn). `apply_atmosphere_config` / `apply_cloud_config` handle
         // later live edits.
-        AtmosphereBundle::from_config(atmosphere, medium, start_position),
+        AtmosphereBundle::from_config(atmosphere, medium, position),
         clouds,
-        // Input map for camera actions.
+        // Spatial audio listener for 3D sound.
+        SpatialListener::default(),
+        // Input map for camera actions (gameplay).
         veldera_game_input::default_camera_input_map(),
     ));
 }

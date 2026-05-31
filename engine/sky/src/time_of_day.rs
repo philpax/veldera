@@ -13,15 +13,29 @@ use veldera_config::ConfigPlugin;
 use veldera_geo::{coords::ecef_to_lat_lon, floating_origin::FloatingOriginCamera};
 
 /// Plugin for the time-of-day system.
+///
+/// Defaults to the config at [`DEFAULT_CONFIG_PATH`](Self::DEFAULT_CONFIG_PATH)
+/// in the shared engine asset subtree; override via [`new`](Self::new) for a
+/// different asset layout.
 pub struct TimeOfDayPlugin {
-    /// Asset path of the time-of-day config TOML (app-supplied).
+    /// Asset path of the time-of-day config TOML.
     pub config_path: &'static str,
 }
 
 impl TimeOfDayPlugin {
+    /// Canonical config path within the shared engine asset subtree.
+    pub const DEFAULT_CONFIG_PATH: &'static str = "engine/config/world/time_of_day.toml";
+
     /// Create the plugin, loading its config from `config_path`.
     pub const fn new(config_path: &'static str) -> Self {
         Self { config_path }
+    }
+}
+
+impl Default for TimeOfDayPlugin {
+    /// Load the config from [`DEFAULT_CONFIG_PATH`](Self::DEFAULT_CONFIG_PATH).
+    fn default() -> Self {
+        Self::new(Self::DEFAULT_CONFIG_PATH)
     }
 }
 

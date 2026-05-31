@@ -46,15 +46,29 @@ pub struct AtmosphereConfig {
 }
 
 /// Plugin that integrates spherical atmosphere with floating origin cameras.
+///
+/// Defaults to the config at [`DEFAULT_CONFIG_PATH`](Self::DEFAULT_CONFIG_PATH)
+/// in the shared engine asset subtree; override via [`new`](Self::new) for a
+/// different asset layout.
 pub struct AtmosphereIntegrationPlugin {
-    /// Asset path of the atmosphere config TOML (app-supplied).
+    /// Asset path of the atmosphere config TOML.
     pub config_path: &'static str,
 }
 
 impl AtmosphereIntegrationPlugin {
+    /// Canonical config path within the shared engine asset subtree.
+    pub const DEFAULT_CONFIG_PATH: &'static str = "engine/config/rendering/atmosphere.toml";
+
     /// Create the plugin, loading its config from `config_path`.
     pub const fn new(config_path: &'static str) -> Self {
         Self { config_path }
+    }
+}
+
+impl Default for AtmosphereIntegrationPlugin {
+    /// Load the config from [`DEFAULT_CONFIG_PATH`](Self::DEFAULT_CONFIG_PATH).
+    fn default() -> Self {
+        Self::new(Self::DEFAULT_CONFIG_PATH)
     }
 }
 

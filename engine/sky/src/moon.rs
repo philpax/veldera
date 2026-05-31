@@ -45,15 +45,29 @@ pub struct MoonConfig {
 }
 
 /// Plugin that drives the Moon's transform and brightness each frame.
+///
+/// Defaults to the config at [`DEFAULT_CONFIG_PATH`](Self::DEFAULT_CONFIG_PATH)
+/// in the shared engine asset subtree; override via [`new`](Self::new) for a
+/// different asset layout.
 pub struct MoonPlugin {
-    /// Asset path of the moon config TOML (app-supplied).
+    /// Asset path of the moon config TOML.
     pub config_path: &'static str,
 }
 
 impl MoonPlugin {
+    /// Canonical config path within the shared engine asset subtree.
+    pub const DEFAULT_CONFIG_PATH: &'static str = "engine/config/world/moon.toml";
+
     /// Create the plugin, loading its config from `config_path`.
     pub const fn new(config_path: &'static str) -> Self {
         Self { config_path }
+    }
+}
+
+impl Default for MoonPlugin {
+    /// Load the config from [`DEFAULT_CONFIG_PATH`](Self::DEFAULT_CONFIG_PATH).
+    fn default() -> Self {
+        Self::new(Self::DEFAULT_CONFIG_PATH)
     }
 }
 

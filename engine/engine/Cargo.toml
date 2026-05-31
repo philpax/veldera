@@ -7,7 +7,14 @@ license.workspace = true
 description = "Umbrella facade for the Veldera engine: re-exports every engine crate and bundles the always-on infrastructure into an EnginePlugins group"
 
 [dependencies]
-bevy = { workspace = true, features = ["bevy_asset"] }
+# Render features back the `world_camera_bundle` helper (camera rig, tonemapping,
+# HDR, bloom); `bevy_asset` backs the re-exported loaders.
+bevy = { workspace = true, features = [
+  "bevy_asset",
+  "bevy_core_pipeline",
+  "bevy_post_process",
+  "bevy_render",
+] }
 veldera_async = { workspace = true }
 veldera_camera = { workspace = true }
 veldera_config = { workspace = true }

@@ -126,8 +126,9 @@ pub fn desired_physics_depth(bands: &[(f64, usize)], effective_distance_m: f64) 
 
 /// Plugin for physics integration with the rocktree LOD system.
 ///
-/// Config file locations are supplied by the host so the engine crate stays
-/// free of any particular asset layout.
+/// Defaults to the configs at [`DEFAULT_PHYSICS_PATH`](Self::DEFAULT_PHYSICS_PATH)
+/// and [`DEFAULT_STREAMING_PATH`](Self::DEFAULT_STREAMING_PATH) in the shared
+/// engine asset subtree; override via [`new`](Self::new) for a different layout.
 pub struct PhysicsIntegrationPlugin {
     /// Path to the global [`PhysicsConfig`] TOML.
     pub physics_config_path: &'static str,
@@ -136,6 +137,11 @@ pub struct PhysicsIntegrationPlugin {
 }
 
 impl PhysicsIntegrationPlugin {
+    /// Canonical [`PhysicsConfig`] path within the shared engine asset subtree.
+    pub const DEFAULT_PHYSICS_PATH: &'static str = "engine/config/physics/physics.toml";
+    /// Canonical [`PhysicsStreamingConfig`] path within the shared engine asset subtree.
+    pub const DEFAULT_STREAMING_PATH: &'static str = "engine/config/physics/streaming.toml";
+
     /// Create the plugin, loading its configs from the given paths.
     pub const fn new(
         physics_config_path: &'static str,
@@ -145,6 +151,14 @@ impl PhysicsIntegrationPlugin {
             physics_config_path,
             streaming_config_path,
         }
+    }
+}
+
+impl Default for PhysicsIntegrationPlugin {
+    /// Load the configs from [`DEFAULT_PHYSICS_PATH`](Self::DEFAULT_PHYSICS_PATH)
+    /// and [`DEFAULT_STREAMING_PATH`](Self::DEFAULT_STREAMING_PATH).
+    fn default() -> Self {
+        Self::new(Self::DEFAULT_PHYSICS_PATH, Self::DEFAULT_STREAMING_PATH)
     }
 }
 

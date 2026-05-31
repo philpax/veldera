@@ -82,6 +82,14 @@ impl CameraControllerPlugin {
     }
 }
 
+impl Default for CameraControllerPlugin {
+    /// Load the freelook camera config from the engine's default path
+    /// ([`FreelookCameraPlugin::DEFAULT_CONFIG_PATH`]).
+    fn default() -> Self {
+        Self::new(FreelookCameraPlugin::DEFAULT_CONFIG_PATH)
+    }
+}
+
 impl Plugin for CameraControllerPlugin {
     fn build(&self, app: &mut App) {
         app.add_plugins(FreelookCameraPlugin::new(self.config_path))

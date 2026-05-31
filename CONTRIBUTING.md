@@ -26,10 +26,22 @@ The workspace is three tiers; dependencies only ever point *down* the stack.
 The engine exposes mechanism; gameplay supplies policy. When an engine crate
 needs something from the app, it *inverts* rather than reaching into gameplay:
 
-- **Config paths are app policy.** An engine plugin takes its config-file
-  path(s) as constructor params (`FooPlugin::new(path)`); the engine owns the
-  config *type* and its `Default`, the app owns the path and the file. Likewise
-  any other asset path the engine loads (e.g. the cloud topography texture).
+- **Engine config has a canonical path; gameplay config paths are app policy.**
+  An engine plugin owns the config *type* and its `Default`, and defaults to a
+  canonical path under the shared engine asset subtree
+  (`FooPlugin::default()`/`FooPlugin::DEFAULT_CONFIG_PATH`); a host with a
+  different asset layout overrides it via `FooPlugin::new(path)`. Gameplay
+  plugins still take their paths as constructor params (the app owns those files
+  and their layout). Both clients mount the engine assets identically via the
+  `assets/engine` symlink, so the engine's default paths Just Work and neither
+  client lists them.
+- **Each engine crate supplies its own plugin group.** A crate with several
+  plugins exposes a `FooPlugins` `PluginGroup` (e.g. `TerrainPlugins`,
+  `SkyPlugins`) wiring its constituents at their default paths, so hosts add the
+  crate, not its internals. The `veldera_engine` umbrella composes these into
+  `EngineWorldPlugins` (terrain + physics + sky); a host adds that one group plus
+  its own camera plugin. Cross-cutting spawn helpers that tie several crates
+  together (e.g. `world_camera_bundle`) also live in the umbrella.
 - **Markers, resources, and events the host fills in.** The engine reads
   host-set state rather than gameplay state — e.g. radial gravity skips a
   `ManualGravity` marker (gameplay attaches it to the FPS player), the freelook
@@ -150,8 +162,9 @@ tuning knob that someone will want to iterate on.
   under `assets/{engine,game}/config/` (engine-owned schemas under `engine/`,
   gameplay under `game/`), backed by a `ConfigPlugin<C>` (the config type is both
   an `Asset` and a mirror `Resource`). The engine crate owns the type and its
-  `Default`; the app supplies the file path to the plugin (see "Config paths are
-  app policy" above). Native builds watch the file and apply edits live; consumers
+  `Default`, and the engine plugin defaults to a canonical path while accepting an
+  override (see "Engine config has a canonical path" above); a gameplay plugin
+  takes its path from the app. Native builds watch the file and apply edits live; consumers
   read `config::Config<C>` (or the mirror `Resource`) and get the new value on the
   next frame. This is the normal case, so do not document or comment that a value
   is hot-reloadable — it is assumed.

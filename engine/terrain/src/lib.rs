@@ -17,3 +17,22 @@ pub mod loader;
 pub mod lod;
 pub mod mesh;
 pub mod terrain_material;
+
+use bevy::app::{PluginGroup, PluginGroupBuilder};
+
+/// The full terrain stack: planetoid loading, the LOD traversal and culling, and
+/// the octant-masked terrain material.
+///
+/// [`LodPlugin`](lod::LodPlugin) loads its tuning config from the default engine
+/// asset path; a host with a different layout adds the constituent plugins
+/// individually instead.
+pub struct TerrainPlugins;
+
+impl PluginGroup for TerrainPlugins {
+    fn build(self) -> PluginGroupBuilder {
+        PluginGroupBuilder::start::<Self>()
+            .add(loader::DataLoaderPlugin)
+            .add(lod::LodPlugin::default())
+            .add(terrain_material::TerrainMaterialPlugin)
+    }
+}

@@ -22,15 +22,26 @@ pub use veldera_terrain as terrain;
 pub mod assets;
 pub mod profiler;
 
-use bevy::app::{PluginGroup, PluginGroupBuilder};
+use bevy::{
+    app::{PluginGroup, PluginGroupBuilder},
+    camera::Exposure,
+    core_pipeline::tonemapping::Tonemapping,
+    math::DVec3,
+    post_process::bloom::Bloom,
+    prelude::*,
+    render::view::Hdr,
+};
+
+use camera::FlightCamera;
+use geo::floating_origin::FloatingOriginCamera;
 
 /// The engine's always-on, configuration-free infrastructure plugins.
 ///
 /// Covers the floating-origin world frame, the abstract input-intent layer,
 /// custom asset loaders, and the CPU profiler — everything a client needs
-/// regardless of which subsystems it enables. Subsystem plugins (terrain, sky,
-/// physics, the freelook camera) are added separately because each takes a
-/// config-file path, which is the client's policy to supply.
+/// regardless of which subsystems it enables. The freelook camera is added
+/// separately (gameplay clients layer their own mode machine over it); the rest
+/// of the configurable subsystems live in [`EngineWorldPlugins`].
 pub struct EnginePlugins;
 
 impl PluginGroup for EnginePlugins {
@@ -41,4 +52,66 @@ impl PluginGroup for EnginePlugins {
             .add(assets::AssetsPlugin)
             .add(profiler::ProfilerPlugin)
     }
+}
+
+/// The configurable engine subsystems that render the world, each crate's stack
+/// at its canonical engine asset paths.
+///
+/// Composes [`TerrainPlugins`](terrain::TerrainPlugins), the physics integration,
+/// and [`SkyPlugins`](sky::SkyPlugins) — the block both the game and the
+/// reference viewer add identically. Each crate group defaults to its paths in
+/// the shared engine asset subtree; a client with a different layout adds the
+/// crate groups (or their constituents) individually instead. The camera is
+/// deliberately excluded so each client supplies its own (the game wraps the
+/// freelook camera in a mode machine).
+pub struct EngineWorldPlugins;
+
+impl PluginGroup for EngineWorldPlugins {
+    fn build(self) -> PluginGroupBuilder {
+        PluginGroupBuilder::start::<Self>()
+            .add_group(terrain::TerrainPlugins)
+            .add(physics::PhysicsIntegrationPlugin::default())
+            .add_group(sky::SkyPlugins)
+    }
+}
+
+/// The universal floating-origin camera rig, ready to spawn over an ECEF
+/// `position` looking along `direction` with local `up` (see
+/// [`enu_look_direction`](geo::coords::enu_look_direction)).
+///
+/// Bundles the camera, its perspective projection (from `fov_deg`), the HDR +
+/// ACES + bloom pipeline the atmosphere needs, and the floating-origin and
+/// flight-camera components. It deliberately omits the atmosphere and cloud
+/// bundles (and any gameplay components): the caller composes those on top, e.g.
+/// `commands.spawn((world_camera_bundle(p, d, u, fov), AtmosphereBundle::from_config(..), clouds))`,
+/// since a headless or gameplay client may want different extras.
+pub fn world_camera_bundle(
+    position: DVec3,
+    direction: Vec3,
+    up: Vec3,
+    fov_deg: f32,
+) -> impl Bundle {
+    (
+        Camera3d::default(),
+        Camera::default(),
+        // The transform stays at the origin; everything else is rendered
+        // relative to it via the floating-origin system.
+        Transform::from_translation(Vec3::ZERO).looking_to(direction, up),
+        Projection::Perspective(PerspectiveProjection {
+            fov: fov_deg.to_radians(),
+            near: 1.0,
+            far: 100_000_000.0, // 100,000 km — enough to see the whole Earth.
+            ..default()
+        }),
+        // ACES filmic tonemapping over an HDR target, as the atmosphere expects.
+        Tonemapping::AcesFitted,
+        Hdr,
+        // Fixed exposure calibrated for daytime; CPU sun extinction darkens the
+        // scene through twilight, so no eye-adaptation curve is needed.
+        Exposure { ev100: 13.0 },
+        // Bloom gives the sun a natural glow.
+        Bloom::NATURAL,
+        FloatingOriginCamera::new(position),
+        FlightCamera { direction },
+    )
 }

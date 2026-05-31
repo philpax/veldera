@@ -185,18 +185,29 @@ impl TranslateRequest {
 
 /// Plugin for the floating-origin freelook flight camera.
 ///
-/// The host supplies the [`CameraConfig`] path so the engine crate stays free
-/// of any particular asset layout, and drives [`FreelookCameraControl`] to gate
-/// the camera's activity.
+/// Defaults to the camera config at [`DEFAULT_CONFIG_PATH`](Self::DEFAULT_CONFIG_PATH)
+/// in the shared engine asset subtree; a host with a different asset layout can
+/// override the path via [`new`](Self::new). It drives [`FreelookCameraControl`]
+/// to gate the camera's activity.
 pub struct FreelookCameraPlugin {
     /// Path to the [`CameraConfig`] TOML.
     pub config_path: &'static str,
 }
 
 impl FreelookCameraPlugin {
+    /// Canonical [`CameraConfig`] path within the shared engine asset subtree.
+    pub const DEFAULT_CONFIG_PATH: &'static str = "engine/config/camera/camera.toml";
+
     /// Create the plugin, loading its config from `config_path`.
     pub const fn new(config_path: &'static str) -> Self {
         Self { config_path }
+    }
+}
+
+impl Default for FreelookCameraPlugin {
+    /// Load the camera config from [`DEFAULT_CONFIG_PATH`](Self::DEFAULT_CONFIG_PATH).
+    fn default() -> Self {
+        Self::new(Self::DEFAULT_CONFIG_PATH)
     }
 }
 

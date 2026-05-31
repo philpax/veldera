@@ -90,7 +90,8 @@ pub struct CloudIntegrationPlugin {
 }
 
 /// Asset paths for the cloud configs the integration loads. The engine owns the
-/// config *types*; the app supplies these paths.
+/// config *types*; [`Default`] points at the canonical engine asset subtree, and
+/// a host with a different layout can supply its own paths.
 pub struct CloudConfigPaths {
     /// Per-layer cloud config ([`CloudConfig`]).
     pub layers: &'static str,
@@ -104,10 +105,31 @@ pub struct CloudConfigPaths {
     pub topography: &'static str,
 }
 
+impl Default for CloudConfigPaths {
+    /// The canonical cloud config and topography paths within the shared engine
+    /// asset subtree.
+    fn default() -> Self {
+        Self {
+            layers: "engine/config/rendering/clouds.toml",
+            engine: "engine/config/rendering/cloud_engine.toml",
+            shader: "engine/config/rendering/cloud_shader.toml",
+            climate: "engine/config/rendering/cloud_climate.toml",
+            topography: "engine/world/earth_topography.png",
+        }
+    }
+}
+
 impl CloudIntegrationPlugin {
     /// Create the plugin, loading its configs from `paths`.
     pub const fn new(paths: CloudConfigPaths) -> Self {
         Self { paths }
+    }
+}
+
+impl Default for CloudIntegrationPlugin {
+    /// Load the cloud configs from [`CloudConfigPaths::default`].
+    fn default() -> Self {
+        Self::new(CloudConfigPaths::default())
     }
 }
 

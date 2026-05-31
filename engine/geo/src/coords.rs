@@ -79,6 +79,21 @@ pub fn lat_lon_to_ecef(lat_deg: f64, lon_deg: f64, radius: f64) -> DVec3 {
     )
 }
 
+/// Initial camera look direction and local up at an ECEF `position`, for a
+/// compass `heading` and `pitch` in degrees.
+///
+/// `heading` 0 faces north and increases toward east; positive `pitch` tilts
+/// up. Returns `(direction, up)` ready for `Transform::looking_to`. Used to aim
+/// a freshly spawned floating-origin camera from a lat/lon/heading/pitch launch.
+pub fn enu_look_direction(position: DVec3, heading_deg: f32, pitch_deg: f32) -> (Vec3, Vec3) {
+    let frame = RadialFrame::from_ecef_position(position);
+    let heading = heading_deg.to_radians();
+    let pitch = pitch_deg.to_radians();
+    let horizontal = frame.north * heading.cos() + frame.east * heading.sin();
+    let direction = (horizontal * pitch.cos() + frame.up * pitch.sin()).normalize();
+    (direction, frame.up)
+}
+
 /// Smoother step interpolation (Ken Perlin's improved version).
 ///
 /// Has zero first and second derivative at both endpoints.

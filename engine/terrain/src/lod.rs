@@ -96,17 +96,28 @@ pub struct LodTuning {
 
 /// Plugin for LOD management and frustum culling.
 ///
-/// The host supplies the [`LodTuning`] config path so the engine crate stays
-/// free of any particular asset layout.
+/// Defaults to the tuning config at [`DEFAULT_CONFIG_PATH`](Self::DEFAULT_CONFIG_PATH)
+/// in the shared engine asset subtree; override via [`new`](Self::new) for a
+/// different asset layout.
 pub struct LodPlugin {
     /// Path to the [`LodTuning`] TOML.
     pub config_path: &'static str,
 }
 
 impl LodPlugin {
+    /// Canonical [`LodTuning`] path within the shared engine asset subtree.
+    pub const DEFAULT_CONFIG_PATH: &'static str = "engine/config/world/lod.toml";
+
     /// Create the plugin, loading its tuning config from `config_path`.
     pub const fn new(config_path: &'static str) -> Self {
         Self { config_path }
+    }
+}
+
+impl Default for LodPlugin {
+    /// Load the tuning config from [`DEFAULT_CONFIG_PATH`](Self::DEFAULT_CONFIG_PATH).
+    fn default() -> Self {
+        Self::new(Self::DEFAULT_CONFIG_PATH)
     }
 }
 
