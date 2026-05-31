@@ -177,9 +177,22 @@ pub struct FpsConfig {
     pub air_speed_cap: f32,
     /// Air acceleration (m/s²).
     pub air_acceleration: f32,
-    /// Hard cap on lateral air speed (m/s); raised so point-yeet launches aren't
-    /// clamped. Normal air movement is bounded by `air_speed_cap`.
-    pub max_air_speed: f32,
+    /// Quadratic air-drag coefficient (1/m). While airborne, contributes
+    /// `air_drag_quadratic * speed²` to a resistance applied opposite the full
+    /// velocity. Dominates at high speed, so it tames a fast flycam →
+    /// first-person hand-off or a point-yeet launch with no hard cap, then
+    /// fades as the square of speed — which leaves a slow low-speed tail that
+    /// [`air_drag_linear`](Self::air_drag_linear) cleans up.
+    pub air_drag_quadratic: f32,
+    /// Linear air-drag coefficient (1/s). Contributes `air_drag_linear * speed`
+    /// to the same airborne resistance. Unlike the quadratic term it doesn't
+    /// vanish at low speed, so it gives a crisp, full stop instead of an endless
+    /// drift. Because the resistance acts on the *full* velocity (to preserve
+    /// travel direction — a lateral-only drag would tilt the trajectory), it
+    /// also opposes falling: the airborne terminal velocity is the `speed` where
+    /// `air_drag_quadratic * speed² + air_drag_linear * speed == gravity`, so a
+    /// larger linear term means a crisper stop *and* a slower, floatier fall.
+    pub air_drag_linear: f32,
     /// Ground acceleration (m/s²).
     pub acceleration: f32,
     /// Ground friction coefficient (normal play; ragdoll uses `landing_friction`).
@@ -290,7 +303,8 @@ pub struct FpsController {
     pub side_speed: f32,
     pub air_speed_cap: f32,
     pub air_acceleration: f32,
-    pub max_air_speed: f32,
+    pub air_drag_quadratic: f32,
+    pub air_drag_linear: f32,
     pub acceleration: f32,
     pub friction: f32,
     /// If the dot product (alignment) of the normal of the surface and the upward vector,
@@ -338,7 +352,8 @@ impl FpsController {
         self.side_speed = c.side_speed;
         self.air_speed_cap = c.air_speed_cap;
         self.air_acceleration = c.air_acceleration;
-        self.max_air_speed = c.max_air_speed;
+        self.air_drag_quadratic = c.air_drag_quadratic;
+        self.air_drag_linear = c.air_drag_linear;
         self.acceleration = c.acceleration;
         self.friction = c.friction;
         self.traction_normal_cutoff = c.traction_normal_cutoff;
@@ -737,15 +752,17 @@ fn fps_controller_prepare(
         let is_grounded = controller.ground_tick >= 1;
         let is_ragdolling = controller.ragdoll_state == RagdollState::Ragdolling;
 
-        // Ground friction applies always — including during ragdoll —
-        // so the kinematic capsule eventually stops sliding after
-        // landing and the grounded timer can fire recovery. Without
-        // this, lateral velocity from the launch persists forever and
-        // `ground_recovery_s` never elapses. While ragdolling we
-        // use a much stronger coefficient so a high-speed rooftop
-        // landing arrests almost on contact rather than skidding off the
-        // edge.
+        // Passive resistance: ground friction when grounded, air drag when
+        // airborne. Both apply always — including during ragdoll — so a
+        // high-speed launch is arrested whether it ends in a slide or a tumble;
+        // gating either behind the ragdoll `continue` below would freeze the
+        // capsule's speed the instant it ragdolls (e.g. a fast flycam hand-off
+        // ragdolls after `airborne_threshold_s` and would then coast forever).
         if is_grounded {
+            // Ground friction. While ragdolling we use a much stronger
+            // coefficient so a high-speed rooftop landing arrests almost on
+            // contact rather than skidding off the edge, and so the grounded
+            // timer can elapse to fire recovery.
             let friction = if is_ragdolling {
                 fps_config.landing_friction
             } else {
@@ -764,13 +781,29 @@ fn fps_controller_prepare(
             } else {
                 velocity.0 = vertical_component;
             }
+        } else {
+            // Air drag: a resistance of `quadratic * speed² + linear * speed`
+            // applied opposite the full velocity. The quadratic term bites hard
+            // at high speed (taming a fast hand-off or launch with no hard cap);
+            // the linear term doesn't vanish as you slow, so it cleans up the
+            // low-speed tail into a crisp stop. Acting on the whole vector
+            // preserves the travel direction — a lateral-only drag would leave
+            // the vertical component intact and tilt the trajectory — and lets
+            // it double as a terminal-velocity cap for long falls. The
+            // `max(0.0)` guards against an overshoot reversing direction.
+            let speed = velocity.0.length();
+            if speed > f32::EPSILON {
+                let decel = controller.air_drag_quadratic * speed * speed
+                    + controller.air_drag_linear * speed;
+                let new_speed = (speed - decel * dt).max(0.0);
+                velocity.0 *= new_speed / speed;
+            }
         }
 
-        // The rest of the controller logic — input-driven
-        // acceleration, jump, crouch height updates, collider
-        // resize — is for the player driving. While ragdolling
-        // there's no driving; gravity + the friction above are the
-        // only forces on the capsule.
+        // The rest of the controller logic — input-driven acceleration, jump,
+        // crouch height updates, collider resize — is for the player driving.
+        // While ragdolling there's no driving; gravity plus the passive
+        // resistance above are the only forces on the capsule.
         if is_ragdolling {
             continue;
         }
@@ -791,7 +824,8 @@ fn fps_controller_prepare(
                 velocity.0 += local_up * controller.jump_speed;
             }
         } else {
-            // Air acceleration.
+            // Air acceleration (input-driven; the passive air drag above runs
+            // every airborne tick, ragdoll or not).
             let capped_wish_speed = f32::min(wish_speed, controller.air_speed_cap);
             let add = acceleration(
                 wish_direction,
@@ -801,15 +835,6 @@ fn fps_controller_prepare(
                 dt,
             );
             velocity.0 += add;
-
-            // Clamp air speed.
-            let vertical_component = velocity.0.dot(local_up) * local_up;
-            let lateral_velocity = velocity.0 - vertical_component;
-            let air_speed = lateral_velocity.length();
-            if air_speed > controller.max_air_speed {
-                let ratio = controller.max_air_speed / air_speed;
-                velocity.0 = vertical_component + lateral_velocity * ratio;
-            }
         }
 
         // Sync height bounds from the central config so UI edits take

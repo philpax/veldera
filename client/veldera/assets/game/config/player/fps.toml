@@ -40,11 +40,18 @@ friction = 10.0
 stop_speed = 1.0
 friction_speed_cutoff = 0.1
 traction_normal_cutoff = 0.7
-# Air control. air_speed_cap bounds per-tick air control; max_air_speed is the
-# hard lateral cap, lifted to 200 so point-yeet launches aren't clamped.
+# Air control. air_speed_cap bounds per-tick air control. air_drag_quadratic
+# (1/m) and air_drag_linear (1/s) together set the airborne resistance, applied
+# opposite the velocity as air_drag_quadratic * speed^2 + air_drag_linear *
+# speed: the quadratic term tames high speeds (a flycam entry, a point-yeet)
+# with no hard cap, the linear term cleans up the slow tail into a full stop.
+# The resistance also opposes falling, so terminal velocity is the speed where
+# the two terms sum to gravity (~28 m/s here); raise air_drag_linear for a
+# crisper stop and a floatier fall.
 air_speed_cap = 2.0
 air_acceleration = 20.0
-max_air_speed = 200.0
+air_drag_quadratic = 0.002
+air_drag_linear = 0.3
 # Jump impulse (m/s) and crouch/uncrouch capsule resize rates (m/s).
 jump_speed = 4.0
 crouch_speed = 6.0

@@ -440,10 +440,10 @@ pub(super) fn handle_yeet(
     // Apply the launch as an *impulse* added to existing velocity
     // rather than overwriting it — otherwise a small counter-yeet
     // can cancel out arbitrarily large existing momentum, which
-    // feels unphysical. The FPS controller's `max_air_speed` cap
-    // (bumped to 200 m/s for yeets) acts as the upper bound on
-    // chained accumulation. Lateral, not vertical, is clamped, so
-    // stacking vertical yeets is unbounded — that's fine for now.
+    // feels unphysical. The FPS controller's quadratic air drag
+    // bounds chained accumulation: each launch adds speed, but the
+    // faster you go the harder the drag pulls back, so stacked yeets
+    // converge rather than growing without limit.
     //
     // For non-steeply-down launches add a small upward nudge so
     // the FPS controller's next slide doesn't re-detect ground
