@@ -1,3 +1,53 @@
+## Workspace structure
+
+The workspace is three tiers; dependencies only ever point *down* the stack.
+
+- **Engine (`engine/`).** Reusable, gameplay-agnostic crates, packages named
+  `veldera_*` (`veldera_geo`, `veldera_config`, `veldera_input`, `veldera_async`,
+  `veldera_sky`, `veldera_physics`, `veldera_terrain`, `veldera_camera`, the
+  `veldera_atmosphere`/`veldera_clouds` renderers, `veldera_constants`). The
+  `veldera_engine` umbrella re-exports them all and bundles the always-on
+  infrastructure into an `EnginePlugins` group. An engine crate never depends on
+  gameplay or names a gameplay type.
+- **Extras (`extras/`).** Reusable-but-not-core blocks usable by any client but
+  not part of the engine (e.g. `veldera_places`, geocoding/elevation — pulls
+  `reqwest`). The engine never depends on extras.
+- **Clients (`client/`).** `client/veldera` is the game: a thin binary
+  (`main` + scene wiring + leftover glue) on top of the gameplay crates, packages
+  named `veldera_game_*` (`veldera_game_input`, `_camera_state`, `_player`,
+  `_teleport`, `_camera`, `_vehicle`, `_ui`). `client/reference` is a freelook
+  Earth viewer built on engine crates only — the acid test that the engine
+  boundary is clean.
+
+### Keeping the engine gameplay-agnostic
+
+The engine exposes mechanism; gameplay supplies policy. When an engine crate
+needs something from the app, it *inverts* rather than reaching into gameplay:
+
+- **Config paths are app policy.** An engine plugin takes its config-file
+  path(s) as constructor params (`FooPlugin::new(path)`); the engine owns the
+  config *type* and its `Default`, the app owns the path and the file. Likewise
+  any other asset path the engine loads (e.g. the cloud topography texture).
+- **Markers, resources, and events the host fills in.** The engine reads
+  host-set state rather than gameplay state — e.g. radial gravity skips a
+  `ManualGravity` marker (gameplay attaches it to the FPS player), the freelook
+  camera reads a `FreelookCameraControl` resource the mode machine drives, and
+  the FPS controller gates on an `FpsControllerSuppressed` flag the teleport
+  sets. The engine never reads `CameraMode`, the player, etc.
+- **Shared data below a state machine** goes in its own low crate (e.g.
+  `veldera_game_camera_state` holds `CameraMode`/`CameraModeState` so player,
+  vehicle, and teleport read the mode without depending on the mode machine).
+
+### Dependencies and assets
+
+- **Workspace dependencies.** Versions are single-sourced in the root
+  `[workspace.dependencies]`; every crate uses `dep = { workspace = true,
+  features = [...] }`, selecting features per-crate.
+- **Asset layout.** Assets split into `assets/engine/` and `assets/game/` by
+  ownership. `assets/engine` is a symlink to the top-level `engine_assets/`
+  directory, so another client can symlink the same engine assets;
+  `web_build.sh` reifies it (`cp -rL`) since the browser can't follow symlinks.
+
 ## General conventions
 
 ### Correctness over convenience
@@ -95,11 +145,14 @@ tuning knob that someone will want to iterate on.
 
 - **Hot-reloadable config (default, preferred).** Any value that affects "feel",
   appearance, or behaviour someone might want to tune lives in a per-domain TOML
-  under `client/veldera/assets/config/`, backed by a `ConfigPlugin<C>` (the config
-  type is both an `Asset` and a mirror `Resource`). Native builds watch the file
-  and apply edits live; consumers read `config::Config<C>` (or the mirror
-  `Resource`) and get the new value on the next frame. This is the normal case, so
-  do not document or comment that a value is hot-reloadable — it is assumed.
+  under `assets/{engine,game}/config/` (engine-owned schemas under `engine/`,
+  gameplay under `game/`), backed by a `ConfigPlugin<C>` (the config type is both
+  an `Asset` and a mirror `Resource`). The engine crate owns the type and its
+  `Default`; the app supplies the file path to the plugin (see "Config paths are
+  app policy" above). Native builds watch the file and apply edits live; consumers
+  read `config::Config<C>` (or the mirror `Resource`) and get the new value on the
+  next frame. This is the normal case, so do not document or comment that a value
+  is hot-reloadable — it is assumed.
 - **Init-only config.** Some values can only be applied at startup or plugin-build
   time (e.g. a value that sizes a GPU buffer or seeds a one-shot spawn). Keep these
   in the TOML too, but call out the init-only constraint explicitly in a comment on
