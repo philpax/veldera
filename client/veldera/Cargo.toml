@@ -56,15 +56,15 @@ rocktree = { path = "../../rocktree/rocktree" }
 rocktree-decode = { path = "../../rocktree/rocktree-decode" }
 veldera_config = { path = "../../crates/config" }
 veldera_constants = { path = "../../crates/constants" }
+veldera_async = { path = "../../crates/async" }
 veldera_geo = { path = "../../crates/geo" }
 veldera_input = { path = "../../crates/input" }
+veldera_places = { path = "../../extras/places" }
 veldera_sky = { path = "../../crates/sky" }
 # For geocoding API responses and character metric extras parsing.
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 tracing = "0.1"
-# For URL encoding geocoding queries.
-urlencoding = "2"
 # Cross-platform time support.
 web-time = "1"
 # Serde-backed asset loaders; we use the TOML one for hot-reloadable configs.
@@ -97,16 +97,8 @@ bevy = { version = "0.18.0", default-features = false, features = [
   "trace",
   "x11"
 ] }
-bevy-tokio-tasks = "0.18"
 clap = { version = "4", features = ["derive"] }
-tokio = { version = "1", features = ["sync"] }
 tracing-subscriber = "0.3"
-
-# Geocoding HTTP requests (native).
-[target.'cfg(not(target_family = "wasm"))'.dependencies.reqwest]
-version = "0.12"
-default-features = false
-features = ["json", "rustls-tls"]
 
 # WASM: Panic hook and tracing for browser console.
 [target.'cfg(target_family = "wasm")'.dependencies]
@@ -114,12 +106,6 @@ console_error_panic_hook = "0.1"
 js-sys = "0.3"
 tracing-wasm = "0.2"
 wasm-bindgen = "0.2"
-
-# Geocoding HTTP requests (WASM).
-[target.'cfg(target_family = "wasm")'.dependencies.reqwest]
-version = "0.12"
-default-features = false
-features = ["json"]
 
 [features]
 default = ["webgpu"]

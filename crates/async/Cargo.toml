@@ -1,0 +1,17 @@
+[package]
+name = "veldera_async"
+version = "0.1.0"
+edition.workspace = true
+repository.workspace = true
+license.workspace = true
+description = "Platform-agnostic async task spawning for native (Tokio) and WASM (Bevy task pool) Veldera builds"
+
+[dependencies]
+bevy = { version = "0.18.0", default-features = false }
+
+[target.'cfg(not(target_family = "wasm"))'.dependencies]
+bevy-tokio-tasks = "0.18"
+tokio = { version = "1", features = ["rt"] }
+
+[lints]
+workspace = true

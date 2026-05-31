@@ -24,7 +24,7 @@ use crate::{
     },
 };
 
-use super::{HttpClient, elevation::fetch_elevation};
+use veldera_places::{HttpClient, fetch_elevation};
 
 /// Handle to the woosh sound asset.
 #[derive(Resource)]
@@ -123,7 +123,7 @@ impl TeleportState {
         self.play_departure_woosh = true;
 
         let tx = self.elevation_tx.clone();
-        let client = client.0.clone();
+        let client = client.inner().clone();
 
         spawner.spawn(async move {
             let result = fetch_elevation(&client, lat, lon).await;

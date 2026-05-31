@@ -6799,7 +6799,6 @@ dependencies = [
  "async-channel",
  "avian3d",
  "bevy",
- "bevy-tokio-tasks",
  "bevy_common_assets",
  "bevy_egui",
  "chrono",
@@ -6812,25 +6811,33 @@ dependencies = [
  "js-sys",
  "leafwing-input-manager",
  "rand 0.9.2",
- "reqwest 0.12.28",
  "rocktree",
  "rocktree-decode",
  "serde",
  "serde_json",
- "tokio",
  "tracing",
  "tracing-subscriber",
  "tracing-wasm",
- "urlencoding",
+ "veldera_async",
  "veldera_atmosphere",
  "veldera_clouds",
  "veldera_config",
  "veldera_constants",
  "veldera_geo",
  "veldera_input",
+ "veldera_places",
  "veldera_sky",
  "wasm-bindgen",
  "web-time",
+]
+
+[[package]]
+name = "veldera_async"
+version = "0.1.0"
+dependencies = [
+ "bevy",
+ "bevy-tokio-tasks",
+ "tokio",
 ]
 
 [[package]]
@@ -6882,6 +6889,18 @@ name = "veldera_input"
 version = "0.1.0"
 dependencies = [
  "bevy",
+]
+
+[[package]]
+name = "veldera_places"
+version = "0.1.0"
+dependencies = [
+ "async-channel",
+ "bevy",
+ "reqwest 0.12.28",
+ "serde",
+ "urlencoding",
+ "veldera_async",
 ]
 
 [[package]]

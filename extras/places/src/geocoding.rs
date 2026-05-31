@@ -3,9 +3,9 @@
 use bevy::prelude::*;
 use serde::Deserialize;
 
-use crate::async_runtime::TaskSpawner;
+use veldera_async::TaskSpawner;
 
-use super::HttpClient;
+use crate::HttpClient;
 
 /// Throttle duration between geocoding requests (per Nominatim usage policy).
 pub const GEOCODING_THROTTLE_SECS: f64 = 5.0;

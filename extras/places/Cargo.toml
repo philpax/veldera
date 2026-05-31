@@ -1,0 +1,31 @@
+[package]
+name = "veldera_places"
+version = "0.1.0"
+edition.workspace = true
+repository.workspace = true
+license.workspace = true
+description = "Geocoding and elevation lookup services for Veldera, backed by OpenStreetMap Nominatim and Open Elevation"
+
+[dependencies]
+bevy = { version = "0.18.0", default-features = false }
+# Platform-agnostic async channel for delivering results back to the main thread.
+async-channel = "2"
+serde = { version = "1", features = ["derive"] }
+# For URL encoding geocoding queries.
+urlencoding = "2"
+veldera_async = { path = "../../crates/async" }
+
+# Geocoding/elevation HTTP requests (native).
+[target.'cfg(not(target_family = "wasm"))'.dependencies.reqwest]
+version = "0.12"
+default-features = false
+features = ["json", "rustls-tls"]
+
+# Geocoding/elevation HTTP requests (WASM).
+[target.'cfg(target_family = "wasm")'.dependencies.reqwest]
+version = "0.12"
+default-features = false
+features = ["json"]
+
+[lints]
+workspace = true

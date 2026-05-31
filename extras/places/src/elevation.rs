@@ -3,11 +3,7 @@
 use serde::Deserialize;
 
 /// Fetch elevation from Open Elevation API.
-pub(super) async fn fetch_elevation(
-    client: &reqwest::Client,
-    lat: f64,
-    lon: f64,
-) -> Result<f64, String> {
+pub async fn fetch_elevation(client: &reqwest::Client, lat: f64, lon: f64) -> Result<f64, String> {
     #[derive(Debug, Deserialize)]
     struct Response {
         results: Vec<Result>,
