@@ -6826,6 +6826,7 @@ dependencies = [
  "veldera_game_camera_state",
  "veldera_game_input",
  "veldera_game_player",
+ "veldera_game_teleport",
  "veldera_geo",
  "veldera_physics",
  "veldera_places",
@@ -6949,6 +6950,26 @@ dependencies = [
  "veldera_game_input",
  "veldera_geo",
  "veldera_physics",
+]
+
+[[package]]
+name = "veldera_game_teleport"
+version = "0.1.0"
+dependencies = [
+ "async-channel",
+ "avian3d",
+ "bevy",
+ "glam",
+ "serde",
+ "tracing",
+ "veldera_async",
+ "veldera_camera",
+ "veldera_config",
+ "veldera_constants",
+ "veldera_game_camera_state",
+ "veldera_game_player",
+ "veldera_geo",
+ "veldera_places",
 ]
 
 [[package]]

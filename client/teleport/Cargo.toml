@@ -1,0 +1,29 @@
+[package]
+name = "veldera_game_teleport"
+version = "0.1.0"
+edition.workspace = true
+repository.workspace = true
+license.workspace = true
+description = "Cinematic fly-to-location teleport for the Veldera client: animates the camera to a searched place and respawns the player on arrival"
+
+[dependencies]
+async-channel = "2"
+avian3d = "0.6"
+bevy = { version = "0.18.0", default-features = false, features = [
+    "bevy_asset",
+    "bevy_audio",
+] }
+glam = "0.30"
+serde = { version = "1", features = ["derive"] }
+tracing = "0.1"
+veldera_async = { path = "../../crates/async" }
+veldera_camera = { path = "../../crates/camera" }
+veldera_config = { path = "../../crates/config" }
+veldera_constants = { path = "../../crates/constants" }
+veldera_geo = { path = "../../crates/geo" }
+veldera_places = { path = "../../extras/places" }
+veldera_game_camera_state = { path = "../camera_state" }
+veldera_game_player = { path = "../player" }
+
+[lints]
+workspace = true

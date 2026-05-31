@@ -3,7 +3,7 @@
 //! physics has loaded.
 //!
 //! On a teleport request the destination elevation is fetched (via
-//! [`super::elevation`]); once it arrives the flight arc begins. Two
+//! [`veldera_places::fetch_elevation`]); once it arrives the flight arc begins. Two
 //! orientation styles are supported (classic zoom-out and horizon-chasing),
 //! and the wind-loop / whoosh audio is driven from the animation phase.
 
@@ -16,31 +16,63 @@ use veldera_game_player::{
     FpsPlayerConfig, LogicalPlayer, RenderPlayer, direction_to_yaw_pitch, spawn_fps_player,
 };
 
-use crate::{
-    async_runtime::TaskSpawner,
-    camera::{CameraConfig, CameraMode, CameraModeState, FlightCamera, TeleportAnimationMode},
-    world::{
-        coords::{RadialFrame, lat_lon_to_ecef, slerp_dvec3, smootherstep},
-        floating_origin::FloatingOriginCamera,
-    },
+use veldera_async::TaskSpawner;
+use veldera_camera::{CameraConfig, FlightCamera, TeleportAnimationMode};
+use veldera_config::ConfigPlugin;
+use veldera_game_camera_state::{CameraMode, CameraModeState};
+use veldera_geo::{
+    coords::{RadialFrame, lat_lon_to_ecef, slerp_dvec3, smootherstep},
+    floating_origin::FloatingOriginCamera,
 };
-
 use veldera_places::{HttpClient, fetch_elevation};
+
+/// Plugin for the cinematic fly-to-location teleport.
+///
+/// The host supplies the [`GeoConfig`] path. The shared HTTP client comes from
+/// [`veldera_places::PlacesPlugin`], which the host must add separately.
+pub struct TeleportPlugin {
+    /// Path to the [`GeoConfig`] TOML.
+    pub config_path: &'static str,
+}
+
+impl TeleportPlugin {
+    /// Create the plugin, loading its config from `config_path`.
+    pub const fn new(config_path: &'static str) -> Self {
+        Self { config_path }
+    }
+}
+
+impl Plugin for TeleportPlugin {
+    fn build(&self, app: &mut App) {
+        app.add_plugins(ConfigPlugin::<GeoConfig>::new(self.config_path))
+            .init_resource::<TeleportState>()
+            .init_resource::<TeleportAnimation>()
+            .add_systems(Startup, load_teleport_sounds)
+            .add_systems(
+                Update,
+                (
+                    play_departure_woosh,
+                    poll_teleport,
+                    update_teleport_animation,
+                ),
+            );
+    }
+}
 
 /// Handle to the woosh sound asset.
 #[derive(Resource)]
-pub(super) struct WooshSoundHandle(Handle<AudioSource>);
+struct WooshSoundHandle(Handle<AudioSource>);
 
 /// Handle to the wind loop sound asset.
 #[derive(Resource)]
-pub(super) struct WindLoopSoundHandle(Handle<AudioSource>);
+struct WindLoopSoundHandle(Handle<AudioSource>);
 
 /// Marker component for the teleport wind loop audio entity.
 #[derive(Component)]
-pub(super) struct TeleportWindLoop;
+struct TeleportWindLoop;
 
 /// Play departure woosh immediately when teleport is requested.
-pub(super) fn play_departure_woosh(
+fn play_departure_woosh(
     mut commands: Commands,
     mut teleport_state: ResMut<TeleportState>,
     woosh_sound: Option<Res<WooshSoundHandle>>,
@@ -57,7 +89,7 @@ pub(super) fn play_departure_woosh(
 }
 
 /// Load teleport sound assets on startup.
-pub(super) fn load_teleport_sounds(mut commands: Commands, asset_server: Res<AssetServer>) {
+fn load_teleport_sounds(mut commands: Commands, asset_server: Res<AssetServer>) {
     commands.insert_resource(WooshSoundHandle(
         asset_server.load("683096__florianreichelt__woosh.mp3"),
     ));
@@ -620,7 +652,7 @@ fn horizon_cruise_orientation(phase: &TeleportPhase, t: f64, dt: f64) -> Quat {
 
 /// Poll for elevation results and start teleport animation.
 #[allow(clippy::too_many_arguments)]
-pub(super) fn poll_teleport(
+fn poll_teleport(
     mut commands: Commands,
     config: Res<GeoConfig>,
     mut teleport_state: ResMut<TeleportState>,
@@ -782,7 +814,7 @@ pub(super) fn poll_teleport(
 
 /// Update the teleport animation each frame.
 #[allow(clippy::too_many_arguments)]
-pub(super) fn update_teleport_animation(
+fn update_teleport_animation(
     mut commands: Commands,
     time: Res<Time>,
     config: Res<GeoConfig>,
