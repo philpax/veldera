@@ -2,6 +2,7 @@
 //!
 //! Provides geocoding search, coordinate input, altitude control, and time-of-day settings.
 
+use avian3d::prelude::LinearVelocity;
 use bevy::{
     diagnostic::{DiagnosticsStore, FrameTimeDiagnosticsPlugin},
     ecs::system::SystemParam,
@@ -11,6 +12,7 @@ use bevy_egui::egui;
 use glam::DVec3;
 
 use veldera_game_camera::{AltitudeRequest, FlightCamera, HeadingRequest, TranslateRequest};
+use veldera_game_player::LogicalPlayer;
 
 use veldera_async::TaskSpawner;
 use veldera_game_teleport::{TeleportAnimation, TeleportState};
@@ -60,6 +62,10 @@ pub(super) struct LocationParams<'w, 's> {
     /// query in the same system. Heading changes flow back through
     /// [`HeadingRequest`].
     pub flight_camera_query: Query<'w, 's, &'static FlightCamera>,
+    /// First-person body velocity, present only in FPS mode. Used for the
+    /// current-speed readout; the flycam's own velocity comes from
+    /// [`FlightCamera`] in the other modes.
+    pub player_velocity_query: Query<'w, 's, &'static LinearVelocity, With<LogicalPlayer>>,
     pub diagnostics: Res<'w, DiagnosticsStore>,
 }
 
@@ -78,6 +84,21 @@ pub(super) fn render_location_tab(
     ui.label(format!(
         "FPS: {fps:.0}  ·  Position: ({:.0}, {:.0}, {:.0})",
         position.x, position.y, position.z
+    ));
+
+    // Current movement speed. In first-person it's the physics body's
+    // velocity; otherwise it's the flycam's own tracked velocity. Both share
+    // the same ECEF axes, so the magnitude is directly comparable.
+    let speed_mps = if let Ok(velocity) = location.player_velocity_query.single() {
+        velocity.0.length()
+    } else if let Ok(flight_camera) = location.flight_camera_query.single() {
+        flight_camera.velocity.length()
+    } else {
+        0.0
+    };
+    ui.label(format!(
+        "Speed: {speed_mps:.1} m/s ({:.0} km/h)",
+        speed_mps * 3.6
     ));
     ui.separator();
 

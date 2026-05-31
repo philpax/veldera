@@ -7,6 +7,7 @@ license.workspace = true
 description = "Debug UI for the Veldera client: the egui dock shell and per-subsystem diagnostic/tuning panels"
 
 [dependencies]
+avian3d = { workspace = true }
 bevy = { workspace = true, features = [
     "bevy_asset",
     "bevy_core_pipeline",
