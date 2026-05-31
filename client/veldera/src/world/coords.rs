@@ -1,9 +1,61 @@
 //! Coordinate conversion utilities.
 //!
 //! Provides conversions between ECEF (Earth-Centered, Earth-Fixed) coordinates
-//! and geographic coordinates (latitude, longitude).
+//! and geographic coordinates (latitude, longitude), plus the local tangent
+//! frame ([`RadialFrame`]) used to turn headings into world directions.
 
-use glam::DVec3;
+use glam::{DVec3, Vec3};
+
+/// Radial coordinate frame based on an ECEF position.
+///
+/// Provides a local reference frame where "up" points away from Earth center,
+/// with `north`/`east` spanning the tangent plane. Pure geometry — used wherever
+/// a yaw/heading needs to become a world-space direction (player look, vehicle
+/// spawn orientation, streaming, teleport).
+pub struct RadialFrame {
+    /// Local up vector (from Earth center outward).
+    pub up: Vec3,
+    /// Local north vector (tangent toward the pole).
+    pub north: Vec3,
+    /// Local east vector (tangent perpendicular to north).
+    pub east: Vec3,
+}
+
+impl RadialFrame {
+    /// Compute the radial frame from an ECEF position.
+    pub fn from_ecef_position(ecef_pos: DVec3) -> Self {
+        let up = ecef_pos.normalize().as_vec3();
+
+        // In ECEF, the Z axis points toward the North Pole.
+        let world_north = Vec3::Z;
+
+        // Project world north onto the tangent plane.
+        let north = (world_north - up * world_north.dot(up)).normalize_or_zero();
+
+        // Handle degenerate case at the poles.
+        let north = if north.length_squared() < 0.001 {
+            Vec3::X
+        } else {
+            north
+        };
+
+        let east = north.cross(up).normalize();
+
+        Self { up, north, east }
+    }
+
+    /// Horizontal heading direction for a `yaw` angle (radians): `0` faces
+    /// north, increasing yaw rotates toward `-east`.
+    pub fn heading(&self, yaw: f32) -> Vec3 {
+        (self.north * yaw.cos() - self.east * yaw.sin()).normalize()
+    }
+
+    /// Look direction for a `yaw`/`pitch` (radians): the horizontal
+    /// [`heading`](Self::heading) tilted toward `up` by `pitch`.
+    pub fn look(&self, yaw: f32, pitch: f32) -> Vec3 {
+        self.heading(yaw) * pitch.cos() + self.up * pitch.sin()
+    }
+}
 
 /// Convert ECEF coordinates to latitude and longitude (degrees).
 ///

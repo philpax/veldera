@@ -7,10 +7,10 @@ use bevy_egui::egui;
 
 use crate::{
     camera::{
-        BodyConfig, BodyTuning, CameraConfig, CameraMode, CameraModeState, CharacterMetrics,
-        FlightCamera, FollowCameraConfig, FollowEntityTarget, FpsPlayerConfig,
-        TeleportAnimationMode,
+        CameraConfig, CameraMode, CameraModeState, FlightCamera, FollowCameraConfig,
+        FollowEntityTarget, TeleportAnimationMode,
     },
+    player::{BodyConfig, BodyTuning, CharacterMetrics, FpsPlayerConfig},
     world::floating_origin::FloatingOriginCamera,
 };
 

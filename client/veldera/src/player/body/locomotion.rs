@@ -15,12 +15,12 @@ use serde::Deserialize;
 
 use super::{BodyAssets, BodyVisual};
 use crate::{
-    camera::fps::{FpsController, FpsPlayerConfig, LogicalPlayer, RadialFrame},
-    world::floating_origin::WorldPosition,
+    player::{FpsController, FpsPlayerConfig, LogicalPlayer},
+    world::{coords::RadialFrame, floating_origin::WorldPosition},
 };
 
 /// Hot-reloadable locomotion-blend tuning, loaded from
-/// `assets/config/camera/body/locomotion.toml`. All speeds are metres/second.
+/// `assets/config/player/body/locomotion.toml`. All speeds are metres/second.
 #[derive(Default, Asset, Resource, TypePath, Clone, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct LocomotionConfig {

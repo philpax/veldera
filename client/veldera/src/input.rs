@@ -49,7 +49,7 @@ pub enum CameraAction {
     Fire,
     /// Raise right arm to point at the look direction (right mouse,
     /// held). Releasing the button yeets the player along the look
-    /// direction at [`YEET_SPEED_M_S`](crate::camera::YEET_SPEED_M_S).
+    /// direction at a charge-scaled speed (see [`crate::player::yeet`]).
     Point,
 }
 

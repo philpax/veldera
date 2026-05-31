@@ -16,9 +16,12 @@ use super::{
     telemetry::{self, TelemetrySnapshot},
 };
 use crate::{
-    camera::{CameraModeState, RadialFrame},
+    camera::CameraModeState,
     ui::VehicleRightRequest,
-    world::floating_origin::{FloatingOriginCamera, WorldPosition},
+    world::{
+        coords::RadialFrame,
+        floating_origin::{FloatingOriginCamera, WorldPosition},
+    },
 };
 use leafwing_input_manager::prelude::*;
 

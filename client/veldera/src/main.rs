@@ -10,6 +10,7 @@ mod config;
 mod input;
 mod launch_params;
 mod physics;
+mod player;
 mod profiler;
 mod rendering;
 mod ui;
@@ -61,6 +62,7 @@ impl Plugin for AppPlugin {
             FloatingOriginPlugin,
             InputPlugin,
             CameraControllerPlugin,
+            player::PlayerPlugin,
             DataLoaderPlugin,
             GeoPlugin,
             LodPlugin,

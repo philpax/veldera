@@ -1,6 +1,6 @@
 # FPS controller ragdoll-trigger tuning.
 # (Whether the skeletal rig is built is the separate `enable_skeletal` in
-# config/camera/body/ragdoll.toml.)
+# config/player/body/ragdoll.toml.)
 
 # Master switch for the ragdoll feature. false = normal locomotion even at
 # terminal velocity; true = ragdoll after sustained airtime.

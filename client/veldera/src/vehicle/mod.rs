@@ -30,13 +30,14 @@ pub use components::{
 };
 
 use crate::{
-    camera::{
-        CameraModeState, CameraModeTransitions, FlightCamera, FollowedEntity, FpsController,
-        LogicalPlayer, RadialFrame,
-    },
+    camera::{CameraModeState, CameraModeTransitions, FlightCamera, FollowedEntity},
     physics::DespawnOutsidePhysicsRange,
+    player::{FpsController, LogicalPlayer},
     ui::VehicleTabOpen,
-    world::floating_origin::{FloatingOriginCamera, WorldPosition},
+    world::{
+        coords::RadialFrame,
+        floating_origin::{FloatingOriginCamera, WorldPosition},
+    },
 };
 
 /// Hot-reloadable global vehicle tuning, loaded from
@@ -408,7 +409,7 @@ fn spawn_vehicle_scene(
     let forward = if let Ok(fps) = fps_query.single() {
         // FPS mode: compute forward from yaw in the radial frame.
         // Yaw of 0 = facing north, positive yaw = clockwise rotation.
-        frame.north * fps.yaw.cos() - frame.east * fps.yaw.sin()
+        frame.heading(fps.yaw)
     } else if let Some(fc) = flight_camera {
         // Flycam mode: project camera direction onto ground plane.
         let forward_projected =

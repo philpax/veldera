@@ -25,10 +25,8 @@
 //!
 //! When entering FollowEntity mode, the previous mode is stored and restored on exit.
 
-mod body;
 mod flycam;
 mod follow;
-mod fps;
 mod input;
 
 use avian3d::prelude::*;
@@ -40,12 +38,12 @@ use crate::{
     world::floating_origin::{FloatingOriginCamera, WorldPosition},
 };
 
-pub use body::{BodyConfig, BodyTuning, CharacterMetrics};
+// The first-person player avatar lives in `crate::player`; the camera mode
+// state machine spawns and tears it down via these helpers. Aliased so the
+// transition code below reads against a single `fps::` namespace.
+use crate::player::controller as fps;
+
 pub use follow::{FollowCameraConfig, FollowEntityTarget, FollowedEntity};
-pub use fps::{
-    FpsController, FpsPlayerConfig, LogicalPlayer, RadialFrame, RenderPlayer,
-    direction_to_yaw_pitch, spawn_fps_player,
-};
 
 // ============================================================================
 // Configuration
@@ -323,10 +321,8 @@ impl Plugin for CameraControllerPlugin {
         .init_resource::<TranslateRequest>()
         .add_plugins((
             flycam::FlycamPlugin,
-            fps::FpsControllerPlugin,
             follow::FollowCameraPlugin,
             input::CameraInputPlugin,
-            body::BodyPlugin,
         ))
         .add_systems(
             Update,

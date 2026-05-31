@@ -4,9 +4,12 @@
 
 use bevy::prelude::*;
 
-use crate::world::floating_origin::{FloatingOriginCamera, WorldPosition};
+use crate::world::{
+    coords::RadialFrame,
+    floating_origin::{FloatingOriginCamera, WorldPosition},
+};
 
-use super::{CameraModeState, FlightCamera, fps::RadialFrame};
+use super::{CameraModeState, FlightCamera};
 
 // ============================================================================
 // Plugin

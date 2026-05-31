@@ -15,17 +15,19 @@
 //!   world space so the camera and head stay aligned during locomotion).
 //! - [`locomotion`] — per-tick clip weight computation + blend over the
 //!   `AnimationPlayer`. Splits locomotion across two Mixamo packs.
-//! - [`arm_point`] — right-click "raise arm to look direction" pose and
-//!   the yeet-on-release launch.
+//! - [`arm`] — right-click "raise arm to look direction" pose; the
+//!   yeet-on-release launch lives in [`crate::player::yeet`].
 //! - This file — plugin assembly, asset loading, scene spawn/despawn,
 //!   `AnimationPlayer` install, per-frame `WorldPosition` sync, and the
 //!   eye-offset query the FPS camera consumes.
 
-mod arm_point;
+mod arm;
 mod bones;
 mod head;
 mod locomotion;
 mod ragdoll;
+
+pub(crate) use arm::ArmPointTarget;
 
 use std::collections::HashMap;
 
@@ -43,12 +45,10 @@ use serde::Deserialize;
 use bones::{LOWER_BODY_MASK, UPPER_BODY_MASK};
 
 use crate::{
-    camera::{
-        CameraModeState,
-        fps::{FpsController, FpsPlayerConfig, LogicalPlayer, RadialFrame},
-    },
+    camera::CameraModeState,
     config,
-    world::floating_origin::WorldPosition,
+    player::{FpsController, FpsPlayerConfig, LogicalPlayer},
+    world::{coords::RadialFrame, floating_origin::WorldPosition},
 };
 
 // ============================================================================
@@ -56,7 +56,7 @@ use crate::{
 // ============================================================================
 
 /// Hot-reloadable first-person body tuning, loaded from
-/// `assets/config/camera/body/body.toml`. Eye height/forward *values* come from
+/// `assets/config/player/body/body.toml`. Eye height/forward *values* come from
 /// the character model ([`CharacterMetrics`]); this carries the cross-fade
 /// timing, the Camera-tab slider bounds, the head-lock clamp, and the glTF path.
 #[derive(Default, Asset, Resource, TypePath, Clone, Deserialize)]
@@ -184,7 +184,7 @@ pub struct BodyVisual {
     pub head_lock_delta: Vec3,
     /// Cached descendant entity of the right upper-arm bone
     /// (`mixamorig*:RightArm`). Populated by
-    /// [`arm_point::cache_right_arm`].
+    /// [`arm::cache_right_arm`].
     pub right_arm_entity: Option<Entity>,
     /// Bind-pose offset from the right upper-arm origin to the right
     /// hand origin, in the upper arm's local frame. Combined with the
@@ -197,20 +197,6 @@ pub struct BodyVisual {
     /// finger straightens — Mixamo's bind pose has them slightly
     /// curled.
     pub right_index_bones: Vec<Entity>,
-    /// `0..1` blend amount for the point-arm pose. Lerped toward `1`
-    /// while the [`Point`](crate::input::CameraAction::Point) action
-    /// is held and toward `0` when released. The IK rotation is mixed
-    /// in by this factor so the arm raises and lowers smoothly.
-    pub point_amount: f32,
-    /// Seconds the Point action has been held this charge, capped at
-    /// [`YeetConfig::max_charge_duration_s`](arm_point::YeetConfig). Maps
-    /// linearly to yeet speed at release; resets to 0 on yeet or when not
-    /// pointing.
-    pub charge_seconds: f32,
-    /// Seconds remaining before the player can yeet again. Set to
-    /// [`YeetConfig::cooldown_s`](arm_point::YeetConfig) on release; while > 0
-    /// the Point action is treated as not pressed.
-    pub yeet_cooldown_s: f32,
     /// Per-bone ragdoll rig owned by this body. `None` outside
     /// ragdoll; `Some` while ragdolling and the rig was assembled
     /// successfully (Hips + neck anchor found). Built by
@@ -229,16 +215,18 @@ impl Plugin for BodyPlugin {
         app.add_plugins((
             config::ConfigPlugin::<ragdoll::RagdollConfig>::new(config::paths::RAGDOLL),
             config::ConfigPlugin::<locomotion::LocomotionConfig>::new(config::paths::LOCOMOTION),
-            config::ConfigPlugin::<arm_point::YeetConfig>::new(config::paths::ARM_POINT),
+            config::ConfigPlugin::<super::yeet::YeetConfig>::new(config::paths::YEET),
             config::ConfigPlugin::<BodyConfig>::new(config::paths::BODY),
         ))
         // Register the procedural charge-rumble audio source.
-        .add_audio_source::<arm_point::RumbleAudio>()
+        .add_audio_source::<super::yeet::RumbleAudio>()
         .init_resource::<CharacterMetrics>()
         .init_resource::<BodyTuning>()
         .init_resource::<BodyAssets>()
         .init_resource::<EyeLerp>()
-        .add_systems(Startup, arm_point::setup_charge_audio)
+        .init_resource::<arm::ArmPointTarget>()
+        .init_resource::<super::yeet::YeetState>()
+        .add_systems(Startup, super::yeet::setup_charge_audio)
         .add_systems(Update, request_body_asset)
         .add_systems(
             Update,
@@ -252,9 +240,9 @@ impl Plugin for BodyPlugin {
                 head::disable_body_frustum_culling,
                 populate_bone_mask_groups,
                 install_animation_player,
-                arm_point::cache_right_arm,
+                arm::cache_right_arm,
                 locomotion::update_locomotion_blend,
-                arm_point::handle_yeet,
+                super::yeet::handle_yeet,
                 ragdoll::manage_ragdoll_skeleton,
             )
                 .chain(),
@@ -279,7 +267,12 @@ impl Plugin for BodyPlugin {
         .add_systems(
             PostUpdate,
             (
-                arm_point::apply_arm_pointing,
+                // The yeet mechanic drives the arm-point request; the arm pose
+                // then responds to it. Both sit here so the pose lands after
+                // `animate_targets` writes bone poses (we stomp the right arm)
+                // but before transform propagation builds GlobalTransforms.
+                super::yeet::drive_arm_point,
+                arm::apply_arm_pointing,
                 ragdoll::sync_bones_from_physics,
             )
                 .chain()
@@ -543,9 +536,6 @@ fn spawn_body_on_fps_enter(
             right_arm_entity: None,
             right_arm_hand_offset_bind: Vec3::ZERO,
             right_index_bones: Vec::new(),
-            point_amount: 0.0,
-            charge_seconds: 0.0,
-            yeet_cooldown_s: 0.0,
             ragdoll_graph: None,
         },
         SceneRoot(scene_handle.clone()),

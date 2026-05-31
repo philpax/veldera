@@ -15,52 +15,13 @@ use crate::{
     config,
     input::CameraAction,
     world::{
+        coords::RadialFrame,
         floating_origin::{FloatingOrigin, FloatingOriginCamera, WorldPosition},
         geo::TeleportAnimation,
     },
 };
 
-use super::{CameraConfig, CameraModeState, FlightCamera};
-
-// ============================================================================
-// Radial frame
-// ============================================================================
-
-/// Radial coordinate frame based on ECEF position.
-///
-/// Provides a local reference frame where "up" points away from Earth center.
-pub struct RadialFrame {
-    /// Local up vector (from Earth center through player).
-    pub up: Vec3,
-    /// Local north vector (tangent toward pole).
-    pub north: Vec3,
-    /// Local east vector (tangent perpendicular to north).
-    pub east: Vec3,
-}
-
-impl RadialFrame {
-    /// Compute the radial frame from an ECEF position.
-    pub fn from_ecef_position(ecef_pos: DVec3) -> Self {
-        let up = ecef_pos.normalize().as_vec3();
-
-        // In ECEF, the Z axis points toward the North Pole.
-        let world_north = Vec3::Z;
-
-        // Project world north onto the tangent plane.
-        let north = (world_north - up * world_north.dot(up)).normalize_or_zero();
-
-        // Handle degenerate case at the poles.
-        let north = if north.length_squared() < 0.001 {
-            Vec3::X
-        } else {
-            north
-        };
-
-        let east = north.cross(up).normalize();
-
-        Self { up, north, east }
-    }
-}
+use crate::camera::{CameraConfig, CameraModeState, FlightCamera};
 
 // ============================================================================
 // Plugin
@@ -140,7 +101,7 @@ pub struct RenderPlayer {
 }
 
 /// Hot-reloadable ragdoll-trigger tuning for the FPS controller, loaded from
-/// `assets/config/camera/fps.toml`. The skeletal rig itself has a separate
+/// `assets/config/player/fps.toml`. The skeletal rig itself has a separate
 /// compile-time switch,
 /// [`ENABLE_SKELETAL_RAGDOLL`](super::body::ragdoll).
 #[derive(Default, Asset, Resource, TypePath, Clone, Deserialize)]
@@ -375,7 +336,7 @@ impl FpsController {
 
 /// Preserved FPS controller state for restoration after FollowEntity mode.
 #[derive(Resource, Default)]
-pub(super) struct PreservedFpsState {
+pub(crate) struct PreservedFpsState {
     /// The yaw angle when entering FollowEntity.
     pub yaw: f32,
     /// The pitch angle when entering FollowEntity.
@@ -479,7 +440,7 @@ pub(super) fn yaw_pitch_to_direction(yaw: f32, pitch: f32, ecef_pos: DVec3) -> V
 }
 
 /// Set up FPS mode from Flycam: spawn logical player at camera position.
-pub(super) fn setup_from_flycam(
+pub(crate) fn setup_from_flycam(
     commands: &mut Commands,
     config: &FpsPlayerConfig,
     camera_entity: Entity,
@@ -501,7 +462,7 @@ pub(super) fn setup_from_flycam(
 }
 
 /// Set up FPS mode from FollowEntity: spawn logical player at camera position with preserved angles.
-pub(super) fn setup_from_follow_entity(
+pub(crate) fn setup_from_follow_entity(
     commands: &mut Commands,
     config: &FpsPlayerConfig,
     preserved_fps: &mut PreservedFpsState,
@@ -523,7 +484,7 @@ pub(super) fn setup_from_follow_entity(
 
 /// Clean up FPS mode: despawn logical player, restore FlightCamera.
 #[allow(clippy::type_complexity)]
-pub(super) fn cleanup(
+pub(crate) fn cleanup(
     commands: &mut Commands,
     camera_entity: Entity,
     logical_player_query: &Query<
@@ -554,7 +515,7 @@ pub(super) fn cleanup(
 
 /// Preserve FPS state and despawn the logical player.
 #[allow(clippy::type_complexity)]
-pub(super) fn preserve_and_cleanup(
+pub(crate) fn preserve_and_cleanup(
     commands: &mut Commands,
     preserved_fps: &mut PreservedFpsState,
     logical_player_query: &Query<

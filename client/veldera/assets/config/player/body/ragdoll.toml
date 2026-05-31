@@ -1,13 +1,13 @@
 # Skeletal ragdoll tuning (kinematic torso, dynamic limbs).
 #
 # The bone topology, anchor bone, and which bones are kinematic torso vs. dynamic
-# limb are structural and stay in code (`camera/body/ragdoll.rs`); only the
+# limb are structural and stay in code (`player/body/ragdoll.rs`); only the
 # numeric feel lives here.
 
 # Master switch for the skeletal rig. false = the body keeps animating normally
 # through a tumble (no rig built); true = spawn the kinematic-torso/dynamic-limb
 # rig on ragdoll entry. (Whether the tumble triggers at all is the separate
-# `enable_ragdoll` in config/camera/fps.toml.)
+# `enable_ragdoll` in config/player/fps.toml.)
 enable_skeletal = true
 
 # --- Capsule radii (metres) -------------------------------------------------

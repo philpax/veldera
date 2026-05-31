@@ -7,7 +7,7 @@
 use avian3d::prelude::*;
 use bevy::prelude::*;
 
-use crate::{camera::LogicalPlayer, physics::PhysicsConfig, world::floating_origin::WorldPosition};
+use crate::{physics::PhysicsConfig, player::LogicalPlayer, world::floating_origin::WorldPosition};
 
 /// Apply radial gravity toward Earth center.
 ///

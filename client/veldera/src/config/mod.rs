@@ -35,7 +35,7 @@ pub struct ConfigPlugin<C> {
 
 impl<C> ConfigPlugin<C> {
     /// Loads the config from `path`, relative to the `assets/` root (e.g.
-    /// `"config/camera/body/ragdoll.toml"`).
+    /// `"config/player/body/ragdoll.toml"`).
     pub const fn new(path: &'static str) -> Self {
         Self {
             path,

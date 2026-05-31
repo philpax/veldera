@@ -10,13 +10,13 @@ pub const LAUNCH: &str = "config/launch.toml";
 
 // Camera.
 pub const CAMERA: &str = "config/camera/camera.toml";
-pub const FPS: &str = "config/camera/fps.toml";
 
-// Camera body (first-person character).
-pub const BODY: &str = "config/camera/body/body.toml";
-pub const RAGDOLL: &str = "config/camera/body/ragdoll.toml";
-pub const LOCOMOTION: &str = "config/camera/body/locomotion.toml";
-pub const ARM_POINT: &str = "config/camera/body/arm_point.toml";
+// Player (first-person controller, body avatar, and the yeet launch mechanic).
+pub const FPS: &str = "config/player/fps.toml";
+pub const BODY: &str = "config/player/body/body.toml";
+pub const RAGDOLL: &str = "config/player/body/ragdoll.toml";
+pub const LOCOMOTION: &str = "config/player/body/locomotion.toml";
+pub const YEET: &str = "config/player/yeet.toml";
 
 // World.
 pub const GEO: &str = "config/world/geo.toml";

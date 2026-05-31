@@ -1,12 +1,12 @@
 //! Body ragdoll: kinematic torso, dynamic limbs.
 //!
-//! While [`RagdollState::Ragdolling`](crate::camera::fps::RagdollState)
+//! While [`RagdollState::Ragdolling`](crate::player::controller::RagdollState)
 //! is active, the torso is held upright and pinned to the controller
 //! while the arms and legs hang and flail under physics.
 //!
 //! The design deliberately decouples the *camera* from the physics.
 //! The camera stays on its normal first-person eye path (see
-//! [`fps_controller_render`](crate::camera::fps)) — look behaviour is
+//! [`fps_controller_render`](crate::player::controller)) — look behaviour is
 //! unchanged during ragdoll. Only the body *model* ragdolls, and it
 //! does so by pinning the torso to the controller and hanging the limbs
 //! off it:
@@ -72,13 +72,16 @@ use serde::Deserialize;
 
 use super::{BodyVisual, bones::bone_stem};
 use crate::{
-    camera::fps::{FpsController, LogicalPlayer, RadialFrame, RagdollState},
+    player::{FpsController, LogicalPlayer, RagdollState},
     vehicle::GameLayer,
-    world::floating_origin::{FloatingOriginCamera, WorldPosition},
+    world::{
+        coords::RadialFrame,
+        floating_origin::{FloatingOriginCamera, WorldPosition},
+    },
 };
 
 /// Hot-reloadable tuning for the skeletal ragdoll, loaded from
-/// `assets/config/camera/body/ragdoll.toml`. The bone topology
+/// `assets/config/player/body/ragdoll.toml`. The bone topology
 /// ([`RAGDOLL_BONE_TABLE`], [`RAGDOLL_UPRIGHT_BONES`], [`RAGDOLL_ANCHOR_STEM`])
 /// stays compiled in — it's structural, not a tunable value. Defaults below are
 /// the values these constants held before externalization, so behaviour is
@@ -87,7 +90,7 @@ use crate::{
 #[serde(default, deny_unknown_fields)]
 pub struct RagdollConfig {
     /// Master switch for the skeletal rig. `false` → the state machine still
-    /// runs (if [`FpsConfig::enable_ragdoll`](crate::camera::fps::FpsConfig) is
+    /// runs (if [`FpsConfig::enable_ragdoll`](crate::player::controller::FpsConfig) is
     /// on) but no rig is built; the body keeps animating normally through the
     /// tumble. `true` → on ragdoll entry, spawn a kinematic torso + dynamic
     /// limb capsules and drive the skinned mesh from physics until recovery.

@@ -15,10 +15,12 @@ use bevy_egui::egui;
 use glam::DVec3;
 
 use crate::{
-    camera::RadialFrame,
     physics::PhysicsStreamingConfig,
     rendering::mesh::RocktreeMeshMarker,
-    world::lod::{LodSnapshot, LodSnapshotRequest, LodTuning, SnapshotNode, SnapshotNodeState},
+    world::{
+        coords::RadialFrame,
+        lod::{LodSnapshot, LodSnapshotRequest, LodTuning, SnapshotNode, SnapshotNodeState},
+    },
 };
 
 /// Resources for the streaming tab.
