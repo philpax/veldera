@@ -48,13 +48,11 @@ fn uv_to_lat_deg(v: f32) -> f32 {
     return (0.5 - v) * 180.0;
 }
 
-// Equirectangular UV per metre. The u axis covers 360° of longitude
-// (Earth circumference at equator = 40 075 km); the v axis covers
-// 180° of latitude (pole-to-pole distance = 20 004 km). We convert
-// directly to UV here (NOT degrees) so the wind-driven UV
-// displacement per step matches the texture grid.
-const LON_UV_PER_M_EQUATOR: f32 = 1.0 / 40075000.0;
-const LAT_V_PER_M: f32 = 1.0 / 20004000.0;
+// Equirectangular UV per metre is derived from the planet circumferences on
+// the uniform: the u axis covers 360° of longitude
+// (`cloud.equatorial_circumference_m`); the v axis covers 180° of latitude
+// (`cloud.meridional_circumference_m`). We convert directly to UV here (NOT
+// degrees) so the wind-driven UV displacement per step matches the texture grid.
 
 // Analytic zonal wind speed (m/s, eastward positive) as a function
 // of latitude. Three-cell Earth model:
@@ -193,9 +191,9 @@ fn wind_at(uv: vec2<f32>) -> vec2<f32> {
 fn wind_ms_to_uv_per_s(wind_ms: vec2<f32>, lat_deg: f32) -> vec2<f32> {
     let cos_lat = max(cos(lat_deg * PI / 180.0), 0.01);
     return vec2<f32>(
-        wind_ms.x * LON_UV_PER_M_EQUATOR / cos_lat,
+        wind_ms.x / cloud.equatorial_circumference_m / cos_lat,
         // Note v decreases northward (north is at top of texture).
-        -wind_ms.y * LAT_V_PER_M,
+        -wind_ms.y / cloud.meridional_circumference_m,
     );
 }
 

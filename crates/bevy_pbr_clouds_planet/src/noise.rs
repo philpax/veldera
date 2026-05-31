@@ -146,6 +146,12 @@ impl FromWorld for NoisePipeline {
             label: Some("cloud_noise_bake_pipeline".into()),
             layout: vec![layout],
             shader,
+            // Inject the host `NOISE_RES` so the WGSL grid bound stays in sync
+            // with the texture this dispatch fills.
+            shader_defs: vec![bevy::shader::ShaderDefVal::UInt(
+                "NOISE_RES".into(),
+                NOISE_RES,
+            )],
             ..Default::default()
         });
         Self { pipeline }

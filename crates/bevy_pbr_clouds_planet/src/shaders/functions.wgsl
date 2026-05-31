@@ -8,6 +8,7 @@
     noise_3d, cloud_sampler, lut_sampler, climate_map,
 };
 #import bevy_pbr_clouds_planet::climate::climate_coverage_at;
+#import bevy_pbr_clouds_planet::types::CONE_OFFSETS;
 
 // World-space ray direction for a screen UV. Mirrors the atmosphere's
 // `uv_to_ray_direction`: build the homogeneous near-plane position, divide
@@ -351,15 +352,6 @@ fn remap(x: f32, a: f32, b: f32, c: f32, d: f32) -> f32 {
 // vector whose length grows with distance, so the march samples a soft cone
 // rather than a strict line. Offsets are deterministic (no per-pixel noise)
 // to keep the result temporally stable.
-const CONE_OFFSETS: array<vec3<f32>, 6> = array<vec3<f32>, 6>(
-    vec3<f32>( 0.155,  0.490,  0.000),
-    vec3<f32>( 0.255, -0.290,  0.190),
-    vec3<f32>(-0.220, -0.215,  0.380),
-    vec3<f32>( 0.000,  0.155, -0.420),
-    vec3<f32>(-0.310,  0.080,  0.150),
-    vec3<f32>( 0.430, -0.080, -0.100),
-);
-
 // Optical depth toward the sun via a 6-tap cone march.
 //
 // Takes both the absolute `start_pos` (for ray-sphere math) and

@@ -70,11 +70,9 @@ fn depth_to_camera_dist(uv: vec2<f32>, depth: f32) -> f32 {
 // separation ≈ T × pixel-angular-size), so Moiré decorrelation
 // survives.
 //
-// CELL_SIZE is chosen ≪ `PRIMARY_STEP_WORLD_M` (so adjacent samples
-// along the ray fall in different cells) and ≫ the f32 quantisation
+// `cloud.world_cell_size` is chosen ≪ `PRIMARY_STEP_WORLD_M` (so adjacent
+// samples along the ray fall in different cells) and ≫ the f32 quantisation
 // of `world_pos` at ECEF magnitudes (≈ 0.7 m). 4 m hits both.
-const WORLD_CELL_SIZE: f32 = 4.0;
-const INV_WORLD_CELL_SIZE: f32 = 0.25;
 
 // Optional per-frame golden-ratio Cranley-Patterson rotation gated
 // by `cloud.raymarch_jitter_temporal_rotation`. With rotation on,
@@ -87,7 +85,7 @@ const INV_WORLD_CELL_SIZE: f32 = 0.25;
 // stacks variance the clamp can't absorb.
 const GOLDEN_RATIO: f32 = 1.61803398874989;
 fn world_cell_jitter_value(world_pos_unjit: vec3<f32>, frame: u32, animate: bool) -> f32 {
-    let cell = vec3<i32>(floor(world_pos_unjit * INV_WORLD_CELL_SIZE));
+    let cell = vec3<i32>(floor(world_pos_unjit / cloud.world_cell_size));
     var h = u32(cell.x) * 73856093u;
     h = h ^ (u32(cell.y) * 19349663u);
     h = h ^ (u32(cell.z) * 83492791u);
@@ -123,14 +121,12 @@ fn halton(index: u32, base: u32) -> f32 {
     return r;
 }
 
-// 16-frame Halton(2, 3) jitter cycle centred on 0. Returns the
-// sub-pixel offset in full-resolution-pixel units, range
-// `[-0.5, +0.5]` on each axis. 16 frames balances convergence speed
-// after disocclusion vs reaching the full effective supersampling
-// pattern.
-const JITTER_PERIOD: u32 = 16u;
+// `cloud.jitter_period`-frame Halton(2, 3) jitter cycle centred on 0. Returns
+// the sub-pixel offset in full-resolution-pixel units, range `[-0.5, +0.5]` on
+// each axis. The period balances convergence speed after disocclusion vs
+// reaching the full effective supersampling pattern.
 fn jitter_for_frame(frame: u32) -> vec2<f32> {
-    let i = (frame % JITTER_PERIOD) + 1u;
+    let i = (frame % cloud.jitter_period) + 1u;
     return vec2(halton(i, 2u), halton(i, 3u)) - vec2(0.5);
 }
 

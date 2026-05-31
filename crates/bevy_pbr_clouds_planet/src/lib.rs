@@ -81,7 +81,7 @@ use resources::{
 };
 
 pub use constants::{CLIMATE_MAP_HEIGHT, CLIMATE_MAP_WIDTH, MAX_CLOUD_LAYERS};
-pub use settings::{CloudPlanetSettings, CloudShaderParams};
+pub use settings::{CloudClimateSettings, CloudPlanetSettings, CloudShaderParams};
 
 /// Plugin that registers the volumetric-cloud render pipeline.
 ///
@@ -120,6 +120,7 @@ impl Plugin for CloudsPlanetPlugin {
         app.insert_resource(self.settings)
             .init_resource::<CloudWorldTime>()
             .init_resource::<CloudShaderParams>()
+            .init_resource::<CloudClimateSettings>()
             .add_plugins((
                 ExtractComponentPlugin::<CloudLayers>::default(),
                 ExtractComponentPlugin::<CloudCameraEcef>::default(),
@@ -128,6 +129,7 @@ impl Plugin for CloudsPlanetPlugin {
                 ExtractComponentPlugin::<CloudSimStatePreview>::default(),
                 ExtractResourcePlugin::<CloudPlanetSettings>::default(),
                 ExtractResourcePlugin::<CloudShaderParams>::default(),
+                ExtractResourcePlugin::<CloudClimateSettings>::default(),
                 ExtractResourcePlugin::<CloudWorldTime>::default(),
                 UniformComponentPlugin::<GpuCloudUniform>::default(),
                 inspect::CloudInspectPlugin,

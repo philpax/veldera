@@ -1,6 +1,7 @@
 #define_import_path bevy_pbr_clouds_planet::climate
 
 #import bevy_render::maths::PI;
+#import bevy_pbr_clouds_planet::types::CloudUniform;
 
 // Earth-aware climate model. The runtime, the shadow bake, and the
 // composite all consume climate data by *sampling the climate-map
@@ -52,127 +53,43 @@
 //     (deferred — Climate #4, #8).
 
 // ---------- Bake-side physics (called only by climate_bake.wgsl) ----------
-
-// Latitude (offset from the seasonally-shifted ITCZ centre, in
-// degrees) at which the subtropical "high pressure" dry band peaks.
-// ~25-30° lines up with Earth's deserts (Sahara, Australia, Atacama)
-// and the persistent oceanic highs.
-const SUBTROPICAL_OFFSET_DEG: f32 = 27.0;
-// Latitude offset of the storm tracks. Real Earth has the polar
-// front jet meandering between ~45° and 65°; 55° is roughly central.
-const STORM_TRACK_OFFSET_DEG: f32 = 55.0;
-
-// Gaussian widths (`exp(-off² · sigma)`). Bigger sigma = narrower
-// band. Tuned so the bands overlap smoothly rather than producing
-// visible "stripes".
 //
-// `ITCZ_BAND_SIGMA = 0.012` ⇒ FWHM ~14°, in the same range as
-// Earth's actual ITCZ (a band ~5-10° wide of dense convection
-// surrounded by a wider zone of elevated cloudiness).
-const ITCZ_BAND_SIGMA: f32 = 0.012;
-const SUBTROPICAL_BAND_SIGMA: f32 = 0.015;
-const STORM_TRACK_BAND_SIGMA: f32 = 0.008;
-
-// Latitude-band coverage = `BASELINE + ITCZ_AMP·itcz − SUBTROPICAL_AMP·sub
-//                          + STORM_TRACK_AMP·storm`, saturated.
+// The tuning constants below all live on the `cloud` uniform
+// (`CloudClimateSettings` host-side), so they hot-reload. The bake-side
+// functions take `cloud` and read `cloud.climate_*`; the reasoning behind each
+// value is documented on `CloudClimateSettings`. The model-level reasoning that
+// doesn't fit a per-field doc is kept inline below.
 //
-// Tuned to leave headroom — the previous values pushed the ITCZ
-// + ocean + monsoon stack to saturate at 1.0 across a wide band,
-// clipping the noise and ocean modulation into a uniform white
-// stripe. Lower amplitudes here mean the ITCZ peak typically lands
-// at 0.6-0.85 propensity, so noise and ocean factors read as
-// visible internal structure instead of being clipped away.
-const BASELINE: f32 = 0.20;
-const ITCZ_AMP: f32 = 0.45;
-const SUBTROPICAL_AMP: f32 = 0.30;
-const STORM_TRACK_AMP: f32 = 0.25;
-
-// Ocean bonus magnitude (multiplied by per-camera `ocean_strength`
-// and the latitude factor below). Real stratocumulus decks over cold
-// oceans push cloud cover up by ~15–25 %; 0.15 lands in the middle
-// once the user can dial it further via the strength slider.
-const OCEAN_BONUS_MAX: f32 = 0.15;
-
-// Latitude amplitudes for the ocean bonus. Ocean is NOT uniformly
-// cloudier than land — the difference depends sharply on where in the
-// Hadley cell we are:
+//   - Bands. `climate_subtropical_offset_deg` (~27°) lines the dry "high
+//     pressure" band up with Earth's deserts and oceanic highs;
+//     `climate_storm_track_offset_deg` (~55°) sits in the meandering polar-front
+//     jet. The Gaussian sigmas are tuned so the bands overlap smoothly rather
+//     than producing visible stripes, and the amplitudes leave headroom so the
+//     ITCZ peak lands at ~0.6-0.85 propensity (noise and ocean factors then read
+//     as internal structure instead of clipping to a white stripe).
 //
-//   - Tropics (under ITCZ): warm SST drives strong convection ⇒
-//     ocean much cloudier than land. +1.
-//   - Subtropics: descending Hadley air over oceanic high pressure
-//     (Pacific/Bermuda/Azores Highs) creates clear oceans punctuated
-//     by stratocumulus decks at the eastern margins. Net effect:
-//     ocean should be CLEARER than land at this latitude. -1.
-//     (The eastern-margin stratocumulus is added back via Climate
-//     #4 once the coast-distance texture is online.)
-//   - Storm tracks: oceanic lows (Aleutian, Icelandic) dump much
-//     more cloud over ocean than land. +0.7.
-//   - Polar: cold, dry; ocean and land similar.
-const OCEAN_TROPICS_AMP: f32 = 1.0;
-const OCEAN_SUBTROPICAL_AMP: f32 = 1.0;
-const OCEAN_STORM_AMP: f32 = 0.7;
-
-// Sea-level threshold on the normalised topography texture. The bake
-// remaps elevation `[-500, +9000] m` → `[0, 255]`, so `0 m` sits at
-// ~0.052. Smoothstep ±a few texels so coastline transitions aren't
-// stairstepped.
-const OCEAN_SEA_LEVEL_LO: f32 = 0.04;
-const OCEAN_SEA_LEVEL_HI: f32 = 0.06;
-
-// Persistent eastern-margin stratocumulus decks. Real Earth has
-// bright cloud strips on the EAST side of every subtropical ocean
-// (off California, Peru, Namibia, Western Australia) where
-// trade-wind-driven cold-water upwelling meets descending Hadley
-// air. These are among the brightest features on the planet from
-// orbit. We detect them by: (a) being over ocean, (b) being at a
-// subtropical latitude, (c) having land within ~500 km to the EAST
-// (a continental coast that the ocean sits west of). The "to the
-// east" test is what differentiates California (eastern-margin
-// Pacific, foggy) from Japan (western-margin Pacific, no
-// stratocumulus deck).
+//   - Ocean bonus. Ocean is NOT uniformly cloudier than land; the sign depends
+//     on the Hadley cell. Tropics (warm SST, strong convection): ocean much
+//     cloudier, +1. Subtropics (descending air over the oceanic highs): ocean
+//     CLEARER than land, -1 — this is what produces the persistent clear
+//     eastern Pacific / Atlantic. Storm tracks (Aleutian / Icelandic lows):
+//     ocean cloudier, +0.7. The sea-level smoothstep band sits where the bake's
+//     `[-500, +9000] m → [0, 1]` remap puts 0 m (~0.052).
 //
-// Amplitude needs to be large enough to overcome the subtropical
-// `lat_prop` suppression AND the negative ocean propensity at the
-// same latitude — without that, the deck is buried under the dry
-// zone it's supposed to override. Real-Earth deck cloud cover
-// jumps ~+0.5 to +0.7 over surrounding subtropical ocean, so 0.70
-// peak bonus (× ocean_strength) is in the right ballpark.
-const STRATOCUMULUS_AMP: f32 = 0.70;
-// Subtropical band where stratocumulus is active — Gaussian centred
-// on the same offset as the subtropical highs. Sigma chosen narrower
-// than SUBTROPICAL_BAND_SIGMA so the deck is concentrated rather
-// than spread the full subtropics.
-const STRATOCUMULUS_LAT_SIGMA: f32 = 0.010;
-// Easterly UV offsets to sample for land detection. 0.003 in U is
-// ~120 km at the equator (slightly less at higher latitudes); three
-// samples out to ~0.015 ≈ 600 km cover the typical reach of the
-// stratocumulus deck. Multiple samples give a graded edge — the
-// deck strength fades as the coast retreats.
-const STRATOCUMULUS_EAST_OFFSETS: array<f32, 3> = array<f32, 3>(0.003, 0.008, 0.015);
-
-// Continental-interior dryness. Land deep inside a continent (far
-// from any coast) is drier than land near a coast, especially in the
-// subtropics where descending Hadley air dominates — this is why the
-// Sahara, Arabian, Gobi, Atacama, and Australian Outback deserts
-// exist. We detect "interior" by sampling topography at 4 cardinal
-// directions ~1000 km out; if all 4 are land, we're surrounded by
-// continent. The latitude mask concentrates the effect in the
-// subtropics: Amazon and Congo are tropical interior land but stay
-// cloudy (lat mask is low there); Siberia is mid-latitude interior
-// but only mildly dry (lat mask is moderate); Sahara/Gobi peak.
-// Amplitude tuned to *visibly* clear the great deserts in the
-// rendered scene, not just nudge the climate map. The penalty
-// stacks with subtropical `lat_prop` suppression so total propensity
-// in deep interior subtropical land lands deep negative (saturates
-// to 0 = clear).
-const INTERIOR_AMP: f32 = 0.50;
-// Wider lat sigma than the subtropical band itself, so the dryness
-// reaches into mid-latitudes (Central Asia, Mongolia) — those
-// regions ARE much drier than coastal land at the same latitude
-// even though they're not under the subtropical high.
-const INTERIOR_LAT_SIGMA: f32 = 0.003;
-const INTERIOR_PROBE_U: f32 = 0.025;  // ~1000 km at equator.
-const INTERIOR_PROBE_V: f32 = 0.050;  // ~1000 km north-south.
+//   - Eastern-margin stratocumulus. Bright decks on the EAST side of every
+//     subtropical ocean (California, Peru, Namibia, W. Australia) where cold
+//     upwelling meets descending air. Detected by being over ocean, at a
+//     subtropical latitude, with land within ~500 km to the EAST — the "to the
+//     east" test is what distinguishes California (foggy) from Japan (no deck).
+//     The amplitude must overcome both the subtropical `lat_prop` suppression
+//     and the negative subtropical ocean propensity, or the deck is buried.
+//
+//   - Interior-continent dryness. Subtropical land far from any coast is drier
+//     (descending Hadley air) — the Sahara/Arabian/Gobi/Atacama/Outback
+//     deserts. Detected by sampling topography at 4 cardinal probes ~1000 km
+//     out; the latitude mask is wider than the subtropical band so the dryness
+//     reaches mid-latitude interiors (Central Asia) while sparing tropical
+//     interiors (Amazon, Congo, where the mask is low).
 
 // Latitude-only "cloud propensity" (intuitive semantics: 1 = lots of
 // cloud, 0 = clear) as a function of offset (in degrees) from the
@@ -180,16 +97,24 @@ const INTERIOR_PROBE_V: f32 = 0.050;  // ~1000 km north-south.
 // channel; consumers downstream just sample the threshold.
 //
 // Use `lat_deg - itcz_center_deg` as input.
-fn climate_lat_propensity(offset_from_itcz_deg: f32) -> f32 {
+fn climate_lat_propensity(offset_from_itcz_deg: f32, cloud: CloudUniform) -> f32 {
     let off = abs(offset_from_itcz_deg);
-    let itcz = exp(-off * off * ITCZ_BAND_SIGMA);
+    let itcz = exp(-off * off * cloud.climate_itcz_band_sigma);
     let sub = exp(
-        -(off - SUBTROPICAL_OFFSET_DEG) * (off - SUBTROPICAL_OFFSET_DEG) * SUBTROPICAL_BAND_SIGMA,
+        -(off - cloud.climate_subtropical_offset_deg)
+            * (off - cloud.climate_subtropical_offset_deg)
+            * cloud.climate_subtropical_band_sigma,
     );
     let storm = exp(
-        -(off - STORM_TRACK_OFFSET_DEG) * (off - STORM_TRACK_OFFSET_DEG) * STORM_TRACK_BAND_SIGMA,
+        -(off - cloud.climate_storm_track_offset_deg)
+            * (off - cloud.climate_storm_track_offset_deg)
+            * cloud.climate_storm_track_band_sigma,
     );
-    return saturate(BASELINE + ITCZ_AMP * itcz - SUBTROPICAL_AMP * sub + STORM_TRACK_AMP * storm);
+    return saturate(
+        cloud.climate_baseline + cloud.climate_itcz_amp * itcz
+            - cloud.climate_subtropical_amp * sub
+            + cloud.climate_storm_track_amp * storm,
+    );
 }
 
 // Latitude factor for the ocean bonus, in roughly [-1, +1]. Positive
@@ -199,17 +124,22 @@ fn climate_lat_propensity(offset_from_itcz_deg: f32) -> f32 {
 // peaks align with the cloud bands.
 //
 // Use `lat_deg - itcz_center_deg` as input.
-fn climate_ocean_lat_factor(offset_from_itcz_deg: f32) -> f32 {
+fn climate_ocean_lat_factor(offset_from_itcz_deg: f32, cloud: CloudUniform) -> f32 {
     let off = abs(offset_from_itcz_deg);
-    let tropics = exp(-off * off * ITCZ_BAND_SIGMA);
+    let tropics = exp(-off * off * cloud.climate_itcz_band_sigma);
     let sub = exp(
-        -(off - SUBTROPICAL_OFFSET_DEG) * (off - SUBTROPICAL_OFFSET_DEG) * SUBTROPICAL_BAND_SIGMA,
+        -(off - cloud.climate_subtropical_offset_deg)
+            * (off - cloud.climate_subtropical_offset_deg)
+            * cloud.climate_subtropical_band_sigma,
     );
     let storm = exp(
-        -(off - STORM_TRACK_OFFSET_DEG) * (off - STORM_TRACK_OFFSET_DEG) * STORM_TRACK_BAND_SIGMA,
+        -(off - cloud.climate_storm_track_offset_deg)
+            * (off - cloud.climate_storm_track_offset_deg)
+            * cloud.climate_storm_track_band_sigma,
     );
     return clamp(
-        OCEAN_TROPICS_AMP * tropics + OCEAN_STORM_AMP * storm - OCEAN_SUBTROPICAL_AMP * sub,
+        cloud.climate_ocean_tropics_amp * tropics + cloud.climate_ocean_storm_amp * storm
+            - cloud.climate_ocean_subtropical_amp * sub,
         -1.0,
         1.0,
     );
@@ -223,9 +153,18 @@ fn climate_ocean_lat_factor(offset_from_itcz_deg: f32) -> f32 {
 // southern Indian Ocean from orbit.
 //
 // `lat_factor` is `climate_ocean_lat_factor(off_from_itcz)`.
-fn climate_ocean_propensity(height: f32, ocean_strength: f32, lat_factor: f32) -> f32 {
-    let ocean = 1.0 - smoothstep(OCEAN_SEA_LEVEL_LO, OCEAN_SEA_LEVEL_HI, height);
-    return ocean * OCEAN_BONUS_MAX * ocean_strength * lat_factor;
+fn climate_ocean_propensity(
+    height: f32,
+    ocean_strength: f32,
+    lat_factor: f32,
+    cloud: CloudUniform,
+) -> f32 {
+    let ocean = 1.0 - smoothstep(
+        cloud.climate_ocean_sea_level_lo,
+        cloud.climate_ocean_sea_level_hi,
+        height,
+    );
+    return ocean * cloud.climate_ocean_bonus_max * ocean_strength * lat_factor;
 }
 
 // Stratocumulus deck bonus. Caller passes a pre-sampled `here_height`
@@ -240,15 +179,21 @@ fn climate_stratocumulus_bonus(
     here_height: f32,
     off_from_itcz_deg: f32,
     ocean_strength: f32,
+    cloud: CloudUniform,
 ) -> f32 {
-    let is_ocean = 1.0 - smoothstep(OCEAN_SEA_LEVEL_LO, OCEAN_SEA_LEVEL_HI, here_height);
+    let is_ocean = 1.0 - smoothstep(
+        cloud.climate_ocean_sea_level_lo,
+        cloud.climate_ocean_sea_level_hi,
+        here_height,
+    );
     if is_ocean < 0.01 {
         return 0.0;
     }
     let off_abs = abs(off_from_itcz_deg);
     let subtropical = exp(
-        -(off_abs - SUBTROPICAL_OFFSET_DEG) * (off_abs - SUBTROPICAL_OFFSET_DEG)
-            * STRATOCUMULUS_LAT_SIGMA,
+        -(off_abs - cloud.climate_subtropical_offset_deg)
+            * (off_abs - cloud.climate_subtropical_offset_deg)
+            * cloud.climate_stratocumulus_lat_sigma,
     );
     if subtropical < 0.05 {
         return 0.0;
@@ -263,13 +208,20 @@ fn climate_stratocumulus_bonus(
     // retreats.
     var east_land: f32 = 0.0;
     for (var i: i32 = 0; i < 3; i = i + 1) {
-        let east_uv = vec2<f32>(fract(uv.x + STRATOCUMULUS_EAST_OFFSETS[i]), uv.y);
+        let east_uv = vec2<f32>(
+            fract(uv.x + cloud.climate_stratocumulus_east_offsets[i]),
+            uv.y,
+        );
         let h_east = textureSampleLevel(topography, topo_sampler, east_uv, 0.0).r;
-        let land_here = smoothstep(OCEAN_SEA_LEVEL_LO, OCEAN_SEA_LEVEL_HI, h_east);
+        let land_here = smoothstep(
+            cloud.climate_ocean_sea_level_lo,
+            cloud.climate_ocean_sea_level_hi,
+            h_east,
+        );
         east_land = max(east_land, land_here);
     }
 
-    return is_ocean * subtropical * east_land * STRATOCUMULUS_AMP * ocean_strength;
+    return is_ocean * subtropical * east_land * cloud.climate_stratocumulus_amp * ocean_strength;
 }
 
 // Interior-continent dryness penalty. Returns a NEGATIVE
@@ -286,15 +238,21 @@ fn climate_interior_dryness(
     uv: vec2<f32>,
     here_height: f32,
     off_from_itcz_deg: f32,
+    cloud: CloudUniform,
 ) -> f32 {
-    let is_land = smoothstep(OCEAN_SEA_LEVEL_LO, OCEAN_SEA_LEVEL_HI, here_height);
+    let is_land = smoothstep(
+        cloud.climate_ocean_sea_level_lo,
+        cloud.climate_ocean_sea_level_hi,
+        here_height,
+    );
     if is_land < 0.01 {
         return 0.0;
     }
     let off_abs = abs(off_from_itcz_deg);
     let subtropical_mask = exp(
-        -(off_abs - SUBTROPICAL_OFFSET_DEG) * (off_abs - SUBTROPICAL_OFFSET_DEG)
-            * INTERIOR_LAT_SIGMA,
+        -(off_abs - cloud.climate_subtropical_offset_deg)
+            * (off_abs - cloud.climate_subtropical_offset_deg)
+            * cloud.climate_interior_lat_sigma,
     );
     if subtropical_mask < 0.05 {
         return 0.0;
@@ -306,10 +264,10 @@ fn climate_interior_dryness(
     // to the polar row — fine for this coarse interior test).
     var land_count: f32 = 0.0;
     let probes = array<vec2<f32>, 4>(
-        vec2<f32>( INTERIOR_PROBE_U, 0.0),
-        vec2<f32>(-INTERIOR_PROBE_U, 0.0),
-        vec2<f32>(0.0,  INTERIOR_PROBE_V),
-        vec2<f32>(0.0, -INTERIOR_PROBE_V),
+        vec2<f32>( cloud.climate_interior_probe_u, 0.0),
+        vec2<f32>(-cloud.climate_interior_probe_u, 0.0),
+        vec2<f32>(0.0,  cloud.climate_interior_probe_v),
+        vec2<f32>(0.0, -cloud.climate_interior_probe_v),
     );
     for (var i: i32 = 0; i < 4; i = i + 1) {
         let probe_uv = vec2<f32>(
@@ -317,12 +275,16 @@ fn climate_interior_dryness(
             clamp(uv.y + probes[i].y, 0.0, 1.0),
         );
         let h = textureSampleLevel(topography, topo_sampler, probe_uv, 0.0).r;
-        land_count = land_count + smoothstep(OCEAN_SEA_LEVEL_LO, OCEAN_SEA_LEVEL_HI, h);
+        land_count = land_count + smoothstep(
+            cloud.climate_ocean_sea_level_lo,
+            cloud.climate_ocean_sea_level_hi,
+            h,
+        );
     }
     let interior_factor = land_count * 0.25;  // 0..1.
 
     // Negative: this is a SUBTRACTION from propensity.
-    return -is_land * interior_factor * subtropical_mask * INTERIOR_AMP;
+    return -is_land * interior_factor * subtropical_mask * cloud.climate_interior_amp;
 }
 
 // Equirectangular UV for an absolute ECEF world position — used by

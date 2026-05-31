@@ -16,7 +16,7 @@
 #import bevy_pbr_atmosphere_planet::types::{
     Atmosphere, AtmosphereTransforms, AtmosphereLight, AtmosphereLights,
 };
-#import bevy_pbr_clouds_planet::types::CloudUniform;
+#import bevy_pbr_clouds_planet::types::{CloudUniform, CONE_OFFSETS};
 #import bevy_pbr_clouds_planet::climate::climate_coverage_at;
 
 @group(0) @binding(0) var<uniform> cloud: CloudUniform;
@@ -35,22 +35,14 @@
 // `cloud_shader.toml` and the pipeline recompiles with the new value.
 const SHADOW_STEPS: u32 = #{SHADOW_STEPS}u;
 
-// Cone-march parameters. `CONE_RATIO` is `tan(half-angle)` for the
-// cone the ray jitters into around the central sun-direction axis,
+// Cone-march parameters. `cloud.shadow_cone_ratio` is `tan(half-angle)` for
+// the cone the ray jitters into around the central sun-direction axis,
 // matching the main raymarch's sun-cone-shadow value. `CONE_OFFSETS`
 // is the same fixed 6-tap pattern from functions.wgsl; we cycle
 // through it per step (one offset per step) rather than fanning out
 // per step, so the bake's density-eval count is unchanged from the
-// straight-line march.
-const CONE_RATIO: f32 = 0.05;
-const CONE_OFFSETS: array<vec3<f32>, 6> = array<vec3<f32>, 6>(
-    vec3<f32>( 0.155,  0.490,  0.000),
-    vec3<f32>( 0.255, -0.290,  0.190),
-    vec3<f32>(-0.220, -0.215,  0.380),
-    vec3<f32>( 0.000,  0.155, -0.420),
-    vec3<f32>(-0.310,  0.080,  0.150),
-    vec3<f32>( 0.430, -0.080, -0.100),
-);
+// straight-line march. `CONE_OFFSETS` is shared with `functions.wgsl` via
+// `types.wgsl`.
 
 // Mirror of `sample_layer_density` from functions.wgsl, inlined here to
 // avoid pulling in the full main-pass binding set. Only the bits we need
@@ -326,7 +318,7 @@ fn main(@builtin(global_invocation_id) idx: vec3<u32>) {
     var optical_depth = 0.0;
     for (var i: u32 = 0u; i < SHADOW_STEPS; i = i + 1u) {
         let t = t_start + (f32(i) + 0.5) * dt;
-        let cone_r = t * CONE_RATIO;
+        let cone_r = t * cloud.shadow_cone_ratio;
         let off = CONE_OFFSETS[i % 6u];
         let cone_off = (cone_t_dir * off.x + cone_b_dir * off.y + n * off.z) * cone_r;
         let displacement = sun_dir * t + cone_off;

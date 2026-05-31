@@ -1,0 +1,72 @@
+# Earth-aware climate-model tuning. These shape the baked climate map
+# (latitude bands, ocean/land differentiation, stratocumulus decks, interior
+# dryness, and climate noise) that the cloud renderer samples for coverage.
+# Flowed into the cloud uniform each frame, so edits re-tune the next climate
+# bake live. See `crates/bevy_pbr_clouds_planet/src/shaders/climate.wgsl` for the
+# full model reasoning.
+#
+# Sigmas are Gaussian-width coefficients in `exp(-off² · sigma)` (1/degree²);
+# larger = narrower band. Offsets are degrees of latitude from the
+# seasonally-shifted ITCZ centre. Sea-level thresholds are on the normalised
+# [0, 1] topography texture (0 m sits at ~0.052).
+
+# Latitude offset where the subtropical dry "high pressure" band peaks (matches
+# Earth's deserts and oceanic highs), and the storm-track offset (polar-front
+# jet).
+subtropical_offset_deg = 27.0
+storm_track_offset_deg = 55.0
+
+# Gaussian widths of the ITCZ, subtropical, and storm-track bands. itcz=0.012 is
+# FWHM ~14°, in range with Earth's ITCZ.
+itcz_band_sigma = 0.012
+subtropical_band_sigma = 0.015
+storm_track_band_sigma = 0.008
+
+# Latitude-band coverage = baseline + itcz_amp·itcz − subtropical_amp·sub
+# + storm_track_amp·storm, saturated. Tuned to leave headroom so the ITCZ peak
+# lands at ~0.6-0.85 (noise/ocean read as structure, not a clipped white stripe).
+baseline = 0.20
+itcz_amp = 0.45
+subtropical_amp = 0.30
+storm_track_amp = 0.25
+
+# Peak ocean-bonus magnitude (× per-camera ocean_strength × latitude factor).
+ocean_bonus_max = 0.15
+
+# Ocean-bonus latitude amplitudes: cloudier than land under the tropics (+1) and
+# storm tracks (+0.7), clearer under the subtropical highs (−1).
+ocean_tropics_amp = 1.0
+ocean_subtropical_amp = 1.0
+ocean_storm_amp = 0.7
+
+# Sea-level smoothstep band on the normalised topography texture.
+ocean_sea_level_lo = 0.04
+ocean_sea_level_hi = 0.06
+
+# Eastern-margin stratocumulus decks (California, Peru, Namibia, W. Australia):
+# peak bonus and the narrow subtropical band it's active in.
+stratocumulus_amp = 0.70
+stratocumulus_lat_sigma = 0.010
+
+# Interior-continent dryness (Sahara, Gobi, Atacama, Outback): penalty
+# magnitude, the (wider) latitude-mask width, and the east/west + north/south
+# probe distances in UV (~1000 km out).
+interior_amp = 0.50
+interior_lat_sigma = 0.003
+interior_probe_u = 0.025
+interior_probe_v = 0.050
+
+# Low-frequency climate noise: amplitude on the propensity output, and the
+# world-time → climate-evolution rate (cycles/sec; weather systems evolve over
+# minutes, stable frame-to-frame).
+noise_amp = 0.10
+noise_evolution = 0.0005
+
+# Continental-monsoon enhancement: peak extra propensity over land near the
+# ITCZ, and the (wide) Gaussian band it's applied over.
+monsoon_amp = 0.12
+monsoon_band_sigma = 0.003
+
+# Easterly UV offsets sampled for stratocumulus land detection; three distances
+# out to ~600 km give the deck a graded edge.
+stratocumulus_east_offsets = [0.003, 0.008, 0.015]

@@ -38,9 +38,9 @@
 @group(0) @binding(8) var m2_in: texture_2d<f32>;
 @group(0) @binding(9) var m2_out: texture_storage_2d<r16float, write>;
 
-// Temporal blend factor: weight given to the current frame each step. Lower
-// = smoother but slower to converge / more ghosting.
-const BLEND_ALPHA: f32 = 0.1;
+// `cloud.temporal_blend_alpha` is the temporal blend factor: weight given to
+// the current frame each step. Lower = smoother but slower to converge / more
+// ghosting.
 
 fn uv_to_ray_dir_ws(uv: vec2<f32>) -> vec3<f32> {
     let ndc = uv * vec2(2.0, -2.0) + vec2(-1.0, 1.0);
@@ -189,8 +189,8 @@ fn main(@builtin(global_invocation_id) idx: vec3<u32>) {
     }
     history = clamp(history, nb_min, nb_max);
 
-    let blended = mix(history, current, BLEND_ALPHA);
-    let blended_m2 = mix(history_m2, current_a2, BLEND_ALPHA);
+    let blended = mix(history, current, cloud.temporal_blend_alpha);
+    let blended_m2 = mix(history_m2, current_a2, cloud.temporal_blend_alpha);
     textureStore(history_out, vec2<i32>(idx.xy), blended);
     textureStore(m2_out, vec2<i32>(idx.xy), vec4(blended_m2, 0.0, 0.0, 0.0));
 }

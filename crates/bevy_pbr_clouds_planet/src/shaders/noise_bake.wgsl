@@ -12,8 +12,9 @@
 
 @group(0) @binding(0) var noise_out: texture_storage_3d<rgba8unorm, write>;
 
-// Must match `NOISE_RES` in noise.rs.
-const NOISE_RES: u32 = 256u;
+// Injected as a `shader_def` from the host `NOISE_RES` constant (see
+// `NoisePipeline` in noise.rs), so it tracks the texture this shader fills.
+const NOISE_RES: u32 = #{NOISE_RES}u;
 
 // Hash for a 3D integer cell into a pseudo-random point inside the cell.
 fn hash3(p: vec3<u32>) -> vec3<f32> {

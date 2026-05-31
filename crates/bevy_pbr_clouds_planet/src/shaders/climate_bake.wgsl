@@ -45,27 +45,18 @@
 @group(0) @binding(4) var noise_3d: texture_3d<f32>;
 @group(0) @binding(5) var noise_sampler: sampler;
 
-// Climate-noise amplitude on the propensity output. ±0.10 is enough
-// to break the perfect-latitude rings into recognisable "today the
-// trade winds are doing X" blotches without overwhelming the
-// underlying band structure.
-const CLIMATE_NOISE_AMP: f32 = 0.10;
-// World time → climate evolution rate. Climate weather systems
-// evolve much slower than per-cell cumulus weather; ~0.0005
-// cycles/sec means a noticeable change over a few minutes of real
-// time but stable across a typical frame-to-frame view.
-const CLIMATE_NOISE_EVOLUTION: f32 = 0.0005;
-
-// Monsoon enhancement: when the seasonal ITCZ shifts onto land, the
-// associated convective cloud band is much more vigorous than over
-// neighbouring ocean (Indian monsoon, west African monsoon,
-// Australian wet season, Amazonian convection). MONSOON_AMP is the
-// peak extra propensity over land near the ITCZ; MONSOON_BAND_SIGMA
-// is wider than ITCZ_BAND_SIGMA (in `climate.wgsl`) because the
-// continental convection footprint extends further from the ITCZ
-// centre than the ocean ITCZ itself.
-const MONSOON_AMP: f32 = 0.12;
-const MONSOON_BAND_SIGMA: f32 = 0.003;
+// Climate-noise amplitude (`cloud.climate_noise_amp`) and world-time →
+// evolution rate (`cloud.climate_noise_evolution`) live on the uniform. ±0.10
+// noise breaks the perfect-latitude rings into recognisable blotches without
+// overwhelming the band structure; ~0.0005 cycles/sec evolves over minutes but
+// is stable frame-to-frame.
+//
+// Monsoon enhancement: when the seasonal ITCZ shifts onto land, the associated
+// convective cloud band is much more vigorous than over neighbouring ocean
+// (Indian, west African, Australian, Amazonian). `cloud.climate_monsoon_amp` is
+// the peak extra propensity over land near the ITCZ; `climate_monsoon_band_sigma`
+// is wider than the ITCZ band because the continental convection footprint
+// reaches further from the ITCZ centre than the ocean ITCZ itself.
 
 @compute @workgroup_size(8, 8, 1)
 fn main(@builtin(global_invocation_id) idx: vec3<u32>) {
@@ -81,16 +72,16 @@ fn main(@builtin(global_invocation_id) idx: vec3<u32>) {
     let lat_deg = lat_rad * (180.0 / PI);
 
     let off = lat_deg - cloud.climate_itcz_center_deg;
-    let lat_prop = climate_lat_propensity(off);
+    let lat_prop = climate_lat_propensity(off, cloud);
     let height = textureSampleLevel(topography, topo_sampler, uv, 0.0).r;
     // Latitude-modulated ocean bonus: cloudy under ITCZ + storm
     // tracks, suppressed under the subtropical highs. Can be
     // negative, which is the whole point — the eastern Pacific /
     // Atlantic subtropical clear oceans need to dip BELOW the land
     // baseline at that latitude, not just stay flat.
-    let ocean_factor = climate_ocean_lat_factor(off);
+    let ocean_factor = climate_ocean_lat_factor(off, cloud);
     let ocean_prop = climate_ocean_propensity(
-        height, cloud.climate_ocean_strength, ocean_factor,
+        height, cloud.climate_ocean_strength, ocean_factor, cloud,
     );
 
     // Continental monsoon enhancement. When the seasonal ITCZ has
@@ -102,9 +93,13 @@ fn main(@builtin(global_invocation_id) idx: vec3<u32>) {
     // ITCZ centre — so the model produces a year-round equatorial
     // continental wet zone (Amazon, Congo) AND seasonal monsoon
     // bands that follow the ITCZ off the equator.
-    let land_factor = smoothstep(0.04, 0.06, height);
-    let monsoon_proximity = exp(-off * off * MONSOON_BAND_SIGMA);
-    let monsoon_prop = land_factor * monsoon_proximity * MONSOON_AMP;
+    let land_factor = smoothstep(
+        cloud.climate_ocean_sea_level_lo,
+        cloud.climate_ocean_sea_level_hi,
+        height,
+    );
+    let monsoon_proximity = exp(-off * off * cloud.climate_monsoon_band_sigma);
+    let monsoon_prop = land_factor * monsoon_proximity * cloud.climate_monsoon_amp;
 
     // Eastern-margin stratocumulus decks (California, Peru, Namibia,
     // W. Australia). Lights up subtropical ocean pixels that have
@@ -114,7 +109,7 @@ fn main(@builtin(global_invocation_id) idx: vec3<u32>) {
     // bonus, because the test is "land to the EAST of here", and
     // those continents have ocean to their east.
     let stratocumulus_prop = climate_stratocumulus_bonus(
-        topography, topo_sampler, uv, height, off, cloud.climate_ocean_strength,
+        topography, topo_sampler, uv, height, off, cloud.climate_ocean_strength, cloud,
     );
 
     // Interior-continent dryness (Sahara, Arabian, Gobi, Atacama,
@@ -124,7 +119,7 @@ fn main(@builtin(global_invocation_id) idx: vec3<u32>) {
     // Tropical interiors (Amazon, Congo) stay cloudy because the
     // latitude mask attenuates the penalty away from the subtropics.
     let interior_prop = climate_interior_dryness(
-        topography, topo_sampler, uv, height, off,
+        topography, topo_sampler, uv, height, off, cloud,
     );
 
     // Low-frequency climate noise. Single 3D-noise tap at a planet
@@ -132,9 +127,9 @@ fn main(@builtin(global_invocation_id) idx: vec3<u32>) {
     // a slow time axis. Breaks the perfect latitude-ring look so
     // the planet doesn't read as a stack of paint stripes from
     // orbit. ±0.10 amplitude on the propensity.
-    let noise_uv = vec3<f32>(uv * 3.0, cloud.time_seconds * CLIMATE_NOISE_EVOLUTION);
+    let noise_uv = vec3<f32>(uv * 3.0, cloud.time_seconds * cloud.climate_noise_evolution);
     let noise_n = textureSampleLevel(noise_3d, noise_sampler, noise_uv, 0.0).r;
-    let climate_noise = (noise_n - 0.5) * 2.0 * CLIMATE_NOISE_AMP;
+    let climate_noise = (noise_n - 0.5) * 2.0 * cloud.climate_noise_amp;
 
     // Structural propensity — all physics EXCEPT the noise term.
     // This is the sim's forcing target: stable in time-and-space

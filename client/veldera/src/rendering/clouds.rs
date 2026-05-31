@@ -18,9 +18,9 @@ use bevy_egui::{EguiTextureHandle, EguiUserTextures};
 #[allow(unused_imports)]
 pub use bevy_pbr_clouds_planet::CloudDebugMode;
 use bevy_pbr_clouds_planet::{
-    CLIMATE_MAP_HEIGHT, CLIMATE_MAP_WIDTH, CloudCameraEcef, CloudClimateMap, CloudEarthTopography,
-    CloudLayers, CloudPlanetSettings, CloudShaderParams, CloudSimStatePreview, CloudWorldTime,
-    CloudsPlanetPlugin,
+    CLIMATE_MAP_HEIGHT, CLIMATE_MAP_WIDTH, CloudCameraEcef, CloudClimateMap, CloudClimateSettings,
+    CloudEarthTopography, CloudLayers, CloudPlanetSettings, CloudShaderParams,
+    CloudSimStatePreview, CloudWorldTime, CloudsPlanetPlugin,
 };
 use serde::Deserialize;
 
@@ -62,6 +62,18 @@ pub struct CloudEngineConfig(pub CloudPlanetSettings);
 #[serde(transparent)]
 pub struct CloudShaderConfig(pub CloudShaderParams);
 
+/// Hot-reloadable cloud *climate* tuning, loaded from
+/// `assets/config/rendering/cloud_climate.toml`. Wraps the cloud crate's
+/// [`CloudClimateSettings`] (latitude bands, ocean/land differentiation,
+/// stratocumulus decks, interior dryness, climate noise), kept separate from
+/// the per-layer [`CloudConfig`] and the renderer [`CloudEngineConfig`] because
+/// it tunes the climate model rather than the clouds or the renderer. Applied to
+/// the crate's [`CloudClimateSettings`] resource by [`apply_cloud_climate_config`],
+/// which the crate mirrors into the render world each frame.
+#[derive(Asset, Resource, TypePath, Clone, Default, Deserialize)]
+#[serde(transparent)]
+pub struct CloudClimateConfig(pub CloudClimateSettings);
+
 /// Path the climate model expects for the planet topography. The
 /// `bake_earth_topography` tool produces this; if missing the climate
 /// ocean path falls back to "everywhere is land".
@@ -87,6 +99,9 @@ impl Plugin for CloudIntegrationPlugin {
             .add_plugins(config::ConfigPlugin::<CloudShaderConfig>::new(
                 config::paths::CLOUD_SHADER,
             ))
+            .add_plugins(config::ConfigPlugin::<CloudClimateConfig>::new(
+                config::paths::CLOUD_CLIMATE,
+            ))
             .init_resource::<CloudClimateAssets>()
             .add_systems(Startup, load_climate_assets)
             .add_systems(
@@ -95,6 +110,7 @@ impl Plugin for CloudIntegrationPlugin {
                     apply_cloud_config,
                     apply_cloud_engine_config,
                     apply_cloud_shader_config,
+                    apply_cloud_climate_config,
                     sync_cloud_world_time,
                     sync_cloud_camera_ecef,
                     sync_cloud_topography,
@@ -291,6 +307,20 @@ fn apply_cloud_shader_config(
         return;
     }
     *params = config.0;
+}
+
+/// Apply [`CloudClimateConfig`] to the cloud crate's [`CloudClimateSettings`]
+/// resource when the config (re)loads, so editing `cloud_climate.toml` retunes
+/// the climate model without a restart. The crate mirrors the resource into the
+/// render world each frame, where the next climate bake picks it up.
+fn apply_cloud_climate_config(
+    config: Res<CloudClimateConfig>,
+    mut settings: ResMut<CloudClimateSettings>,
+) {
+    if !config.is_changed() {
+        return;
+    }
+    *settings = config.0;
 }
 
 /// Pushes `day_of_year * 86400 + utc_seconds` into [`CloudWorldTime`]. Wraps the

@@ -32,8 +32,8 @@ use bevy_pbr_atmosphere_planet::{
 };
 
 use crate::{
-    CloudCameraEcef, CloudLayers, CloudPlanetSettings, CloudShaderParams, CloudWorldTime,
-    MAX_CLOUD_LAYERS, constants::SHADOW_MAP_SIZE, noise::NoiseTextures,
+    CloudCameraEcef, CloudClimateSettings, CloudLayers, CloudPlanetSettings, CloudShaderParams,
+    CloudWorldTime, MAX_CLOUD_LAYERS, constants::SHADOW_MAP_SIZE, noise::NoiseTextures,
 };
 
 /// Per-view uniform consumed by the cloud raymarch and composite shaders.
@@ -292,6 +292,46 @@ pub struct GpuCloudUniform {
     pub wrenninge_attenuation: f32,
     pub wrenninge_contribution: f32,
     pub wrenninge_eccentricity: f32,
+
+    // Scattered raymarch/shadow/temporal feel constants, sourced from
+    // `CloudPlanetSettings`. Keep in lockstep with `CloudUniform`.
+    pub world_cell_size: f32,
+    pub shadow_floor: f32,
+    pub shadow_cone_ratio: f32,
+    pub temporal_blend_alpha: f32,
+    pub jitter_period: u32,
+    pub equatorial_circumference_m: f32,
+    pub meridional_circumference_m: f32,
+
+    // Climate-model tuning, sourced from `CloudClimateSettings` and consumed by
+    // the bake-side functions in `climate.wgsl`. See that struct for docs. Keep
+    // in lockstep with `CloudUniform`; the `vec3` is last so it aligns cleanly.
+    pub climate_subtropical_offset_deg: f32,
+    pub climate_storm_track_offset_deg: f32,
+    pub climate_itcz_band_sigma: f32,
+    pub climate_subtropical_band_sigma: f32,
+    pub climate_storm_track_band_sigma: f32,
+    pub climate_baseline: f32,
+    pub climate_itcz_amp: f32,
+    pub climate_subtropical_amp: f32,
+    pub climate_storm_track_amp: f32,
+    pub climate_ocean_bonus_max: f32,
+    pub climate_ocean_tropics_amp: f32,
+    pub climate_ocean_subtropical_amp: f32,
+    pub climate_ocean_storm_amp: f32,
+    pub climate_ocean_sea_level_lo: f32,
+    pub climate_ocean_sea_level_hi: f32,
+    pub climate_stratocumulus_amp: f32,
+    pub climate_stratocumulus_lat_sigma: f32,
+    pub climate_interior_amp: f32,
+    pub climate_interior_lat_sigma: f32,
+    pub climate_interior_probe_u: f32,
+    pub climate_interior_probe_v: f32,
+    pub climate_noise_amp: f32,
+    pub climate_noise_evolution: f32,
+    pub climate_monsoon_amp: f32,
+    pub climate_monsoon_band_sigma: f32,
+    pub climate_stratocumulus_east_offsets: Vec3,
 }
 
 /// Per-view storage texture written by the raymarch pass and read by the
@@ -880,6 +920,19 @@ pub struct CloudPipelines {
     pub poisson_jacobi: CachedComputePipelineId,
 }
 
+/// Shader-defs every cloud pipeline whose shader (transitively) imports
+/// `types.wgsl` must supply, so the `#{MAX_CLOUD_LAYERS}` substitution in that
+/// module resolves. Sourced from the host [`MAX_CLOUD_LAYERS`] constant — the
+/// single source of truth — so the WGSL array size can never drift from the
+/// Rust array size. Unused on the two noise pipelines (which import nothing),
+/// but supplying an unused def is harmless.
+fn layer_shader_defs() -> Vec<bevy::shader::ShaderDefVal> {
+    vec![bevy::shader::ShaderDefVal::UInt(
+        "MAX_CLOUD_LAYERS".into(),
+        MAX_CLOUD_LAYERS as u32,
+    )]
+}
+
 impl FromWorld for CloudPipelines {
     fn from_world(world: &mut World) -> Self {
         let pipeline_cache = world.resource::<PipelineCache>();
@@ -891,6 +944,7 @@ impl FromWorld for CloudPipelines {
             label: Some("cloud_raymarch_pipeline".into()),
             layout: vec![layouts.raymarch.clone()],
             shader: raymarch_shader,
+            shader_defs: layer_shader_defs(),
             ..Default::default()
         });
 
@@ -898,6 +952,7 @@ impl FromWorld for CloudPipelines {
             label: Some("cloud_temporal_pipeline".into()),
             layout: vec![layouts.temporal.clone()],
             shader: temporal_shader,
+            shader_defs: layer_shader_defs(),
             ..Default::default()
         });
 
@@ -909,6 +964,7 @@ impl FromWorld for CloudPipelines {
                 layout: vec![layouts.denoise.clone()],
                 shader: denoise_shader.clone(),
                 entry_point: Some(denoise_entries[i].into()),
+                shader_defs: layer_shader_defs(),
                 ..Default::default()
             })
         });
@@ -918,6 +974,7 @@ impl FromWorld for CloudPipelines {
             label: Some("cloud_climate_bake_pipeline".into()),
             layout: vec![layouts.climate_bake.clone()],
             shader: climate_bake_shader,
+            shader_defs: layer_shader_defs(),
             ..Default::default()
         });
 
@@ -926,6 +983,7 @@ impl FromWorld for CloudPipelines {
             label: Some("cloud_sim_step_pipeline".into()),
             layout: vec![layouts.sim_step.clone()],
             shader: sim_step_shader,
+            shader_defs: layer_shader_defs(),
             ..Default::default()
         });
 
@@ -934,6 +992,7 @@ impl FromWorld for CloudPipelines {
             label: Some("cloud_poisson_jacobi_pipeline".into()),
             layout: vec![layouts.poisson_jacobi.clone()],
             shader: poisson_shader,
+            shader_defs: layer_shader_defs(),
             ..Default::default()
         });
 
@@ -972,10 +1031,14 @@ fn shadow_bake_descriptor(
         label: Some("cloud_shadow_bake_pipeline".into()),
         layout: vec![layout.clone()],
         shader: shader.clone(),
-        shader_defs: vec![bevy::shader::ShaderDefVal::UInt(
-            "SHADOW_STEPS".into(),
-            shadow_steps,
-        )],
+        shader_defs: {
+            let mut defs = layer_shader_defs();
+            defs.push(bevy::shader::ShaderDefVal::UInt(
+                "SHADOW_STEPS".into(),
+                shadow_steps,
+            ));
+            defs
+        },
         ..Default::default()
     }
 }
@@ -1115,7 +1178,7 @@ impl SpecializedRenderPipeline for CloudBindGroupLayouts {
             vertex: self.fullscreen_shader.to_vertex_state(),
             fragment: Some(FragmentState {
                 shader: fragment,
-                shader_defs: Vec::new(),
+                shader_defs: layer_shader_defs(),
                 targets: vec![Some(ColorTargetState {
                     format: TextureFormat::Rgba16Float,
                     blend: Some(blend),
@@ -1240,6 +1303,7 @@ pub(super) fn prepare_cloud_uniforms(
     mut commands: Commands,
     atmosphere_lights: Res<ExtractedAtmosphereLights>,
     settings: Res<CloudPlanetSettings>,
+    climate_settings: Res<CloudClimateSettings>,
     world_time: Res<CloudWorldTime>,
     inspect_cursor: Res<crate::inspect::CloudInspectCursor>,
     layers: Query<(
@@ -1667,6 +1731,39 @@ pub(super) fn prepare_cloud_uniforms(
             wrenninge_attenuation: settings.wrenninge_attenuation,
             wrenninge_contribution: settings.wrenninge_contribution,
             wrenninge_eccentricity: settings.wrenninge_eccentricity,
+            world_cell_size: settings.world_cell_size,
+            shadow_floor: settings.shadow_floor,
+            shadow_cone_ratio: settings.shadow_cone_ratio,
+            temporal_blend_alpha: settings.temporal_blend_alpha,
+            jitter_period: settings.jitter_period,
+            equatorial_circumference_m: settings.equatorial_circumference_m,
+            meridional_circumference_m: settings.meridional_circumference_m,
+            climate_subtropical_offset_deg: climate_settings.subtropical_offset_deg,
+            climate_storm_track_offset_deg: climate_settings.storm_track_offset_deg,
+            climate_itcz_band_sigma: climate_settings.itcz_band_sigma,
+            climate_subtropical_band_sigma: climate_settings.subtropical_band_sigma,
+            climate_storm_track_band_sigma: climate_settings.storm_track_band_sigma,
+            climate_baseline: climate_settings.baseline,
+            climate_itcz_amp: climate_settings.itcz_amp,
+            climate_subtropical_amp: climate_settings.subtropical_amp,
+            climate_storm_track_amp: climate_settings.storm_track_amp,
+            climate_ocean_bonus_max: climate_settings.ocean_bonus_max,
+            climate_ocean_tropics_amp: climate_settings.ocean_tropics_amp,
+            climate_ocean_subtropical_amp: climate_settings.ocean_subtropical_amp,
+            climate_ocean_storm_amp: climate_settings.ocean_storm_amp,
+            climate_ocean_sea_level_lo: climate_settings.ocean_sea_level_lo,
+            climate_ocean_sea_level_hi: climate_settings.ocean_sea_level_hi,
+            climate_stratocumulus_amp: climate_settings.stratocumulus_amp,
+            climate_stratocumulus_lat_sigma: climate_settings.stratocumulus_lat_sigma,
+            climate_interior_amp: climate_settings.interior_amp,
+            climate_interior_lat_sigma: climate_settings.interior_lat_sigma,
+            climate_interior_probe_u: climate_settings.interior_probe_u,
+            climate_interior_probe_v: climate_settings.interior_probe_v,
+            climate_noise_amp: climate_settings.noise_amp,
+            climate_noise_evolution: climate_settings.noise_evolution,
+            climate_monsoon_amp: climate_settings.monsoon_amp,
+            climate_monsoon_band_sigma: climate_settings.monsoon_band_sigma,
+            climate_stratocumulus_east_offsets: climate_settings.stratocumulus_east_offsets,
         });
 
         commands.entity(entity).insert(CloudPrevFrame {

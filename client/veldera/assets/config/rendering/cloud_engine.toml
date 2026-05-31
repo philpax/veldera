@@ -61,3 +61,24 @@ shade_morph_far_m = 80000.0
 wrenninge_attenuation = 0.55
 wrenninge_contribution = 0.9
 wrenninge_eccentricity = 0.6
+
+# Edge length (m) of the world-space cell the raymarch jitter hashes against.
+# Chosen well below the primary-march step and well above the ~0.7 m f32
+# quantisation of ECEF positions.
+world_cell_size = 4.0
+# Minimum brightness a fully cloud-shadowed pixel retains (0 = black shadows,
+# 1 = no darkening). Ambient sky + indirect bounce keep real shadows at ~40-60%.
+shadow_floor = 0.45
+# tan(half-angle) of the shadow-bake cone march; widens the penumbra with
+# distance from the receiver.
+shadow_cone_ratio = 0.05
+# Temporal-reprojection blend weight on the current frame. Lower = smoother but
+# slower to converge / more ghosting.
+temporal_blend_alpha = 0.1
+# Length of the Halton(2, 3) sub-pixel jitter cycle, in frames.
+jitter_period = 16
+# Planet circumferences (m), used by the weather sim to convert wind (m/s) to
+# UV/s on the equirectangular climate map. Earth's equator = 40_075 km,
+# pole-to-pole = 20_004 km.
+equatorial_circumference_m = 40075000.0
+meridional_circumference_m = 20004000.0

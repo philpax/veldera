@@ -23,11 +23,10 @@
 @group(0) @binding(3) var depth_texture: texture_depth_multisampled_2d;
 @group(0) @binding(4) var lut_sampler: sampler;
 
-// Minimum brightness fraction a fully-shadowed pixel retains. Real
-// cloud-shadowed terrain isn't black — ambient sky and indirect bounce
-// keep it lit at maybe ~40-60% of the sunny value. We approximate that
-// here without separating direct sun from ambient.
-const SHADOW_FLOOR: f32 = 0.45;
+// `cloud.shadow_floor` is the minimum brightness fraction a fully-shadowed
+// pixel retains. Real cloud-shadowed terrain isn't black — ambient sky and
+// indirect bounce keep it lit at maybe ~40-60% of the sunny value. We
+// approximate that here without separating direct sun from ambient.
 
 // Mirrors `CloudDebugMode::ShadowMap` / `ShadowUv` in lib.rs.
 const DBG_SHADOW_MAP: u32 = 8u;
@@ -67,7 +66,7 @@ fn main(in: FullscreenVertexOutput) -> @location(0) vec4<f32> {
     }
 
     let transmittance = textureSampleLevel(shadow_map, lut_sampler, shadow_uv, 0.0).r;
-    // Map transmittance ∈ [0, 1] to brightness ∈ [SHADOW_FLOOR, 1],
+    // Map transmittance ∈ [0, 1] to brightness ∈ [shadow_floor, 1],
     // then fade the dimming by both `shadow_strength` (twilight gate,
     // 0 when the active light is below horizon) and the user-tunable
     // `shadow_intensity` (lets you push shadows past the default 45 %
@@ -75,7 +74,7 @@ fn main(in: FullscreenVertexOutput) -> @location(0) vec4<f32> {
     // light level is already dim and the default intensity is hard to
     // perceive). Clamped to [0, 1] so an intensity > 1 can't produce
     // negative output.
-    let base_dim = mix(SHADOW_FLOOR, 1.0, transmittance);
+    let base_dim = mix(cloud.shadow_floor, 1.0, transmittance);
     let dim_raw = mix(1.0, base_dim, cloud.shadow_strength * cloud.shadow_intensity);
     let dim = clamp(dim_raw, 0.0, 1.0);
     return vec4<f32>(dim, dim, dim, 1.0);

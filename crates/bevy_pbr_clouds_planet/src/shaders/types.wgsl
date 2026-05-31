@@ -1,8 +1,23 @@
 #define_import_path bevy_pbr_clouds_planet::types
 
-// Maximum cloud sub-layers per camera. Must match `MAX_CLOUD_LAYERS` in
-// lib.rs.
-const MAX_CLOUD_LAYERS: u32 = 3u;
+// Maximum cloud sub-layers per camera. Injected as a `shader_def` from the
+// host `MAX_CLOUD_LAYERS` constant (see `layer_shader_defs` in resources.rs),
+// so this can never drift from the Rust array size.
+const MAX_CLOUD_LAYERS: u32 = #{MAX_CLOUD_LAYERS}u;
+
+// Fixed 6-tap cone-march offset pattern, shared by the main raymarch's
+// sun-occlusion cone (`functions.wgsl`) and the shadow bake's cone march
+// (`cloud_shadow_bake.wgsl`) so the two stay identical. Defined here rather
+// than in `functions.wgsl` because the shadow bake can't import that module
+// (it would pull in the full main-pass binding set).
+const CONE_OFFSETS: array<vec3<f32>, 6> = array<vec3<f32>, 6>(
+    vec3<f32>( 0.155,  0.490,  0.000),
+    vec3<f32>( 0.255, -0.290,  0.190),
+    vec3<f32>(-0.220, -0.215,  0.380),
+    vec3<f32>( 0.000,  0.155, -0.420),
+    vec3<f32>(-0.310,  0.080,  0.150),
+    vec3<f32>( 0.430, -0.080, -0.100),
+);
 
 struct CloudSubLayer {
     inner_radius: f32,
@@ -167,4 +182,41 @@ struct CloudUniform {
     wrenninge_attenuation: f32,
     wrenninge_contribution: f32,
     wrenninge_eccentricity: f32,
+    // Scattered raymarch/shadow/temporal feel constants. Keep in lockstep with
+    // `GpuCloudUniform` in resources.rs.
+    world_cell_size: f32,
+    shadow_floor: f32,
+    shadow_cone_ratio: f32,
+    temporal_blend_alpha: f32,
+    jitter_period: u32,
+    equatorial_circumference_m: f32,
+    meridional_circumference_m: f32,
+    // Climate-model tuning (consumed by climate.wgsl's bake functions). Keep in
+    // lockstep with `GpuCloudUniform`; the vec3 is last so it aligns cleanly.
+    climate_subtropical_offset_deg: f32,
+    climate_storm_track_offset_deg: f32,
+    climate_itcz_band_sigma: f32,
+    climate_subtropical_band_sigma: f32,
+    climate_storm_track_band_sigma: f32,
+    climate_baseline: f32,
+    climate_itcz_amp: f32,
+    climate_subtropical_amp: f32,
+    climate_storm_track_amp: f32,
+    climate_ocean_bonus_max: f32,
+    climate_ocean_tropics_amp: f32,
+    climate_ocean_subtropical_amp: f32,
+    climate_ocean_storm_amp: f32,
+    climate_ocean_sea_level_lo: f32,
+    climate_ocean_sea_level_hi: f32,
+    climate_stratocumulus_amp: f32,
+    climate_stratocumulus_lat_sigma: f32,
+    climate_interior_amp: f32,
+    climate_interior_lat_sigma: f32,
+    climate_interior_probe_u: f32,
+    climate_interior_probe_v: f32,
+    climate_noise_amp: f32,
+    climate_noise_evolution: f32,
+    climate_monsoon_amp: f32,
+    climate_monsoon_band_sigma: f32,
+    climate_stratocumulus_east_offsets: vec3<f32>,
 }
