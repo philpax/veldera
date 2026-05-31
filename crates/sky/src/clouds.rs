@@ -14,7 +14,6 @@ use bevy::{
         Extent3d, TextureDescriptor, TextureDimension, TextureFormat, TextureUsages,
     },
 };
-use bevy_egui::{EguiTextureHandle, EguiUserTextures};
 use serde::Deserialize;
 #[allow(unused_imports)]
 pub use veldera_clouds::CloudDebugMode;
@@ -23,11 +22,10 @@ use veldera_clouds::{
     CloudEarthTopography, CloudLayers, CloudPlanetSettings, CloudShaderParams,
     CloudSimStatePreview, CloudWorldTime, CloudsPlanetPlugin,
 };
+use veldera_config::ConfigPlugin;
+use veldera_geo::floating_origin::FloatingOriginCamera;
 
-use crate::{
-    config,
-    world::{floating_origin::FloatingOriginCamera, time_of_day::TimeOfDayState},
-};
+use crate::time_of_day::TimeOfDayState;
 
 /// Hot-reloadable cloud configuration, loaded from
 /// `assets/config/rendering/clouds.toml`. Wraps the cloud crate's
@@ -85,23 +83,38 @@ const EARTH_TOPOGRAPHY_PATH: &str = "world/earth_topography.png";
 /// Also drives the cloud system's world time directly from the time-of-day
 /// clock, so wind / weather drift / cloud evolution is a pure function of
 /// in-world time — moving the time slider jumps the cloud state to match.
-pub struct CloudIntegrationPlugin;
+pub struct CloudIntegrationPlugin {
+    /// Asset paths of the four cloud config TOMLs (app-supplied).
+    pub paths: CloudConfigPaths,
+}
+
+/// Asset paths for the cloud configs the integration loads. The engine owns the
+/// config *types*; the app supplies these paths.
+pub struct CloudConfigPaths {
+    /// Per-layer cloud config ([`CloudConfig`]).
+    pub layers: &'static str,
+    /// Renderer engine settings ([`CloudEngineConfig`]).
+    pub engine: &'static str,
+    /// Shader-def knobs ([`CloudShaderConfig`]).
+    pub shader: &'static str,
+    /// Climate-model tuning ([`CloudClimateConfig`]).
+    pub climate: &'static str,
+}
+
+impl CloudIntegrationPlugin {
+    /// Create the plugin, loading its configs from `paths`.
+    pub const fn new(paths: CloudConfigPaths) -> Self {
+        Self { paths }
+    }
+}
 
 impl Plugin for CloudIntegrationPlugin {
     fn build(&self, app: &mut App) {
         app.add_plugins(CloudsPlanetPlugin::default())
-            .add_plugins(config::ConfigPlugin::<CloudConfig>::new(
-                config::paths::CLOUDS,
-            ))
-            .add_plugins(config::ConfigPlugin::<CloudEngineConfig>::new(
-                config::paths::CLOUD_ENGINE,
-            ))
-            .add_plugins(config::ConfigPlugin::<CloudShaderConfig>::new(
-                config::paths::CLOUD_SHADER,
-            ))
-            .add_plugins(config::ConfigPlugin::<CloudClimateConfig>::new(
-                config::paths::CLOUD_CLIMATE,
-            ))
+            .add_plugins(ConfigPlugin::<CloudConfig>::new(self.paths.layers))
+            .add_plugins(ConfigPlugin::<CloudEngineConfig>::new(self.paths.engine))
+            .add_plugins(ConfigPlugin::<CloudShaderConfig>::new(self.paths.shader))
+            .add_plugins(ConfigPlugin::<CloudClimateConfig>::new(self.paths.climate))
             .init_resource::<CloudClimateAssets>()
             .add_systems(Startup, load_climate_assets)
             .add_systems(
@@ -123,8 +136,9 @@ impl Plugin for CloudIntegrationPlugin {
 }
 
 /// Cached handles for climate-model textures so we only ask the asset
-/// server to load each one once. Also registered with the egui texture
-/// pool so the Climate debug sub-tab can preview them inline.
+/// server to load each one once. Exposed publicly so a UI can register them
+/// for preview (e.g. with egui) — this crate stays UI-agnostic and only owns
+/// the handles.
 #[derive(Resource, Default)]
 pub struct CloudClimateAssets {
     pub topography: Option<Handle<Image>>,
@@ -143,10 +157,8 @@ fn load_climate_assets(
     asset_server: Res<AssetServer>,
     mut images: ResMut<Assets<Image>>,
     mut assets: ResMut<CloudClimateAssets>,
-    mut egui_user_textures: ResMut<EguiUserTextures>,
 ) {
     let topo_handle: Handle<Image> = asset_server.load(EARTH_TOPOGRAPHY_PATH);
-    egui_user_textures.add_image(EguiTextureHandle::Strong(topo_handle.clone()));
     assets.topography = Some(topo_handle);
 
     // Allocate the climate-map bake target. STORAGE_BINDING is required
@@ -174,7 +186,6 @@ fn load_climate_assets(
     };
     climate_image.resize(size);
     let climate_handle = images.add(climate_image);
-    egui_user_textures.add_image(EguiTextureHandle::Strong(climate_handle.clone()));
     assets.climate_map = Some(climate_handle);
 
     // Sim-state display preview. Same dimensions as the climate map
@@ -198,7 +209,6 @@ fn load_climate_assets(
     };
     sim_state_image.resize(size);
     let sim_state_handle = images.add(sim_state_image);
-    egui_user_textures.add_image(EguiTextureHandle::Strong(sim_state_handle.clone()));
     assets.sim_state_preview = Some(sim_state_handle);
 }
 

@@ -13,5 +13,6 @@
 //! engine owns the config *types*, the app supplies the *paths*.
 
 pub mod atmosphere;
+pub mod clouds;
 pub mod moon;
 pub mod time_of_day;

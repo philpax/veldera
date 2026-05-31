@@ -6894,6 +6894,7 @@ dependencies = [
  "js-sys",
  "serde",
  "veldera_atmosphere",
+ "veldera_clouds",
  "veldera_config",
  "veldera_constants",
  "veldera_geo",

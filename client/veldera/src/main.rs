@@ -37,7 +37,7 @@ use rendering::{
     atmosphere::{
         AtmosphereBundle, AtmosphereConfig, AtmosphereIntegrationPlugin, AtmosphericLight,
     },
-    clouds::{CloudConfig, CloudEngineConfig, CloudIntegrationPlugin},
+    clouds::{CloudConfig, CloudConfigPaths, CloudEngineConfig, CloudIntegrationPlugin},
     terrain_material::TerrainMaterialPlugin,
 };
 use ui::DebugUiPlugin;
@@ -71,7 +71,12 @@ impl Plugin for AppPlugin {
             DebugUiPlugin,
             TerrainMaterialPlugin,
             AtmosphereIntegrationPlugin::new(config::paths::ATMOSPHERE),
-            CloudIntegrationPlugin,
+            CloudIntegrationPlugin::new(CloudConfigPaths {
+                layers: config::paths::CLOUDS,
+                engine: config::paths::CLOUD_ENGINE,
+                shader: config::paths::CLOUD_SHADER,
+                climate: config::paths::CLOUD_CLIMATE,
+            }),
             vehicle::VehiclePlugin,
         ))
         .add_plugins(config::ConfigPlugin::<LaunchConfig>::new(

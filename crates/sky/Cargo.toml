@@ -19,6 +19,7 @@ glam = "0.30"
 serde = { version = "1", features = ["derive"] }
 web-time = "1"
 veldera_atmosphere = { path = "../atmosphere", features = ["serde"] }
+veldera_clouds = { path = "../clouds", features = ["serde"] }
 veldera_config = { path = "../config" }
 veldera_constants = { path = "../constants" }
 veldera_geo = { path = "../geo" }

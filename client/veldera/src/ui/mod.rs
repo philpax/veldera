@@ -15,7 +15,9 @@ mod vehicle;
 use std::sync::Arc;
 
 use bevy::{diagnostic::FrameTimeDiagnosticsPlugin, prelude::*};
-use bevy_egui::{EguiContexts, EguiPlugin, EguiPrimaryContextPass, egui};
+use bevy_egui::{
+    EguiContexts, EguiPlugin, EguiPrimaryContextPass, EguiTextureHandle, EguiUserTextures, egui,
+};
 use egui_dock::{DockArea, DockState, Style};
 use glam::DVec3;
 use leafwing_input_manager::prelude::*;
@@ -59,7 +61,14 @@ impl Plugin for DebugUiPlugin {
             .init_resource::<VehicleTabOpen>()
             .init_resource::<streaming::DiagnosticsViewState>()
             .init_resource::<UiVisible>()
-            .add_systems(Update, (toggle_ui_visible, inspector::sync_inspect_cursor))
+            .add_systems(
+                Update,
+                (
+                    toggle_ui_visible,
+                    inspector::sync_inspect_cursor,
+                    register_cloud_climate_textures,
+                ),
+            )
             .add_systems(
                 EguiPrimaryContextPass,
                 (
@@ -68,6 +77,32 @@ impl Plugin for DebugUiPlugin {
                 ),
             );
     }
+}
+
+/// Register the cloud crate's climate-preview images with egui so the Climate
+/// debug tab can display them. `veldera_sky` exposes the handles via
+/// [`CloudClimateAssets`](crate::rendering::clouds::CloudClimateAssets) and
+/// stays egui-free; this app-side system does the egui registration once the
+/// handles exist (idempotent via the `registered` latch).
+fn register_cloud_climate_textures(
+    assets: Res<crate::rendering::clouds::CloudClimateAssets>,
+    mut egui_user_textures: ResMut<EguiUserTextures>,
+    mut registered: Local<bool>,
+) {
+    if *registered {
+        return;
+    }
+    let (Some(topography), Some(climate_map), Some(sim_state_preview)) = (
+        assets.topography.as_ref(),
+        assets.climate_map.as_ref(),
+        assets.sim_state_preview.as_ref(),
+    ) else {
+        return;
+    };
+    egui_user_textures.add_image(EguiTextureHandle::Strong(topography.clone()));
+    egui_user_textures.add_image(EguiTextureHandle::Strong(climate_map.clone()));
+    egui_user_textures.add_image(EguiTextureHandle::Strong(sim_state_preview.clone()));
+    *registered = true;
 }
 
 /// Which tab in the debug UI dock.
