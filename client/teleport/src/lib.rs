@@ -91,10 +91,10 @@ fn play_departure_woosh(
 /// Load teleport sound assets on startup.
 fn load_teleport_sounds(mut commands: Commands, asset_server: Res<AssetServer>) {
     commands.insert_resource(WooshSoundHandle(
-        asset_server.load("683096__florianreichelt__woosh.mp3"),
+        asset_server.load("game/sounds/683096__florianreichelt__woosh.mp3"),
     ));
     commands.insert_resource(WindLoopSoundHandle(
-        asset_server.load("135034__mrlindstrom__windloop6sec.wav"),
+        asset_server.load("game/sounds/135034__mrlindstrom__windloop6sec.wav"),
     ));
 }
 

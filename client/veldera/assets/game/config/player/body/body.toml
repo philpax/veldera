@@ -4,7 +4,7 @@
 
 # Character glTF, relative to assets/. Must have a Mixamo-compatible skeleton
 # (the controller depends on its bone names), so it's read once at startup.
-gltf_path = "characters/leonard.glb"
+gltf_path = "game/characters/leonard.glb"
 
 # Eye cross-fade when entering FPS mode: default duration, and slider upper bound (s).
 default_eye_lerp_duration_s = 0.3

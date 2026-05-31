@@ -226,10 +226,10 @@ pub fn despawn_projectiles(
 /// Load sound assets on startup.
 pub fn load_sounds(mut commands: Commands, asset_server: Res<AssetServer>) {
     commands.insert_resource(BounceSoundHandle(
-        asset_server.load("519649__boaay__basket-ball-bounce.wav"),
+        asset_server.load("game/sounds/519649__boaay__basket-ball-bounce.wav"),
     ));
     commands.insert_resource(FireSoundHandle(
-        asset_server.load("151713__bowlingballout__pvc-rocket-cannon.wav"),
+        asset_server.load("game/sounds/151713__bowlingballout__pvc-rocket-cannon.wav"),
     ));
 }
 

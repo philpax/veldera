@@ -40,7 +40,7 @@
           density: 10.0,
         ),
         "veldera::vehicle::components::VehicleModel": (
-          path: "vehicles/craft_racer.glb#Scene0",
+          path: "game/vehicles/craft_racer.glb#Scene0",
           scale: 1.5,
         ),
         "veldera::camera::follow::FollowCameraConfig": (

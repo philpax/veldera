@@ -156,7 +156,7 @@ fn start_loading_vehicle_folder(
     asset_server: Res<AssetServer>,
     mut loader: ResMut<VehicleFolderLoader>,
 ) {
-    let handle = asset_server.load_folder("vehicles");
+    let handle = asset_server.load_folder("game/vehicles");
     loader.folder_handle = Some(handle);
     tracing::info!("Started loading vehicles folder");
 }

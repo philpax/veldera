@@ -93,7 +93,7 @@ pub struct RumbleConfig {
 }
 
 /// Path to the whoosh asset (looked up via `AssetServer`).
-const WHOOSH_ASSET_PATH: &str = "855844__sadiquecat__whoosh-long-bamboo-stick-os-st-13.wav";
+const WHOOSH_ASSET_PATH: &str = "game/sounds/855844__sadiquecat__whoosh-long-bamboo-stick-os-st-13.wav";
 
 /// Sample rate (Hz) of the synthesized rumble. 48 kHz is rodio's
 /// default-friendly rate and matches the whoosh sample's rate.

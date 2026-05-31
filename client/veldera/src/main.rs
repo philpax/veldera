@@ -78,6 +78,7 @@ impl Plugin for AppPlugin {
                 engine: config::paths::CLOUD_ENGINE,
                 shader: config::paths::CLOUD_SHADER,
                 climate: config::paths::CLOUD_CLIMATE,
+                topography: config::paths::CLOUD_TOPOGRAPHY,
             }),
             VehiclePlugin::new(config::paths::VEHICLE),
         ))

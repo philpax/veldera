@@ -72,10 +72,11 @@ pub struct CloudShaderConfig(pub CloudShaderParams);
 #[serde(transparent)]
 pub struct CloudClimateConfig(pub CloudClimateSettings);
 
-/// Path the climate model expects for the planet topography. The
-/// `bake_earth_topography` tool produces this; if missing the climate
+/// Host-supplied asset path of the planet topography texture. The
+/// `bake_earth_topography` tool produces it; if missing the climate
 /// ocean path falls back to "everywhere is land".
-const EARTH_TOPOGRAPHY_PATH: &str = "world/earth_topography.png";
+#[derive(Resource)]
+struct CloudTopographyPath(&'static str);
 
 /// Plugin that registers the cloud renderer and drives it from config. The
 /// [`CloudLayers`] component is built from `clouds.toml` at camera spawn (the
@@ -99,6 +100,8 @@ pub struct CloudConfigPaths {
     pub shader: &'static str,
     /// Climate-model tuning ([`CloudClimateConfig`]).
     pub climate: &'static str,
+    /// Planet topography texture the climate model samples.
+    pub topography: &'static str,
 }
 
 impl CloudIntegrationPlugin {
@@ -116,6 +119,7 @@ impl Plugin for CloudIntegrationPlugin {
             .add_plugins(ConfigPlugin::<CloudShaderConfig>::new(self.paths.shader))
             .add_plugins(ConfigPlugin::<CloudClimateConfig>::new(self.paths.climate))
             .init_resource::<CloudClimateAssets>()
+            .insert_resource(CloudTopographyPath(self.paths.topography))
             .add_systems(Startup, load_climate_assets)
             .add_systems(
                 Update,
@@ -155,10 +159,11 @@ pub struct CloudClimateAssets {
 
 fn load_climate_assets(
     asset_server: Res<AssetServer>,
+    topography_path: Res<CloudTopographyPath>,
     mut images: ResMut<Assets<Image>>,
     mut assets: ResMut<CloudClimateAssets>,
 ) {
-    let topo_handle: Handle<Image> = asset_server.load(EARTH_TOPOGRAPHY_PATH);
+    let topo_handle: Handle<Image> = asset_server.load(topography_path.0);
     assets.topography = Some(topo_handle);
 
     // Allocate the climate-map bake target. STORAGE_BINDING is required

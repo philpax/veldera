@@ -1,6 +1,6 @@
 //! First-person body: a Mixamo character spawned alongside the FPS player.
 //!
-//! Loads `characters/leonard.glb` (produced by `tools/convert_character`),
+//! Loads `game/characters/leonard.glb` (produced by `tools/convert_character`),
 //! parses the `extras.veldera_character` metrics into a [`CharacterMetrics`]
 //! resource, and — while the camera is in `FpsController` mode — keeps a
 //! body entity tracking the logical player's interpolated position with
