@@ -112,6 +112,9 @@ pub fn world_camera_bundle(
         // Bloom gives the sun a natural glow.
         Bloom::NATURAL,
         FloatingOriginCamera::new(position),
-        FlightCamera { direction },
+        FlightCamera {
+            direction,
+            velocity: Vec3::ZERO,
+        },
     )
 }

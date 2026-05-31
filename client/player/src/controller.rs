@@ -375,6 +375,7 @@ pub fn spawn_fps_player(
     config: &FpsPlayerConfig,
     ecef_pos: DVec3,
     physics_pos: Vec3,
+    initial_velocity: Vec3,
     yaw: f32,
     pitch: f32,
 ) -> Entity {
@@ -396,7 +397,10 @@ pub fn spawn_fps_player(
             Collider::capsule(radius, length),
             Position(physics_pos),
             CustomPositionIntegration,
-            LinearVelocity::default(),
+            // Seeded from the caller so a mode switch (e.g. from the flycam) can
+            // carry momentum into first-person; the controller's own clamps then
+            // take over. `Vec3::ZERO` for a fresh spawn at rest.
+            LinearVelocity(initial_velocity),
             LockedAxes::ROTATION_LOCKED,
             // Default `CollisionLayers` is all-bits-set, which means
             // the capsule filters for `Ragdoll`. Ragdoll bones spawn
@@ -466,13 +470,28 @@ pub fn setup_from_flycam(
     flight_camera: Option<&FlightCamera>,
 ) {
     let camera_ecef = camera.position;
-    let (yaw, pitch) = if let Some(fc) = flight_camera {
-        direction_to_yaw_pitch(fc.direction, camera_ecef)
+    // The flycam's velocity is already in ECEF axes — the same frame the
+    // physics body's `LinearVelocity` uses — so it carries over directly, giving
+    // the player whatever momentum they had when they dropped into first-person.
+    // It can far exceed the controller's air-speed cap (the flycam is fast near
+    // the ground); `fps_controller_prepare`'s air drag bleeds the excess off
+    // gradually rather than this hand-off clamping it.
+    let (yaw, pitch, velocity) = if let Some(fc) = flight_camera {
+        let (yaw, pitch) = direction_to_yaw_pitch(fc.direction, camera_ecef);
+        (yaw, pitch, fc.velocity)
     } else {
-        (0.0, 0.0)
+        (0.0, 0.0, Vec3::ZERO)
     };
 
-    let logical_entity = spawn_fps_player(commands, config, camera_ecef, Vec3::ZERO, yaw, pitch);
+    let logical_entity = spawn_fps_player(
+        commands,
+        config,
+        camera_ecef,
+        Vec3::ZERO,
+        velocity,
+        yaw,
+        pitch,
+    );
 
     commands
         .entity(camera_entity)
@@ -491,7 +510,15 @@ pub fn setup_from_follow_entity(
     let yaw = preserved_fps.yaw;
     let pitch = preserved_fps.pitch;
 
-    let logical_entity = spawn_fps_player(commands, config, camera_ecef, Vec3::ZERO, yaw, pitch);
+    let logical_entity = spawn_fps_player(
+        commands,
+        config,
+        camera_ecef,
+        Vec3::ZERO,
+        Vec3::ZERO,
+        yaw,
+        pitch,
+    );
 
     commands
         .entity(camera_entity)
@@ -521,7 +548,12 @@ pub fn cleanup(
 
     commands.entity(camera_entity).remove::<RenderPlayer>();
     commands.entity(camera_entity).insert((
-        FlightCamera { direction },
+        // The flycam derives its velocity from input each frame (no inertia), so
+        // there's nothing to carry over from the player here.
+        FlightCamera {
+            direction,
+            velocity: Vec3::ZERO,
+        },
         FloatingOriginCamera::new(final_ecef),
         transform,
     ));

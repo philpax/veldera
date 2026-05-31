@@ -103,7 +103,10 @@ pub(super) fn cleanup(
         .entity(camera_entity)
         .remove::<FollowEntityTarget>();
     commands.entity(camera_entity).insert((
-        FlightCamera { direction },
+        FlightCamera {
+            direction,
+            velocity: Vec3::ZERO,
+        },
         FloatingOriginCamera::new(camera.position),
         transform,
     ));

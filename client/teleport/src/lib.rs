@@ -1079,8 +1079,16 @@ fn complete_teleport_animation(
         let (yaw, pitch) = direction_to_yaw_pitch(flight_camera.direction, spawn_ecef);
 
         // Spawn new logical player at position above ground.
-        let logical_entity =
-            spawn_fps_player(commands, player_config, spawn_ecef, physics_pos, yaw, pitch);
+        // A teleport respawns the player at a new location, so it starts at rest.
+        let logical_entity = spawn_fps_player(
+            commands,
+            player_config,
+            spawn_ecef,
+            physics_pos,
+            Vec3::ZERO,
+            yaw,
+            pitch,
+        );
 
         // Add RenderPlayer to camera.
         commands

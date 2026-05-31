@@ -103,6 +103,13 @@ pub enum TeleportAnimationMode {
 pub struct FlightCamera {
     /// Current direction the camera is facing (normalized).
     pub direction: Vec3,
+    /// Current freelook velocity in ECEF world axes (m/s), tracked so a host can
+    /// hand it to another controller on a mode switch. It's the intended
+    /// per-frame movement velocity: `direction * speed` while a movement key is
+    /// held, zero the instant input stops (the flycam has no inertia). The
+    /// physics player's `LinearVelocity` shares these axes, so it transfers
+    /// directly when entering first-person.
+    pub velocity: Vec3,
 }
 
 // ============================================================================

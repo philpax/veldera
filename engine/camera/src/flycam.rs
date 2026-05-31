@@ -143,7 +143,12 @@ fn camera_movement(
         }
 
         if displacement != Vec3::ZERO {
-            let displacement = displacement.normalize() * speed * time.delta_secs();
+            // Intended velocity in ECEF axes; cached so a host switching modes
+            // can preserve it (the flycam has no inertia, so it's `dir * speed`
+            // this frame and zero the moment input stops).
+            let velocity = displacement.normalize() * speed;
+            camera.velocity = velocity;
+            let displacement = velocity * time.delta_secs();
 
             // Apply movement to high-precision position.
             let movement_dvec = DVec3::new(
@@ -168,6 +173,8 @@ fn camera_movement(
             camera.direction = (rotation * camera.direction).normalize();
 
             transform.look_to(camera.direction, new_up);
+        } else {
+            camera.velocity = Vec3::ZERO;
         }
     }
 }
