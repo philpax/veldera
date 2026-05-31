@@ -27,3 +27,11 @@ aerial_view_lut_max_distance = 32000.0
 scene_units_to_m = 1.0
 # Render method: "LookupTexture" (fast, default) | "Raymarched" (slower, accurate).
 rendering_method = "LookupTexture"
+# Where in each LUT ray-march segment the single density sample is taken
+# (0 = start, 0.5 = middle, 1 = end). Biased toward the start to approximate the
+# exponential density falloff.
+raymarch_midpoint_ratio = 0.3
+# Same offset for the CPU sun-transmittance integration. It accumulates dt
+# between successive samples, so the true midpoint (0.5) is correct here —
+# distinct from raymarch_midpoint_ratio's single-tap-per-segment scheme.
+sun_transmittance_midpoint_ratio = 0.5

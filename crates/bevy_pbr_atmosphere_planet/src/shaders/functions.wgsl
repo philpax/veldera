@@ -51,11 +51,10 @@ const ROOT_2: f32 = 1.41421356; // sqrt(2)
 const EPSILON: f32 = 1.0; // 1 meter
 const MIN_EXTINCTION: vec3<f32> = vec3(1e-12);
 
-// During raymarching, each segment is sampled at a single point. This constant determines
-// where in the segment that sample is taken (0.0 = start, 0.5 = middle, 1.0 = end).
-// We use 0.3 to sample closer to the start of each segment, which better approximates
-// the exponential falloff of atmospheric density.
-const MIDPOINT_RATIO: f32 = 0.3;
+// During raymarching, each segment is sampled at a single point.
+// `settings.raymarch_midpoint_ratio` determines where in the segment that
+// sample is taken (0.0 = start, 0.5 = middle, 1.0 = end); the default biases
+// toward the start to better approximate the exponential density falloff.
 
 // LUT UV PARAMETERIZATIONS
 
@@ -491,7 +490,7 @@ fn raymarch_atmosphere(
     var optical_depth = vec3(0.0);
     for (var s = 0.0; s < sample_count; s += 1.0) {
         // Linear distribution from atmosphere entry to exit/ground.
-        let t_i = t_start + t_total * (s + MIDPOINT_RATIO) / sample_count;
+        let t_i = t_start + t_total * (s + settings.raymarch_midpoint_ratio) / sample_count;
         let dt_i = (t_i - prev_t);
         prev_t = t_i;
 

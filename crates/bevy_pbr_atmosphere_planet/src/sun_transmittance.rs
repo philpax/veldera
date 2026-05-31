@@ -31,11 +31,15 @@ const SAMPLES: u32 = 40;
 ///
 /// Returns `Vec3::ZERO` when the ray is geometrically blocked by the planet.
 /// Otherwise returns `exp(-optical_depth)` per RGB channel.
+///
+/// `midpoint_ratio` places each sample within its slab (0 = start, 0.5 =
+/// middle); pass [`crate::AtmosphereSettings::sun_transmittance_midpoint_ratio`].
 pub fn compute_sun_transmittance(
     atmosphere: &SphericalAtmosphere,
     medium: &ScatteringMedium,
     r: f32,
     mu: f32,
+    midpoint_ratio: f32,
 ) -> Vec3 {
     if ray_intersects_ground(r, mu, atmosphere.bottom_radius) {
         return Vec3::ZERO;
@@ -53,7 +57,7 @@ pub fn compute_sun_transmittance(
     let mut optical_depth = Vec3::ZERO;
     let mut prev_t = 0.0;
     for i in 0..SAMPLES {
-        let t_i = t_max * (i as f32 + MIDPOINT_RATIO) * inv_samples;
+        let t_i = t_max * (i as f32 + midpoint_ratio) * inv_samples;
         let dt = t_i - prev_t;
         prev_t = t_i;
 
@@ -77,11 +81,6 @@ pub fn compute_sun_transmittance(
         (-optical_depth.z).exp(),
     )
 }
-
-/// Midpoint offset used in the GPU shader so the first sample sits at the
-/// center of the first slab rather than at `t = 0`. Matches `MIDPOINT_RATIO`
-/// in `functions.wgsl`.
-const MIDPOINT_RATIO: f32 = 0.5;
 
 fn distance_to_top_atmosphere_boundary(r: f32, mu: f32, top_radius: f32) -> f32 {
     let disc = (r * r * (mu * mu - 1.0) + top_radius * top_radius).max(0.0);

@@ -5,7 +5,7 @@
     bindings::settings,
     functions::{
         sample_density_lut, get_local_r, max_atmosphere_distance,
-        MIDPOINT_RATIO, ABSORPTION_DENSITY, SCATTERING_DENSITY
+        ABSORPTION_DENSITY, SCATTERING_DENSITY
     },
     bruneton_functions::transmittance_lut_uv_to_r_mu,
 }
@@ -36,7 +36,7 @@ fn ray_optical_depth(r: f32, mu: f32, sample_count: u32) -> vec3<f32> {
     var prev_t = 0.0f;
 
     for (var i = 0u; i < sample_count; i++) {
-        let t_i = t_max * (f32(i) + MIDPOINT_RATIO) / f32(sample_count);
+        let t_i = t_max * (f32(i) + settings.raymarch_midpoint_ratio) / f32(sample_count);
         let dt = t_i - prev_t;
         prev_t = t_i;
 

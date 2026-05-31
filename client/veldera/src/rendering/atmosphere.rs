@@ -179,14 +179,14 @@ fn sync_atmosphere_camera(
 /// channel in the LUT shaders, which we can revisit if it becomes noticeable.
 fn update_atmospheric_light_extinction(
     camera: Query<&FloatingOriginCamera>,
-    atmospheres: Query<&SphericalAtmosphere, With<Camera3d>>,
+    atmospheres: Query<(&SphericalAtmosphere, &AtmosphereSettings), With<Camera3d>>,
     media: Res<Assets<ScatteringMedium>>,
     mut lights: Query<(&Transform, &mut DirectionalLight, &AtmosphericLight)>,
 ) {
     let Ok(camera) = camera.single() else {
         return;
     };
-    let Ok(atmosphere) = atmospheres.single() else {
+    let Ok((atmosphere, settings)) = atmospheres.single() else {
         return;
     };
     let Some(medium) = media.get(&atmosphere.medium) else {
@@ -202,7 +202,13 @@ fn update_atmospheric_light_extinction(
         let dir = transform.back().as_vec3();
         let mu = dir.dot(local_up);
 
-        let transmittance = compute_sun_transmittance(atmosphere, medium, r, mu);
+        let transmittance = compute_sun_transmittance(
+            atmosphere,
+            medium,
+            r,
+            mu,
+            settings.sun_transmittance_midpoint_ratio,
+        );
         let base = atmo_light.base_color;
         light.color = Color::LinearRgba(LinearRgba::new(
             base.red * transmittance.x,

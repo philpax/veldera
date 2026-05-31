@@ -25,6 +25,7 @@ struct AtmosphereSettings {
     scene_units_to_m: f32,
     sky_max_samples: u32,
     rendering_method: u32,
+    raymarch_midpoint_ratio: f32,
 }
 
 // "Atmosphere space" is centered at the camera position, with Y pointing in the local "up"

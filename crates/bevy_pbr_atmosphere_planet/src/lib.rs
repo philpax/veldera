@@ -418,6 +418,20 @@ pub struct AtmosphereSettings {
 
     /// The rendering method to use for the atmosphere.
     pub rendering_method: AtmosphereMode,
+
+    /// Where in each LUT ray-march segment the single density sample is taken
+    /// (0 = segment start, 0.5 = middle, 1 = end). Lower biases toward the
+    /// start, better approximating the exponential density falloff. Read by the
+    /// LUT shaders via [`GpuAtmosphereSettings`].
+    pub raymarch_midpoint_ratio: f32,
+
+    /// The same midpoint offset for the CPU sun-transmittance integration in
+    /// [`compute_sun_transmittance`]. Distinct from
+    /// [`Self::raymarch_midpoint_ratio`]: that path takes one tap per segment
+    /// (biased toward the start), whereas this one accumulates `dt` between
+    /// successive sample points, so the true midpoint (0.5) is correct here.
+    /// CPU-only — not mirrored into [`GpuAtmosphereSettings`].
+    pub sun_transmittance_midpoint_ratio: f32,
 }
 
 /// GPU-compatible version of [`AtmosphereSettings`].
@@ -437,6 +451,7 @@ pub struct GpuAtmosphereSettings {
     pub scene_units_to_m: f32,
     pub sky_max_samples: u32,
     pub rendering_method: u32,
+    pub raymarch_midpoint_ratio: f32,
 }
 
 impl Default for GpuAtmosphereSettings {
@@ -461,6 +476,7 @@ impl From<AtmosphereSettings> for GpuAtmosphereSettings {
             scene_units_to_m: s.scene_units_to_m,
             sky_max_samples: s.sky_max_samples,
             rendering_method: s.rendering_method as u32,
+            raymarch_midpoint_ratio: s.raymarch_midpoint_ratio,
         }
     }
 }
