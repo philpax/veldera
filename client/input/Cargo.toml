@@ -1,0 +1,16 @@
+[package]
+name = "veldera_game_input"
+version = "0.1.0"
+edition.workspace = true
+repository.workspace = true
+license.workspace = true
+description = "Gameplay input bindings for the Veldera client: leafwing action maps, cursor-grab/egui focus management, and CameraAction-to-intent mapping"
+
+[dependencies]
+bevy = { version = "0.18.0", default-features = false, features = ["bevy_window"] }
+bevy_egui = "0.39"
+leafwing-input-manager = "0.20"
+veldera_input = { path = "../../crates/input" }
+
+[lints]
+workspace = true

@@ -1,7 +1,7 @@
 //! Input handling for camera controls.
 //!
 //! Handles cursor grab/ungrab and camera mode toggling.
-//! Input focus is managed centrally by [`crate::input`].
+//! Input focus is managed centrally by [`veldera_game_input`].
 
 use bevy::{
     prelude::*,
@@ -10,10 +10,8 @@ use bevy::{
 use bevy_egui::EguiContexts;
 use leafwing_input_manager::prelude::*;
 
-use crate::{
-    input::{CameraAction, set_cursor_grab},
-    world::geo::TeleportAnimation,
-};
+use crate::world::geo::TeleportAnimation;
+use veldera_game_input::{CameraAction, set_cursor_grab};
 
 use super::{CameraMode, CameraModeState, CameraModeTransitions};
 

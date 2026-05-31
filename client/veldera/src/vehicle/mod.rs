@@ -22,7 +22,8 @@ use glam::DVec3;
 use leafwing_input_manager::prelude::*;
 use serde::Deserialize;
 
-use crate::{config, input::CameraAction};
+use crate::config;
+use veldera_game_input::CameraAction;
 
 pub use components::{
     Vehicle, VehicleDragConfig, VehicleHoverConfig, VehicleInput, VehicleModel,
@@ -502,7 +503,7 @@ fn on_vehicle_scene_ready(
         // Despawn when outside physics range.
         DespawnOutsidePhysicsRange,
         // Input map for vehicle actions.
-        crate::input::default_vehicle_input_map(),
+        veldera_game_input::default_vehicle_input_map(),
     ));
 
     // Load the GLTF model as a child with automatic convex hull collider generation.

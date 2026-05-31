@@ -11,11 +11,11 @@ use glam::DVec3;
 use leafwing_input_manager::prelude::*;
 use serde::Deserialize;
 
+use veldera_game_input::CameraAction;
 use veldera_physics::GameLayer;
 
 use crate::{
     config,
-    input::CameraAction,
     physics::ManualGravity,
     world::{
         coords::RadialFrame,

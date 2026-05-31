@@ -6,7 +6,6 @@
 mod async_runtime;
 mod camera;
 mod config;
-mod input;
 mod launch_params;
 mod physics;
 mod player;
@@ -30,7 +29,6 @@ use bevy::{
 use camera::{
     CameraConfig, CameraControllerPlugin, CameraMode, CameraModeTransitions, FlightCamera,
 };
-use input::InputPlugin;
 use launch_params::{LaunchConfig, LaunchParams, ResolvedLaunch};
 use rendering::{
     atmosphere::{
@@ -42,6 +40,7 @@ use rendering::{
 use ui::DebugUiPlugin;
 use veldera_clouds::CloudLayers;
 use veldera_engine::{assets, profiler};
+use veldera_game_input::InputPlugin;
 use world::{
     coords::lat_lon_to_ecef,
     floating_origin::{FloatingOriginCamera, FloatingOriginPlugin},
@@ -300,7 +299,7 @@ fn spawn_camera(
         AtmosphereBundle::from_config(atmosphere, medium, start_position),
         clouds,
         // Input map for camera actions.
-        input::default_camera_input_map(),
+        veldera_game_input::default_camera_input_map(),
     ));
 }
 

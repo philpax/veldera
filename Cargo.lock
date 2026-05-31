@@ -6823,8 +6823,8 @@ dependencies = [
  "veldera_config",
  "veldera_constants",
  "veldera_engine",
+ "veldera_game_input",
  "veldera_geo",
- "veldera_input",
  "veldera_physics",
  "veldera_places",
  "veldera_sky",
@@ -6907,6 +6907,16 @@ dependencies = [
  "veldera_physics",
  "veldera_sky",
  "veldera_terrain",
+]
+
+[[package]]
+name = "veldera_game_input"
+version = "0.1.0"
+dependencies = [
+ "bevy",
+ "bevy_egui",
+ "leafwing-input-manager",
+ "veldera_input",
 ]
 
 [[package]]

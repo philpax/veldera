@@ -32,9 +32,10 @@ use bevy::{
 use leafwing_input_manager::prelude::*;
 use serde::Deserialize;
 
+use veldera_game_input::CameraAction;
+
 use super::body::ArmPointTarget;
 use crate::{
-    input::CameraAction,
     player::{FpsController, LogicalPlayer, RagdollState},
     world::{coords::RadialFrame, floating_origin::WorldPosition},
 };

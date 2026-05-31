@@ -11,9 +11,10 @@ use leafwing_input_manager::prelude::*;
 use rand::Rng;
 use serde::Deserialize;
 
+use veldera_game_input::CameraAction;
+
 use crate::{
     camera::CameraModeState,
-    input::CameraAction,
     world::{
         floating_origin::{FloatingOriginCamera, WorldPosition},
         lod::LodState,

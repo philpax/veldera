@@ -27,19 +27,19 @@ use leafwing_input_manager::prelude::*;
 
 /// Capture vehicle input from action state.
 pub fn vehicle_input_system(
-    action_query: Query<&ActionState<crate::input::VehicleAction>>,
+    action_query: Query<&ActionState<veldera_game_input::VehicleAction>>,
     mut query: Query<&mut VehicleInput, With<Vehicle>>,
 ) {
     let Ok(action_state) = action_query.single() else {
         return;
     };
 
-    let drive = action_state.clamped_axis_pair(&crate::input::VehicleAction::Drive);
+    let drive = action_state.clamped_axis_pair(&veldera_game_input::VehicleAction::Drive);
 
     for mut input in &mut query {
         input.throttle = drive.y;
         input.turn = drive.x;
-        input.jump = action_state.just_pressed(&crate::input::VehicleAction::Jump);
+        input.jump = action_state.just_pressed(&veldera_game_input::VehicleAction::Jump);
     }
 }
 

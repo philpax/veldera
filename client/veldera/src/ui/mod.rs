@@ -22,7 +22,7 @@ use egui_dock::{DockArea, DockState, Style};
 use glam::DVec3;
 use leafwing_input_manager::prelude::*;
 
-use crate::input::CameraAction;
+use veldera_game_input::CameraAction;
 
 pub use vehicle::VehicleRightRequest;
 
