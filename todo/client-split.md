@@ -97,5 +97,11 @@ After 1–4, the graph is the DAG above. Remaining engine-facade edges
   assets (shaders are embedded already; sounds/models the engine needs) vs.
   gameplay assets. Update asset paths accordingly; keep the single watched root.
 
+- **CONTRIBUTING.md.** Document the final structure once it settles: the three
+  tiers (`crates/` engine, `extras/`, `client/` gameplay + `reference/`), the
+  `veldera_*` vs `veldera_game_*` package naming, the config-path-as-param and
+  marker/resource inversion conventions, the `config/engine` vs `config/game`
+  (and asset) split, and workspace-dependency usage.
+
 Delete this file when the split is complete (and `engine-split.md` once the
 reference client lands).
