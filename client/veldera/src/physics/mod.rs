@@ -3,17 +3,14 @@
 //!
 //! The reusable physics integration — radial gravity, floating-origin
 //! shifting, terrain colliders, and collider streaming — lives in
-//! [`veldera_physics`]. This module re-exports the pieces the rest of the
-//! client touches (so `crate::physics::*` paths resolve unchanged) and adds
-//! the gameplay-only projectile system on top.
+//! [`veldera_physics`]. This module wires it into the client's config layout
+//! and adds the gameplay-only projectile system on top.
 
 mod projectile;
 
 use bevy::prelude::*;
 
 use crate::config;
-
-pub use veldera_physics::DespawnOutsidePhysicsRange;
 
 /// Plugin wiring the engine physics integration into this client and layering
 /// the gameplay projectile mechanic on top.

@@ -14,13 +14,9 @@ use serde::Deserialize;
 use veldera_game_input::CameraAction;
 
 use veldera_game_camera_state::CameraModeState;
-
-use crate::world::{
-    floating_origin::{FloatingOriginCamera, WorldPosition},
-    lod::LodState,
-};
-
-use super::DespawnOutsidePhysicsRange;
+use veldera_geo::floating_origin::{FloatingOriginCamera, WorldPosition};
+use veldera_physics::DespawnOutsidePhysicsRange;
+use veldera_terrain::lod::LodState;
 
 /// Handle to the bounce sound asset.
 #[derive(Resource)]

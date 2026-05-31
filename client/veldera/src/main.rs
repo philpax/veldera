@@ -3,14 +3,11 @@
 //! This application provides a free-flight camera to explore Google Earth's
 //! 3D terrain data, with LOD-based loading and frustum culling.
 
-mod async_runtime;
 mod config;
 mod launch_params;
 mod physics;
-mod rendering;
 mod world;
 
-use async_runtime::AsyncRuntimePlugin;
 // Custom asset loaders and the CPU profiler now live in the engine umbrella.
 use bevy::{
     audio::SpatialListener,
@@ -23,13 +20,7 @@ use bevy::{
     render::view::Hdr,
 };
 use launch_params::{LaunchConfig, LaunchParams, ResolvedLaunch};
-use rendering::{
-    atmosphere::{
-        AtmosphereBundle, AtmosphereConfig, AtmosphereIntegrationPlugin, AtmosphericLight,
-    },
-    clouds::{CloudConfig, CloudConfigPaths, CloudEngineConfig, CloudIntegrationPlugin},
-    terrain_material::TerrainMaterialPlugin,
-};
+use veldera_async::AsyncRuntimePlugin;
 use veldera_clouds::CloudLayers;
 use veldera_engine::{assets, profiler};
 use veldera_game_camera::{
@@ -39,15 +30,23 @@ use veldera_game_input::InputPlugin;
 use veldera_game_player::{PlayerConfigPaths, PlayerPlugin};
 use veldera_game_ui::DebugUiPlugin;
 use veldera_game_vehicle::VehiclePlugin;
-use world::{
+use veldera_geo::{
     coords::lat_lon_to_ecef,
     floating_origin::{FloatingOriginCamera, FloatingOriginPlugin},
-    geo::GeoPlugin,
-    loader::DataLoaderPlugin,
-    lod::LodPlugin,
+};
+use veldera_sky::{
+    atmosphere::{
+        AtmosphereBundle, AtmosphereConfig, AtmosphereIntegrationPlugin, AtmosphericLight,
+    },
+    clouds::{CloudConfig, CloudConfigPaths, CloudEngineConfig, CloudIntegrationPlugin},
     moon::{Moon, MoonPlugin},
     time_of_day::{Sun, TimeOfDayPlugin, TimeOfDayState},
 };
+use veldera_terrain::{
+    loader::DataLoaderPlugin, lod::LodPlugin, terrain_material::TerrainMaterialPlugin,
+};
+
+use crate::world::geo::GeoPlugin;
 
 /// Plugin for the main application.
 pub struct AppPlugin;
