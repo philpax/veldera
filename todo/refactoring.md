@@ -1,1 +1,0 @@
-- ensure that string literals and the like are formalized into constants or put in enums

@@ -42,7 +42,7 @@ use bevy::{
 use glam::DVec3;
 use serde::Deserialize;
 
-use bones::{LOWER_BODY_MASK, UPPER_BODY_MASK};
+use bones::{Bone, LOWER_BODY_MASK, UPPER_BODY_MASK};
 
 use veldera_config::{Config, ConfigPlugin};
 use veldera_game_camera_state::CameraModeState;
@@ -618,7 +618,7 @@ fn populate_bone_mask_groups(
             if let Ok(name) = names.get(e)
                 && let Ok(target_id) = target_ids.get(e)
             {
-                let mask = bones::bone_mask_group(bones::bone_stem(name.as_str()));
+                let mask = Bone::from_name(name.as_str()).map_or(0, Bone::mask_group);
                 if mask != 0 {
                     graph.mask_groups.insert(*target_id, mask);
                     any = true;

@@ -76,14 +76,17 @@ use veldera_geo::{
 };
 use veldera_physics::GameLayer;
 
-use super::{BodyVisual, bones::bone_stem};
+use super::{
+    BodyVisual,
+    bones::{Bone, Side},
+};
 use crate::{FpsController, LogicalPlayer, RagdollState};
 
 /// Hot-reloadable tuning for the skeletal ragdoll, loaded from
 /// `assets/config/game/player/body/ragdoll.toml`. The bone topology
-/// ([`RAGDOLL_BONE_TABLE`], [`RAGDOLL_UPRIGHT_BONES`], [`RAGDOLL_ANCHOR_STEM`])
-/// stays compiled in — it's structural, not a tunable value. Defaults below are
-/// the values these constants held before externalization, so behaviour is
+/// ([`RAGDOLL_BONE_TABLE`], the [`is_torso`] set, [`RAGDOLL_ANCHOR`]) stays
+/// compiled in — it's structural, not a tunable value. Defaults below are the
+/// values these constants held before externalization, so behaviour is
 /// unchanged until the TOML is edited.
 #[derive(Default, Asset, Resource, TypePath, Clone, Deserialize)]
 #[serde(default, deny_unknown_fields)]
@@ -141,11 +144,6 @@ pub struct RagdollJointLimits {
     pub extremity_twist_deg: f32,
 }
 
-/// All bone names in the ragdoll table are `&'static str` constants,
-/// so HashMap keys + cross-references can just borrow them directly
-/// — no allocation or interning needed.
-type BoneStem = &'static str;
-
 // ============================================================================
 // Per-bone ragdoll graph
 // ============================================================================
@@ -168,61 +166,57 @@ type BoneStem = &'static str;
 /// initial value cascades NaN through every joint connected to it.
 /// The head follows the neck just fine through transform
 /// propagation, so pinning the neck upright keeps the head upright.
-const RAGDOLL_BONE_TABLE: &[(&str, Option<&str>)] = &[
-    ("Hips", None),
-    ("Spine", Some("Hips")),
-    ("Spine1", Some("Spine")),
-    ("Spine2", Some("Spine1")),
-    ("Neck", Some("Spine2")),
-    ("LeftShoulder", Some("Spine2")),
-    ("LeftArm", Some("LeftShoulder")),
-    ("LeftForeArm", Some("LeftArm")),
-    ("LeftHand", Some("LeftForeArm")),
-    ("RightShoulder", Some("Spine2")),
-    ("RightArm", Some("RightShoulder")),
-    ("RightForeArm", Some("RightArm")),
-    ("RightHand", Some("RightForeArm")),
-    ("LeftUpLeg", Some("Hips")),
-    ("LeftLeg", Some("LeftUpLeg")),
-    ("LeftFoot", Some("LeftLeg")),
-    ("RightUpLeg", Some("Hips")),
-    ("RightLeg", Some("RightUpLeg")),
-    ("RightFoot", Some("RightLeg")),
-];
+const RAGDOLL_BONE_TABLE: &[(Bone, Option<Bone>)] = {
+    use Bone::*;
+    use Side::{Left, Right};
+    &[
+        (Hips, None),
+        (Spine, Some(Hips)),
+        (Spine1, Some(Spine)),
+        (Spine2, Some(Spine1)),
+        (Neck, Some(Spine2)),
+        (Shoulder(Left), Some(Spine2)),
+        (Arm(Left), Some(Shoulder(Left))),
+        (ForeArm(Left), Some(Arm(Left))),
+        (Hand(Left), Some(ForeArm(Left))),
+        (Shoulder(Right), Some(Spine2)),
+        (Arm(Right), Some(Shoulder(Right))),
+        (ForeArm(Right), Some(Arm(Right))),
+        (Hand(Right), Some(ForeArm(Right))),
+        (UpLeg(Left), Some(Hips)),
+        (Leg(Left), Some(UpLeg(Left))),
+        (Foot(Left), Some(Leg(Left))),
+        (UpLeg(Right), Some(Hips)),
+        (Leg(Right), Some(UpLeg(Right))),
+        (Foot(Right), Some(Leg(Right))),
+    ]
+};
 
 /// The topmost torso bone, carrying the head. Like the rest of the
 /// torso it's kinematic and re-pinned upright to the controller every
 /// tick; the head (excluded from the table — its hide-pass zero scale
 /// would NaN a rigid body) follows it through transform propagation, so
 /// pinning the neck upright keeps the head upright and at the view.
-const RAGDOLL_ANCHOR_STEM: BoneStem = "Neck";
+const RAGDOLL_ANCHOR: Bone = Bone::Neck;
 
-/// The torso bones, *besides the neck anchor* (see [`is_torso`]). These
-/// plus the [`RAGDOLL_ANCHOR_STEM`] neck are all driven kinematically —
-/// pinned to the controller's frame each tick by
-/// [`drive_ragdoll_anchor`] at their captured offsets and upright bind
-/// orientations. Making the torso a rigid, controller-driven unit is
-/// what keeps the chest and head aligned with the view and makes the
-/// body feel *driven by* the controller rather than the reverse.
+/// Whether a bone is part of the kinematic, controller-driven torso (the spine
+/// column, shoulders, and neck anchor) as opposed to a free-hanging dynamic
+/// limb.
 ///
-/// Everything *not* here or the anchor (arms, forearms, hands, legs,
-/// feet) is dynamic: with capsule colliders their center of mass sits
-/// partway down the bone, so gravity torques them into a natural hang,
-/// and self-collision stops them at the kinematic torso.
-const RAGDOLL_UPRIGHT_BONES: &[&str] = &[
-    "Hips",
-    "Spine",
-    "Spine1",
-    "Spine2",
-    "LeftShoulder",
-    "RightShoulder",
-];
-
-/// Whether a bone is part of the kinematic, controller-driven torso
-/// (the spine column, shoulders, and neck anchor) as opposed to a
-/// free-hanging dynamic limb.
-fn is_torso(stem: &str) -> bool {
-    stem == RAGDOLL_ANCHOR_STEM || RAGDOLL_UPRIGHT_BONES.contains(&stem)
+/// The torso bones — the spine column and shoulders, plus the [`RAGDOLL_ANCHOR`]
+/// neck — are all driven kinematically, pinned to the controller's frame each
+/// tick by [`drive_ragdoll_anchor`] at their captured offsets and upright bind
+/// orientations. Making the torso a rigid, controller-driven unit is what keeps
+/// the chest and head aligned with the view and makes the body feel *driven by*
+/// the controller rather than the reverse.
+///
+/// Everything else (arms, forearms, hands, legs, feet) is dynamic: with capsule
+/// colliders their centre of mass sits partway down the bone, so gravity torques
+/// them into a natural hang, and self-collision stops them at the kinematic
+/// torso.
+fn is_torso(bone: Bone) -> bool {
+    use Bone::*;
+    matches!(bone, Hips | Spine | Spine1 | Spine2 | Shoulder(_) | Neck)
 }
 
 /// State for one ragdolled bone: which bone in the skinned mesh,
@@ -240,10 +234,9 @@ pub struct RagdolledBone {
 /// Bookkeeping for one ragdoll instance, owned by the body. `None`
 /// outside ragdoll, `Some` for the duration of one tumble.
 pub struct RagdollGraph {
-    /// Bone-stem-indexed map of every spawned rigid body. Lookup is
-    /// by stem because joints reference each other by stem (see
-    /// [`RAGDOLL_BONE_TABLE`]).
-    pub bones: HashMap<BoneStem, RagdolledBone>,
+    /// [`Bone`]-indexed map of every spawned rigid body. Lookup is by bone
+    /// because joints reference each other by bone (see [`RAGDOLL_BONE_TABLE`]).
+    pub bones: HashMap<Bone, RagdolledBone>,
     /// Spherical-joint entities, despawned on ragdoll exit.
     pub joints: Vec<Entity>,
     /// Per kinematic torso bone (spine, shoulders, neck anchor): where
@@ -252,13 +245,13 @@ pub struct RagdollGraph {
     /// ragdoll entry; [`drive_ragdoll_anchor`] reconstructs each torso
     /// bone's world target from this every tick so the torso rides the
     /// controller rigidly, rotating with its yaw.
-    pub torso_offsets: HashMap<BoneStem, Vec3>,
+    pub torso_offsets: HashMap<Bone, Vec3>,
     /// Each torso bone's orientation at ragdoll entry, relative to the
     /// upright body basis (`upright⁻¹ · bone_world_rotation`).
     /// Re-expressed in the current upright frame each tick to give the
     /// bone's target rotation, so the torso holds a coherent upright
     /// pose that yaws with the controller.
-    pub bind_relative_rotations: HashMap<BoneStem, Quat>,
+    pub bind_relative_rotations: HashMap<Bone, Quat>,
 }
 
 // ============================================================================
@@ -396,21 +389,21 @@ pub(super) fn drive_ragdoll_anchor(
         let upright = Quat::from_mat3(&Mat3::from_cols(right, frame.up, forward));
         let player_velocity = player_velocity.0;
 
-        for (stem, ragdolled) in &graph.bones {
+        for (bone, ragdolled) in &graph.bones {
             let Ok((position, mut rotation, mut linear, mut angular)) =
                 bone_query.get_mut(ragdolled.physics_entity)
             else {
                 continue;
             };
 
-            if is_torso(stem) {
+            if is_torso(*bone) {
                 // Kinematic torso bone: pin to the controller frame.
                 // Reconstruct its world target from the captured
                 // yaw-frame offset, ride the treadmill velocity toward
                 // it, and set the upright bind orientation directly.
                 let (Some(&offset), Some(&bind_relative)) = (
-                    graph.torso_offsets.get(*stem),
-                    graph.bind_relative_rotations.get(*stem),
+                    graph.torso_offsets.get(bone),
+                    graph.bind_relative_rotations.get(bone),
                 ) else {
                     continue;
                 };
@@ -479,10 +472,10 @@ pub(super) fn sync_bones_from_physics(
             bone_to_physics.insert(ragdolled.bone_entity, ragdolled.physics_entity);
         }
 
-        for (stem, ragdolled) in &graph.bones {
+        for (bone, ragdolled) in &graph.bones {
             // Torso bones (including the neck/head) render from animation
             // + head-lock, not physics — see the system doc.
-            if is_torso(stem) {
+            if is_torso(*bone) {
                 continue;
             }
 
@@ -529,33 +522,30 @@ pub(super) fn sync_bones_from_physics(
 /// anchor) which spawns as a sphere instead. Branch points pick the
 /// continuation that should carry the volume: `Hips` → up the spine,
 /// `Spine2` → up to the neck (so the chest is a fat vertical column).
-fn capsule_target(stem: &str) -> Option<&'static str> {
-    Some(match stem {
-        "Hips" => "Spine",
-        "Spine" => "Spine1",
-        "Spine1" => "Spine2",
-        "Spine2" => "Neck",
-        "LeftShoulder" => "LeftArm",
-        "LeftArm" => "LeftForeArm",
-        "LeftForeArm" => "LeftHand",
-        "RightShoulder" => "RightArm",
-        "RightArm" => "RightForeArm",
-        "RightForeArm" => "RightHand",
-        "LeftUpLeg" => "LeftLeg",
-        "LeftLeg" => "LeftFoot",
-        "RightUpLeg" => "RightLeg",
-        "RightLeg" => "RightFoot",
+fn capsule_target(bone: Bone) -> Option<Bone> {
+    use Bone::*;
+    Some(match bone {
+        Hips => Spine,
+        Spine => Spine1,
+        Spine1 => Spine2,
+        Spine2 => Neck,
+        Shoulder(s) => Arm(s),
+        Arm(s) => ForeArm(s),
+        ForeArm(s) => Hand(s),
+        UpLeg(s) => Leg(s),
+        Leg(s) => Foot(s),
         _ => return None,
     })
 }
 
 /// Capsule (or leaf-sphere) radius for a bone, by body region.
-fn bone_radius(cfg: &RagdollConfig, stem: &str) -> f32 {
-    match stem {
-        "Hips" | "Spine" | "Spine1" | "Spine2" => cfg.torso_radius_m,
-        "LeftUpLeg" | "RightUpLeg" | "LeftLeg" | "RightLeg" => cfg.leg_radius_m,
-        "LeftArm" | "RightArm" | "LeftForeArm" | "RightForeArm" => cfg.arm_radius_m,
-        "LeftShoulder" | "RightShoulder" => cfg.shoulder_radius_m,
+fn bone_radius(cfg: &RagdollConfig, bone: Bone) -> f32 {
+    use Bone::*;
+    match bone {
+        Hips | Spine | Spine1 | Spine2 => cfg.torso_radius_m,
+        UpLeg(_) | Leg(_) => cfg.leg_radius_m,
+        Arm(_) | ForeArm(_) => cfg.arm_radius_m,
+        Shoulder(_) => cfg.shoulder_radius_m,
         _ => cfg.leaf_radius_m,
     }
 }
@@ -569,15 +559,12 @@ fn bone_radius(cfg: &RagdollConfig, stem: &str) -> f32 {
 /// later refinement — but the cones already stop the limbs windmilling
 /// and hyperextending. Proximal limbs (upper arm/thigh) get the widest
 /// cone, mid limbs (forearm/shin) a tighter one, extremities the least.
-fn joint_limits_rad(cfg: &RagdollConfig, child_stem: &str) -> (f32, f32) {
+fn joint_limits_rad(cfg: &RagdollConfig, child: Bone) -> (f32, f32) {
+    use Bone::*;
     let limits = &cfg.joint_limits;
-    let (swing_deg, twist_deg): (f32, f32) = match child_stem {
-        "LeftArm" | "RightArm" | "LeftUpLeg" | "RightUpLeg" => {
-            (limits.proximal_swing_deg, limits.proximal_twist_deg)
-        }
-        "LeftForeArm" | "RightForeArm" | "LeftLeg" | "RightLeg" => {
-            (limits.mid_swing_deg, limits.mid_twist_deg)
-        }
+    let (swing_deg, twist_deg): (f32, f32) = match child {
+        Arm(_) | UpLeg(_) => (limits.proximal_swing_deg, limits.proximal_twist_deg),
+        ForeArm(_) | Leg(_) => (limits.mid_swing_deg, limits.mid_twist_deg),
         _ => (limits.extremity_swing_deg, limits.extremity_twist_deg),
     };
     (swing_deg.to_radians(), twist_deg.to_radians())
@@ -596,31 +583,30 @@ fn build_ragdoll_graph(
     names: &Query<&Name>,
     global_transforms: &Query<&GlobalTransform>,
 ) -> Option<RagdollGraph> {
-    // Walk descendants once and map every tracked bone stem to its
+    // Walk descendants once and map every tracked ragdoll bone to its
     // entity + current GlobalTransform.
-    let mut tracked: HashMap<BoneStem, (Entity, GlobalTransform)> = HashMap::new();
+    let mut tracked: HashMap<Bone, (Entity, GlobalTransform)> = HashMap::new();
     let mut stack: Vec<Entity> = vec![body_root];
     while let Some(entity) = stack.pop() {
         if let Ok(name) = names.get(entity)
             && let Ok(global) = global_transforms.get(entity)
+            && let Some(bone) = Bone::from_name(name.as_str())
+            && RAGDOLL_BONE_TABLE.iter().any(|(b, _)| *b == bone)
         {
-            let stem = bone_stem(name.as_str());
-            if let Some((static_stem, _)) = RAGDOLL_BONE_TABLE.iter().find(|(s, _)| *s == stem) {
-                tracked.insert(*static_stem, (entity, *global));
-            }
+            tracked.insert(bone, (entity, *global));
         }
         if let Ok(child_list) = children.get(entity) {
             stack.extend(child_list.iter());
         }
     }
 
-    if !tracked.contains_key("Hips") {
+    if !tracked.contains_key(&Bone::Hips) {
         tracing::warn!("Ragdoll build aborted: Hips bone not found in skeleton");
         return None;
     }
 
-    if !tracked.contains_key(RAGDOLL_ANCHOR_STEM) {
-        tracing::warn!("Ragdoll build aborted: anchor bone {RAGDOLL_ANCHOR_STEM} not found");
+    if !tracked.contains_key(&RAGDOLL_ANCHOR) {
+        tracing::warn!("Ragdoll build aborted: anchor bone {RAGDOLL_ANCHOR} not found");
         return None;
     }
 
@@ -633,15 +619,15 @@ fn build_ragdoll_graph(
     let right = frame.up.cross(forward).normalize_or_zero();
     let upright = Quat::from_mat3(&Mat3::from_cols(right, frame.up, forward));
 
-    let mut bones: HashMap<BoneStem, RagdolledBone> = HashMap::new();
-    let mut bind_relative_rotations: HashMap<BoneStem, Quat> = HashMap::new();
-    let mut torso_offsets: HashMap<BoneStem, Vec3> = HashMap::new();
+    let mut bones: HashMap<Bone, RagdolledBone> = HashMap::new();
+    let mut bind_relative_rotations: HashMap<Bone, Quat> = HashMap::new();
+    let mut torso_offsets: HashMap<Bone, Vec3> = HashMap::new();
     // Pass 1: spawn one rigid body per tracked bone. Torso bones (spine,
     // shoulders, neck) are kinematic and pinned to the controller; the
     // limbs are dynamic and hang.
-    for (stem, _parent_stem) in RAGDOLL_BONE_TABLE {
-        let stem_key = *stem;
-        let Some((bone_entity, bone_global)) = tracked.get(&stem_key) else {
+    for (bone, _parent) in RAGDOLL_BONE_TABLE {
+        let bone = *bone;
+        let Some((bone_entity, bone_global)) = tracked.get(&bone) else {
             continue;
         };
         let bone_world_pos = bone_global.translation();
@@ -654,11 +640,11 @@ fn build_ragdoll_graph(
         // downstream just won't ragdoll, which is preferable to
         // poisoning the whole rig.
         if !(bone_world_pos.is_finite() && bone_world_rot.is_finite()) {
-            tracing::warn!("Skipping ragdoll body for {stem}: GlobalTransform is non-finite",);
+            tracing::warn!("Skipping ragdoll body for {bone}: GlobalTransform is non-finite",);
             continue;
         }
 
-        let is_torso_bone = is_torso(stem_key);
+        let is_torso_bone = is_torso(bone);
         let spawn_rot = bone_world_rot;
 
         // Capsule running from this bone's joint (the body origin) toward
@@ -668,8 +654,8 @@ fn build_ragdoll_graph(
         // center of mass — sits partway down the bone, giving gravity a
         // lever to hang the limb. Leaf bones (and degenerate near-zero
         // spans) fall back to a sphere.
-        let radius = bone_radius(cfg, stem_key);
-        let collider = match capsule_target(stem_key).and_then(|child| tracked.get(child)) {
+        let radius = bone_radius(cfg, bone);
+        let collider = match capsule_target(bone).and_then(|child| tracked.get(&child)) {
             Some((_, child_global)) => {
                 let child_local =
                     bone_world_rot.inverse() * (child_global.translation() - bone_world_pos);
@@ -698,7 +684,7 @@ fn build_ragdoll_graph(
             // capsule, not the bones. Adjacent (jointed) pairs are
             // exempted via `JointCollisionDisabled` on the joint.
             CollisionLayers::new([GameLayer::Ragdoll], [GameLayer::Ragdoll]),
-            Name::new(format!("ragdoll_{stem}")),
+            Name::new(format!("ragdoll_{bone}")),
         ));
         if is_torso_bone {
             // Kinematic: driven each tick by `drive_ragdoll_anchor`.
@@ -729,13 +715,13 @@ fn build_ragdoll_graph(
             // orientation relative to the upright basis.
             let offset = bone_world_pos - logical_render_pos;
             torso_offsets.insert(
-                stem_key,
+                bone,
                 Vec3::new(offset.dot(right), offset.dot(frame.up), offset.dot(forward)),
             );
-            bind_relative_rotations.insert(stem_key, upright.inverse() * bone_world_rot);
+            bind_relative_rotations.insert(bone, upright.inverse() * bone_world_rot);
         }
         bones.insert(
-            stem_key,
+            bone,
             RagdolledBone {
                 bone_entity: *bone_entity,
                 physics_entity,
@@ -743,10 +729,8 @@ fn build_ragdoll_graph(
         );
     }
 
-    if !bones.contains_key(RAGDOLL_ANCHOR_STEM) {
-        tracing::warn!(
-            "Ragdoll build aborted: anchor bone {RAGDOLL_ANCHOR_STEM} had no rigid body"
-        );
+    if !bones.contains_key(&RAGDOLL_ANCHOR) {
+        tracing::warn!("Ragdoll build aborted: anchor bone {RAGDOLL_ANCHOR} had no rigid body");
         for ragdolled in bones.into_values() {
             commands.entity(ragdolled.physics_entity).despawn();
         }
@@ -761,20 +745,20 @@ fn build_ragdoll_graph(
     // expressed in the parent body's local frame; the anchor on the
     // child is its own origin (Vec3::ZERO).
     let mut joints = Vec::new();
-    for (stem, parent_stem) in RAGDOLL_BONE_TABLE {
-        let Some(parent_stem) = parent_stem else {
+    for (bone, parent) in RAGDOLL_BONE_TABLE {
+        let Some(parent) = parent else {
             continue;
         };
-        let stem_key = *stem;
-        let parent_key = *parent_stem;
-        if is_torso(stem_key) {
+        let bone = *bone;
+        let parent_bone = *parent;
+        if is_torso(bone) {
             continue;
         }
-        let (Some(child), Some(parent)) = (bones.get(stem_key), bones.get(parent_key)) else {
+        let (Some(child), Some(parent)) = (bones.get(&bone), bones.get(&parent_bone)) else {
             continue;
         };
         let (Some((_, child_global)), Some((_, parent_global))) =
-            (tracked.get(stem_key), tracked.get(parent_key))
+            (tracked.get(&bone), tracked.get(&parent_bone))
         else {
             continue;
         };
@@ -790,7 +774,7 @@ fn build_ragdoll_graph(
         // stays identity, so at rest the two frame bases coincide. The
         // limits then bound deviation from the rest pose.
         let bind_relative = parent_world_rot.inverse() * child_world_rot;
-        let (swing, twist) = joint_limits_rad(cfg, stem_key);
+        let (swing, twist) = joint_limits_rad(cfg, bone);
 
         let joint_entity = commands
             .spawn((

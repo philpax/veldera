@@ -14,16 +14,13 @@
 //! decoupled from the launch mechanic: the mechanic can be removed without
 //! touching this file.
 //!
-//! Bone-name lookup uses the centralised constants in [`super::bones`].
+//! Bone identification uses the typed [`Bone`](super::bones::Bone) enum.
 
 use bevy::prelude::*;
 
 use super::{
     BodyVisual,
-    bones::{
-        BONE_RIGHT_ARM, BONE_RIGHT_FORE_ARM, BONE_RIGHT_HAND, BONE_RIGHT_HAND_INDEX_PREFIX,
-        bone_stem,
-    },
+    bones::{Bone, Finger, Side},
 };
 
 /// A request for the right-arm point pose, established each frame by whatever
@@ -67,19 +64,14 @@ pub(super) fn cache_right_arm(
         if body.right_arm_entity.is_some() {
             continue;
         }
-        let Some(right_arm) =
-            find_descendant_by_bone_stem(entity, BONE_RIGHT_ARM, &children, &names)
+        let Some(right_arm) = find_bone(entity, Bone::Arm(Side::Right), &children, &names) else {
+            continue;
+        };
+        let Some(right_forearm) = find_bone(entity, Bone::ForeArm(Side::Right), &children, &names)
         else {
             continue;
         };
-        let Some(right_forearm) =
-            find_descendant_by_bone_stem(entity, BONE_RIGHT_FORE_ARM, &children, &names)
-        else {
-            continue;
-        };
-        let Some(right_hand) =
-            find_descendant_by_bone_stem(entity, BONE_RIGHT_HAND, &children, &names)
-        else {
+        let Some(right_hand) = find_bone(entity, Bone::Hand(Side::Right), &children, &names) else {
             continue;
         };
 
@@ -93,17 +85,9 @@ pub(super) fn cache_right_arm(
         };
         let offset = forearm_t.translation + forearm_t.rotation * hand_t.translation;
 
-        // Collect right-hand index finger phalanges in proximal →
-        // distal order so the straighten-on-point pass can iterate
-        // them deterministically.
-        let mut index_bones = collect_index_finger_bones(right_hand, &children, &names);
-        index_bones.sort_by_key(|&e| {
-            names
-                .get(e)
-                .ok()
-                .map(|n| bone_stem(n.as_str()).to_owned())
-                .unwrap_or_default()
-        });
+        // Right-hand index finger phalanges in proximal → distal order so the
+        // straighten-on-point pass can iterate them deterministically.
+        let index_bones = collect_right_index_finger_bones(right_hand, &children, &names);
 
         body.right_arm_entity = Some(right_arm);
         body.right_arm_hand_offset_bind = offset;
@@ -118,36 +102,42 @@ pub(super) fn cache_right_arm(
     }
 }
 
-fn collect_index_finger_bones(
+fn collect_right_index_finger_bones(
     hand: Entity,
     children: &Query<&Children>,
     names: &Query<&Name>,
 ) -> Vec<Entity> {
-    let mut out = Vec::new();
+    let mut found: Vec<(u8, Entity)> = Vec::new();
     let mut stack: Vec<Entity> = vec![hand];
     while let Some(entity) = stack.pop() {
         if let Ok(name) = names.get(entity)
-            && bone_stem(name.as_str()).starts_with(BONE_RIGHT_HAND_INDEX_PREFIX)
+            && let Some(Bone::HandFinger {
+                side: Side::Right,
+                finger: Finger::Index,
+                segment,
+            }) = Bone::from_name(name.as_str())
         {
-            out.push(entity);
+            found.push((segment, entity));
         }
         if let Ok(child_list) = children.get(entity) {
             stack.extend(child_list.iter());
         }
     }
-    out
+    // Proximal (segment 1) → tip (segment 4).
+    found.sort_by_key(|&(segment, _)| segment);
+    found.into_iter().map(|(_, entity)| entity).collect()
 }
 
-fn find_descendant_by_bone_stem(
+fn find_bone(
     root: Entity,
-    target_stem: &str,
+    target: Bone,
     children: &Query<&Children>,
     names: &Query<&Name>,
 ) -> Option<Entity> {
     let mut stack: Vec<Entity> = vec![root];
     while let Some(entity) = stack.pop() {
         if let Ok(name) = names.get(entity)
-            && bone_stem(name.as_str()) == target_stem
+            && Bone::from_name(name.as_str()) == Some(target)
         {
             return Some(entity);
         }
