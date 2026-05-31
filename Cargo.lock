@@ -6828,6 +6828,7 @@ dependencies = [
  "veldera_game_input",
  "veldera_game_player",
  "veldera_game_teleport",
+ "veldera_game_vehicle",
  "veldera_geo",
  "veldera_physics",
  "veldera_places",
@@ -6990,6 +6991,25 @@ dependencies = [
  "veldera_game_player",
  "veldera_geo",
  "veldera_places",
+]
+
+[[package]]
+name = "veldera_game_vehicle"
+version = "0.1.0"
+dependencies = [
+ "avian3d",
+ "bevy",
+ "glam",
+ "leafwing-input-manager",
+ "serde",
+ "tracing",
+ "veldera_config",
+ "veldera_game_camera",
+ "veldera_game_camera_state",
+ "veldera_game_input",
+ "veldera_game_player",
+ "veldera_geo",
+ "veldera_physics",
 ]
 
 [[package]]

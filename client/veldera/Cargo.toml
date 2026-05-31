@@ -63,6 +63,7 @@ veldera_game_camera_state = { path = "../camera_state" }
 veldera_game_input = { path = "../input" }
 veldera_game_player = { path = "../player" }
 veldera_game_teleport = { path = "../teleport" }
+veldera_game_vehicle = { path = "../vehicle" }
 veldera_geo = { path = "../../crates/geo" }
 veldera_physics = { path = "../../crates/physics" }
 veldera_places = { path = "../../extras/places" }

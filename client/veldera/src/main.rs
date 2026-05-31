@@ -9,7 +9,6 @@ mod launch_params;
 mod physics;
 mod rendering;
 mod ui;
-mod vehicle;
 mod world;
 
 use async_runtime::AsyncRuntimePlugin;
@@ -40,6 +39,7 @@ use veldera_game_camera::{
 };
 use veldera_game_input::InputPlugin;
 use veldera_game_player::{PlayerConfigPaths, PlayerPlugin};
+use veldera_game_vehicle::VehiclePlugin;
 use world::{
     coords::lat_lon_to_ecef,
     floating_origin::{FloatingOriginCamera, FloatingOriginPlugin},
@@ -81,7 +81,7 @@ impl Plugin for AppPlugin {
                 shader: config::paths::CLOUD_SHADER,
                 climate: config::paths::CLOUD_CLIMATE,
             }),
-            vehicle::VehiclePlugin,
+            VehiclePlugin::new(config::paths::VEHICLE),
         ))
         .add_plugins(config::ConfigPlugin::<LaunchConfig>::new(
             config::paths::LAUNCH,

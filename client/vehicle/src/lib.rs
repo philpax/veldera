@@ -22,26 +22,37 @@ use glam::DVec3;
 use leafwing_input_manager::prelude::*;
 use serde::Deserialize;
 
-use crate::config;
+use veldera_config::ConfigPlugin;
+use veldera_game_camera::{CameraModeState, CameraModeTransitions, FlightCamera, FollowedEntity};
 use veldera_game_input::CameraAction;
+use veldera_game_player::{FpsController, LogicalPlayer};
+use veldera_geo::{
+    coords::RadialFrame,
+    floating_origin::{FloatingOriginCamera, WorldPosition},
+};
+use veldera_physics::{DespawnOutsidePhysicsRange, GameLayer};
 
 pub use components::{
     Vehicle, VehicleDragConfig, VehicleHoverConfig, VehicleInput, VehicleModel,
     VehicleMovementConfig, VehiclePhysicsConfig, VehicleState,
 };
-use veldera_physics::GameLayer;
 
-use veldera_game_camera::{CameraModeState, CameraModeTransitions, FlightCamera, FollowedEntity};
-use veldera_game_player::{FpsController, LogicalPlayer};
+/// Whether the debug UI's vehicle tab is currently open.
+///
+/// The host's debug UI sets this; vehicle systems (e.g. the thruster-gizmo
+/// overlay) consult it to skip per-frame work when the user isn't looking at
+/// the tab. Owned here so the vehicle crate doesn't depend on the UI.
+#[derive(Resource, Default)]
+pub struct VehicleTabOpen(pub bool);
 
-use crate::{
-    physics::DespawnOutsidePhysicsRange,
-    ui::VehicleTabOpen,
-    world::{
-        coords::RadialFrame,
-        floating_origin::{FloatingOriginCamera, WorldPosition},
-    },
-};
+/// Request to right the vehicle (reset orientation).
+///
+/// Set by the host's debug UI; consumed by [`physics::process_vehicle_right_request`].
+#[derive(Resource, Default)]
+pub struct VehicleRightRequest {
+    /// Whether a right request is pending.
+    pub pending: bool,
+}
 
 /// Hot-reloadable global vehicle tuning, loaded from
 /// `assets/config/game/vehicle/vehicle.toml`. Per-vehicle physics (hover/movement/
@@ -69,37 +80,50 @@ pub struct VehicleConfig {
 pub struct VehicleDebugGizmos;
 
 /// Plugin for vehicle functionality.
-pub struct VehiclePlugin;
+///
+/// The host supplies the [`VehicleConfig`] path and sets [`VehicleTabOpen`] /
+/// [`VehicleRightRequest`] (both owned here) from its debug UI.
+pub struct VehiclePlugin {
+    /// Path to the [`VehicleConfig`] TOML.
+    pub config_path: &'static str,
+}
+
+impl VehiclePlugin {
+    /// Create the plugin, loading its config from `config_path`.
+    pub const fn new(config_path: &'static str) -> Self {
+        Self { config_path }
+    }
+}
 
 impl Plugin for VehiclePlugin {
     fn build(&self, app: &mut App) {
         // Register reflectable types for scene serialization.
-        app.add_plugins(config::ConfigPlugin::<VehicleConfig>::new(
-            config::paths::VEHICLE,
-        ))
-        .init_gizmo_group::<VehicleDebugGizmos>()
-        .register_type::<Vehicle>()
-        .register_type::<VehicleHoverConfig>()
-        .register_type::<VehicleMovementConfig>()
-        .register_type::<VehicleDragConfig>()
-        .register_type::<VehiclePhysicsConfig>()
-        .register_type::<VehicleModel>()
-        .init_resource::<VehicleDefinitions>()
-        .init_resource::<VehicleActions>()
-        .init_resource::<PendingVehicleSpawn>()
-        .init_resource::<VehicleFolderLoader>()
-        .add_systems(
-            Startup,
-            (start_loading_vehicle_folder, configure_vehicle_debug_gizmos),
-        )
-        .add_systems(FixedPreUpdate, physics::vehicle_physics_system)
-        .add_systems(
-            Update,
-            (
-                physics::vehicle_input_system.run_if(physics::is_follow_entity_mode),
-                physics::process_vehicle_right_request,
-            ),
-        );
+        app.add_plugins(ConfigPlugin::<VehicleConfig>::new(self.config_path))
+            .init_gizmo_group::<VehicleDebugGizmos>()
+            .register_type::<Vehicle>()
+            .register_type::<VehicleHoverConfig>()
+            .register_type::<VehicleMovementConfig>()
+            .register_type::<VehicleDragConfig>()
+            .register_type::<VehiclePhysicsConfig>()
+            .register_type::<VehicleModel>()
+            .init_resource::<VehicleDefinitions>()
+            .init_resource::<VehicleActions>()
+            .init_resource::<VehicleTabOpen>()
+            .init_resource::<VehicleRightRequest>()
+            .init_resource::<PendingVehicleSpawn>()
+            .init_resource::<VehicleFolderLoader>()
+            .add_systems(
+                Startup,
+                (start_loading_vehicle_folder, configure_vehicle_debug_gizmos),
+            )
+            .add_systems(FixedPreUpdate, physics::vehicle_physics_system)
+            .add_systems(
+                Update,
+                (
+                    physics::vehicle_input_system.run_if(physics::is_follow_entity_mode),
+                    physics::process_vehicle_right_request,
+                ),
+            );
 
         app.add_systems(
             Update,

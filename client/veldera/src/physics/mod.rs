@@ -14,7 +14,7 @@ use bevy::prelude::*;
 use crate::config;
 
 pub use veldera_physics::{
-    DespawnOutsidePhysicsRange, PhysicsConfig, PhysicsStreamingConfig, is_physics_debug_enabled,
+    DespawnOutsidePhysicsRange, PhysicsStreamingConfig, is_physics_debug_enabled,
     toggle_physics_debug,
 };
 

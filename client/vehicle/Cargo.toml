@@ -1,0 +1,33 @@
+[package]
+name = "veldera_game_vehicle"
+version = "0.1.0"
+edition.workspace = true
+repository.workspace = true
+license.workspace = true
+description = "Hovercraft vehicle system for the Veldera client: PID-controlled hover physics, scene-defined vehicles, and follow-camera entry/exit"
+
+[dependencies]
+avian3d = "0.6"
+bevy = { version = "0.18.0", default-features = false, features = [
+    "bevy_asset",
+    "bevy_gizmos",
+    "bevy_gltf",
+    "bevy_mesh",
+    "bevy_pbr",
+    "bevy_render",
+    "bevy_scene",
+] }
+glam = "0.30"
+leafwing-input-manager = "0.20"
+serde = { version = "1", features = ["derive"] }
+tracing = "0.1"
+veldera_config = { path = "../../crates/config" }
+veldera_geo = { path = "../../crates/geo" }
+veldera_physics = { path = "../../crates/physics" }
+veldera_game_camera = { path = "../camera" }
+veldera_game_camera_state = { path = "../camera_state" }
+veldera_game_input = { path = "../input" }
+veldera_game_player = { path = "../player" }
+
+[lints]
+workspace = true

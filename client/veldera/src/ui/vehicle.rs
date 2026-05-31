@@ -12,9 +12,9 @@ use egui_plot::{Line, Plot, PlotPoints};
 
 use veldera_game_camera_state::CameraModeState;
 
-use crate::vehicle::{
+use veldera_game_vehicle::{
     Vehicle, VehicleActions, VehicleDefinitions, VehicleDragConfig, VehicleHoverConfig,
-    VehicleInput, VehicleMovementConfig, VehicleState,
+    VehicleInput, VehicleMovementConfig, VehicleRightRequest, VehicleState,
 };
 
 /// Number of samples to keep in vehicle history.
@@ -60,13 +60,6 @@ impl VehicleHistory {
         self.altitude.clear();
         self.hover_force.clear();
     }
-}
-
-/// Request to right the vehicle (reset orientation).
-#[derive(Resource, Default)]
-pub struct VehicleRightRequest {
-    /// Whether a right request is pending.
-    pub pending: bool,
 }
 
 /// Resources for the vehicles tab.

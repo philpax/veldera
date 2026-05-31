@@ -23,15 +23,7 @@ use glam::DVec3;
 use leafwing_input_manager::prelude::*;
 
 use veldera_game_input::CameraAction;
-
-pub use vehicle::VehicleRightRequest;
-
-/// Resource tracking whether the vehicle tab is currently open.
-///
-/// Vehicle systems (e.g. thruster gizmo overlay) consult this to skip
-/// per-frame work when the user isn't looking at the tab.
-#[derive(Resource, Default)]
-pub struct VehicleTabOpen(pub bool);
+use veldera_game_vehicle::VehicleTabOpen;
 
 /// Resource controlling whether the debug UI is visible.
 #[derive(Resource)]
@@ -57,8 +49,6 @@ impl Plugin for DebugUiPlugin {
             .init_resource::<location::CoordinateInputState>()
             .init_resource::<DebugUiState>()
             .init_resource::<vehicle::VehicleHistory>()
-            .init_resource::<VehicleRightRequest>()
-            .init_resource::<VehicleTabOpen>()
             .init_resource::<streaming::DiagnosticsViewState>()
             .init_resource::<UiVisible>()
             .add_systems(

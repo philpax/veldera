@@ -15,16 +15,14 @@ use super::{
     core::{self, VehicleFrame, VehiclePhysicsParams, VehicleSimInput, VehicleSimState},
     telemetry::{self, TelemetrySnapshot},
 };
-use veldera_game_camera_state::CameraModeState;
-
-use crate::{
-    ui::VehicleRightRequest,
-    world::{
-        coords::RadialFrame,
-        floating_origin::{FloatingOriginCamera, WorldPosition},
-    },
-};
 use leafwing_input_manager::prelude::*;
+use veldera_game_camera_state::CameraModeState;
+use veldera_geo::{
+    coords::RadialFrame,
+    floating_origin::{FloatingOriginCamera, WorldPosition},
+};
+
+use crate::VehicleRightRequest;
 
 /// Capture vehicle input from action state.
 pub fn vehicle_input_system(
@@ -111,7 +109,7 @@ fn copy_sim_state_back(state: &mut VehicleState, sim_state: &VehicleSimState) {
 #[allow(clippy::too_many_lines, clippy::type_complexity)]
 pub fn vehicle_physics_system(
     time: Res<Time<Fixed>>,
-    physics_config: Res<crate::physics::PhysicsConfig>,
+    physics_config: Res<veldera_physics::PhysicsConfig>,
     vehicle_config: Res<VehicleConfig>,
     spatial_query: SpatialQuery,
     camera_query: Query<&FloatingOriginCamera>,
