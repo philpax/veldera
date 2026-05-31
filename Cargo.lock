@@ -6815,7 +6815,6 @@ dependencies = [
  "serde",
  "serde_json",
  "tracing",
- "tracing-subscriber",
  "tracing-wasm",
  "veldera_async",
  "veldera_atmosphere",
@@ -6823,6 +6822,7 @@ dependencies = [
  "veldera_clouds",
  "veldera_config",
  "veldera_constants",
+ "veldera_engine",
  "veldera_geo",
  "veldera_input",
  "veldera_physics",
@@ -6890,6 +6890,24 @@ dependencies = [
 [[package]]
 name = "veldera_constants"
 version = "0.1.0"
+
+[[package]]
+name = "veldera_engine"
+version = "0.1.0"
+dependencies = [
+ "bevy",
+ "tracing",
+ "tracing-subscriber",
+ "veldera_async",
+ "veldera_camera",
+ "veldera_config",
+ "veldera_constants",
+ "veldera_geo",
+ "veldera_input",
+ "veldera_physics",
+ "veldera_sky",
+ "veldera_terrain",
+]
 
 [[package]]
 name = "veldera_geo"

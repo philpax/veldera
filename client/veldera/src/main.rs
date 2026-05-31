@@ -3,7 +3,6 @@
 //! This application provides a free-flight camera to explore Google Earth's
 //! 3D terrain data, with LOD-based loading and frustum culling.
 
-mod assets;
 mod async_runtime;
 mod camera;
 mod config;
@@ -11,13 +10,13 @@ mod input;
 mod launch_params;
 mod physics;
 mod player;
-mod profiler;
 mod rendering;
 mod ui;
 mod vehicle;
 mod world;
 
 use async_runtime::AsyncRuntimePlugin;
+// Custom asset loaders and the CPU profiler now live in the engine umbrella.
 use bevy::{
     audio::SpatialListener,
     camera::Exposure,
@@ -42,6 +41,7 @@ use rendering::{
 };
 use ui::DebugUiPlugin;
 use veldera_clouds::CloudLayers;
+use veldera_engine::{assets, profiler};
 use world::{
     coords::lat_lon_to_ecef,
     floating_origin::{FloatingOriginCamera, FloatingOriginPlugin},

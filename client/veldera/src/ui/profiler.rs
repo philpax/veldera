@@ -17,7 +17,7 @@ use bevy::{
 use bevy_egui::egui;
 use egui_extras::{Column, TableBuilder};
 
-use crate::profiler::CpuProfile;
+use veldera_engine::profiler::CpuProfile;
 
 /// Selected sub-tab in the Profiler tab.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]

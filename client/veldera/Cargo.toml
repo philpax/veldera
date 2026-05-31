@@ -57,6 +57,7 @@ veldera_config = { path = "../../crates/config" }
 veldera_constants = { path = "../../crates/constants" }
 veldera_async = { path = "../../crates/async" }
 veldera_camera = { path = "../../crates/camera" }
+veldera_engine = { path = "../../crates/engine" }
 veldera_geo = { path = "../../crates/geo" }
 veldera_input = { path = "../../crates/input" }
 veldera_physics = { path = "../../crates/physics" }
@@ -100,7 +101,6 @@ bevy = { version = "0.18.0", default-features = false, features = [
   "x11"
 ] }
 clap = { version = "4", features = ["derive"] }
-tracing-subscriber = "0.3"
 
 # WASM: Panic hook and tracing for browser console.
 [target.'cfg(target_family = "wasm")'.dependencies]
