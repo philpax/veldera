@@ -1,3 +1,1 @@
-- look at big files and split them apart
 - ensure that string literals and the like are formalized into constants or put in enums
-- refactor into multiple crates, engine / game
