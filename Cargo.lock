@@ -6825,6 +6825,7 @@ dependencies = [
  "veldera_atmosphere",
  "veldera_clouds",
  "veldera_constants",
+ "veldera_geo",
  "wasm-bindgen",
  "web-time",
 ]
@@ -6854,6 +6855,14 @@ dependencies = [
 [[package]]
 name = "veldera_constants"
 version = "0.1.0"
+
+[[package]]
+name = "veldera_geo"
+version = "0.1.0"
+dependencies = [
+ "bevy",
+ "glam",
+]
 
 [[package]]
 name = "version_check"
