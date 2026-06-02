@@ -13,7 +13,8 @@
 // atmosphere space, not world space.
 
 #import veldera_atmosphere::{
-    functions::{direction_world_to_atmosphere, sample_sky_view_lut, get_view_position},
+    bindings::settings,
+    functions::{direction_world_to_atmosphere, sample_sky_view_lut, get_view_position, FEAT_ENVIRONMENT},
 }
 #import bevy_pbr::utils::sample_cube_dir;
 
@@ -25,6 +26,13 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
     let slice_index = global_id.z;
 
     if (global_id.x >= dimensions.x || global_id.y >= dimensions.y || slice_index >= 6u) {
+        return;
+    }
+
+    // When the environment map is disabled, write black so the scene gets no
+    // atmosphere-derived image-based lighting.
+    if (settings.feature_flags & FEAT_ENVIRONMENT) == 0u {
+        textureStore(output, vec2<i32>(global_id.xy), i32(slice_index), vec4<f32>(0.0, 0.0, 0.0, 1.0));
         return;
     }
 

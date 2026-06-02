@@ -225,13 +225,17 @@ fn update_atmospheric_light_extinction(
         let dir = transform.back().as_vec3();
         let mu = dir.dot(local_up);
 
-        let transmittance = compute_sun_transmittance(
-            atmosphere,
-            medium,
-            r,
-            mu,
-            settings.sun_transmittance_midpoint_ratio,
-        );
+        let transmittance = if settings.light_extinction {
+            compute_sun_transmittance(
+                atmosphere,
+                medium,
+                r,
+                mu,
+                settings.sun_transmittance_midpoint_ratio,
+            )
+        } else {
+            Vec3::ONE
+        };
         let base = atmo_light.base_color;
         light.color = Color::LinearRgba(LinearRgba::new(
             base.red * transmittance.x,

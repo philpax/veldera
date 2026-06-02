@@ -35,3 +35,14 @@ raymarch_midpoint_ratio = 0.3
 # between successive samples, so the true midpoint (0.5) is correct here —
 # distinct from raymarch_midpoint_ratio's single-tap-per-segment scheme.
 sun_transmittance_midpoint_ratio = 0.5
+
+# Sky in-scatter feature toggles. All on by default; flip one off to isolate a
+# rendering piece live (these hot-reload). Handy for bisecting artifacts.
+inscattering = true        # render the aerial-perspective in-scatter
+planet_shadow = true       # planet shadows the sun on single scattering
+sun_transmittance = true   # attenuate sunlight by sun-to-sample transmittance
+phase_function = true      # anisotropic phase (false = isotropic scattering)
+multiscattering = true     # add the multiple-scattering term
+environment_map = true     # sky IBL that lights the terrain (ambient/specular)
+light_extinction = true    # redden/dim the sun's DirectionalLight via transmittance
+isolate_inscatter = false  # debug view: show only the in-scatter, hide the scene

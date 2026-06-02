@@ -433,6 +433,56 @@ pub struct AtmosphereSettings {
     /// successive sample points, so the true midpoint (0.5) is correct here.
     /// CPU-only — not mirrored into [`GpuAtmosphereSettings`].
     pub sun_transmittance_midpoint_ratio: f32,
+
+    /// Render the aerial-perspective in-scatter. Disable to view the scene
+    /// without atmospheric haze. Enabled by default.
+    #[cfg_attr(feature = "serde", serde(default = "default_true"))]
+    pub inscattering: bool,
+
+    /// Shadow single scattering where the planet occludes the sun. Enabled by
+    /// default.
+    #[cfg_attr(feature = "serde", serde(default = "default_true"))]
+    pub planet_shadow: bool,
+
+    /// Attenuate sunlight by the sun-to-sample transmittance (the transmittance
+    /// LUT). Enabled by default.
+    #[cfg_attr(feature = "serde", serde(default = "default_true"))]
+    pub sun_transmittance: bool,
+
+    /// Use the anisotropic phase function for single scattering; disable for
+    /// isotropic scattering. Enabled by default.
+    #[cfg_attr(feature = "serde", serde(default = "default_true"))]
+    pub phase_function: bool,
+
+    /// Add the multiple-scattering term. Enabled by default.
+    #[cfg_attr(feature = "serde", serde(default = "default_true"))]
+    pub multiscattering: bool,
+
+    /// Generate the sky environment map that image-based-lights the scene
+    /// (terrain ambient/specular). Disable to remove the atmosphere's
+    /// contribution to scene lighting. Enabled by default.
+    #[cfg_attr(feature = "serde", serde(default = "default_true"))]
+    pub environment_map: bool,
+
+    /// Modulate the sun/moon `DirectionalLight` colour by atmospheric
+    /// transmittance along the camera→light ray (reddening at low angles,
+    /// occlusion below the horizon). Disable to light the scene with the
+    /// unattenuated base colour. CPU-only — not mirrored into
+    /// [`GpuAtmosphereSettings`]. Enabled by default.
+    #[cfg_attr(feature = "serde", serde(default = "default_true"))]
+    pub light_extinction: bool,
+
+    /// Debug view: block the scene and show only the atmosphere in-scatter
+    /// (aerial perspective) in isolation. Disabled by default.
+    pub isolate_inscatter: bool,
+}
+
+/// Default for the feature toggles, which are on unless the config turns them
+/// off. (The toggles are individually `serde(default = "default_true")` so a
+/// config that omits them still renders normally.)
+#[cfg(feature = "serde")]
+fn default_true() -> bool {
+    true
 }
 
 /// GPU-compatible version of [`AtmosphereSettings`].
@@ -453,6 +503,11 @@ pub struct GpuAtmosphereSettings {
     pub sky_max_samples: u32,
     pub rendering_method: u32,
     pub raymarch_midpoint_ratio: f32,
+    /// Packed feature toggles read by the sky shaders. Bit 0 = isolate
+    /// in-scatter (debug); bits 1–6 = in-scatter, planet shadow, sun
+    /// transmittance, anisotropic phase, multiscattering, and environment-map
+    /// enables.
+    pub feature_flags: u32,
 }
 
 impl Default for GpuAtmosphereSettings {
@@ -463,6 +518,14 @@ impl Default for GpuAtmosphereSettings {
 
 impl From<AtmosphereSettings> for GpuAtmosphereSettings {
     fn from(s: AtmosphereSettings) -> Self {
+        // Bit layout must match the `FEAT_*` constants in `functions.wgsl`.
+        let feature_flags = (s.isolate_inscatter as u32)
+            | ((s.inscattering as u32) << 1)
+            | ((s.planet_shadow as u32) << 2)
+            | ((s.sun_transmittance as u32) << 3)
+            | ((s.phase_function as u32) << 4)
+            | ((s.multiscattering as u32) << 5)
+            | ((s.environment_map as u32) << 6);
         Self {
             transmittance_lut_size: s.transmittance_lut_size,
             multiscattering_lut_size: s.multiscattering_lut_size,
@@ -478,6 +541,7 @@ impl From<AtmosphereSettings> for GpuAtmosphereSettings {
             sky_max_samples: s.sky_max_samples,
             rendering_method: s.rendering_method as u32,
             raymarch_midpoint_ratio: s.raymarch_midpoint_ratio,
+            feature_flags,
         }
     }
 }

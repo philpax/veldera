@@ -51,6 +51,17 @@ const ROOT_2: f32 = 1.41421356; // sqrt(2)
 const EPSILON: f32 = 1.0; // 1 meter
 const MIN_EXTINCTION: vec3<f32> = vec3(1e-12);
 
+// Feature-toggle bits packed into `settings.feature_flags` (see
+// `AtmosphereSettings`). Bit set = feature on; bit 0 is the isolate-in-scatter
+// debug view.
+const FEAT_ISOLATE_INSCATTER: u32 = 1u;
+const FEAT_INSCATTERING: u32 = 2u;
+const FEAT_PLANET_SHADOW: u32 = 4u;
+const FEAT_SUN_TRANSMITTANCE: u32 = 8u;
+const FEAT_PHASE: u32 = 16u;
+const FEAT_MULTISCATTERING: u32 = 32u;
+const FEAT_ENVIRONMENT: u32 = 64u;
+
 // During raymarching, each segment is sampled at a single point.
 // `settings.raymarch_midpoint_ratio` determines where in the segment that
 // sample is taken (0.0 = start, 0.5 = middle, 1.0 = end); the default biases
@@ -235,16 +246,32 @@ fn sample_local_inscattering(local_scattering: vec3<f32>, ray_dir: vec3<f32>, at
         // instead of towards it (as is the convention for V).
         let neg_LdotV = dot(light_dir_as, ray_dir);
 
-        let transmittance_to_light = sample_transmittance_lut(local_r, mu_light);
-        let shadow_factor = transmittance_to_light * f32(!ray_intersects_ground(local_r, mu_light));
-        let scattering_coeff = sample_scattering_lut(local_r, neg_LdotV);
+        // Feature toggles (see `AtmosphereSettings`): a cleared bit disables
+        // that contribution, for isolating rendering artifacts at runtime.
+        let flags = settings.feature_flags;
+        var transmittance_to_light = sample_transmittance_lut(local_r, mu_light);
+        if (flags & FEAT_SUN_TRANSMITTANCE) == 0u {
+            transmittance_to_light = vec3(1.0);
+        }
+        var planet_visibility = f32(!ray_intersects_ground(local_r, mu_light));
+        if (flags & FEAT_PLANET_SHADOW) == 0u {
+            planet_visibility = 1.0;
+        }
+        let shadow_factor = transmittance_to_light * planet_visibility;
+        // Disabling the phase function samples the phase LUT at a fixed angle,
+        // making single scattering isotropic (no view-angle dependence).
+        let phase_cos = select(neg_LdotV, 0.0, (flags & FEAT_PHASE) == 0u);
+        let scattering_coeff = sample_scattering_lut(local_r, phase_cos);
 
         // Transmittance from scattering event to light source.
         let scattering_factor = shadow_factor * scattering_coeff;
 
         // Additive factor from the multiscattering LUT.
         let psi_ms = sample_multiscattering_lut(local_r, mu_light);
-        let multiscattering_factor = psi_ms * local_scattering;
+        var multiscattering_factor = psi_ms * local_scattering;
+        if (flags & FEAT_MULTISCATTERING) == 0u {
+            multiscattering_factor = vec3(0.0);
+        }
 
         inscattering += light.color * (scattering_factor + multiscattering_factor);
     }

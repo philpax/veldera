@@ -11,7 +11,7 @@ enable dual_source_blending;
         direction_world_to_atmosphere,
         uv_to_ray_direction, uv_to_ndc,
         sample_sun_radiance, ndc_to_camera_dist, raymarch_atmosphere,
-        get_view_position, max_atmosphere_distance
+        get_view_position, max_atmosphere_distance, FEAT_ISOLATE_INSCATTER, FEAT_INSCATTERING
     },
 };
 
@@ -89,6 +89,19 @@ fn main(in: FullscreenVertexOutput) -> RenderSkyOutput {
 
     // Exposure compensation.
     inscattering *= view.exposure;
+
+    // Disabling in-scatter shows the scene without aerial perspective. This
+    // drops both the additive in-scatter glow AND the multiplicative
+    // transmittance (extinction) the atmosphere applies to the terrain, so the
+    // scene is left completely unaffected by the atmosphere.
+    if (settings.feature_flags & FEAT_INSCATTERING) == 0u {
+        inscattering = vec3(0.0);
+        transmittance = vec3(1.0);
+    }
+    // Isolate in-scatter: block the scene and show only the aerial perspective.
+    if (settings.feature_flags & FEAT_ISOLATE_INSCATTER) != 0u {
+        transmittance = vec3(0.0);
+    }
 
 #ifdef DUAL_SOURCE_BLENDING
     return RenderSkyOutput(vec4(inscattering, 0.0), vec4(transmittance, 1.0));
