@@ -533,39 +533,61 @@ fn compute_orientation_classic(
 ) -> Quat {
     let ascent_end = config.teleport_ascent_end;
     let descent_start = config.teleport_descent_start;
-    // Direction toward Earth center (looking down).
-    let down = -position.normalize().as_vec3();
 
     if t < ascent_end {
         // Ascent: slerp from initial orientation to looking down with ascent_up.
         let phase_t = (t / ascent_end) as f32;
         let eased_t = smootherstep(f64::from(phase_t)) as f32;
 
-        let orient_ascent_end = Transform::IDENTITY
-            .looking_to(down, phase.ascent_up)
-            .rotation;
+        let orient_ascent_end = look_straight_down(position, phase.ascent_up);
         phase.orient_start.slerp(orient_ascent_end, eased_t)
     } else if t < descent_start {
         // Cruise: always look at Earth center, interpolate the up vector.
         let cruise_t = ((t - ascent_end) / (descent_start - ascent_end)) as f32;
 
         // Slerp the up vector from ascent_up to descent_up.
-        let up = phase
-            .ascent_up
-            .slerp(phase.descent_up, cruise_t)
-            .normalize();
+        let up = phase.ascent_up.slerp(phase.descent_up, cruise_t);
 
-        Transform::IDENTITY.looking_to(down, up).rotation
+        look_straight_down(position, up)
     } else {
         // Descent: slerp from looking down to final orientation.
         let phase_t = ((t - descent_start) / (1.0 - descent_start)) as f32;
         let eased_t = smootherstep(f64::from(phase_t)) as f32;
 
-        let orient_descent_start = Transform::IDENTITY
-            .looking_to(down, phase.descent_up)
-            .rotation;
+        let orient_descent_start = look_straight_down(position, phase.descent_up);
         orient_descent_start.slerp(phase.orient_end, eased_t)
     }
+}
+
+/// Maximum tangential length of the up hint, below which it is treated as
+/// effectively radial and replaced with a stable tangent. `0.05` ≈ the hint
+/// being within ~3° of the down direction.
+const NEAR_RADIAL_UP_EPSILON: f32 = 0.05;
+
+/// Build a "looking straight down at the planet" orientation, rolled so the
+/// horizontal part of `up_hint` is screen-up — robust against `up_hint` going
+/// parallel to the down (radial) direction.
+///
+/// The classic-mode up hints (`ascent_up` is the great-circle tangent at the
+/// *start*, `descent_up` is north at the *target*) are anchored to the arc's
+/// endpoints. On a long arc they drift to point nearly *radial* at the
+/// intermediate cruise position, so `up_hint` approaches the down direction.
+/// There `Transform::looking_to` is ill-conditioned: its `up × forward`
+/// collapses toward zero and the resulting camera roll jitters frame-to-frame.
+/// That roll jitter rotates the whole view about the nadir each frame, which
+/// makes the top-down terrain shimmer/alias and the water specular sparkle.
+/// Re-project `up_hint` into the local tangent plane and fall back to local
+/// north (always tangent to down) when it nears radial, keeping the frame
+/// well-conditioned across the whole cruise.
+fn look_straight_down(position: DVec3, up_hint: Vec3) -> Quat {
+    let down = -position.normalize().as_vec3();
+    let tangential = up_hint.reject_from(down);
+    let up = if tangential.length() > NEAR_RADIAL_UP_EPSILON {
+        tangential.normalize()
+    } else {
+        RadialFrame::from_ecef_position(position).north
+    };
+    Transform::IDENTITY.looking_to(down, up).rotation
 }
 
 /// Horizon-chasing orientation: face the direction of travel with Earth below.
