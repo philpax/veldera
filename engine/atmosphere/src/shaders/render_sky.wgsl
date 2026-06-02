@@ -6,7 +6,7 @@ enable dual_source_blending;
 #import bevy_render::maths::ray_sphere_intersect
 
 #import veldera_atmosphere::{
-    bindings::{view, settings, atmosphere_transforms, atmosphere},
+    bindings::{view, settings, atmosphere},
     functions::{
         direction_world_to_atmosphere,
         uv_to_ray_direction, uv_to_ndc,
@@ -39,10 +39,8 @@ fn main(in: FullscreenVertexOutput) -> RenderSkyOutput {
     let ray_dir_ws = uv_to_ray_direction(in.uv);
     let world_pos = get_view_position();
     let r = length(world_pos);
-    // In atmosphere space, up is Y, so use the local_up uniform for world-space calculations.
-    let up = atmosphere_transforms.local_up;
     // For the LUT lookups, mu should be relative to the atmosphere-space Y axis.
-    let ray_dir_as = direction_world_to_atmosphere(ray_dir_ws, up);
+    let ray_dir_as = direction_world_to_atmosphere(ray_dir_ws);
     let mu = ray_dir_as.y;
     let max_samples = settings.sky_max_samples;
 

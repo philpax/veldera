@@ -2,7 +2,7 @@
 // See NOTICE.md for attribution and licensing.
 
 #import veldera_atmosphere::{
-    bindings::{settings, atmosphere_transforms},
+    bindings::settings,
     functions::{
         sample_density_lut, sample_local_inscattering, uv_to_ray_direction, get_view_position,
         direction_world_to_atmosphere,
@@ -21,7 +21,7 @@ fn main(@builtin(global_invocation_id) idx: vec3<u32>) {
     let uv = (vec2<f32>(idx.xy) + 0.5) / vec2<f32>(settings.aerial_view_lut_size.xy);
     // Convert ray direction from world space to atmosphere space.
     let ray_dir_ws = uv_to_ray_direction(uv);
-    let ray_dir = direction_world_to_atmosphere(ray_dir_ws, atmosphere_transforms.local_up);
+    let ray_dir = direction_world_to_atmosphere(ray_dir_ws);
     let atmo_pos = get_view_position();
 
     let r = length(atmo_pos);

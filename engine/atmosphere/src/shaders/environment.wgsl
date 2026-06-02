@@ -6,13 +6,13 @@
 // `GeneratedEnvironmentMapLight`, which Bevy filters into the diffuse and
 // specular environment maps used by the standard PBR shader.
 //
-// Difference from `bevy_pbr::atmosphere::environment`: world-space up is read
-// from `atmosphere_transforms.local_up` rather than derived from the camera
+// Difference from `bevy_pbr::atmosphere::environment`: directions are mapped
+// into atmosphere space via `direction_world_to_atmosphere` (which inverts the
+// CPU-built `world_from_atmosphere` matrix) rather than derived from the camera
 // position, because in this fork `get_view_position()` returns the camera in
 // atmosphere space, not world space.
 
 #import veldera_atmosphere::{
-    bindings::atmosphere_transforms,
     functions::{direction_world_to_atmosphere, sample_sky_view_lut, get_view_position},
 }
 #import bevy_pbr::utils::sample_cube_dir;
@@ -37,13 +37,11 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
     // Invert z because cubemaps are left-handed.
     ray_dir_ws.z = -ray_dir_ws.z;
 
-    // Use the camera position clamped to surface for r, but read world-space
-    // up from the transform uniform instead of deriving from the position.
+    // Use the camera position clamped to surface for r.
     let world_pos_as = get_view_position();
     let r = length(world_pos_as);
-    let up_ws = atmosphere_transforms.local_up;
 
-    let ray_dir_as = direction_world_to_atmosphere(ray_dir_ws.xyz, up_ws);
+    let ray_dir_as = direction_world_to_atmosphere(ray_dir_ws.xyz);
     let inscattering = sample_sky_view_lut(r, ray_dir_as);
 
     textureStore(output, vec2<i32>(global_id.xy), i32(slice_index), vec4<f32>(inscattering, 1.0));

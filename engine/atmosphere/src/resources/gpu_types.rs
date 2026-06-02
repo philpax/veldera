@@ -56,6 +56,12 @@ pub struct GpuAtmosphere {
 }
 
 /// GPU uniform for atmosphere transforms including spherical planet support.
+///
+/// `world_from_atmosphere` is an orthonormal (rigid) basis whose Y column is the
+/// camera's local up; the atmosphere shaders invert it (via transpose) to map
+/// world-space directions into atmosphere space. `local_up` is shipped
+/// redundantly because the clouds crate reads it directly for ECEF
+/// reconstruction (`local_up * camera_radius`).
 #[derive(ShaderType)]
 pub struct AtmosphereTransform {
     pub(crate) world_from_atmosphere: Mat4,

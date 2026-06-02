@@ -3,7 +3,7 @@
 //
 // Key modifications for spherical planets:
 // - get_view_position() uses camera_radius uniform instead of assuming Y-up
-// - direction_world_to_atmosphere() uses local_up uniform for proper tangent frame
+// - direction_world_to_atmosphere() inverts the CPU-built world_from_atmosphere matrix
 
 #define_import_path veldera_atmosphere::functions
 
@@ -227,7 +227,7 @@ fn sample_local_inscattering(local_scattering: vec3<f32>, ray_dir: vec3<f32>, at
         let light = atmosphere_lights.lights[light_i];
 
         // Transform light direction from world space to atmosphere space.
-        let light_dir_as = direction_world_to_atmosphere(light.direction_to_light, atmosphere_transforms.local_up);
+        let light_dir_as = direction_world_to_atmosphere(light.direction_to_light);
 
         let mu_light = dot(light_dir_as, local_up);
 
@@ -263,7 +263,7 @@ fn sample_sun_radiance(ray_dir_as: vec3<f32>) -> vec3<f32> {
     for (var light_i: u32 = 0u; light_i < atmosphere_lights.count; light_i++) {
         let light = atmosphere_lights.lights[light_i];
         // Transform light direction from world space to atmosphere space.
-        let light_dir_as = direction_world_to_atmosphere(light.direction_to_light, atmosphere_transforms.local_up);
+        let light_dir_as = direction_world_to_atmosphere(light.direction_to_light);
         let neg_LdotV = dot(light_dir_as, ray_dir_as);
         let angle_to_sun = fast_acos(clamp(neg_LdotV, -1.0, 1.0));
         let w = max(0.5 * fwidth(angle_to_sun), 1e-6);
@@ -361,18 +361,22 @@ fn ndc_to_uv(ndc: vec2<f32>) -> vec2<f32> {
 
 /// Converts a direction in world space to atmosphere space.
 ///
-/// For spherical planets, the local "up" direction varies with camera position.
-/// This function uses the local_up uniform to build a proper tangent frame.
-fn direction_world_to_atmosphere(dir_ws: vec3<f32>, up: vec3<f32>) -> vec3<f32> {
-    // Camera forward in world space (-Z in view to world transform).
-    let forward_ws = (view.world_from_view * vec4(0.0, 0.0, -1.0, 0.0)).xyz;
-    let tangent_z = normalize(up * dot(forward_ws, up) - forward_ws);
-    let tangent_x = cross(up, tangent_z);
-    return vec3(
-        dot(dir_ws, tangent_x),
-        dot(dir_ws, up),
-        dot(dir_ws, tangent_z),
+/// This is the inverse of `direction_atmosphere_to_world`. Because
+/// `world_from_atmosphere` is a rigid rotation (an orthonormal basis), its
+/// inverse is its transpose. Reusing the CPU-built matrix — rather than
+/// rebuilding the tangent frame from the camera forward — keeps the two
+/// transforms exactly consistent and, crucially, robust when the camera looks
+/// straight down or up: there the camera forward is parallel to `local_up`, so
+/// a forward-derived tangent frame collapses to `normalize(0)` and produces
+/// NaNs across the whole view, whereas the CPU matrix falls back to a stable
+/// frame (see `prepare_atmosphere_transforms`).
+fn direction_world_to_atmosphere(dir_ws: vec3<f32>) -> vec3<f32> {
+    let world_from_atmosphere = mat3x3<f32>(
+        atmosphere_transforms.world_from_atmosphere[0].xyz,
+        atmosphere_transforms.world_from_atmosphere[1].xyz,
+        atmosphere_transforms.world_from_atmosphere[2].xyz,
     );
+    return transpose(world_from_atmosphere) * dir_ws;
 }
 
 /// Converts a direction in atmosphere space to world space.
