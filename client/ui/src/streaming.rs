@@ -17,7 +17,7 @@ use glam::DVec3;
 use veldera_geo::coords::RadialFrame;
 use veldera_physics::PhysicsStreamingConfig;
 use veldera_terrain::{
-    lod::{LodSnapshot, LodSnapshotRequest, LodTuning, SnapshotNode, SnapshotNodeState},
+    lod::{FreezeLod, LodSnapshot, LodSnapshotRequest, LodTuning, SnapshotNode, SnapshotNodeState},
     mesh::RocktreeMeshMarker,
 };
 
@@ -30,6 +30,7 @@ pub(super) struct StreamingParams<'w, 's> {
     pub diagnostics_state: ResMut<'w, DiagnosticsViewState>,
     pub tuning: ResMut<'w, LodTuning>,
     pub streaming: Res<'w, PhysicsStreamingConfig>,
+    pub freeze: ResMut<'w, FreezeLod>,
 }
 
 /// Per-frame UI state for the diagnostics map (zoom, layer toggles).
@@ -64,6 +65,7 @@ pub(super) fn render_streaming_tab(ui: &mut egui::Ui, params: &mut StreamingPara
     let view = &mut *params.diagnostics_state;
     let tuning = &mut *params.tuning;
     let streaming = &*params.streaming;
+    let freeze = &mut *params.freeze;
     let mesh_count = params.mesh_query.iter().count();
 
     if snapshot.camera_pos.is_none() {
@@ -110,6 +112,12 @@ pub(super) fn render_streaming_tab(ui: &mut egui::Ui, params: &mut StreamingPara
              every BFS. Longer = less churn on quick view shifts.",
         );
     });
+
+    ui.checkbox(&mut freeze.0, "Freeze LoD").on_hover_text(
+        "Reuse the current octree selection every frame instead of \
+             re-walking it. Streaming stops churning so the LoD set \
+             settles — handy for isolating LoD-transition artifacts.",
+    );
 
     draw_top_down_map(ui, snapshot, view, tuning, streaming);
 

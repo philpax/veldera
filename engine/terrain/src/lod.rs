@@ -121,6 +121,13 @@ impl Default for LodPlugin {
     }
 }
 
+/// Debug toggle: when `true`, the LOD octree traversal is frozen — every frame
+/// reuses the previous selection instead of re-walking the tree, so streaming
+/// stops requesting/dropping tiles and the octant-mask stitching settles. Used
+/// to isolate LOD-churn artifacts. Exposed in the Streaming debug tab.
+#[derive(Resource, Default)]
+pub struct FreezeLod(pub bool);
+
 impl Plugin for LodPlugin {
     fn build(&self, app: &mut App) {
         app.init_resource::<LodState>()
@@ -128,6 +135,7 @@ impl Plugin for LodPlugin {
             .init_resource::<LodSnapshot>()
             .init_resource::<LodSnapshotRequest>()
             .init_resource::<LodScratch>()
+            .init_resource::<FreezeLod>()
             .add_plugins(ConfigPlugin::<LodTuning>::new(self.config_path))
             .add_systems(
                 Update,
@@ -950,6 +958,7 @@ fn update_lod_requests(
     motion: Res<MotionTracker>,
     tuning: Res<LodTuning>,
     streaming: Res<PhysicsStreamingConfig>,
+    freeze: Res<FreezeLod>,
     mut snapshot_request: ResMut<LodSnapshotRequest>,
     mut snapshot: ResMut<LodSnapshot>,
     spawner: TaskSpawner,
@@ -989,10 +998,12 @@ fn update_lod_requests(
         nodes_completed_version: lod_state.nodes_completed_version,
         keep_loaded_radius: tuning.keep_loaded_radius,
     };
+    // When frozen, always reuse the previous traversal (as long as one exists),
+    // bypassing the signature comparison entirely.
     let can_skip_bfs = scratch
         .last_bfs_signature
         .as_ref()
-        .is_some_and(|last| last.matches(&current_signature, &tuning));
+        .is_some_and(|last| freeze.0 || last.matches(&current_signature, &tuning));
 
     if !can_skip_bfs {
         // Single walk that evaluates render's screen-space-error
@@ -1077,13 +1088,18 @@ fn update_lod_requests(
     retained_nodes.extend(scratch.physics_result.collider_paths.iter().copied());
     let retained_bulks: HashSet<OctreePath> = lod_state.bulk_last_seen.keys().copied().collect();
 
-    unload_obsolete(
-        &mut lod_state,
-        &mut commands,
-        &retained_nodes,
-        &retained_bulks,
-        &scratch.physics_result.collider_paths,
-    );
+    // When frozen, keep every currently-loaded tile alive: the BFS skip stops
+    // refreshing last-seen timestamps, so without this the grace window would
+    // expire and evict the whole set, defeating the freeze.
+    if !freeze.0 {
+        unload_obsolete(
+            &mut lod_state,
+            &mut commands,
+            &retained_nodes,
+            &retained_bulks,
+            &scratch.physics_result.collider_paths,
+        );
+    }
 
     // Limit concurrent loads. Bumped from the original 20 to absorb a
     // BFS frame's worth of fine-LoD requests in one pass — at 20 we
