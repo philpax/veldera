@@ -534,6 +534,13 @@ impl CloudSubLayer {
     }
 }
 
+/// Default for `serde(default = ...)` fields that are on unless the config
+/// turns them off.
+#[cfg(feature = "serde")]
+fn default_true() -> bool {
+    true
+}
+
 /// Container component placed on a camera. Holds up to [`MAX_CLOUD_LAYERS`]
 /// cloud sub-layers, plus shared rendering settings.
 ///
@@ -547,6 +554,11 @@ pub struct CloudLayers {
     /// Sub-layers, processed in array order each frame. Indices beyond
     /// `MAX_CLOUD_LAYERS` are ignored.
     pub layers: Vec<CloudSubLayer>,
+    /// Master switch: when `false`, no layers are processed, so the raymarch
+    /// accumulates no density and nothing composites onto the scene. Enabled by
+    /// default. Handy for isolating non-cloud rendering.
+    #[cfg_attr(feature = "serde", serde(default = "default_true"))]
+    pub enabled: bool,
     /// Quality tier; controls sample counts and resolution scale.
     pub quality: CloudQuality,
     /// Debug visualisation mode. See [`CloudDebugMode`].
@@ -826,6 +838,7 @@ impl CloudLayers {
     pub fn stratocumulus_only() -> Self {
         Self {
             layers: vec![CloudSubLayer::stratocumulus()],
+            enabled: true,
             quality: CloudQuality::default(),
             debug_mode: CloudDebugMode::Off,
             god_rays: GodRaysSettings::default(),
@@ -852,6 +865,7 @@ impl CloudLayers {
     pub fn stratocumulus_with_cirrus() -> Self {
         Self {
             layers: vec![CloudSubLayer::stratocumulus(), CloudSubLayer::cirrus()],
+            enabled: true,
             quality: CloudQuality::default(),
             debug_mode: CloudDebugMode::Off,
             god_rays: GodRaysSettings::default(),
@@ -884,6 +898,7 @@ impl CloudLayers {
                 CloudSubLayer::cirrus(),
                 CloudSubLayer::ground_fog(),
             ],
+            enabled: true,
             quality: CloudQuality::default(),
             debug_mode: CloudDebugMode::Off,
             god_rays: GodRaysSettings::default(),

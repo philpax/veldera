@@ -6,6 +6,10 @@
 # native, Low on web); set it explicitly (`quality = "Low" | "Medium" | "High"`)
 # to override.
 
+# Master switch: false = no clouds rendered at all (handy for isolating other
+# rendering when debugging).
+enabled = true
+
 # --- Debug / shadows --------------------------------------------------------
 debug_mode = "Off"          # "Off" | "ShellHit" | "Noise" | ... (see CloudDebugMode)
 shadow_intensity = 1.0      # cloud-shadow dimming on terrain; 0 = none

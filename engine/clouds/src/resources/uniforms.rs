@@ -200,8 +200,14 @@ pub fn prepare_cloud_uniforms(
         // precision), so cloud state is a pure function of world time —
         // jumping the world clock immediately jumps the clouds too.
         let mut gpu_layers = [GpuCloudSubLayer::default(); MAX_CLOUD_LAYERS];
-        let layer_count = cloud.layers.len().min(MAX_CLOUD_LAYERS);
-        for (i, sub) in cloud.layers.iter().take(MAX_CLOUD_LAYERS).enumerate() {
+        // `enabled` is a master switch: zero active layers means the raymarch
+        // accumulates no density, so nothing composites onto the scene.
+        let layer_count = if cloud.enabled {
+            cloud.layers.len().min(MAX_CLOUD_LAYERS)
+        } else {
+            0
+        };
+        for (i, sub) in cloud.layers.iter().take(layer_count).enumerate() {
             let wrap = (sub.noise_tile * 32.0).max(1.0);
             let raw = sub.wind_velocity * world_time;
             let wind_offset = Vec2::new(raw.x.rem_euclid(wrap), raw.y.rem_euclid(wrap));
