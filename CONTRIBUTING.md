@@ -113,7 +113,7 @@ needs something from the app, it *inverts* rather than reaching into gameplay:
   - `cargo test --workspace`
   - `cargo test --workspace --no-default-features`
   - Run `scripts/web_check.sh`, using WSL if necessary.
-- _Never_ run `cargo build`.
+- _Never_ run `cargo build` or `cargo run`. Instead, use `cargo clippy`, as above.
 
 ### Type system patterns
 
