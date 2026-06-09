@@ -340,6 +340,13 @@ pub struct FpsController {
     /// tick. Triggers the recovery transition once it crosses
     /// [`FpsConfig::ground_recovery_s`].
     pub grounded_time_s: f32,
+    /// Smoothed torso lean (radians, positive = forward) applied while
+    /// ragdolling so the body pitches into the velocity direction, and
+    /// eased back to zero on recovery. Driven by the ragdoll torso-pitch
+    /// system in `body::ragdoll`; read by the ragdoll rig driver and the
+    /// body transform sync, both of which pivot the lean about the head
+    /// so the camera never moves.
+    pub ragdoll_pitch: f32,
 }
 
 impl FpsController {

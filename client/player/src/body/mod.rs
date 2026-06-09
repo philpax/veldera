@@ -200,7 +200,7 @@ pub struct BodyVisual {
     /// ragdoll; `Some` while ragdolling and the rig was assembled
     /// successfully (Hips + neck anchor found). Built by
     /// [`ragdoll::manage_ragdoll_skeleton`], pinned each tick by
-    /// [`ragdoll::drive_ragdoll_anchor`], and consumed by
+    /// [`ragdoll::drive_ragdoll_rig`], and consumed by
     /// [`ragdoll::sync_bones_from_physics`]. Its `Some`/`None` edge
     /// is what the skeleton manager uses to detect ragdoll
     /// entry/exit.
@@ -259,14 +259,20 @@ impl Plugin for BodyPlugin {
             )
                 .chain(),
         )
-        // Re-pin the kinematic neck anchor to the controller right
-        // before Avian's solve (and after `apply_origin_shift`,
-        // which lives in the previous schedule), so the dangling
-        // chain hangs from the controller's current position this
-        // physics tick.
+        // Drive the ragdoll rig right before Avian's solve (and after
+        // `apply_origin_shift`, which lives in the previous schedule):
+        // ease the torso lean toward the velocity direction, then pin
+        // the kinematic torso and apply the limb forces, so the rig
+        // hangs from the controller's current position this physics
+        // tick.
         .add_systems(
             bevy::app::FixedPostUpdate,
-            ragdoll::drive_ragdoll_anchor.before(avian3d::prelude::PhysicsSystems::Prepare),
+            (
+                ragdoll::update_ragdoll_torso_pitch,
+                ragdoll::drive_ragdoll_rig,
+            )
+                .chain()
+                .before(avian3d::prelude::PhysicsSystems::Prepare),
         )
         .add_systems(
             bevy::app::RunFixedMainLoop,
@@ -770,7 +776,6 @@ fn sync_body_transform(
         // bottom is `height/2` below the centre — *not* `height/2 + radius`
         // (that would put the feet a full extra radius below the capsule).
         let foot_offset = local_up * (controller.height * 0.5);
-        let _ = config;
         let delta_local = interpolated - logical_transform.translation;
         // Head-lock: subtract the previous frame's head-bone wobble so
         // the body shifts to keep its head where the bind pose would put
@@ -787,9 +792,10 @@ fn sync_body_transform(
                 f64::from(delta_local.z - head_lock.z),
             );
 
-        // Yaw-only rotation in the radial frame: model faces "north" in
-        // the radial plane; rotate about local up by `controller.yaw`.
-        // No pitch contribution — the body never leans with head pitch.
+        // Yaw rotation in the radial frame: model faces "north" in the
+        // radial plane; rotate about local up by `controller.yaw`. The
+        // body never leans with head pitch — look stays decoupled from
+        // the body.
         //
         // Build a right-handed `(right, up, forward)` basis. The model's
         // local +X (right) corresponds to `local_up × forward` in world
@@ -799,14 +805,33 @@ fn sync_body_transform(
         let forward =
             (frame.north * controller.yaw.cos() - frame.east * controller.yaw.sin()).normalize();
         let right = local_up.cross(forward).normalize();
-        // The body root stays upright even while ragdolling: the limp
-        // dangle lives entirely in the per-bone local transforms
-        // `ragdoll::sync_bones_from_physics` writes, so the root only
-        // needs to provide a stable, sensibly-placed parent frame for
-        // those bones to hang from.
-        body_transform.rotation = Quat::from_mat3(&Mat3::from_cols(right, local_up, forward));
+        let upright = Quat::from_mat3(&Mat3::from_cols(right, local_up, forward));
 
-        let _ = resolved;
+        // While ragdolling, the root leans into the velocity direction
+        // (`FpsController::ragdoll_pitch`, eased back to zero on
+        // recovery). The lean pivots about the bind-pose head, so the
+        // head — and therefore the camera — stays exactly where the
+        // unleaned body would put it: the head-lock's desired head
+        // position (`body_world + rotation * head_y`) algebraically
+        // cancels back to the unpitched value. The physics rig leans by
+        // the same angle about the same pivot in `drive_ragdoll_rig`,
+        // so the limbs hang off a torso the two systems agree on.
+        let pitch = controller.ragdoll_pitch;
+        if pitch.abs() > 1e-4 {
+            // Crouching scales the head height the same way head-lock
+            // does, so the pivot tracks the crouched head.
+            let height_ratio = if config.height > 0.0 {
+                (controller.height / config.height).clamp(0.0, 1.0)
+            } else {
+                1.0
+            };
+            let pivot = local_up * (resolved.head_bone_y_m * height_ratio);
+            let pitch_rot = Quat::from_axis_angle(right, pitch);
+            body_world_pos.position += (pivot - pitch_rot * pivot).as_dvec3();
+            body_transform.rotation = pitch_rot * upright;
+        } else {
+            body_transform.rotation = upright;
+        }
     }
 }
 

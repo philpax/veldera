@@ -11,7 +11,7 @@
 //! does so by pinning the torso to the controller and hanging the limbs
 //! off it:
 //!
-//! 1. **Kinematic torso** ([`drive_ragdoll_anchor`]). The spine,
+//! 1. **Kinematic torso** ([`drive_ragdoll_rig`]). The spine,
 //!    shoulders, and neck ([`is_torso`]) are each a
 //!    `RigidBody::Kinematic` whose `Position`/`Rotation` we re-pin every
 //!    physics tick to the controller's frame — at the offsets and
@@ -55,16 +55,33 @@
 //! one physics-coherent frame, so no mesh stretch); and real capsule
 //! volume + self-collision stops the limbs gliding through each other.
 //!
-//! Limb joints carry swing/twist angle limits relative to the bind pose
-//! ([`joint_limits_rad`]), so the limbs can't windmill or hyperextend
-//! past a cone around their rest pose. (The cones are symmetric for now;
-//! one-directional hinges for elbows/knees would be the next refinement.)
+//! Limb joints are anatomical rather than generic ball sockets
+//! ([`joint_kind`]): knees and elbows are one-directional hinges
+//! (flexion only, no hyperextension), with the flexion axis derived
+//! from the limb's bend in the entry pose; hips and shoulders are swing
+//! cones whose centre is pitched toward body-forward, so the limb can
+//! flex much further than it can extend; hands and feet keep small
+//! symmetric cones.
+//!
+//! On top of the passive rig, [`drive_ragdoll_rig`] keeps the limbs
+//! looking *alive* rather than drowned: a weak muscle drive blends each
+//! limb's angular velocity toward a slowly flailing target pose
+//! ([`flail_oscillation`]), quadratic aerodynamic drag makes the limbs
+//! trail the airflow, and linear damping acts on the velocity *relative
+//! to the player* — world-space damping at fall speed would stream the
+//! limbs upward at tens of g, which is exactly the boot-in-your-face
+//! failure mode this replaces. The torso also leans into the velocity
+//! direction ([`update_ragdoll_torso_pitch`]), pivoting about the head
+//! so the camera never moves.
 //!
 //! Not yet modelled (clean follow-ups): terrain/building collision for
 //! the bones (needs CCD at launch speed), and mesh-derived capsule
 //! dimensions (radii are currently heuristic per body region).
 
-use std::collections::HashMap;
+use std::{
+    collections::HashMap,
+    f32::consts::{FRAC_PI_2, PI, TAU},
+};
 
 use avian3d::prelude::*;
 use bevy::{prelude::*, reflect::TypePath};
@@ -74,7 +91,7 @@ use veldera_geo::{
     coords::RadialFrame,
     floating_origin::{FloatingOriginCamera, WorldPosition},
 };
-use veldera_physics::GameLayer;
+use veldera_physics::{GameLayer, PhysicsConfig};
 
 use super::{
     BodyVisual,
@@ -111,37 +128,131 @@ pub struct RagdollConfig {
     pub min_capsule_length_m: f32,
     /// Uniform per-bone collider density (kg/m³).
     pub bone_density_kg_per_m3: f32,
-    /// Linear damping on dynamic limbs (air-resistance stand-in).
-    pub linear_damping: f32,
-    /// Angular damping on dynamic limbs — the main anti-flailing knob.
+    /// Damping (1/s) applied to a limb's velocity *relative to the player*.
+    /// World-space damping is wrong here: at fall speed it would decelerate
+    /// the limbs against the air while the torso is forced down at the
+    /// player's velocity, streaming the limbs upward at tens of g.
+    pub relative_linear_damping: f32,
+    /// Angular damping on dynamic limbs.
     pub angular_damping: f32,
     /// Bone-on-bone self-collision friction.
     pub bone_friction: f32,
-    /// Spherical-joint point compliance (m/N); lower = stiffer.
+    /// Joint point compliance (m/N); lower = stiffer.
     pub joint_compliance: f32,
     /// Time constant (s) for the kinematic neck anchor's soft correction.
     pub anchor_correction_tau_s: f32,
     /// Maximum per-bone divergence from the player velocity (m/s).
     pub bone_max_rel_speed_m_s: f32,
-    /// Per-region joint swing/twist limits.
+    /// Per-region joint limits (hinge ranges, swing cones, cone tilts).
     pub joint_limits: RagdollJointLimits,
+    /// Quadratic aerodynamic drag on the limbs.
+    pub aero: RagdollAero,
+    /// Muscle-tone drive pulling each limb toward its target pose.
+    pub muscle: RagdollMuscle,
+    /// Procedural flail animation fed to the muscle drive as its target.
+    pub flail: RagdollFlail,
+    /// Torso lean into the velocity direction while ragdolling.
+    pub torso_pitch: RagdollTorsoPitch,
 }
 
-/// Swing-cone and twist half-angles (degrees) per limb region, keyed by the
-/// child bone hanging off each joint. Proximal limbs (upper arm/thigh) get the
-/// widest cone, mid limbs (forearm/shin) a tighter one, extremities the least.
+/// Per-region joint limits, keyed by the child bone hanging off each joint.
+/// Hips and shoulders are swing cones (with the cone centre pitched toward
+/// body-forward to fake anatomical asymmetry); knees and elbows are
+/// one-directional hinges; hands and feet are small symmetric cones.
 #[derive(Default, Clone, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct RagdollJointLimits {
-    /// Upper arms and thighs (`LeftArm`, `RightArm`, `LeftUpLeg`, `RightUpLeg`).
+    /// Swing-cone and twist half-angles for upper arms and thighs
+    /// (`LeftArm`, `RightArm`, `LeftUpLeg`, `RightUpLeg`), degrees.
     pub proximal_swing_deg: f32,
     pub proximal_twist_deg: f32,
-    /// Forearms and shins (`LeftForeArm`, `RightForeArm`, `LeftLeg`, `RightLeg`).
-    pub mid_swing_deg: f32,
-    pub mid_twist_deg: f32,
-    /// Everything else (hands, feet).
+    /// How far the hip swing cone's centre is pitched toward body-forward
+    /// (degrees). A leg can flex far past vertical but barely extends
+    /// behind the body; tilting the cone gives `swing + pitch` of flexion
+    /// but only `swing - pitch` of extension. Keep below the proximal
+    /// swing so the entry pose stays inside the cone.
+    pub hip_cone_pitch_deg: f32,
+    /// As [`hip_cone_pitch_deg`](Self::hip_cone_pitch_deg), for the shoulders.
+    pub shoulder_cone_pitch_deg: f32,
+    /// Maximum knee flexion (degrees) from dead straight. Knees are hinges:
+    /// they bend one way only, and never hyperextend.
+    pub knee_flexion_max_deg: f32,
+    /// Maximum elbow flexion (degrees) from dead straight.
+    pub elbow_flexion_max_deg: f32,
+    /// Swing-cone and twist half-angles for hands and feet, degrees.
     pub extremity_swing_deg: f32,
     pub extremity_twist_deg: f32,
+}
+
+/// Quadratic aerodynamic drag on the dynamic limbs. The limbs decelerate
+/// against the airflow at `g * (speed / terminal_speed)²`, so the limbs of a
+/// fast-falling body trail upward and flutter — the physically grounded
+/// version of what world-space linear damping used to fake.
+#[derive(Default, Clone, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct RagdollAero {
+    /// Speed (m/s) at which drag balances gravity. `0` disables drag.
+    pub terminal_speed_m_s: f32,
+    /// Cap on the drag deceleration, in multiples of gravity, so a
+    /// 150 m/s yeet doesn't rip the limbs into their joint limits.
+    pub max_drag_g: f32,
+}
+
+/// Muscle tone: each tick the limb's angular velocity is blended toward the
+/// velocity that would carry it onto its target pose (the entry pose composed
+/// with the [`RagdollFlail`] oscillation). Weak gains read as a person
+/// straining against the tumble; zero reads as a corpse.
+#[derive(Default, Clone, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct RagdollMuscle {
+    /// Blend rate (1/s) of limb angular velocity toward the corrective
+    /// velocity. `0` disables the muscle drive entirely.
+    pub tone_per_s: f32,
+    /// Time constant (s) converting pose error to desired angular velocity;
+    /// smaller = snappier pursuit of the target pose.
+    pub response_tau_s: f32,
+    /// Cap on the corrective angular velocity (rad/s).
+    pub max_angular_velocity_rad_s: f32,
+    /// Per-region strength scale: shoulders/hips, elbows/knees, hands/feet.
+    pub proximal_gain: f32,
+    pub mid_gain: f32,
+    pub extremity_gain: f32,
+}
+
+/// Procedural flail: the muscle target pose is the ragdoll-entry pose with a
+/// slow oscillation layered on. Ball joints (shoulders, hips) stir their
+/// target around a cone; hinges (elbows, knees) pump into flexion. Left and
+/// right limbs run in opposite phase, so arms windmill and legs bicycle.
+#[derive(Default, Clone, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct RagdollFlail {
+    /// Arm stir cone half-angle (degrees; also the elbow pump amplitude).
+    /// `0` disables the arm flail.
+    pub arm_swing_deg: f32,
+    pub arm_frequency_hz: f32,
+    /// Leg stir cone half-angle (degrees; also the knee pump amplitude).
+    /// `0` disables the leg flail.
+    pub leg_swing_deg: f32,
+    pub leg_frequency_hz: f32,
+}
+
+/// Torso lean into the velocity direction while ragdolling: diving forward
+/// pitches the body face-down, launching upward leans it back. The lean
+/// pivots about the head so the camera (and a future VR view) never moves —
+/// only the body below it swings.
+#[derive(Default, Clone, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct RagdollTorsoPitch {
+    /// Maximum lean (degrees). `0` disables the lean.
+    pub max_deg: f32,
+    /// Fraction of the velocity vector's pitch angle the torso adopts.
+    pub velocity_gain: f32,
+    /// Smoothing time constant (s) for the lean (and for easing back
+    /// upright after landing).
+    pub tau_s: f32,
+    /// Speed (m/s) at which the lean reaches full strength; below this it
+    /// fades out so a near-stationary tumble doesn't tilt the body.
+    pub full_strength_speed_m_s: f32,
 }
 
 // ============================================================================
@@ -205,7 +316,7 @@ const RAGDOLL_ANCHOR: Bone = Bone::Neck;
 ///
 /// The torso bones — the spine column and shoulders, plus the [`RAGDOLL_ANCHOR`]
 /// neck — are all driven kinematically, pinned to the controller's frame each
-/// tick by [`drive_ragdoll_anchor`] at their captured offsets and upright bind
+/// tick by [`drive_ragdoll_rig`] at their captured offsets and upright bind
 /// orientations. Making the torso a rigid, controller-driven unit is what keeps
 /// the chest and head aligned with the view and makes the body feel *driven by*
 /// the controller rather than the reverse.
@@ -242,7 +353,7 @@ pub struct RagdollGraph {
     /// Per kinematic torso bone (spine, shoulders, neck anchor): where
     /// it sits relative to the logical player, in the controller's
     /// yaw-oriented radial basis `(right, up, forward)`. Captured at
-    /// ragdoll entry; [`drive_ragdoll_anchor`] reconstructs each torso
+    /// ragdoll entry; [`drive_ragdoll_rig`] reconstructs each torso
     /// bone's world target from this every tick so the torso rides the
     /// controller rigidly, rotating with its yaw.
     pub torso_offsets: HashMap<Bone, Vec3>,
@@ -252,6 +363,23 @@ pub struct RagdollGraph {
     /// bone's target rotation, so the torso holds a coherent upright
     /// pose that yaws with the controller.
     pub bind_relative_rotations: HashMap<Bone, Quat>,
+    /// Per dynamic limb bone: what the muscle drive needs to compute the
+    /// bone's target pose each tick.
+    pub limb_drives: HashMap<Bone, LimbDrive>,
+}
+
+/// Muscle-drive bookkeeping for one dynamic limb bone, captured at
+/// ragdoll entry.
+pub struct LimbDrive {
+    /// The parent bone in the ragdoll graph, whose current rotation the
+    /// target pose is composed onto.
+    pub parent: Bone,
+    /// Parent→child rotation at ragdoll entry — the muscle's base target.
+    pub bind_relative: Quat,
+    /// Flexion axis in the child bone's local frame, for hinge joints
+    /// (elbows, knees). `None` for ball joints, or when the limb was too
+    /// straight at entry for the axis to be derived.
+    pub hinge_axis: Option<Vec3>,
 }
 
 // ============================================================================
@@ -322,9 +450,55 @@ pub(super) fn manage_ragdoll_skeleton(
     }
 }
 
-/// Drive the kinematic torso (spine, shoulders, neck anchor) to track
-/// the controller each physics tick, before Avian's solve, and keep the
-/// dynamic limbs from diverging too far in one step.
+/// Ease the controller's torso lean toward the velocity direction while
+/// ragdolling, and back to zero otherwise.
+///
+/// The smoothed angle lives on [`FpsController::ragdoll_pitch`] and is
+/// consumed by two systems that must agree: [`drive_ragdoll_rig`] (the
+/// physics torso) and `sync_body_transform` (the rendered body root).
+/// Both pivot the lean about the head, so the camera — and a future VR
+/// view — never moves; only the body below it swings. Smoothing
+/// continues after ragdoll exit, so the body visibly straightens back
+/// up over `tau_s` on landing.
+pub(super) fn update_ragdoll_torso_pitch(
+    time: Res<Time>,
+    config: Res<RagdollConfig>,
+    mut logical_query: Query<
+        (&mut FpsController, &LinearVelocity, &WorldPosition),
+        With<LogicalPlayer>,
+    >,
+) {
+    let dt = time.delta_secs();
+    for (mut controller, velocity, world_pos) in &mut logical_query {
+        let cfg = &config.torso_pitch;
+        let max = cfg.max_deg.to_radians();
+        let target = if config.enable_skeletal
+            && max > 0.0
+            && controller.ragdoll_state == RagdollState::Ragdolling
+        {
+            let frame = RadialFrame::from_ecef_position(world_pos.position);
+            let forward = (frame.north * controller.yaw.cos() - frame.east * controller.yaw.sin())
+                .normalize_or_zero();
+            let v = velocity.0;
+            // Pitch of the velocity vector in the view's vertical plane:
+            // positive when diving, negative when launched upward. The
+            // forward component is floored at zero so flying backward
+            // reads as a plain fall rather than a forward lean.
+            let raw = (-v.dot(frame.up)).atan2(v.dot(forward).max(0.0));
+            let strength = (v.length() / cfg.full_strength_speed_m_s.max(1e-3)).clamp(0.0, 1.0);
+            (raw * cfg.velocity_gain * strength).clamp(-max, max)
+        } else {
+            0.0
+        };
+        let alpha = 1.0 - (-dt / cfg.tau_s.max(1e-3)).exp();
+        controller.ragdoll_pitch += (target - controller.ragdoll_pitch) * alpha;
+    }
+}
+
+/// Drive the whole rig each physics tick, before Avian's solve: pin the
+/// kinematic torso to the controller, and apply the three forces that
+/// keep the dynamic limbs alive (muscle tone, aerodynamic drag, and
+/// relative-frame damping).
 ///
 /// Runs in `FixedPostUpdate` before [`PhysicsSystems::Prepare`], which
 /// is after `physics::apply_origin_shift` (a previous schedule, so the
@@ -339,20 +513,35 @@ pub(super) fn manage_ragdoll_skeleton(
 /// the solver would resolve as a spike), each torso bone rides the same
 /// "treadmill": its `LinearVelocity` is set to the player's render
 /// velocity plus a soft `position_error / tau` correction toward its
-/// pinned target. Its orientation is set directly to the upright bind
-/// pose — spherical joints anchor at the body origin, so rotating a
-/// torso bone only moves where its limbs attach, never the torso itself
-/// (it's kinematic). Targets are reconstructed in render space from
-/// absolute ECEF (`WorldPosition - camera`), independent of origin-shift
-/// timing.
+/// pinned target. Its orientation is the upright bind pose, leaned by
+/// [`FpsController::ragdoll_pitch`] about the neck pivot — the same
+/// head-centred pivot the rendered body uses, so the head stays at the
+/// camera while the chest and hips swing below it. Targets are
+/// reconstructed in render space from absolute ECEF
+/// (`WorldPosition - camera`), independent of origin-shift timing.
 ///
-/// **Limb bones** get only a safety clamp: their velocity is capped to
-/// the player's ± [`RAGDOLL_BONE_MAX_REL_SPEED_M_S`] so a joint never
-/// has to absorb a large differential in one step. Their rotation is
-/// left entirely to physics — offset-COM capsules hang under gravity.
+/// **Limb bones** get, in order:
+///
+/// 1. *Muscle tone*: the limb's angular velocity is blended toward the
+///    velocity that would carry it onto its target pose — the entry pose
+///    composed onto the parent's current rotation, plus the
+///    [`flail_oscillation`]. Weak gains keep it readable as straining
+///    rather than animation playback.
+/// 2. *Aerodynamic drag*: quadratic deceleration against the airflow,
+///    normalized so drag balances gravity at the configured terminal
+///    speed. This is what makes the limbs of a fast-falling body trail
+///    and flutter.
+/// 3. *Relative damping and clamp*: the velocity differential from the
+///    player is exponentially damped and then capped at
+///    [`RagdollConfig::bone_max_rel_speed_m_s`], so a joint never has to
+///    absorb a large differential in one step. Damping the *relative*
+///    velocity matters: world-space damping at fall speed acts as a
+///    huge fictitious upward force on the limbs.
 #[allow(clippy::type_complexity)]
-pub(super) fn drive_ragdoll_anchor(
+pub(super) fn drive_ragdoll_rig(
+    time: Res<Time>,
     config: Res<RagdollConfig>,
+    physics_config: Res<PhysicsConfig>,
     camera_query: Query<&FloatingOriginCamera>,
     body_query: Query<&BodyVisual>,
     logical_query: Query<(&WorldPosition, &FpsController, &LinearVelocity), With<LogicalPlayer>>,
@@ -372,6 +561,8 @@ pub(super) fn drive_ragdoll_anchor(
     let Ok(camera) = camera_query.single() else {
         return;
     };
+    let dt = time.delta_secs();
+    let elapsed = time.elapsed_secs();
     for body in &body_query {
         let Some(graph) = body.ragdoll_graph.as_ref() else {
             continue;
@@ -389,39 +580,107 @@ pub(super) fn drive_ragdoll_anchor(
         let upright = Quat::from_mat3(&Mat3::from_cols(right, frame.up, forward));
         let player_velocity = player_velocity.0;
 
+        // Torso lean, pivoting about the neck anchor's captured offset so
+        // the head stays put while the body swings below it.
+        let pitch_rot = Quat::from_axis_angle(right, controller.ragdoll_pitch);
+        let pivot = graph
+            .torso_offsets
+            .get(&RAGDOLL_ANCHOR)
+            .map(|o| right * o.x + frame.up * o.y + forward * o.z)
+            .unwrap_or(Vec3::ZERO);
+
+        // Pass 1: pin the kinematic torso. Reconstruct each bone's world
+        // target from the captured yaw-frame offset (leaned about the
+        // pivot), ride the treadmill velocity toward it, and set the
+        // leaned upright bind orientation directly.
         for (bone, ragdolled) in &graph.bones {
+            if !is_torso(*bone) {
+                continue;
+            }
             let Ok((position, mut rotation, mut linear, mut angular)) =
                 bone_query.get_mut(ragdolled.physics_entity)
             else {
                 continue;
             };
+            let (Some(&offset), Some(&bind_relative)) = (
+                graph.torso_offsets.get(bone),
+                graph.bind_relative_rotations.get(bone),
+            ) else {
+                continue;
+            };
+            let offset_world = right * offset.x + frame.up * offset.y + forward * offset.z;
+            let target = logical_render + pivot + pitch_rot * (offset_world - pivot);
+            linear.0 = player_velocity + (target - position.0) / config.anchor_correction_tau_s;
+            rotation.0 = pitch_rot * upright * bind_relative;
+            angular.0 = Vec3::ZERO;
+        }
 
+        // Pass 2: snapshot every bone's rotation — the torso's freshly
+        // pinned, the limbs' from the last solve — so the muscle drive
+        // composes its targets on a coherent frame.
+        let mut rotations: HashMap<Bone, Quat> = HashMap::new();
+        for (bone, ragdolled) in &graph.bones {
+            if let Ok((_, rotation, _, _)) = bone_query.get(ragdolled.physics_entity) {
+                rotations.insert(*bone, rotation.0);
+            }
+        }
+
+        // Pass 3: the dynamic limbs.
+        for (bone, ragdolled) in &graph.bones {
             if is_torso(*bone) {
-                // Kinematic torso bone: pin to the controller frame.
-                // Reconstruct its world target from the captured
-                // yaw-frame offset, ride the treadmill velocity toward
-                // it, and set the upright bind orientation directly.
-                let (Some(&offset), Some(&bind_relative)) = (
-                    graph.torso_offsets.get(bone),
-                    graph.bind_relative_rotations.get(bone),
-                ) else {
-                    continue;
-                };
-                let target =
-                    logical_render + right * offset.x + frame.up * offset.y + forward * offset.z;
-                linear.0 = player_velocity + (target - position.0) / config.anchor_correction_tau_s;
-                rotation.0 = upright * bind_relative;
-                angular.0 = Vec3::ZERO;
-            } else {
-                // Dynamic limb: cap divergence from the common-mode
-                // (player) velocity so the joints never absorb a large
-                // differential in one step. Rotation is left to physics.
-                let relative = linear.0 - player_velocity;
-                let speed = relative.length();
-                if speed > config.bone_max_rel_speed_m_s {
-                    linear.0 = player_velocity + relative * (config.bone_max_rel_speed_m_s / speed);
+                continue;
+            }
+            let Ok((_, rotation, mut linear, mut angular)) =
+                bone_query.get_mut(ragdolled.physics_entity)
+            else {
+                continue;
+            };
+
+            // Muscle tone: blend the limb's angular velocity toward the
+            // corrective velocity that carries it onto its flailing
+            // target pose.
+            let muscle = &config.muscle;
+            if muscle.tone_per_s > 0.0
+                && let Some(drive) = graph.limb_drives.get(bone)
+                && let Some(&parent_rot) = rotations.get(&drive.parent)
+            {
+                let target = parent_rot
+                    * drive.bind_relative
+                    * flail_oscillation(&config.flail, *bone, drive.hinge_axis, elapsed);
+                let mut error = target * rotation.0.inverse();
+                // Take the shortest arc; the antipodal quaternion is the
+                // same rotation but would unwind the long way round.
+                if error.w < 0.0 {
+                    error = -error;
+                }
+                let desired = (error.to_scaled_axis() / muscle.response_tau_s.max(1e-3))
+                    .clamp_length_max(muscle.max_angular_velocity_rad_s);
+                let blend = 1.0 - (-muscle.tone_per_s * muscle_gain(muscle, *bone) * dt).exp();
+                let current = angular.0;
+                angular.0 = current + (desired - current) * blend;
+            }
+
+            // Aerodynamic drag against the airflow, capped so extreme
+            // launch speeds don't pin the limbs into their joint limits.
+            let aero = &config.aero;
+            if aero.terminal_speed_m_s > 0.0 {
+                let speed = linear.0.length();
+                if speed > 1e-3 {
+                    let drag = (physics_config.gravity * (speed / aero.terminal_speed_m_s).powi(2))
+                        .min(physics_config.gravity * aero.max_drag_g);
+                    let dv = (drag * dt).min(speed);
+                    let current = linear.0;
+                    linear.0 = current - current * (dv / speed);
                 }
             }
+
+            // Damp the limb's velocity relative to the player, then cap
+            // the divergence so the joints never absorb a large
+            // differential in one step.
+            let mut relative = linear.0 - player_velocity;
+            relative *= (-config.relative_linear_damping * dt).exp();
+            relative = relative.clamp_length_max(config.bone_max_rel_speed_m_s);
+            linear.0 = player_velocity + relative;
         }
     }
 }
@@ -550,24 +809,153 @@ fn bone_radius(cfg: &RagdollConfig, bone: Bone) -> f32 {
     }
 }
 
-/// Per-joint swing-cone and twist half-angles (degrees), keyed by the
-/// *child* bone (the one hanging off the joint). The joint frames are
-/// oriented so the bind pose is the zero, so these bound how far the
-/// limb can deviate from its rest pose: the swing cone caps how far it
-/// can bend away from the bone axis, the twist caps how far it can roll.
-/// Symmetric for now — a one-directional hinge for elbows/knees is a
-/// later refinement — but the cones already stop the limbs windmilling
-/// and hyperextending. Proximal limbs (upper arm/thigh) get the widest
-/// cone, mid limbs (forearm/shin) a tighter one, extremities the least.
-fn joint_limits_rad(cfg: &RagdollConfig, child: Bone) -> (f32, f32) {
+/// How a limb joint is modelled, keyed by the *child* bone (the one
+/// hanging off the joint).
+enum JointKind {
+    /// Ball socket with a swing cone of half-angle `swing`, twist range
+    /// ±`twist`, and the cone centre pitched toward body-forward by
+    /// `pitch` (all radians).
+    Cone { swing: f32, twist: f32, pitch: f32 },
+    /// One-directional hinge with `max_flexion` radians of travel from
+    /// dead straight, and no hyperextension.
+    Hinge { max_flexion: f32 },
+}
+
+/// Anatomical joint model per child bone: ball sockets at the shoulders
+/// and hips (cones pitched toward flexion), hinges at the elbows and
+/// knees, and small symmetric cones at the hands and feet.
+fn joint_kind(cfg: &RagdollConfig, child: Bone) -> JointKind {
     use Bone::*;
-    let limits = &cfg.joint_limits;
-    let (swing_deg, twist_deg): (f32, f32) = match child {
-        Arm(_) | UpLeg(_) => (limits.proximal_swing_deg, limits.proximal_twist_deg),
-        ForeArm(_) | Leg(_) => (limits.mid_swing_deg, limits.mid_twist_deg),
-        _ => (limits.extremity_swing_deg, limits.extremity_twist_deg),
+    let l = &cfg.joint_limits;
+    match child {
+        Arm(_) => JointKind::Cone {
+            swing: l.proximal_swing_deg.to_radians(),
+            twist: l.proximal_twist_deg.to_radians(),
+            pitch: l.shoulder_cone_pitch_deg.to_radians(),
+        },
+        UpLeg(_) => JointKind::Cone {
+            swing: l.proximal_swing_deg.to_radians(),
+            twist: l.proximal_twist_deg.to_radians(),
+            pitch: l.hip_cone_pitch_deg.to_radians(),
+        },
+        ForeArm(_) => JointKind::Hinge {
+            max_flexion: l.elbow_flexion_max_deg.to_radians(),
+        },
+        Leg(_) => JointKind::Hinge {
+            max_flexion: l.knee_flexion_max_deg.to_radians(),
+        },
+        _ => JointKind::Cone {
+            swing: l.extremity_swing_deg.to_radians(),
+            twist: l.extremity_twist_deg.to_radians(),
+            pitch: 0.0,
+        },
+    }
+}
+
+/// Hyperextension grace past dead straight for hinge joints (radians,
+/// ~3°), so the solver has a little slack before the hard stop.
+const HINGE_EXTENSION_MARGIN_RAD: f32 = 0.05;
+
+/// Minimum `sin(bend)` between the parent and child bone directions for
+/// the flexion axis to be numerically meaningful (~2°). Below this the
+/// cross product is rounding noise — normalizing it would produce a
+/// garbage axis — so the joint falls back to a symmetric cone.
+const HINGE_MIN_BEND_SIN: f32 = 0.035;
+
+/// Twist half-angle (radians, ~10°) for the straight-limb cone fallback.
+const HINGE_FALLBACK_TWIST_RAD: f32 = 0.17;
+
+/// The flexion axis (normalized, world space) and current bend angle
+/// between a parent and child bone span, or `None` when the limb is too
+/// straight (or degenerate) for the axis to be derived. The axis is
+/// oriented so positive rotation bends the limb *further* — anatomical
+/// flexion, whichever way this limb's anatomy bends.
+fn hinge_from_bend(parent_span: Vec3, child_span: Vec3) -> Option<(Vec3, f32)> {
+    const MIN_SPAN_M: f32 = 1e-3;
+    let (parent_len, child_len) = (parent_span.length(), child_span.length());
+    if parent_len < MIN_SPAN_M || child_len < MIN_SPAN_M {
+        return None;
+    }
+    let parent_dir = parent_span / parent_len;
+    let child_dir = child_span / child_len;
+    let cross = parent_dir.cross(child_dir);
+    let sin_bend = cross.length();
+    // Rejects both near-straight and fully folded-back limbs; the latter
+    // is anatomically impossible at entry anyway.
+    if sin_bend < HINGE_MIN_BEND_SIN {
+        return None;
+    }
+    let bend = sin_bend.atan2(parent_dir.dot(child_dir));
+    Some((cross / sin_bend, bend))
+}
+
+/// Per-region muscle strength scale.
+fn muscle_gain(muscle: &RagdollMuscle, bone: Bone) -> f32 {
+    use Bone::*;
+    match bone {
+        Arm(_) | UpLeg(_) => muscle.proximal_gain,
+        ForeArm(_) | Leg(_) => muscle.mid_gain,
+        _ => muscle.extremity_gain,
+    }
+}
+
+/// Phase offset separating the left and right limbs by half a cycle, so
+/// arms windmill and legs bicycle instead of moving in lockstep.
+fn side_phase(side: Side) -> f32 {
+    match side {
+        Side::Left => 0.0,
+        Side::Right => PI,
+    }
+}
+
+/// The flail offset composed onto a limb's entry pose to form its muscle
+/// target. Ball joints (shoulders, hips) stir the target around a cone —
+/// reads as windmilling without needing anatomical axes. Hinges (elbows,
+/// knees) pump into flexion along their flexion axis, biased positive so
+/// the oscillation stays inside the one-directional limit; distal bones
+/// lead their proximal parent by a quarter cycle so the limb whips
+/// rather than swinging as a plank.
+fn flail_oscillation(flail: &RagdollFlail, bone: Bone, hinge_axis: Option<Vec3>, t: f32) -> Quat {
+    use Bone::*;
+    let (amplitude_deg, frequency_hz, phase, flex_axis) = match bone {
+        Arm(side) => (
+            flail.arm_swing_deg,
+            flail.arm_frequency_hz,
+            side_phase(side),
+            None,
+        ),
+        ForeArm(side) => (
+            flail.arm_swing_deg,
+            flail.arm_frequency_hz,
+            side_phase(side) + FRAC_PI_2,
+            hinge_axis,
+        ),
+        UpLeg(side) => (
+            flail.leg_swing_deg,
+            flail.leg_frequency_hz,
+            side_phase(side),
+            None,
+        ),
+        Leg(side) => (
+            flail.leg_swing_deg,
+            flail.leg_frequency_hz,
+            side_phase(side) + FRAC_PI_2,
+            hinge_axis,
+        ),
+        _ => return Quat::IDENTITY,
     };
-    (swing_deg.to_radians(), twist_deg.to_radians())
+    let amplitude = amplitude_deg.to_radians();
+    if amplitude <= 0.0 || frequency_hz <= 0.0 {
+        return Quat::IDENTITY;
+    }
+    let angle = TAU * frequency_hz * t + phase;
+    match flex_axis {
+        Some(axis) => Quat::from_axis_angle(axis, amplitude * 0.5 * (1.0 + angle.sin())),
+        None => {
+            Quat::from_rotation_x(amplitude * angle.sin())
+                * Quat::from_rotation_z(amplitude * angle.cos())
+        }
+    }
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -687,7 +1075,7 @@ fn build_ragdoll_graph(
             Name::new(format!("ragdoll_{bone}")),
         ));
         if is_torso_bone {
-            // Kinematic: driven each tick by `drive_ragdoll_anchor`.
+            // Kinematic: driven each tick by `drive_ragdoll_rig`.
             entity_commands.insert((
                 RigidBody::Kinematic,
                 LinearVelocity::default(),
@@ -698,10 +1086,13 @@ fn build_ragdoll_graph(
             // torso flies with the controller too, so there's no
             // velocity differential for the solver to absorb — the limb
             // only sags once gravity overtakes the shared launch
-            // momentum.
+            // momentum. No `LinearDamping` here on purpose: Avian damps
+            // world-space velocity, which at fall speed would act as a
+            // huge fictitious upward force on the limbs;
+            // `drive_ragdoll_rig` damps the velocity relative to the
+            // player instead.
             entity_commands.insert((
                 RigidBody::Dynamic,
-                LinearDamping(cfg.linear_damping),
                 AngularDamping(cfg.angular_damping),
                 LinearVelocity(initial_velocity),
                 AngularVelocity::default(),
@@ -737,14 +1128,15 @@ fn build_ragdoll_graph(
         return None;
     }
 
-    // Pass 2: wire parent → child spherical joints, but only where the
-    // child is a dynamic limb. Joints between two torso bones are
-    // pointless — both are kinematically driven to fixed relative
-    // positions — and would just be extra constraints, so skip them.
-    // The anchor on the parent body is the child bone's world position
-    // expressed in the parent body's local frame; the anchor on the
-    // child is its own origin (Vec3::ZERO).
+    // Pass 2: wire parent → child joints, but only where the child is a
+    // dynamic limb. Joints between two torso bones are pointless — both
+    // are kinematically driven to fixed relative positions — and would
+    // just be extra constraints, so skip them. The anchor on the parent
+    // body is the child bone's world position expressed in the parent
+    // body's local frame; the anchor on the child is its own origin
+    // (Vec3::ZERO).
     let mut joints = Vec::new();
+    let mut limb_drives: HashMap<Bone, LimbDrive> = HashMap::new();
     for (bone, parent) in RAGDOLL_BONE_TABLE {
         let Some(parent) = parent else {
             continue;
@@ -768,31 +1160,118 @@ fn build_ragdoll_graph(
         let child_world_rot = child_global.rotation();
         let anchor_on_parent = parent_world_rot.inverse() * (child_world_pos - parent_world_pos);
 
-        // Orient the joint so the bind pose is the zero of the
-        // swing/twist limits: the parent frame's basis is the
-        // bind-relative parent→child rotation, the child frame's basis
-        // stays identity, so at rest the two frame bases coincide. The
-        // limits then bound deviation from the rest pose.
+        // The parent→child rotation at entry. With the parent frame's
+        // basis set to this (and the child frame's left identity), the
+        // two joint frames coincide at the entry pose, making it the
+        // zero of the joint limits.
         let bind_relative = parent_world_rot.inverse() * child_world_rot;
-        let (swing, twist) = joint_limits_rad(cfg, bone);
 
-        let joint_entity = commands
-            .spawn((
-                SphericalJoint::new(parent.physics_entity, child.physics_entity)
-                    .with_local_anchor1(anchor_on_parent)
-                    .with_local_anchor2(Vec3::ZERO)
-                    .with_local_basis1(bind_relative)
-                    .with_point_compliance(cfg.joint_compliance)
-                    .with_swing_limits(-swing, swing)
-                    .with_twist_limits(-twist, twist),
-                // Don't let a bone collide with the parent it's jointed
-                // to — adjacent capsules overlap at the shared joint by
-                // construction. Non-adjacent capsules still collide, so
-                // limbs stop at the torso.
-                JointCollisionDisabled,
-            ))
-            .id();
+        // For hinge candidates, derive the flexion axis from the limb's
+        // own bend in the entry pose: positive rotation about
+        // `cross(parent_dir, child_dir)` bends the limb further, which
+        // is anatomical flexion whichever way this limb's anatomy bends.
+        let hinge = match joint_kind(cfg, bone) {
+            JointKind::Hinge { max_flexion } => capsule_target(bone)
+                .and_then(|grandchild| tracked.get(&grandchild))
+                .and_then(|(_, grandchild_global)| {
+                    hinge_from_bend(
+                        child_world_pos - parent_world_pos,
+                        grandchild_global.translation() - child_world_pos,
+                    )
+                })
+                .map(|(axis_world, bend)| (axis_world, bend, max_flexion)),
+            JointKind::Cone { .. } => None,
+        };
+
+        let mut hinge_axis_local = None;
+        let joint_entity = match (joint_kind(cfg, bone), hinge) {
+            (JointKind::Hinge { .. }, Some((axis_world, bend, max_flexion))) => {
+                // Zero the joint frames at the *straightened* limb, so
+                // the hinge angle reads as anatomical flexion: the
+                // child's rotation-if-straight is the entry rotation
+                // unbent about the flexion axis, and the entry pose then
+                // sits at `+bend` inside the limits.
+                let straight_rot = Quat::from_axis_angle(axis_world, -bend) * child_world_rot;
+                let basis1 = parent_world_rot.inverse() * straight_rot;
+                let axis_child = child_world_rot.inverse() * axis_world;
+                hinge_axis_local = Some(axis_child);
+                // Widen past the configured maximum if the entry pose is
+                // already more bent (e.g. a deep crouch in the falling
+                // clip), so the joint never starts outside its limit.
+                let max_flexion = max_flexion.max(bend + HINGE_EXTENSION_MARGIN_RAD);
+                commands
+                    .spawn((
+                        RevoluteJoint::new(parent.physics_entity, child.physics_entity)
+                            .with_local_anchor1(anchor_on_parent)
+                            .with_local_anchor2(Vec3::ZERO)
+                            .with_local_basis1(basis1)
+                            .with_hinge_axis(axis_child)
+                            .with_point_compliance(cfg.joint_compliance)
+                            .with_angle_limits(-HINGE_EXTENSION_MARGIN_RAD, max_flexion),
+                        // Adjacent capsules overlap at the shared joint
+                        // by construction; see the cone arm below.
+                        JointCollisionDisabled,
+                    ))
+                    .id()
+            }
+            (kind, _) => {
+                // A hinge candidate whose limb is dead straight at entry
+                // has no derivable flexion axis; degrade to a modest
+                // symmetric cone rather than guessing a direction.
+                let (swing, twist, pitch) = match kind {
+                    JointKind::Cone {
+                        swing,
+                        twist,
+                        pitch,
+                    } => (swing, twist, pitch),
+                    JointKind::Hinge { max_flexion } => {
+                        tracing::debug!(
+                            "No usable flexion axis for {bone}; falling back to a symmetric cone"
+                        );
+                        (max_flexion * 0.5, HINGE_FALLBACK_TWIST_RAD, 0.0)
+                    }
+                };
+                // Pitch the swing cone's centre toward body-forward:
+                // rotating the parent basis by `tilt` moves the cone
+                // while the entry pose stays put, so the limb gets
+                // `swing + pitch` of flexion but only `swing - pitch` of
+                // extension. The entry pose must stay inside the cone,
+                // so the half-angle is floored accordingly.
+                let swing = swing.max(pitch.abs() + 0.05);
+                let basis1 = if pitch.abs() > 1e-4 {
+                    let axis_child = child_world_rot.inverse() * right;
+                    bind_relative * Quat::from_axis_angle(axis_child, -pitch)
+                } else {
+                    bind_relative
+                };
+                commands
+                    .spawn((
+                        SphericalJoint::new(parent.physics_entity, child.physics_entity)
+                            .with_local_anchor1(anchor_on_parent)
+                            .with_local_anchor2(Vec3::ZERO)
+                            .with_local_basis1(basis1)
+                            .with_point_compliance(cfg.joint_compliance)
+                            .with_swing_limits(-swing, swing)
+                            .with_twist_limits(-twist, twist),
+                        // Don't let a bone collide with the parent it's
+                        // jointed to — adjacent capsules overlap at the
+                        // shared joint by construction. Non-adjacent
+                        // capsules still collide, so limbs stop at the
+                        // torso.
+                        JointCollisionDisabled,
+                    ))
+                    .id()
+            }
+        };
         joints.push(joint_entity);
+        limb_drives.insert(
+            bone,
+            LimbDrive {
+                parent: parent_bone,
+                bind_relative,
+                hinge_axis: hinge_axis_local,
+            },
+        );
     }
 
     Some(RagdollGraph {
@@ -800,6 +1279,7 @@ fn build_ragdoll_graph(
         joints,
         torso_offsets,
         bind_relative_rotations,
+        limb_drives,
     })
 }
 
