@@ -15,10 +15,10 @@ pkgs.mkShell {
     vulkan-loader
 
     # X11 dependencies
-    xorg.libX11
-    xorg.libXcursor
-    xorg.libXi
-    xorg.libXrandr
+    libX11
+    libXcursor
+    libXi
+    libXrandr
 
     # Wayland dependencies
     libxkbcommon
@@ -31,14 +31,9 @@ pkgs.mkShell {
     vulkan-loader
     libxkbcommon
     wayland
-    xorg.libX11
-    xorg.libXcursor
-    xorg.libXi
-    xorg.libXrandr
+    libX11
+    libXcursor
+    libXi
+    libXrandr
   ]);
-
-  shellHook = ''
-    echo "Rust rocktree development environment"
-    echo "Run 'cargo build' to build, 'cargo run' to run the client"
-  '';
 }
