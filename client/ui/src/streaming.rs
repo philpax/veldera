@@ -14,11 +14,13 @@ use bevy::{ecs::system::SystemParam, prelude::*};
 use bevy_egui::egui;
 use glam::DVec3;
 
+use rocktree_decode::OctreePath;
 use veldera_geo::coords::RadialFrame;
 use veldera_physics::PhysicsStreamingConfig;
 use veldera_terrain::{
     lod::{FreezeLod, LodSnapshot, LodSnapshotRequest, LodTuning, SnapshotNode, SnapshotNodeState},
     mesh::RocktreeMeshMarker,
+    viz::LodVizSettings,
 };
 
 /// Resources for the streaming tab.
@@ -31,6 +33,7 @@ pub(super) struct StreamingParams<'w, 's> {
     pub tuning: ResMut<'w, LodTuning>,
     pub streaming: Res<'w, PhysicsStreamingConfig>,
     pub freeze: ResMut<'w, FreezeLod>,
+    pub viz: ResMut<'w, LodVizSettings>,
 }
 
 /// Per-frame UI state for the diagnostics map (zoom, layer toggles).
@@ -119,6 +122,8 @@ pub(super) fn render_streaming_tab(ui: &mut egui::Ui, params: &mut StreamingPara
              settles — handy for isolating LoD-transition artifacts.",
     );
 
+    draw_in_world_overlay_controls(ui, &mut params.viz);
+
     draw_top_down_map(ui, snapshot, view, tuning, streaming);
 
     ui.separator();
@@ -126,6 +131,45 @@ pub(super) fn render_streaming_tab(ui: &mut egui::Ui, params: &mut StreamingPara
 
     ui.separator();
     draw_counters_panel(ui, snapshot, mesh_count);
+}
+
+// ============================================================================
+// In-world overlay controls
+// ============================================================================
+
+fn draw_in_world_overlay_controls(ui: &mut egui::Ui, viz: &mut LodVizSettings) {
+    ui.separator();
+    ui.label("In-world overlay:");
+    ui.horizontal(|ui| {
+        ui.checkbox(&mut viz.draw_render_tiles, "Render tiles")
+            .on_hover_text("OBBs of the terrain meshes currently visible, coloured by depth.");
+        ui.checkbox(&mut viz.draw_collider_tiles, "Collider tiles")
+            .on_hover_text("OBBs of the tiles currently hosting physics colliders (white-tinted).");
+        ui.checkbox(&mut viz.draw_loading_nodes, "Loading")
+            .on_hover_text("Dim OBBs of the nodes with in-flight load requests.");
+    });
+    ui.horizontal(|ui| {
+        ui.label("Overlay range:");
+        ui.add(
+            egui::Slider::new(&mut viz.max_distance_m, 100.0..=20000.0)
+                .logarithmic(true)
+                .suffix(" m"),
+        );
+    });
+    ui.horizontal(|ui| {
+        ui.label("Overlay depth:");
+        ui.add(
+            egui::DragValue::new(&mut viz.depth_min)
+                .range(0..=viz.depth_max)
+                .speed(0.1),
+        );
+        ui.label("to");
+        ui.add(
+            egui::DragValue::new(&mut viz.depth_max)
+                .range(viz.depth_min..=OctreePath::MAX_DEPTH)
+                .speed(0.1),
+        );
+    });
 }
 
 // ============================================================================
@@ -210,8 +254,8 @@ fn draw_top_down_map(
     let mut sorted: Vec<&SnapshotNode> = snapshot.nodes.iter().collect();
     sorted.sort_by_key(|n| n.depth);
     for node in sorted {
-        let screen_pos = world_to_screen(node.obb_center);
-        let r_px = (node.obb_radius as f32 * pixels_per_m).clamp(2.0, 24.0);
+        let screen_pos = world_to_screen(node.obb.center);
+        let r_px = (node.obb.extents.length() as f32 * pixels_per_m).clamp(2.0, 24.0);
 
         let color = depth_color(node.depth);
         let alpha: u8 = match node.state {
@@ -281,30 +325,14 @@ fn draw_top_down_map(
     );
 }
 
-/// Depth at which the colour gradient saturates to "warm orange".
-/// Anchored above the observed real-world max depth (~25) so the
-/// gradient spans the actual data range without bunching at the end.
-const COLOR_DEPTH_ANCHOR: f32 = 30.0;
-
-/// Map an octree depth to a color along a cool-→-warm gradient.
+/// Map an octree depth to a color along a cool-→-warm gradient. Defers to the
+/// engine's [`veldera_terrain::viz::depth_color`] so the top-down map and the
+/// in-world overlay use the same colour language.
 fn depth_color(depth: usize) -> egui::Color32 {
-    // Anchor 0 → deep blue, COLOR_DEPTH_ANCHOR → warm orange.
-    let t = (depth as f32 / COLOR_DEPTH_ANCHOR).clamp(0.0, 1.0);
-    // Simple piecewise gradient: blue → cyan → green → yellow → red.
-    let (r, g, b) = if t < 0.25 {
-        let k = t / 0.25;
-        (60.0, 60.0 + k * 195.0, 220.0)
-    } else if t < 0.5 {
-        let k = (t - 0.25) / 0.25;
-        (60.0, 255.0, 220.0 - k * 220.0)
-    } else if t < 0.75 {
-        let k = (t - 0.5) / 0.25;
-        (60.0 + k * 195.0, 255.0, 0.0)
-    } else {
-        let k = (t - 0.75) / 0.25;
-        (255.0, 255.0 - k * 175.0, 0.0)
-    };
-    egui::Color32::from_rgb(r as u8, g as u8, b as u8)
+    let [r, g, b, _] = veldera_terrain::viz::depth_color(depth)
+        .to_srgba()
+        .to_u8_array();
+    egui::Color32::from_rgb(r, g, b)
 }
 
 // ============================================================================

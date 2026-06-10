@@ -47,7 +47,10 @@ use crate::{
         RocktreeMeshMarker, convert_mesh, convert_texture, matrix_to_world_position_and_transform,
     },
     terrain_material::{TerrainMaterial, TerrainMaterialExtension},
-    viz::{ColliderVizFilter, reconcile_collider_wireframes},
+    viz::{
+        ColliderVizFilter, LodVizGizmos, LodVizSettings, configure_lod_viz_gizmos, draw_lod_viz,
+        reconcile_collider_wireframes,
+    },
 };
 
 use avian3d::prelude::*;
@@ -151,9 +154,12 @@ impl Plugin for LodPlugin {
             )
             .add_systems(Update, update_physics_colliders.after(poll_lod_node_tasks))
             .init_resource::<ColliderVizFilter>()
+            .init_resource::<LodVizSettings>()
+            .init_gizmo_group::<LodVizGizmos>()
+            .add_systems(Startup, configure_lod_viz_gizmos)
             .add_systems(
                 Update,
-                reconcile_collider_wireframes.after(update_physics_colliders),
+                (reconcile_collider_wireframes, draw_lod_viz).after(update_physics_colliders),
             );
     }
 }
@@ -188,9 +194,8 @@ pub enum SnapshotNodeState {
 pub struct SnapshotNode {
     pub path: OctreePath,
     pub depth: usize,
-    pub obb_center: DVec3,
-    /// Conservative radius for drawing — the largest OBB half-extent.
-    pub obb_radius: f64,
+    /// The node's oriented bounding box from bulk metadata.
+    pub obb: OrientedBoundingBox,
     pub state: SnapshotNodeState,
     pub sources: NodeSources,
 }
@@ -333,6 +338,15 @@ impl LodState {
     #[must_use]
     pub fn physics_collider_count(&self) -> usize {
         self.physics_colliders.len()
+    }
+
+    /// Iterate the active terrain colliders as `(path, obb)` pairs, for the
+    /// in-world viz overlay. Colliders whose OBB is no longer cached are
+    /// skipped.
+    pub fn collider_obbs(&self) -> impl Iterator<Item = (OctreePath, OrientedBoundingBox)> + '_ {
+        self.physics_colliders
+            .keys()
+            .filter_map(|p| self.node_obbs.get(p).map(|obb| (*p, *obb)))
     }
 }
 
@@ -1581,16 +1595,14 @@ fn populate_snapshot(
             }
         }
 
-        let (obb_center, obb_radius) = match lod_state.node_obbs.get(&path) {
-            Some(obb) => (obb.center, obb.extents.length()),
-            None => continue, // No OBB cached — skip, can't draw it.
+        let Some(obb) = lod_state.node_obbs.get(&path) else {
+            continue; // No OBB cached — skip, can't draw it.
         };
 
         snapshot.nodes.push(SnapshotNode {
             path,
             depth,
-            obb_center,
-            obb_radius,
+            obb: *obb,
             state,
             sources,
         });

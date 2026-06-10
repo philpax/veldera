@@ -11,10 +11,19 @@
 //! diagnostics tab uses, so the in-world view and the top-down map read as one
 //! visualisation.
 
+use std::collections::HashSet;
+
 use avian3d::prelude::ColliderAabb;
 use bevy::{gizmos::config::GizmoConfigStore, prelude::*};
-use rocktree_decode::OctreePath;
+use glam::{DQuat, DVec3};
+use rocktree_decode::{OctreePath, OrientedBoundingBox};
+use veldera_geo::floating_origin::FloatingOriginCamera;
 use veldera_physics::{DebugRender, TerrainCollider, is_physics_debug_enabled};
+
+use crate::{
+    lod::{LodSnapshot, LodSnapshotRequest, LodState, SnapshotNodeState},
+    mesh::RocktreeMeshMarker,
+};
 
 /// Filter for terrain-collider wireframe rendering, applied whenever the
 /// physics debug visualisation is enabled. Dynamic colliders (players,
@@ -40,6 +49,50 @@ impl Default for ColliderVizFilter {
         }
     }
 }
+
+/// Settings for the in-world LoD tile overlay.
+///
+/// The render-tile and collider-tile layers draw from ground truth (the
+/// meshes currently visible and the colliders currently spawned), not from
+/// the BFS's intent, so the overlay always reflects what the player actually
+/// sees and collides with. The loading layer draws from [`LodSnapshot`] and
+/// raises [`LodSnapshotRequest`] while enabled.
+#[derive(Resource, Clone, Copy)]
+pub struct LodVizSettings {
+    /// Draw OBBs of the terrain meshes currently visible, coloured by depth.
+    pub draw_render_tiles: bool,
+    /// Draw OBBs of the tiles currently hosting physics colliders,
+    /// white-tinted to stand apart from the render tiles.
+    pub draw_collider_tiles: bool,
+    /// Draw dim OBBs of the nodes with in-flight load requests.
+    pub draw_loading_nodes: bool,
+    /// Tiles whose OBB centre is farther than this from the camera are
+    /// skipped (m).
+    pub max_distance_m: f64,
+    /// Inclusive minimum octree depth.
+    pub depth_min: usize,
+    /// Inclusive maximum octree depth.
+    pub depth_max: usize,
+}
+
+impl Default for LodVizSettings {
+    fn default() -> Self {
+        Self {
+            draw_render_tiles: false,
+            draw_collider_tiles: false,
+            draw_loading_nodes: false,
+            max_distance_m: 1500.0,
+            depth_min: 0,
+            depth_max: OctreePath::MAX_DEPTH,
+        }
+    }
+}
+
+/// Gizmo config group for the in-world LoD overlay, separate from the default
+/// group so its depth bias can be configured without affecting other gizmo
+/// consumers.
+#[derive(Default, Reflect, GizmoConfigGroup)]
+pub struct LodVizGizmos;
 
 /// Depth at which the colour gradient saturates to warm orange. Anchored above
 /// the observed real-world max depth (~25) so the gradient spans the actual
@@ -107,4 +160,111 @@ pub(crate) fn reconcile_collider_wireframes(
             commands.entity(entity).insert(desired);
         }
     }
+}
+
+/// Configure the [`LodVizGizmos`] group on startup: a small negative depth
+/// bias so tile boxes read through nearby geometry without floating entirely
+/// in front of the scene.
+pub(crate) fn configure_lod_viz_gizmos(mut config_store: ResMut<GizmoConfigStore>) {
+    let (config, _) = config_store.config_mut::<LodVizGizmos>();
+    config.depth_bias = -0.2;
+}
+
+/// Draw the in-world LoD tile overlay (see [`LodVizSettings`]).
+#[allow(clippy::type_complexity)]
+pub(crate) fn draw_lod_viz(
+    settings: Res<LodVizSettings>,
+    lod_state: Res<LodState>,
+    snapshot: Res<LodSnapshot>,
+    mut snapshot_request: ResMut<LodSnapshotRequest>,
+    camera_query: Query<&FloatingOriginCamera, With<Camera3d>>,
+    meshes: Query<(&RocktreeMeshMarker, &Visibility)>,
+    mut gizmos: Gizmos<LodVizGizmos>,
+) {
+    // Keep the snapshot flowing while the loading layer is on; the other
+    // layers draw from live ECS state and need no snapshot.
+    if settings.draw_loading_nodes {
+        snapshot_request.wanted = true;
+    }
+
+    if !settings.draw_render_tiles && !settings.draw_collider_tiles && !settings.draw_loading_nodes
+    {
+        return;
+    }
+    let Ok(camera) = camera_query.single() else {
+        return;
+    };
+    let camera_pos = camera.position;
+
+    let in_range = |obb: &OrientedBoundingBox, depth: usize| -> bool {
+        (settings.depth_min..=settings.depth_max).contains(&depth)
+            && obb.center.distance(camera_pos) <= settings.max_distance_m
+    };
+
+    if settings.draw_render_tiles {
+        // A node spawns one mesh entity per rocktree mesh; dedupe by path so
+        // multi-mesh nodes don't double-draw the same OBB.
+        let mut seen: HashSet<OctreePath> = HashSet::new();
+        for (marker, visibility) in &meshes {
+            if *visibility == Visibility::Hidden || !seen.insert(marker.path) {
+                continue;
+            }
+            let depth = marker.path.depth();
+            if !in_range(&marker.obb, depth) {
+                continue;
+            }
+            draw_obb(
+                &mut gizmos,
+                &marker.obb,
+                camera_pos,
+                1.0,
+                depth_color(depth),
+            );
+        }
+    }
+
+    if settings.draw_collider_tiles {
+        for (path, obb) in lod_state.collider_obbs() {
+            let depth = path.depth();
+            if !in_range(&obb, depth) {
+                continue;
+            }
+            // White-tinted and double-drawn (slightly inflated copy) so the
+            // collider layer stands apart from the render layer when both
+            // are enabled.
+            let color = depth_color(depth).mix(&Color::WHITE, 0.5);
+            draw_obb(&mut gizmos, &obb, camera_pos, 1.0, color);
+            draw_obb(&mut gizmos, &obb, camera_pos, 1.01, color);
+        }
+    }
+
+    if settings.draw_loading_nodes {
+        for node in &snapshot.nodes {
+            if node.state != SnapshotNodeState::Loading || !in_range(&node.obb, node.depth) {
+                continue;
+            }
+            let color = depth_color(node.depth).with_alpha(0.35);
+            draw_obb(&mut gizmos, &node.obb, camera_pos, 1.0, color);
+        }
+    }
+}
+
+/// Draw an OBB as a camera-relative wireframe box, optionally inflated.
+fn draw_obb(
+    gizmos: &mut Gizmos<LodVizGizmos>,
+    obb: &OrientedBoundingBox,
+    camera_pos: DVec3,
+    inflate: f32,
+    color: Color,
+) {
+    gizmos.primitive_3d(
+        &Cuboid {
+            half_size: obb.extents.as_vec3() * inflate,
+        },
+        Isometry3d::new(
+            (obb.center - camera_pos).as_vec3(),
+            DQuat::from_mat3(&obb.orientation).as_quat(),
+        ),
+        color,
+    );
 }
