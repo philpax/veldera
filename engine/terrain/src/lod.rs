@@ -12,6 +12,10 @@
 //!   [`PhysicsStreamingConfig::bands`](veldera_physics::PhysicsStreamingConfig))
 //!   with no frustum culling, producing exactly one terrain collider per region
 //!   within [`PhysicsStreamingConfig::range`](veldera_physics::PhysicsStreamingConfig).
+//!   Within the innermost band, commits additionally follow the renderer:
+//!   whenever all eight children of a node are displayed (the parent is
+//!   fully octant-masked), the commit moves down to the children, so
+//!   near-field collision converges on exactly the meshes on screen.
 //!   If the target depth isn't available
 //!   the deepest loaded ancestor with data is used as a fallback so the
 //!   player can't fall through ground whose data simply hasn't streamed in
@@ -65,7 +69,7 @@ use veldera_constants::EARTH_RADIUS_M_F64;
 use veldera_geo::floating_origin::{FloatingOriginCamera, WorldPosition};
 use veldera_physics::{
     GameLayer, MotionTracker, PhysicsState, PhysicsStreamingConfig, TerrainCollider,
-    desired_physics_depth,
+    desired_physics_depth, within_innermost_band,
 };
 
 /// Hot-reloadable LoD streaming parameters, loaded from
@@ -724,6 +728,21 @@ fn unified_walk(
         // Physics wants to refine if it's in range AND not yet at target.
         let physics_should_refine = physics_in_range && !physics_at_or_past_target;
 
+        // WYSIWYG near field: within the innermost band, when the renderer
+        // has fully replaced this node with its eight children (the octant
+        // mask hides the parent entirely — see `cull_meshes`), commit the
+        // children instead of this node so collision matches the displayed
+        // meshes exactly. Applied recursively, this walks commits down to
+        // the exact render leaves. Requiring *all eight* children mirrors
+        // the renderer's parent-hiding rule and guarantees no coverage
+        // holes: with any child missing, the parent stays the collider,
+        // just as it stays on screen.
+        let wysiwyg_descend = physics_in_range
+            && physics_at_or_past_target
+            && !physics_committed_above
+            && within_innermost_band(ctx.physics_bands, phys_dist)
+            && all_children_displayed(ctx.lod_state, child_node.path);
+
         // No consumer cares about this subtree.
         if !render_visible && !physics_in_range {
             continue;
@@ -774,10 +793,11 @@ fn unified_walk(
         // octant so descendants of THIS octant know not to re-commit.
         let mut octant_handled = physics_committed_above;
 
-        // Commit at this depth if we're in range, at target, and no
-        // ancestor has already committed for our region. This is the
+        // Commit at this depth if we're in range, at target, no ancestor
+        // has already committed for our region, and the WYSIWYG rule isn't
+        // pushing the commit down to the displayed children. This is the
         // primary commit site — at the physics target depth.
-        if physics_in_range && !octant_handled && physics_at_or_past_target {
+        if physics_in_range && !octant_handled && physics_at_or_past_target && !wysiwyg_descend {
             commit_physics_collider(
                 child_node.path,
                 child_phys_loaded,
@@ -804,10 +824,11 @@ fn unified_walk(
                 octant_handled = true;
             }
 
-            // Fallback: physics wanted to refine but the recursion
-            // didn't commit anywhere. Commit at this depth so the
-            // region has some coverage.
-            if physics_in_range && physics_should_refine && !octant_handled {
+            // Fallback: physics wanted to refine (or deferred to the
+            // displayed children) but the recursion didn't commit
+            // anywhere. Commit at this depth so the region has some
+            // coverage.
+            if physics_in_range && (physics_should_refine || wysiwyg_descend) && !octant_handled {
                 commit_physics_collider(
                     child_node.path,
                     child_phys_loaded,
@@ -824,6 +845,21 @@ fn unified_walk(
     }
 
     any_physics_handled
+}
+
+/// Whether the renderer currently displays all eight children of `path` —
+/// the condition under which `cull_meshes` hides the parent entirely (octant
+/// mask `0xff`) and the WYSIWYG rule may push collider commits down to the
+/// children. Also requires the children's node data so they can actually
+/// host commits.
+fn all_children_displayed(lod_state: &LodState, path: OctreePath) -> bool {
+    if path.depth() >= OctreePath::MAX_DEPTH {
+        return false;
+    }
+    (0u8..=7).all(|octant| {
+        let child = path.push(octant);
+        lod_state.loaded_nodes.contains(&child) && lod_state.node_data.contains_key(&child)
+    })
 }
 
 /// Helper: commit a collider for a node, using the deepest loaded ancestor
@@ -1470,6 +1506,7 @@ fn update_physics_colliders(
     mut commands: Commands,
     mut lod_state: ResMut<LodState>,
     physics_state: Res<PhysicsState>,
+    streaming: Res<PhysicsStreamingConfig>,
     camera_query: Query<&FloatingOriginCamera>,
 ) {
     use veldera_physics::terrain::create_terrain_collider;
@@ -1500,8 +1537,11 @@ fn update_physics_colliders(
             continue;
         };
 
-        let Some(collider) = create_terrain_collider(&node_data.meshes, &node_data.transform)
-        else {
+        let Some(collider) = create_terrain_collider(
+            &node_data.meshes,
+            &node_data.transform,
+            streaming.min_collider_triangle_height as f32,
+        ) else {
             tracing::debug!("Skipping invalid mesh for physics collider: '{}'", path);
             continue;
         };

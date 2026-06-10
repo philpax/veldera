@@ -75,15 +75,19 @@ pub struct OriginShiftSystems;
 #[derive(Component, Default)]
 pub struct ManualGravity;
 
-/// Innermost (finest) physics LoD depth — one level coarser than
+/// Innermost (finest) banded physics LoD depth — one level coarser than
 /// [`rocktree_decode::MAX_LEVEL`].
 ///
-/// The deepest tier carries small thin triangles from photogrammetry
-/// reconstruction that cause physics artifacts (objects catching on
-/// near-degenerate edges), so we bias one level back from the absolute
-/// maximum even at point-blank range. Structural (tied to the octree depth),
-/// so it stays compiled in; the config bands are expressed as depth *offsets
-/// below* this so they remain valid if `MAX_LEVEL` changes.
+/// This is the finest depth the *banded* rule targets; within the innermost
+/// band the LoD walk additionally upgrades a region's collider to the exact
+/// meshes the renderer displays (which reach `MAX_LEVEL`), so what you see is
+/// what you collide with. The deepest tier's thin photogrammetry slivers —
+/// the original reason for the one-level bias — are filtered out at collider
+/// build time instead (see
+/// [`PhysicsStreamingConfig::min_collider_triangle_height`]). Structural
+/// (tied to the octree depth), so it stays compiled in; the config bands are
+/// expressed as depth *offsets below* this so they remain valid if
+/// `MAX_LEVEL` changes.
 pub const PHYSICS_FINEST_DEPTH: usize = rocktree_decode::MAX_LEVEL - 1;
 
 /// Hot-reloadable terrain-collider streaming tuning, loaded from
@@ -101,6 +105,12 @@ pub struct PhysicsStreamingConfig {
     /// is `PHYSICS_FINEST_DEPTH - depth_below_finest`. Anything beyond the last
     /// band gets no collider.
     pub bands: Vec<(f64, usize)>,
+    /// Minimum triangle altitude (m) for collider triangles: triangles
+    /// thinner than this across their longest edge are dropped as
+    /// photogrammetry slivers, which cause contact artifacts (objects
+    /// catching on near-degenerate edges with wild normals). Zero disables
+    /// the filter.
+    pub min_collider_triangle_height: f64,
     /// Lookahead time for the lead vector (s); colliders ahead of the player
     /// load at the next-finer band before the player arrives.
     pub lead_time: f64,
@@ -134,6 +144,15 @@ pub fn desired_physics_depth(bands: &[(f64, usize)], effective_distance_m: f64) 
         .iter()
         .find(|(max_d, _)| effective_distance_m <= *max_d)
         .map(|&(_, offset)| PHYSICS_FINEST_DEPTH.saturating_sub(offset))
+}
+
+/// Whether `effective_distance_m` falls within the innermost (finest) distance
+/// band. Within it, the LoD walk upgrades colliders to the exact meshes the
+/// renderer displays (see the WYSIWYG rule in `veldera_terrain`'s LoD walk).
+pub fn within_innermost_band(bands: &[(f64, usize)], effective_distance_m: f64) -> bool {
+    bands
+        .first()
+        .is_some_and(|(max_d, _)| effective_distance_m <= *max_d)
 }
 
 /// Plugin for physics integration with the rocktree LOD system.

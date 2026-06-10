@@ -4,6 +4,13 @@
 # Max distance colliders load at, and the despawn radius for ranged entities (m).
 range = 1000.0
 
+# Collider triangles thinner than this across their longest edge (m) are
+# dropped as photogrammetry slivers (contact artifacts). Zero disables.
+# Within the innermost band, colliders follow the exact displayed meshes
+# (which reach the deepest LoD tier), so this filter is what keeps the
+# deepest tier's degenerate triangles out of physics.
+min_collider_triangle_height = 0.01
+
 # Lead vector: load colliders ahead of the player before they arrive.
 lead_time = 1.0          # lookahead time (s)
 max_lead = 200.0         # cap on lead distance (m) so fast runs don't starve nearby
