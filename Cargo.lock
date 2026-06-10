@@ -7204,6 +7204,7 @@ dependencies = [
  "egui_plot",
  "glam",
  "leafwing-input-manager",
+ "rocktree-decode",
  "veldera_async",
  "veldera_atmosphere",
  "veldera_clouds",
