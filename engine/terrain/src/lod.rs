@@ -1451,11 +1451,8 @@ fn update_physics_colliders(
             continue;
         };
 
-        let Some(first_mesh) = node_data.meshes.first() else {
-            continue;
-        };
-
-        let Some(collider) = create_terrain_collider(first_mesh, &node_data.transform) else {
+        let Some(collider) = create_terrain_collider(&node_data.meshes, &node_data.transform)
+        else {
             tracing::debug!("Skipping invalid mesh for physics collider: '{}'", path);
             continue;
         };
