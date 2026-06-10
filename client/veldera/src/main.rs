@@ -49,6 +49,7 @@ impl Plugin for AppPlugin {
                 locomotion: config::paths::LOCOMOTION,
                 ragdoll: config::paths::RAGDOLL,
                 yeet: config::paths::YEET,
+                effects: config::paths::EFFECTS,
             }),
             GeoPlugin,
             DebugUiPlugin,

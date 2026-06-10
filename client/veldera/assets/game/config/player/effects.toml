@@ -1,0 +1,130 @@
+# Takeoff and landing impact effects: the procedural thumps and the ground
+# burst (shockwave dust ring + dust puffs).
+#
+# Takeoff intensity is the yeet charge ratio; landing intensity maps from the
+# downward impact speed via [landing]. Both are then shaped by
+# intensity_exponent before any scaling. Deliberately no camera shake or
+# screen distortion — the camera stays untouched for a future VR view, so all
+# of the juice lives in the world.
+
+# Response curve on the raw 0..1 intensity: shaped = intensity^exponent.
+# Above 1 weakens the low end (a 0.2 s charge or a 3 m drop barely registers)
+# while leaving the heavy end at full punch.
+intensity_exponent = 1.8
+# Shaped intensities below this spawn nothing at all (no audio voice, no
+# particles) instead of a barely-perceptible effect. 0.02 with the exponent
+# above means a charge under ~0.6 s, or a landing under ~9.5 m/s (~4.5 m
+# drop), goes without effects entirely.
+min_intensity = 0.02
+
+# --- Takeoff thump --------------------------------------------------------------
+# The push-off: shorter, brighter, scuffier than the landing — launching is a
+# spring, not an arrival. Four layers soft-clipped together: pitch-falling
+# body, octave-down sub (the whoa), an inharmonic clank partial (the bite),
+# and a lowpass-swept noise crack (debris, not static). `drive` is the
+# aggression knob.
+[takeoff_thump]
+start_hz = 250.0
+end_hz = 60.0
+pitch_glide_tau_s = 0.045
+amp_decay_tau_s = 0.09
+# Octave-down layer: level vs the body, and decay as a multiple of the body's
+# (above 1 = a low afterglow outlasting the body).
+sub_level = 0.6
+sub_decay_mult = 1.5
+# Inharmonic partial riding the same pitch dive at this frequency ratio; the
+# non-integer ratio is what reads as struck concrete rather than a chord.
+clank_level = 0.6
+clank_ratio = 2.9
+clank_decay_tau_s = 0.035
+# Noise crack: level, decay, and the lowpass sweep from bright to dark.
+noise_level = 0.8
+noise_decay_tau_s = 0.04
+noise_cutoff_start_hz = 7000.0
+noise_cutoff_end_hz = 300.0
+noise_cutoff_tau_s = 0.05
+# Tanh soft-clip drive at full intensity (1 = clean). Higher = denser, dirtier.
+drive = 3.5
+duration_s = 0.5
+# Output volume (linear) at zero / full intensity.
+min_volume = 0.03
+max_volume = 0.9
+# Frequency multiplier at zero / full intensity: light pushes chirp higher,
+# full-charge launches drop lower than the base.
+light_pitch_mult = 1.4
+heavy_pitch_mult = 0.95
+# Amplitude-decay multiplier at zero / full intensity: light pushes are short
+# ticks, heavy ones linger.
+light_decay_mult = 0.6
+heavy_decay_mult = 1.2
+
+# --- Landing thump --------------------------------------------------------------
+# The arrival: a deep concrete boom — heavy sub, darker noise, longer
+# ring-out, slightly cleaner than the takeoff scuff.
+[landing_thump]
+start_hz = 150.0
+end_hz = 32.0
+pitch_glide_tau_s = 0.09
+amp_decay_tau_s = 0.2
+sub_level = 0.9
+sub_decay_mult = 1.8
+clank_level = 0.35
+clank_ratio = 2.3
+clank_decay_tau_s = 0.05
+noise_level = 0.55
+noise_decay_tau_s = 0.06
+noise_cutoff_start_hz = 4500.0
+noise_cutoff_end_hz = 180.0
+noise_cutoff_tau_s = 0.07
+drive = 3.0
+duration_s = 1.0
+min_volume = 0.03
+max_volume = 1.0
+light_pitch_mult = 1.6
+heavy_pitch_mult = 0.85
+light_decay_mult = 0.45
+heavy_decay_mult = 1.5
+
+# --- Ground burst -------------------------------------------------------------
+# Everything visual rides punch = lerp(min_punch, 1, shaped intensity): count,
+# speed, size, lifetimes, and the ring's radius and thickness. The values
+# below are the full-intensity maxima.
+[burst]
+# Punch at zero intensity — light impacts are a barely-there wisp.
+min_punch = 0.12
+dust_count = 36
+dust_speed_m_s = 9.0
+dust_rise_m_s = 4.0
+# Per-puff random fraction ranges [min, max) of the speeds above, and
+# multiplier ranges on the sizes and lifetime, so the puffs scatter unevenly.
+dust_speed_jitter = [0.3, 1.0]
+dust_rise_jitter = [0.2, 1.0]
+dust_size_jitter = [0.7, 1.3]
+dust_lifetime_jitter = [0.7, 1.2]
+dust_lifetime_s = 1.2
+dust_start_scale_m = 0.1
+dust_end_scale_m = 0.5
+# Where each puff spawns relative to the feet (m): pushed outward along its
+# scatter direction, slightly above the ground.
+dust_spawn_radius_m = 0.25
+dust_spawn_height_m = 0.1
+# Fraction of gravity the dust feels — it billows rather than drops.
+dust_gravity_factor = 0.25
+dust_drag_per_s = 2.5
+# [r, g, b, a]; the alpha is the starting opacity.
+dust_color = [0.55, 0.52, 0.48, 0.55]
+# A small lift above the feet so the ring doesn't z-fight the ground.
+ring_spawn_height_m = 0.05
+ring_start_radius_m = 0.4
+ring_end_radius_m = 6.5
+ring_thickness_m = 0.12
+ring_lifetime_s = 0.6
+ring_color = [0.75, 0.73, 0.7, 0.65]
+
+# --- Landing intensity ----------------------------------------------------------
+[landing]
+# Below this downward impact speed (m/s), no landing effects at all (normal
+# jumps land at ~6 m/s, so this keeps everyday hops quiet).
+min_impact_speed_m_s = 7.0
+# At or above this impact speed (m/s), the effects run at full intensity.
+full_impact_speed_m_s = 30.0

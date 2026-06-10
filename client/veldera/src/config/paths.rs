@@ -20,6 +20,7 @@ pub const BODY: &str = "game/config/player/body/body.toml";
 pub const RAGDOLL: &str = "game/config/player/body/ragdoll.toml";
 pub const LOCOMOTION: &str = "game/config/player/body/locomotion.toml";
 pub const YEET: &str = "game/config/player/yeet.toml";
+pub const EFFECTS: &str = "game/config/player/effects.toml";
 
 // Teleport / location services.
 pub const GEO: &str = "game/config/world/geo.toml";

@@ -10,10 +10,14 @@
 //!   Public so the mode machine can spawn/tear down the player.
 //! - [`body`] — the animated glTF body avatar, ragdoll rig, and arm-point IK.
 //! - [`yeet`] — the charged launch mechanic and its procedural rumble audio.
+//! - [`effects`] — takeoff/landing impact effects (a procedural thump and a
+//!   ground dust burst); world-space only, so a future VR camera stays
+//!   untouched.
 
 pub mod controller;
 
 mod body;
+mod effects;
 mod yeet;
 
 use bevy::prelude::*;
@@ -37,9 +41,12 @@ pub struct PlayerConfigPaths {
     pub ragdoll: &'static str,
     /// Yeet-mechanic tuning (`YeetConfig`).
     pub yeet: &'static str,
+    /// Takeoff/landing effects tuning (`EffectsConfig`).
+    pub effects: &'static str,
 }
 
-/// Bundles the first-person controller, the body avatar, and the yeet mechanic.
+/// Bundles the first-person controller, the body avatar, the yeet mechanic,
+/// and the impact effects.
 pub struct PlayerPlugin {
     /// Config-file paths for the player's tuning.
     pub paths: PlayerConfigPaths,
@@ -61,6 +68,9 @@ impl Plugin for PlayerPlugin {
                 locomotion_path: self.paths.locomotion,
                 ragdoll_path: self.paths.ragdoll,
                 yeet_path: self.paths.yeet,
+            },
+            effects::EffectsPlugin {
+                path: self.paths.effects,
             },
         ));
     }

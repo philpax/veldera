@@ -15,9 +15,10 @@
 //! `charge_seconds` then maps linearly to the launch speed on release. A
 //! procedural low rumble (a continuous real-time synth, not a loop) plays
 //! while charging, gliding in volume and pitch with the charge; on release it
-//! fades to silence and a whoosh sample plays as the player is yeeted along
-//! the look direction. A [`YeetConfig::cooldown_s`] timeout follows the
-//! launch to prevent infinite flying.
+//! fades to silence, a whoosh sample plays, a [`PlayerYeeted`] message fires
+//! the takeoff effects, and the player is yeeted along the look direction. A
+//! [`YeetConfig::cooldown_s`] timeout follows the launch to prevent infinite
+//! flying.
 //!
 //! The Point action (right mouse) still raises the arm as a purely cosmetic
 //! gesture; the arm also raises while charging as the wind-up tell.
@@ -32,7 +33,7 @@ use std::{
 
 use avian3d::prelude::*;
 use bevy::{
-    audio::{Decodable, Source},
+    audio::{Decodable, Source, Volume},
     prelude::*,
     reflect::TypePath,
 };
@@ -44,7 +45,7 @@ use veldera_game_input::CameraAction;
 use veldera_geo::{coords::RadialFrame, floating_origin::WorldPosition};
 
 use super::body::ArmPointTarget;
-use crate::{FpsController, LogicalPlayer, RagdollState};
+use crate::{FpsController, LogicalPlayer, RagdollState, effects::PlayerYeeted};
 
 // ----------------------------------------------------------------------------
 // Tuning
@@ -80,6 +81,10 @@ pub struct YeetConfig {
     /// Distance (m) ahead of the camera the right arm aims at while pointing.
     /// Further out → arm closer to parallel-with-look; closer → more convergence.
     pub aim_distance_m: f32,
+    /// Whoosh sample volume at zero charge (linear).
+    pub whoosh_min_volume: f32,
+    /// Whoosh sample volume at full charge (linear).
+    pub whoosh_max_volume: f32,
     /// Procedural rumble audio.
     pub rumble: RumbleConfig,
 }
@@ -464,14 +469,15 @@ pub(super) fn drive_arm_point(
 /// On release of a *charge hold* of the [`Ascend`](CameraAction::Ascend)
 /// action — gated on the cooldown — set the logical player's linear velocity
 /// to `look_direction * lerp(MIN_YEET_SPEED, MAX_YEET_SPEED, charge_ratio)`,
-/// kick off the whoosh sample, and start the cooldown. A tap release is the
-/// controller's jump instead.
+/// kick off the whoosh sample and the [`PlayerYeeted`] takeoff effects, and
+/// start the cooldown. A tap release is the controller's jump instead.
 pub(super) fn handle_yeet(
     mut commands: Commands,
     config: Res<YeetConfig>,
     actions: Query<&ActionState<CameraAction>>,
     charge_audio: Option<Res<ChargeAudio>>,
     mut state: ResMut<YeetState>,
+    mut yeeted: MessageWriter<PlayerYeeted>,
     mut logical_query: Query<
         (&mut FpsController, &WorldPosition, &mut LinearVelocity),
         With<LogicalPlayer>,
@@ -532,6 +538,9 @@ pub(super) fn handle_yeet(
     } else {
         Vec3::ZERO
     };
+    // Captured before the airborne override below, for the takeoff effects
+    // (a mid-air launch gets no ground shockwave).
+    let was_grounded = controller.ground_tick >= 1;
     velocity.0 += look_dir * speed + detach_up;
     // Force "airborne" classification for next prepare tick so
     // friction is skipped even before the slide gets a chance to
@@ -543,12 +552,23 @@ pub(super) fn handle_yeet(
     state.charge_seconds = 0.0;
     state.cooldown_s = config.cooldown_s;
 
-    // Fire-and-forget whoosh sample. `PlaybackMode::Despawn` cleans
-    // up the entity once the sample finishes.
+    yeeted.write(PlayerYeeted {
+        charge_ratio,
+        was_grounded,
+        feet_ecef: world_pos.position - (frame.up * (controller.height * 0.5)).as_dvec3(),
+    });
+
+    // Fire-and-forget whoosh sample, louder the harder the launch.
+    // `PlaybackMode::Despawn` cleans up the entity once the sample finishes.
     if let Some(audio) = charge_audio.as_deref() {
+        let volume = lerp(
+            config.whoosh_min_volume,
+            config.whoosh_max_volume,
+            charge_ratio,
+        );
         commands.spawn((
             AudioPlayer::new(audio.whoosh.clone()),
-            PlaybackSettings::DESPAWN,
+            PlaybackSettings::DESPAWN.with_volume(Volume::Linear(volume)),
         ));
     }
 

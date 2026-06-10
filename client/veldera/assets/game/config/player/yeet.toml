@@ -27,6 +27,9 @@ downward_detach_threshold = -0.5
 # Distance (m) ahead of the camera the right arm aims at. Further = closer to
 # parallel-with-look; closer = more exaggerated convergence on the crosshair.
 aim_distance_m = 10.0
+# Whoosh sample volume (linear) at zero / full charge.
+whoosh_min_volume = 0.15
+whoosh_max_volume = 1.0
 
 # Procedural charge-rumble audio.
 [rumble]

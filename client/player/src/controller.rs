@@ -21,7 +21,7 @@ use veldera_geo::{
 };
 use veldera_physics::{GameLayer, ManualGravity};
 
-use crate::yeet::YeetState;
+use crate::{effects::PlayerLanded, yeet::YeetState};
 
 // ============================================================================
 // Plugin
@@ -47,6 +47,7 @@ impl FpsControllerPlugin {
 impl Plugin for FpsControllerPlugin {
     fn build(&self, app: &mut App) {
         app.add_plugins(ConfigPlugin::<FpsConfig>::new(self.config_path))
+            .add_message::<PlayerLanded>()
             .init_resource::<DidFixedTimestepRunThisFrame>()
             .init_resource::<PreservedFpsState>()
             .init_resource::<FpsPlayerConfig>()
@@ -888,6 +889,11 @@ fn fps_controller_prepare(
     }
 }
 
+/// Minimum continuous airtime (s) before regaining ground contact counts as a
+/// landing for [`PlayerLanded`]. Debounces the single-tick airborne flickers
+/// of stepping down stairs and sliding over seams.
+const LANDING_MIN_AIRTIME_S: f32 = 0.15;
+
 /// Resolve collisions using `MoveAndSlide` and update position.
 ///
 /// Runs after `fps_controller_prepare` which sets up velocity and collider.
@@ -899,6 +905,7 @@ fn fps_controller_slide(
     fps_config: Res<FpsConfig>,
     move_and_slide: MoveAndSlide,
     camera_query: Query<&FloatingOriginCamera>,
+    mut landed: MessageWriter<PlayerLanded>,
     mut query: Query<
         (
             Entity,
@@ -934,6 +941,11 @@ fn fps_controller_slide(
         let mut ground_hit = false;
         let traction_cutoff = controller.traction_normal_cutoff;
 
+        // The velocity going *into* the slide — `move_and_slide` projects the
+        // impact component away, so this is where the landing speed lives.
+        let pre_slide_velocity = velocity.0;
+        let was_airborne = controller.ground_tick == 0;
+
         let output = move_and_slide.move_and_slide(
             collider,
             transform.translation,
@@ -957,6 +969,20 @@ fn fps_controller_slide(
             controller.ground_tick = controller.ground_tick.saturating_add(1);
         } else {
             controller.ground_tick = 0;
+        }
+
+        // Landing: ground contact regained after real airtime. The brief
+        // airborne flickers of walking down steps stay below the debounce;
+        // the landing-effects consumer applies its own impact-speed floor on
+        // top.
+        if ground_hit && was_airborne && controller.airborne_time_s >= LANDING_MIN_AIRTIME_S {
+            // Feet at the post-slide (touchdown) position, so the landing
+            // effects sit on the surface rather than a tick above it.
+            let landed_ecef = camera_pos + transform.translation.as_dvec3();
+            landed.write(PlayerLanded {
+                impact_speed_m_s: (-pre_slide_velocity.dot(local_up)).max(0.0),
+                feet_ecef: landed_ecef - (local_up * (controller.height * 0.5)).as_dvec3(),
+            });
         }
 
         // Track airborne / grounded time for ragdoll state transitions.
