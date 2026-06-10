@@ -22,6 +22,7 @@ egui_plot = { workspace = true }
 chrono = { workspace = true }
 glam = { workspace = true }
 leafwing-input-manager = { workspace = true }
+rocktree-decode = { workspace = true }
 veldera_async = { workspace = true }
 veldera_atmosphere = { workspace = true, features = ["serde"] }
 veldera_clouds = { workspace = true, features = ["serde"] }

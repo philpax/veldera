@@ -13,8 +13,7 @@ use rocktree::Mesh as RocktreeMesh;
 /// The WorldPosition is authoritative; physics Position is synced from it.
 #[derive(Component)]
 pub struct TerrainCollider {
-    /// The octant path for this collider's source node. Stored for debugging/future use.
-    #[allow(dead_code)]
+    /// The octant path for this collider's source node.
     pub path: rocktree_decode::OctreePath,
 }
 

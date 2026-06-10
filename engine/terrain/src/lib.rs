@@ -17,6 +17,7 @@ pub mod loader;
 pub mod lod;
 pub mod mesh;
 pub mod terrain_material;
+pub mod viz;
 
 use bevy::app::{PluginGroup, PluginGroupBuilder};
 

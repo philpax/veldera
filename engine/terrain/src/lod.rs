@@ -47,6 +47,7 @@ use crate::{
         RocktreeMeshMarker, convert_mesh, convert_texture, matrix_to_world_position_and_transform,
     },
     terrain_material::{TerrainMaterial, TerrainMaterialExtension},
+    viz::{ColliderVizFilter, reconcile_collider_wireframes},
 };
 
 use avian3d::prelude::*;
@@ -148,7 +149,12 @@ impl Plugin for LodPlugin {
                 )
                     .chain(),
             )
-            .add_systems(Update, update_physics_colliders.after(poll_lod_node_tasks));
+            .add_systems(Update, update_physics_colliders.after(poll_lod_node_tasks))
+            .init_resource::<ColliderVizFilter>()
+            .add_systems(
+                Update,
+                reconcile_collider_wireframes.after(update_physics_colliders),
+            );
     }
 }
 
@@ -1410,7 +1416,7 @@ fn update_physics_colliders(
     mut lod_state: ResMut<LodState>,
     camera_query: Query<&FloatingOriginCamera>,
 ) {
-    use veldera_physics::{DebugRender, terrain::create_terrain_collider};
+    use veldera_physics::terrain::create_terrain_collider;
 
     let Ok(camera) = camera_query.single() else {
         return;
@@ -1466,7 +1472,6 @@ fn update_physics_colliders(
                     [GameLayer::Ground],
                     [GameLayer::Ground, GameLayer::Vehicle, GameLayer::Ragdoll],
                 ),
-                DebugRender::default(),
             ))
             .id();
 
