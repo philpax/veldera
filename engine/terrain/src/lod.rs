@@ -60,7 +60,8 @@ use veldera_config::ConfigPlugin;
 use veldera_constants::EARTH_RADIUS_M_F64;
 use veldera_geo::floating_origin::{FloatingOriginCamera, WorldPosition};
 use veldera_physics::{
-    GameLayer, MotionTracker, PhysicsStreamingConfig, TerrainCollider, desired_physics_depth,
+    GameLayer, MotionTracker, PhysicsState, PhysicsStreamingConfig, TerrainCollider,
+    desired_physics_depth,
 };
 
 /// Hot-reloadable LoD streaming parameters, loaded from
@@ -1428,6 +1429,7 @@ fn cull_meshes(
 fn update_physics_colliders(
     mut commands: Commands,
     mut lod_state: ResMut<LodState>,
+    physics_state: Res<PhysicsState>,
     camera_query: Query<&FloatingOriginCamera>,
 ) {
     use veldera_physics::terrain::create_terrain_collider;
@@ -1436,7 +1438,14 @@ fn update_physics_colliders(
         return;
     };
 
-    let camera_pos = camera.position;
+    // Spawn relative to the origin-shift bookkeeping, not the live camera:
+    // the camera advances every frame (interpolated sub-tick motion included)
+    // while physics positions are only re-based when a shift is applied.
+    // Using the live camera bakes the difference into the collider as a
+    // permanent offset — centimetres while walking, metres while falling fast.
+    let camera_pos = physics_state
+        .origin_camera_position()
+        .unwrap_or(camera.position);
     let target_paths = lod_state.physics_target_paths.clone();
 
     // Spawn colliders for newly-selected paths.

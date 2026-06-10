@@ -19,7 +19,7 @@ use veldera_geo::{
     coords::RadialFrame,
     floating_origin::{FloatingOrigin, FloatingOriginCamera, WorldPosition},
 };
-use veldera_physics::{GameLayer, ManualGravity};
+use veldera_physics::{GameLayer, ManualGravity, OriginShiftSystems};
 
 use crate::{effects::PlayerLanded, yeet::YeetState};
 
@@ -63,6 +63,13 @@ impl Plugin for FpsControllerPlugin {
                     fps_controller_sync_position,
                 )
                     .chain()
+                    // `fps_controller_sync_position` re-derives the player's
+                    // physics Position from the floating-origin Transform,
+                    // which already reflects the camera position the origin
+                    // shift re-bases everything to this tick. It must run
+                    // after the shift or the camera's motion is applied to
+                    // the player twice, desyncing it from the terrain.
+                    .after(OriginShiftSystems)
                     .run_if(is_fps_mode.and(not_suppressed)),
             )
             .add_systems(

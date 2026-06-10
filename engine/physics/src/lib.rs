@@ -31,6 +31,7 @@ pub mod terrain;
 pub use avian3d::debug_render::DebugRender;
 use avian3d::{
     debug_render::{PhysicsDebugPlugin, PhysicsGizmos},
+    physics_transform::PhysicsTransformConfig,
     prelude::*,
 };
 use bevy::{
@@ -54,6 +55,17 @@ pub use terrain::TerrainCollider;
 /// [`PhysicsStreamingConfig::range`] from the camera.
 #[derive(Component, Default)]
 pub struct DespawnOutsidePhysicsRange;
+
+/// System set for the floating-origin shift applied to every physics
+/// `Position` in `FixedPreUpdate`.
+///
+/// Systems that re-derive a `Position` from the previous frame's render
+/// `Transform` (e.g. a character controller's position sync) must run *after*
+/// this set: their source already reflects the camera position the shift is
+/// about to re-base everything to, so running before it would apply the
+/// camera's motion twice.
+#[derive(SystemSet, Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct OriginShiftSystems;
 
 /// Marker component for `RigidBody` entities that integrate gravity themselves.
 ///
@@ -173,12 +185,27 @@ impl Plugin for PhysicsIntegrationPlugin {
             ))
             .add_plugins(ConfigPlugin::<PhysicsConfig>::new(self.physics_config_path))
             .insert_resource(Gravity(Vec3::ZERO))
+            // `Position` is authoritative everywhere in this stack: spawn
+            // sites set it explicitly, the origin shift re-bases it, and
+            // render `Transform`s are derived from `WorldPosition` by the
+            // floating-origin system. Avian's default Transform→Position
+            // copy-back would silently re-base any entity whose `Position`
+            // didn't change this tick from its floating-origin `Transform` —
+            // a different camera reference than the shift bookkeeping — so
+            // entities would drift in and out of alignment with camera
+            // motion.
+            .insert_resource(PhysicsTransformConfig {
+                transform_to_position: false,
+                ..Default::default()
+            })
             .init_resource::<PhysicsState>()
             .init_resource::<MotionTracker>()
             .add_systems(Startup, configure_physics_debug_on_startup)
             .add_systems(
                 FixedPreUpdate,
-                apply_origin_shift.before(PhysicsSystems::Prepare),
+                apply_origin_shift
+                    .in_set(OriginShiftSystems)
+                    .before(PhysicsSystems::Prepare),
             )
             .add_systems(
                 FixedPostUpdate,
@@ -198,6 +225,22 @@ impl Plugin for PhysicsIntegrationPlugin {
 pub struct PhysicsState {
     /// Last camera position for computing origin shift delta.
     last_camera_position: Option<glam::DVec3>,
+}
+
+impl PhysicsState {
+    /// The camera position every physics `Position` is currently relative to —
+    /// the position recorded at the last applied origin shift.
+    ///
+    /// New physics entities must be spawned relative to *this*, not the live
+    /// camera: the camera advances every frame (including interpolated
+    /// sub-tick motion) while `Position`s are only re-based when a shift is
+    /// applied. Spawning against the live camera bakes the difference into
+    /// the entity as a permanent offset — centimetres while walking, metres
+    /// while falling.
+    #[must_use]
+    pub fn origin_camera_position(&self) -> Option<DVec3> {
+        self.last_camera_position
+    }
 }
 
 /// Tracks camera velocity by EWMA-smoothing frame-to-frame ECEF deltas.
@@ -330,18 +373,23 @@ fn apply_origin_shift(
 
     let camera_pos = camera.position;
 
-    if let Some(last_pos) = physics_state.last_camera_position {
-        let delta = camera_pos - last_pos;
-        // Only apply shift if delta is significant.
-        if delta.length_squared() > 1e-10 {
-            let shift = Vec3::new(-delta.x as f32, -delta.y as f32, -delta.z as f32);
-            for mut pos in &mut query {
-                pos.0 += shift;
+    match physics_state.last_camera_position {
+        None => physics_state.last_camera_position = Some(camera_pos),
+        Some(last_pos) => {
+            let delta = camera_pos - last_pos;
+            // Only apply the shift when the delta is significant. The
+            // bookkeeping only advances when a shift is actually applied, so
+            // sub-threshold motion accumulates until it crosses the
+            // threshold instead of being dropped.
+            if delta.length_squared() > 1e-10 {
+                let shift = Vec3::new(-delta.x as f32, -delta.y as f32, -delta.z as f32);
+                for mut pos in &mut query {
+                    pos.0 += shift;
+                }
+                physics_state.last_camera_position = Some(camera_pos);
             }
         }
     }
-
-    physics_state.last_camera_position = Some(camera_pos);
 }
 
 /// Sync WorldPosition from physics Position for dynamic bodies.
