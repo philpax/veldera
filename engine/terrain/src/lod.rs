@@ -1537,10 +1537,15 @@ fn update_physics_colliders(
             continue;
         };
 
+        // Radial down at the node; the direction varies negligibly across a
+        // single tile, so one vector serves the whole collider's skirts.
+        let down = (-node_data.world_position.normalize()).as_vec3();
         let Some(collider) = create_terrain_collider(
             &node_data.meshes,
             &node_data.transform,
             streaming.min_collider_triangle_height as f32,
+            down,
+            streaming.collider_skirt_depth as f32,
         ) else {
             tracing::debug!("Skipping invalid mesh for physics collider: '{}'", path);
             continue;

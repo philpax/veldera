@@ -4,6 +4,8 @@
 //! Colliders are created at the distance-banded target depth selected by the
 //! LoD walk (see [`PhysicsStreamingConfig::bands`](crate::PhysicsStreamingConfig)).
 
+use std::collections::HashMap;
+
 use avian3d::prelude::*;
 use bevy::prelude::*;
 use rocktree::Mesh as RocktreeMesh;
@@ -33,6 +35,9 @@ pub struct TerrainCollider {
 /// * `transform` - The node's Transform (has scale and rotation, translation is zero).
 /// * `min_triangle_height` - Sliver filter threshold (m); see
 ///   [`PhysicsStreamingConfig::min_collider_triangle_height`](crate::PhysicsStreamingConfig::min_collider_triangle_height).
+/// * `down` - Unit vector toward the planet centre in the baked vertex space.
+/// * `skirt_depth` - Boundary-skirt depth (m); see
+///   [`PhysicsStreamingConfig::collider_skirt_depth`](crate::PhysicsStreamingConfig::collider_skirt_depth).
 ///
 /// # Returns
 /// A trimesh collider with vertices transformed to match the GPU rendering,
@@ -41,11 +46,14 @@ pub fn create_terrain_collider(
     meshes: &[RocktreeMesh],
     transform: &Transform,
     min_triangle_height: f32,
+    down: Vec3,
+    skirt_depth: f32,
 ) -> Option<Collider> {
-    let (vertices, triangles) = merge_meshes(meshes, transform, min_triangle_height);
+    let (mut vertices, mut triangles) = merge_meshes(meshes, transform, min_triangle_height);
     if triangles.is_empty() {
         return None;
     }
+    add_skirts(&mut vertices, &mut triangles, down, skirt_depth);
 
     // Use try_trimesh to avoid panicking on invalid input.
     Collider::try_trimesh(vertices, triangles).ok()
@@ -87,6 +95,40 @@ fn merge_meshes(
     }
 
     (vertices, triangles)
+}
+
+/// Extrude the trimesh's boundary edges (edges used by exactly one triangle)
+/// by `depth` metres along `down`, closing the hairline cracks between
+/// neighbouring tiles at different LoD depths.
+///
+/// Edge sharing is detected by index, not welded position: a border between
+/// two meshes of the same node (or edges exposed by the sliver filter) reads
+/// as boundary and grows a redundant skirt. Those hang strictly below the
+/// surface, so they cost a few triangles and affect nothing.
+fn add_skirts(vertices: &mut Vec<Vec3>, triangles: &mut Vec<[u32; 3]>, down: Vec3, depth: f32) {
+    if depth <= 0.0 {
+        return;
+    }
+
+    let mut edge_counts: HashMap<(u32, u32), u32> = HashMap::new();
+    for tri in triangles.iter() {
+        for (a, b) in [(tri[0], tri[1]), (tri[1], tri[2]), (tri[2], tri[0])] {
+            *edge_counts.entry((a.min(b), a.max(b))).or_insert(0) += 1;
+        }
+    }
+
+    let offset = down * depth;
+    for ((a, b), count) in edge_counts {
+        if count != 1 {
+            continue;
+        }
+        let a_low = vertices.len() as u32;
+        vertices.push(vertices[a as usize] + offset);
+        let b_low = vertices.len() as u32;
+        vertices.push(vertices[b as usize] + offset);
+        triangles.push([a, b, b_low]);
+        triangles.push([a, b_low, a_low]);
+    }
 }
 
 /// A triangle is a sliver when its smallest altitude is below `min_height`:
@@ -201,8 +243,49 @@ mod tests {
         let quad = [(0, 0, 0), (1, 0, 0), (0, 1, 0), (1, 1, 0)];
         let meshes = vec![test_mesh(&quad, vec![]), test_mesh(&quad, vec![0, 1, 2, 3])];
 
-        assert!(create_terrain_collider(&meshes, &Transform::IDENTITY, 0.0).is_some());
-        assert!(create_terrain_collider(&meshes[..1], &Transform::IDENTITY, 0.0).is_none());
+        assert!(
+            create_terrain_collider(&meshes, &Transform::IDENTITY, 0.0, Vec3::NEG_Z, 0.0).is_some()
+        );
+        assert!(
+            create_terrain_collider(&meshes[..1], &Transform::IDENTITY, 0.0, Vec3::NEG_Z, 0.0)
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn test_add_skirts_extrudes_boundary_edges() {
+        // A quad of two triangles: four boundary edges, one shared interior
+        // edge that must not grow a skirt.
+        let mut vertices = vec![
+            Vec3::new(0.0, 0.0, 0.0),
+            Vec3::new(1.0, 0.0, 0.0),
+            Vec3::new(0.0, 1.0, 0.0),
+            Vec3::new(1.0, 1.0, 0.0),
+        ];
+        let mut triangles = vec![[0, 1, 2], [1, 3, 2]];
+
+        add_skirts(&mut vertices, &mut triangles, Vec3::NEG_Z, 2.0);
+
+        // Four boundary edges → two new vertices and two triangles each.
+        assert_eq!(vertices.len(), 4 + 8);
+        assert_eq!(triangles.len(), 2 + 8);
+        // Skirt vertices sit exactly `depth` below their source.
+        assert_eq!(vertices[4].z, -2.0);
+    }
+
+    #[test]
+    fn test_add_skirts_disabled_by_zero_depth() {
+        let mut vertices = vec![
+            Vec3::new(0.0, 0.0, 0.0),
+            Vec3::new(1.0, 0.0, 0.0),
+            Vec3::new(0.0, 1.0, 0.0),
+        ];
+        let mut triangles = vec![[0, 1, 2]];
+
+        add_skirts(&mut vertices, &mut triangles, Vec3::NEG_Z, 0.0);
+
+        assert_eq!(vertices.len(), 3);
+        assert_eq!(triangles.len(), 1);
     }
 
     #[test]

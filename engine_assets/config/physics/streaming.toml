@@ -11,6 +11,11 @@ range = 1000.0
 # deepest tier's degenerate triangles out of physics.
 min_collider_triangle_height = 0.01
 
+# Skirt depth (m) extruded down from each collider tile's boundary edges,
+# sealing the hairline cracks between neighbouring tiles at different LoD
+# depths. Covers vertical mismatches up to this size. Zero disables.
+collider_skirt_depth = 5.0
+
 # Lead vector: load colliders ahead of the player before they arrive.
 lead_time = 1.0          # lookahead time (s)
 max_lead = 200.0         # cap on lead distance (m) so fast runs don't starve nearby

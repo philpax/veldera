@@ -111,6 +111,13 @@ pub struct PhysicsStreamingConfig {
     /// catching on near-degenerate edges with wild normals). Zero disables
     /// the filter.
     pub min_collider_triangle_height: f64,
+    /// Depth (m) of the skirt extruded downward (toward the planet centre)
+    /// from each collider tile's boundary edges. Neighbouring tiles at
+    /// different LoD depths don't share edge vertices, leaving hairline
+    /// cracks a fast-moving body can slip through; skirts make tile borders
+    /// watertight as long as the vertical mismatch between neighbours stays
+    /// under this depth. Zero disables.
+    pub collider_skirt_depth: f64,
     /// Lookahead time for the lead vector (s); colliders ahead of the player
     /// load at the next-finer band before the player arrives.
     pub lead_time: f64,
