@@ -27,7 +27,10 @@ pub enum CameraAction {
     /// Mouse look (yaw/pitch).
     #[actionlike(DualAxis)]
     Look,
-    /// Ascend (Space in flycam) / jump (Space in FPS).
+    /// Ascend (Space in flycam). In FPS, a tap is a jump (applied on
+    /// release) and a hold past the charge threshold becomes the charged
+    /// yeet: releasing launches the player along the look direction at a
+    /// charge-scaled speed.
     Ascend,
     /// Descend (Ctrl in flycam) / crouch (Ctrl in FPS).
     Descend,
@@ -48,9 +51,9 @@ pub enum CameraAction {
     InteractVehicle,
     /// Fire projectile (left click).
     Fire,
-    /// Raise right arm to point at the look direction (right mouse,
-    /// held). Releasing the button yeets the player along the look
-    /// direction at a charge-scaled speed (the player's yeet mechanic).
+    /// Raise the right arm to point at the look direction (right mouse,
+    /// held). Purely cosmetic — the charged yeet lives on a held
+    /// [`Ascend`](Self::Ascend).
     Point,
 }
 

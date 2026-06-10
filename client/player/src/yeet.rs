@@ -1,6 +1,6 @@
 //! Charged-yeet launch mechanic and its procedural rumble audio.
 //!
-//! This module owns the whole gesture: it reads the Point action, accumulates
+//! This module owns the whole gesture: it reads the Ascend action, accumulates
 //! charge ([`YeetState`]), drives the procedural rumble, and on release launches
 //! the player along the look direction. It owns the visual arm too only at
 //! arm's length — each frame it publishes an [`ArmPointTarget`] describing how
@@ -8,12 +8,19 @@
 //! [`crate::body::arm`] responds to it without knowing this mechanic
 //! exists.
 //!
-//! Holding the Point action builds up `charge_seconds`, which maps linearly to
-//! the launch speed on release. A procedural low rumble (a continuous real-time
-//! synth, not a loop) plays while charging, gliding in volume and pitch with the
-//! charge; on release it fades to silence and a whoosh sample plays as the
-//! player is yeeted along the look direction. A [`YeetConfig::cooldown_s`]
-//! timeout follows the launch to prevent infinite flying.
+//! The gesture shares Space with the jump: a tap (released before
+//! [`YeetConfig::charge_hold_threshold_s`]) is a normal jump, applied on
+//! release by the controller (which reads [`YeetState::is_charge_hold`] to
+//! tell the two apart); a hold past the threshold becomes the charge.
+//! `charge_seconds` then maps linearly to the launch speed on release. A
+//! procedural low rumble (a continuous real-time synth, not a loop) plays
+//! while charging, gliding in volume and pitch with the charge; on release it
+//! fades to silence and a whoosh sample plays as the player is yeeted along
+//! the look direction. A [`YeetConfig::cooldown_s`] timeout follows the
+//! launch to prevent infinite flying.
+//!
+//! The Point action (right mouse) still raises the arm as a purely cosmetic
+//! gesture; the arm also raises while charging as the wind-up tell.
 
 use std::{
     sync::{
@@ -54,6 +61,9 @@ use crate::{FpsController, LogicalPlayer, RagdollState};
 pub struct YeetConfig {
     /// Seconds for the arm to fully raise / lower (linear ramp on `point_amount`).
     pub point_ramp_duration_s: f32,
+    /// Seconds the Ascend action must be held before the hold becomes a
+    /// charge. Anything shorter is a tap — a normal jump, applied on release.
+    pub charge_hold_threshold_s: f32,
     /// Maximum charge hold time (s); past this the charge saturates at 1.0.
     pub max_charge_duration_s: f32,
     /// Launch speed at zero charge — a soft push (m/s).
@@ -253,17 +263,44 @@ impl Source for RumbleDecoder {
 // Resources
 // ----------------------------------------------------------------------------
 
-/// Internal state of the yeet mechanic: the in-progress hold charge and the
-/// post-launch cooldown. Kept here rather than on the body avatar so the body
-/// carries no knowledge of the launch mechanic.
+/// Internal state of the yeet mechanic: the in-progress hold and charge, and
+/// the post-launch cooldown. Kept here rather than on the body avatar so the
+/// body carries no knowledge of the launch mechanic.
 #[derive(Resource, Default)]
 pub(super) struct YeetState {
-    /// Seconds the Point action has been held this charge (capped at
+    /// Seconds the Ascend action has been held in the current press,
+    /// regardless of charge gating. Read on the release frame (before
+    /// [`drive_arm_point`] resets it) by both the controller's tap-jump and
+    /// [`handle_yeet`] to tell a tap from a charge hold.
+    hold_seconds: f32,
+    /// Seconds the charge has accumulated past the hold threshold (capped at
     /// [`YeetConfig::max_charge_duration_s`]); maps linearly to launch speed.
     charge_seconds: f32,
     /// Seconds remaining before another launch is allowed; while `> 0` the
-    /// Point action is treated as not pressed.
+    /// hold never becomes a charge.
     cooldown_s: f32,
+    /// Set by [`drive_arm_point`] when a *tap* of Ascend is released, and
+    /// consumed by the controller input as a jump request. The release edge
+    /// is detected here from the hold accumulator rather than from the
+    /// action state's `just_released`: the controller input runs in
+    /// `RunFixedMainLoop`, where leafwing's update/fixed action-state swap
+    /// makes edge flags unreliable, while `pressed()` — all the accumulator
+    /// needs — is a level and reads the same in either state.
+    jump_queued: bool,
+}
+
+impl YeetState {
+    /// Whether the current (or, on the release frame, just-ended) Ascend hold
+    /// is long enough to be a charge rather than a tap. The controller skips
+    /// the jump when this is true; [`handle_yeet`] launches only when it is.
+    pub(super) fn is_charge_hold(&self, config: &YeetConfig) -> bool {
+        self.hold_seconds >= config.charge_hold_threshold_s
+    }
+
+    /// Consume the queued tap-jump request, if any.
+    pub(super) fn take_queued_jump(&mut self) -> bool {
+        std::mem::take(&mut self.jump_queued)
+    }
 }
 
 /// Charge-mechanic audio: the shared rumble-synth state (written each frame) and
@@ -323,10 +360,11 @@ fn lerp(a: f32, b: f32, t: f32) -> f32 {
 // Drive: read input, ramp the gesture, publish the arm-point request
 // ============================================================================
 
-/// Per-frame: tick the cooldown, ramp the point blend toward the input target
-/// (0 or 1) over [`YeetConfig::point_ramp_duration_s`], accumulate
-/// `charge_seconds` while held off-cooldown, feed the charge into the rumble
-/// synth, and publish the [`ArmPointTarget`] the arm pose responds to.
+/// Per-frame: tick the cooldown, track the Ascend hold, ramp the point blend
+/// toward the gesture target (0 or 1) over
+/// [`YeetConfig::point_ramp_duration_s`], accumulate `charge_seconds` while
+/// the hold is a charge, feed the charge into the rumble synth, and publish
+/// the [`ArmPointTarget`] the arm pose responds to.
 #[allow(clippy::type_complexity)]
 pub(super) fn drive_arm_point(
     config: Res<YeetConfig>,
@@ -339,7 +377,8 @@ pub(super) fn drive_arm_point(
 ) {
     let dt = time.delta_secs();
     let action_state = actions.single().ok();
-    let raw_input_pressed = action_state.is_some_and(|s| s.pressed(&CameraAction::Point));
+    let point_pressed = action_state.is_some_and(|s| s.pressed(&CameraAction::Point));
+    let ascend_pressed = action_state.is_some_and(|s| s.pressed(&CameraAction::Ascend));
 
     // No player (not in FPS mode) or a ragdolling one ⇒ no pointing: the arm
     // goes limp with the rest of the body and the gesture ramps back down.
@@ -350,8 +389,40 @@ pub(super) fn drive_arm_point(
     if state.cooldown_s > 0.0 {
         state.cooldown_s = (state.cooldown_s - dt).max(0.0);
     }
-    let pointing =
-        raw_input_pressed && player.is_some() && !is_ragdolling && state.cooldown_s <= 0.0;
+
+    // A tap released this frame queues a jump for the controller input to
+    // consume next frame. Checked before the hold reset below; a *charge*
+    // release leaves no queue (it is `handle_yeet`'s launch — which, having
+    // already run this frame in `Update`, zeroes the hold on launch so a
+    // completed yeet can't be misread here).
+    if player.is_some()
+        && !ascend_pressed
+        && state.hold_seconds > 0.0
+        && !state.is_charge_hold(&config)
+    {
+        state.jump_queued = true;
+    }
+    // A stale queue must not survive outside FPS mode (the consumer only
+    // runs there), or re-entering the mode would replay a phantom jump.
+    if player.is_none() {
+        state.jump_queued = false;
+    }
+
+    // Track the full duration of the current Ascend press. This runs in
+    // `PostUpdate`, so on the release frame `handle_yeet` (earlier in the
+    // frame) reads the final value before the reset here.
+    if ascend_pressed && player.is_some() {
+        state.hold_seconds += dt;
+    } else {
+        state.hold_seconds = 0.0;
+    }
+
+    // The hold becomes a charge once past the tap threshold, when allowed.
+    let charging = state.is_charge_hold(&config) && !is_ragdolling && state.cooldown_s <= 0.0;
+
+    // The arm raises while charging (the wind-up tell) and for the purely
+    // cosmetic Point gesture.
+    let pointing = charging || (point_pressed && player.is_some() && !is_ragdolling);
 
     // Linear ramp of the blend amount toward 0/1 over point_ramp_duration_s.
     let goal = if pointing { 1.0 } else { 0.0 };
@@ -362,8 +433,8 @@ pub(super) fn drive_arm_point(
         (target.amount - step).max(goal)
     };
 
-    // Charge accumulates while pointing, resets while not.
-    if pointing {
+    // Charge accumulates while charging, resets while not.
+    if charging {
         state.charge_seconds = (state.charge_seconds + dt).min(config.max_charge_duration_s);
     } else {
         state.charge_seconds = 0.0;
@@ -374,7 +445,7 @@ pub(super) fn drive_arm_point(
     update_rumble_audio(
         &config.rumble,
         charge_audio.as_deref(),
-        pointing,
+        charging,
         charge_ratio,
     );
 
@@ -390,10 +461,11 @@ pub(super) fn drive_arm_point(
 // Yeet: slam velocity in the look direction on release, play whoosh
 // ============================================================================
 
-/// On release of the [`Point`](CameraAction::Point) action — gated on
-/// the cooldown — set the logical player's linear velocity to
-/// `look_direction * lerp(MIN_YEET_SPEED, MAX_YEET_SPEED, charge_ratio)`,
-/// kick off the whoosh sample, and start the cooldown.
+/// On release of a *charge hold* of the [`Ascend`](CameraAction::Ascend)
+/// action — gated on the cooldown — set the logical player's linear velocity
+/// to `look_direction * lerp(MIN_YEET_SPEED, MAX_YEET_SPEED, charge_ratio)`,
+/// kick off the whoosh sample, and start the cooldown. A tap release is the
+/// controller's jump instead.
 pub(super) fn handle_yeet(
     mut commands: Commands,
     config: Res<YeetConfig>,
@@ -408,19 +480,24 @@ pub(super) fn handle_yeet(
     let Ok(action_state) = actions.single() else {
         return;
     };
-    if !action_state.just_released(&CameraAction::Point) {
+    if !action_state.just_released(&CameraAction::Ascend) {
+        return;
+    }
+    // A tap is the controller's jump, not a launch. This runs before
+    // `drive_arm_point` resets the hold, so the just-ended hold is intact.
+    if !state.is_charge_hold(&config) {
         return;
     }
     // Honor the cooldown even on the release tick — if released during
     // cooldown, no yeet, no charge reset (charge was zero anyway since
-    // pointing was blocked).
+    // charging was blocked).
     if state.cooldown_s > 0.0 {
         return;
     }
     let Ok((mut controller, world_pos, mut velocity)) = logical_query.single_mut() else {
         return;
     };
-    // No yeeting while ragdolling. The Point action is already gated in
+    // No yeeting while ragdolling. Charging is already gated in
     // `drive_arm_point` so `charge_seconds` should be zero here, but defend
     // against state-toggling races.
     if controller.ragdoll_state == RagdollState::Ragdolling {
@@ -461,7 +538,8 @@ pub(super) fn handle_yeet(
     // observe the lifted player.
     controller.ground_tick = 0;
 
-    // Reset charge and start cooldown.
+    // Reset the gesture and start the cooldown.
+    state.hold_seconds = 0.0;
     state.charge_seconds = 0.0;
     state.cooldown_s = config.cooldown_s;
 

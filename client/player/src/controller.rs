@@ -21,6 +21,8 @@ use veldera_geo::{
 };
 use veldera_physics::{GameLayer, ManualGravity};
 
+use crate::yeet::YeetState;
+
 // ============================================================================
 // Plugin
 // ============================================================================
@@ -650,6 +652,7 @@ fn fps_controller_input(
     action_query: Query<&ActionState<CameraAction>>,
     camera_config: Res<CameraConfig>,
     config: Res<FpsConfig>,
+    mut yeet_state: ResMut<YeetState>,
     mut query: Query<(&FpsController, &mut FpsControllerInput)>,
 ) {
     let Ok(action_state) = action_query.single() else {
@@ -677,7 +680,15 @@ fn fps_controller_input(
         let move_input = action_state.clamped_axis_pair(&CameraAction::Move);
         input.movement = Vec3::new(move_input.x, 0.0, move_input.y);
         input.sprint |= action_state.pressed(&CameraAction::Sprint);
-        input.jump |= action_state.pressed(&CameraAction::Ascend);
+        // Jump on releasing a *tap* of Ascend: a hold past the charge
+        // threshold belongs to the yeet gesture (`crate::yeet`), which
+        // launches on release instead. The release edge is detected by the
+        // yeet hold tracker and consumed here — this system runs in
+        // `RunFixedMainLoop`, where leafwing's update/fixed action-state
+        // swap makes `just_released` unreliable. Jump-on-release costs the
+        // tap's duration (~0.1 s) in latency — the price of sharing Space
+        // with the charged leap.
+        input.jump |= yeet_state.take_queued_jump();
         input.crouch |= action_state.pressed(&CameraAction::Descend);
     }
 }

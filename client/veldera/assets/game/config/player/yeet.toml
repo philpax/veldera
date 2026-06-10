@@ -1,8 +1,15 @@
-# Yeet (arm-point launch) tuning. Note: [rumble].base_hz is baked into the
+# Yeet (charged-leap) tuning. The gesture lives on a held Space: a tap is a
+# normal jump, a hold past charge_hold_threshold_s charges, and the release
+# launches along the look direction. Note: [rumble].base_hz is baked into the
 # synthesized loop at startup and only takes effect on restart.
 
 # Seconds for the arm to fully raise / lower.
 point_ramp_duration_s = 0.5
+# Seconds Space must be held before the hold becomes a charge; anything
+# shorter is a tap, which jumps (on release) instead. Generous on purpose:
+# casual jump presses vary a lot in length, and a too-low threshold turns a
+# lazy jump into an accidental mini-yeet.
+charge_hold_threshold_s = 0.5
 # Max charge hold time (s); past this the charge saturates at 1.0.
 max_charge_duration_s = 5.0
 # Launch speed at zero charge — a soft push (m/s).
