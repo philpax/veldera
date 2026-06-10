@@ -266,17 +266,17 @@ fn draw_top_down_map(
         let fill = color.gamma_multiply((f32::from(alpha) / 255.0) * 0.6);
 
         if view.show_physics && node.sources.physics {
-            let stroke_color = if snapshot.physics_collider_paths.contains(&node.path) {
-                // Active collider — thicker, brighter outline.
-                color
-            } else {
-                color.gamma_multiply(0.5)
-            };
-            let stroke_width = if snapshot.physics_collider_paths.contains(&node.path) {
-                2.0
-            } else {
-                1.0
-            };
+            // Uncovered regions (no collider data anywhere on the ancestor
+            // chain) are flagged in red — the player falls through these.
+            let (stroke_color, stroke_width) =
+                if snapshot.physics_uncovered_paths.contains(&node.path) {
+                    (egui::Color32::from_rgb(255, 40, 40), 2.5)
+                } else if snapshot.physics_collider_paths.contains(&node.path) {
+                    // Active collider — thicker, brighter outline.
+                    (color, 2.0)
+                } else {
+                    (color.gamma_multiply(0.5), 1.0)
+                };
             painter.rect_stroke(
                 egui::Rect::from_center_size(screen_pos, egui::Vec2::splat(r_px * 2.0)),
                 0.0,
@@ -461,6 +461,15 @@ fn draw_counters_panel(ui: &mut egui::Ui, snapshot: &LodSnapshot, mesh_count: us
         phys_min.map_or("—".to_string(), |d| d.to_string()),
         phys_max.map_or("—".to_string(), |d| d.to_string()),
     ));
+    if c.physics_uncovered > 0 {
+        ui.colored_label(
+            egui::Color32::from_rgb(255, 80, 80),
+            format!(
+                "  ⚠ {} region(s) with NO collider coverage",
+                c.physics_uncovered
+            ),
+        );
+    }
     ui.monospace(format!(
         "Bulks        cached {:>4}   loading {:>4}   failed {:>4}",
         c.bulks_cached, c.bulks_loading, c.bulks_failed

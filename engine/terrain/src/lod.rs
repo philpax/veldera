@@ -14,7 +14,11 @@
 //!   within [`PhysicsStreamingConfig::range`](veldera_physics::PhysicsStreamingConfig).
 //!   If the target depth isn't available
 //!   the deepest loaded ancestor with data is used as a fallback so the
-//!   player can never fall through unloaded ground.
+//!   player can't fall through ground whose data simply hasn't streamed in
+//!   yet. When *nothing* on a region's ancestor chain is loaded, the region
+//!   is genuinely uncovered: it's counted, logged on transition, and shown
+//!   in the diagnostics until loads (which prioritise the physics chain)
+//!   close the gap.
 //!
 //! Both rules share the same bulk + node caches. Retention takes the
 //! union of both rules' potential sets *over a rolling grace window*
@@ -207,6 +211,8 @@ pub struct SnapshotCounters {
     pub render_loaded: usize,
     pub render_loading: usize,
     pub physics_colliders: usize,
+    /// In-range regions currently without any collider coverage.
+    pub physics_uncovered: usize,
     pub bulks_cached: usize,
     pub bulks_loading: usize,
     pub bulks_failed: usize,
@@ -237,6 +243,9 @@ pub struct LodSnapshot {
     pub nodes: Vec<SnapshotNode>,
     /// Paths the physics BFS currently has colliders for.
     pub physics_collider_paths: HashSet<OctreePath>,
+    /// In-range regions with no loaded collider data anywhere on their
+    /// ancestor chain — no terrain collision until a load completes.
+    pub physics_uncovered_paths: HashSet<OctreePath>,
     /// Aggregate counters.
     pub counters: SnapshotCounters,
 }
@@ -326,6 +335,9 @@ pub struct LodState {
     /// `update_frustum`. Used as the rotational component of the BFS
     /// skip signature.
     view_direction: Option<Vec3>,
+    /// Uncovered-region count from the last BFS run, for logging coverage
+    /// transitions exactly once.
+    last_uncovered_regions: usize,
 }
 
 impl LodState {
@@ -423,6 +435,11 @@ struct PhysicsBfsResult {
     potential_bulks: HashSet<OctreePath>,
     /// OBBs discovered during traversal.
     discovered_obbs: Vec<(OctreePath, OrientedBoundingBox)>,
+    /// In-range regions where a collider commit found no loaded data
+    /// anywhere along the ancestor chain — there is *no* terrain collision
+    /// in these regions until a load completes. Surfaced in the diagnostics
+    /// so the fall-through window is visible instead of silent.
+    uncovered_regions: HashSet<OctreePath>,
 }
 
 impl PhysicsBfsResult {
@@ -434,6 +451,7 @@ impl PhysicsBfsResult {
         self.potential_nodes.clear();
         self.potential_bulks.clear();
         self.discovered_obbs.clear();
+        self.uncovered_regions.clear();
     }
 }
 
@@ -820,9 +838,14 @@ fn commit_physics_collider(
         result.collider_paths.insert(node_path);
     } else if let Some(anc) = best_ancestor {
         result.collider_paths.insert(anc);
+    } else {
+        // No ancestor has data loaded either: this region has no terrain
+        // collision at all until a load completes. The BFS has already
+        // requested every in-range node on the chain, and physics requests
+        // take priority over render requests in the load queue, so the
+        // window is short — but it must be visible, not silent.
+        result.uncovered_regions.insert(node_path);
     }
-    // If no ancestor has data loaded either, we just have no collider in
-    // this region for now. Will resolve once any ancestor finishes loading.
 }
 
 /// Despawn entities for nodes no longer in the retention set, and remove
@@ -1100,6 +1123,20 @@ fn update_lod_requests(
         // Stash the latest physics collider selection for
         // `update_physics_colliders`.
         lod_state.physics_target_paths = physics_bfs.collider_paths.clone();
+
+        // Coverage-loss transitions are logged (not just counted) because a
+        // fall-through-the-world window is a correctness event, not detail.
+        let uncovered = physics_bfs.uncovered_regions.len();
+        if uncovered > 0 && lod_state.last_uncovered_regions == 0 {
+            tracing::warn!(
+                "physics streaming: {uncovered} in-range region(s) have no loaded collider \
+                 data anywhere on their ancestor chain; terrain collision is missing there \
+                 until loads complete"
+            );
+        } else if uncovered == 0 && lod_state.last_uncovered_regions > 0 {
+            tracing::info!("physics streaming: collider coverage restored");
+        }
+        lod_state.last_uncovered_regions = uncovered;
     }
 
     // Derive the retention sets: anything still inside the grace window.
@@ -1130,9 +1167,12 @@ fn update_lod_requests(
     let max_node_loads = 64;
     let max_bulk_loads = 16;
 
-    // Merge node load requests from both BFSes. Drain the scratch
-    // vectors so capacity is reused next frame; HashSet insert in the
-    // filter dedupes any duplicate path either BFS produced.
+    // Merge node load requests from both BFSes. Physics requests go first:
+    // they include the fallback ancestor chain that guarantees ground
+    // coverage, so when the per-frame concurrency cap drops the excess, it
+    // drops render detail rather than the collision safety net. Drain the
+    // scratch vectors so capacity is reused next frame; HashSet insert in
+    // the filter dedupes any duplicate path either BFS produced.
     // Disjoint mutable borrows of the two BFS result fields via
     // destructuring so chained drains compile.
     let LodScratch {
@@ -1141,10 +1181,10 @@ fn update_lod_requests(
         ..
     } = &mut *scratch;
     let mut seen_paths: HashSet<OctreePath> = HashSet::new();
-    let merged_nodes: Vec<NodeMetadata> = render_result
+    let merged_nodes: Vec<NodeMetadata> = physics_result
         .nodes_to_load
         .drain(..)
-        .chain(physics_result.nodes_to_load.drain(..))
+        .chain(render_result.nodes_to_load.drain(..))
         .filter(|n| seen_paths.insert(n.path))
         .collect();
 
@@ -1543,12 +1583,14 @@ fn populate_snapshot(
     snapshot.lead = motion.lead();
     snapshot.velocity = motion.smoothed_velocity();
     snapshot.physics_collider_paths = physics.collider_paths.clone();
+    snapshot.physics_uncovered_paths = physics.uncovered_regions.clone();
 
     let mut counters = SnapshotCounters {
         bulks_cached: lod_state.bulks.len(),
         bulks_loading: lod_state.loading_bulks.len(),
         bulks_failed: lod_state.failed_bulks.len(),
         physics_colliders: lod_state.physics_colliders.len(),
+        physics_uncovered: physics.uncovered_regions.len(),
         ..Default::default()
     };
 
