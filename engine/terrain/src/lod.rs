@@ -1897,6 +1897,7 @@ fn update_physics_colliders(
             streaming.min_collider_triangle_height as f32,
             down,
             streaming.collider_skirt_depth as f32,
+            streaming.collider_skirt_slope as f32,
             mask,
         );
 

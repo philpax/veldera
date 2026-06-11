@@ -125,6 +125,11 @@ pub struct PhysicsStreamingConfig {
     /// watertight as long as the vertical mismatch between neighbours stays
     /// under this depth. Zero disables.
     pub collider_skirt_depth: f64,
+    /// Horizontal outward displacement per metre of skirt descent. With a
+    /// slope, the skirts become aprons: a vertical step at a tile border
+    /// turns into a ramp of this grade that wheels and feet ride over
+    /// instead of striking a wall. Zero keeps the skirts vertical.
+    pub collider_skirt_slope: f64,
     /// Maximum trimesh collider builds per frame. Building a trimesh is the
     /// expensive part of collider streaming; capping it bounds the frame
     /// cost during fast flight when the band boundaries sweep the world.

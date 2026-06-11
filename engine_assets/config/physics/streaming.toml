@@ -22,6 +22,12 @@ min_collider_triangle_height = 0.01
 # depths. Covers vertical mismatches up to this size. Zero disables.
 collider_skirt_depth = 5.0
 
+# Horizontal outward displacement per metre of skirt descent. Slanted skirts
+# are aprons: a vertical step at a tile border becomes a ramp of grade
+# 1/slope that wheels and feet ride over instead of striking a wall.
+# Zero keeps skirts vertical.
+collider_skirt_slope = 2.0
+
 # Max trimesh collider builds per frame (the expensive part of collider
 # streaming); bounds the frame cost during fast flight. Zero = uncapped.
 max_collider_builds_per_frame = 4

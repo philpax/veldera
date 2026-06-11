@@ -47,6 +47,9 @@ pub struct TerrainCollider {
 /// * `down` - Unit vector toward the planet centre in the baked vertex space.
 /// * `skirt_depth` - Boundary-skirt depth (m); see
 ///   [`PhysicsStreamingConfig::collider_skirt_depth`](crate::PhysicsStreamingConfig::collider_skirt_depth).
+/// * `skirt_slope` - Horizontal outward displacement per metre of skirt
+///   descent; see
+///   [`PhysicsStreamingConfig::collider_skirt_slope`](crate::PhysicsStreamingConfig::collider_skirt_slope).
 /// * `octant_mask` - Octants covered by deeper colliders: their geometry is
 ///   removed, with boundary-crossing triangles clipped at the octant
 ///   midplanes (see `merge_meshes`). `0` keeps the full mesh.
@@ -60,6 +63,7 @@ pub fn create_terrain_collider(
     min_triangle_height: f32,
     down: Vec3,
     skirt_depth: f32,
+    skirt_slope: f32,
     octant_mask: u8,
 ) -> Option<Collider> {
     let (mut vertices, mut triangles) =
@@ -67,7 +71,13 @@ pub fn create_terrain_collider(
     if triangles.is_empty() {
         return None;
     }
-    add_skirts(&mut vertices, &mut triangles, down, skirt_depth);
+    add_skirts(
+        &mut vertices,
+        &mut triangles,
+        down,
+        skirt_depth,
+        skirt_slope,
+    );
 
     // Use try_trimesh to avoid panicking on invalid input.
     Collider::try_trimesh(vertices, triangles).ok()
@@ -343,31 +353,66 @@ fn split_polygon(poly: &[Vec3], axis: usize, value: f32) -> (Vec<Vec3>, Vec<Vec3
 /// by `depth` metres along `down`, closing the hairline cracks between
 /// neighbouring tiles at different LoD depths.
 ///
+/// With a non-zero `slope`, the extrusion also pushes outward (away from
+/// the owning triangle) by `depth × slope`, turning the skirt into an
+/// apron: where a neighbouring tile's surface sits lower, the vertical step
+/// at the border becomes a ramp of grade `1 / slope` that wheels and feet
+/// ride over instead of striking a wall. Where the neighbour is higher, the
+/// apron dives below its surface and is unreachable, exactly like a
+/// vertical skirt.
+///
 /// Edge sharing is detected by index, not welded position: a border between
 /// two meshes of the same node (or edges exposed by the sliver filter) reads
 /// as boundary and grows a redundant skirt. Those hang strictly below the
 /// surface, so they cost a few triangles and affect nothing.
-fn add_skirts(vertices: &mut Vec<Vec3>, triangles: &mut Vec<[u32; 3]>, down: Vec3, depth: f32) {
+fn add_skirts(
+    vertices: &mut Vec<Vec3>,
+    triangles: &mut Vec<[u32; 3]>,
+    down: Vec3,
+    depth: f32,
+    slope: f32,
+) {
     if depth <= 0.0 {
         return;
     }
 
-    let mut edge_counts: HashMap<(u32, u32), u32> = HashMap::new();
+    // Boundary edges, each remembering the third vertex of its (single)
+    // owning triangle so the apron knows which way "outward" is.
+    let mut edges: HashMap<(u32, u32), (u32, u32)> = HashMap::new();
     for tri in triangles.iter() {
-        for (a, b) in [(tri[0], tri[1]), (tri[1], tri[2]), (tri[2], tri[0])] {
-            *edge_counts.entry((a.min(b), a.max(b))).or_insert(0) += 1;
+        for ((a, b), third) in [
+            ((tri[0], tri[1]), tri[2]),
+            ((tri[1], tri[2]), tri[0]),
+            ((tri[2], tri[0]), tri[1]),
+        ] {
+            let entry = edges.entry((a.min(b), a.max(b))).or_insert((0, third));
+            entry.0 += 1;
         }
     }
 
-    let offset = down * depth;
-    for ((a, b), count) in edge_counts {
+    let drop = down * depth;
+    for ((a, b), (count, third)) in edges {
         if count != 1 {
             continue;
         }
+        // Outward: perpendicular to the edge, away from the triangle
+        // interior, flattened against `down` so the apron descends evenly.
+        let (va, vb, vc) = (
+            vertices[a as usize],
+            vertices[b as usize],
+            vertices[third as usize],
+        );
+        let edge_dir = (vb - va).normalize_or_zero();
+        let to_third = vc - va;
+        let inward = to_third - edge_dir * to_third.dot(edge_dir);
+        let inward_flat = inward - down * inward.dot(down);
+        let outward = -inward_flat.normalize_or_zero();
+        let offset = drop + outward * (depth * slope);
+
         let a_low = vertices.len() as u32;
-        vertices.push(vertices[a as usize] + offset);
+        vertices.push(va + offset);
         let b_low = vertices.len() as u32;
-        vertices.push(vertices[b as usize] + offset);
+        vertices.push(vb + offset);
         triangles.push([a, b, b_low]);
         triangles.push([a, b_low, a_low]);
     }
@@ -503,12 +548,20 @@ mod tests {
         let meshes = vec![test_mesh(&quad, vec![]), test_mesh(&quad, vec![0, 1, 2, 3])];
 
         assert!(
-            create_terrain_collider(&meshes, &Transform::IDENTITY, 0.0, Vec3::NEG_Z, 0.0, 0)
+            create_terrain_collider(&meshes, &Transform::IDENTITY, 0.0, Vec3::NEG_Z, 0.0, 0.0, 0)
                 .is_some()
         );
         assert!(
-            create_terrain_collider(&meshes[..1], &Transform::IDENTITY, 0.0, Vec3::NEG_Z, 0.0, 0)
-                .is_none()
+            create_terrain_collider(
+                &meshes[..1],
+                &Transform::IDENTITY,
+                0.0,
+                Vec3::NEG_Z,
+                0.0,
+                0.0,
+                0
+            )
+            .is_none()
         );
     }
 
@@ -524,13 +577,51 @@ mod tests {
         ];
         let mut triangles = vec![[0, 1, 2], [1, 3, 2]];
 
-        add_skirts(&mut vertices, &mut triangles, Vec3::NEG_Z, 2.0);
+        add_skirts(&mut vertices, &mut triangles, Vec3::NEG_Z, 2.0, 0.0);
 
         // Four boundary edges → two new vertices and two triangles each.
         assert_eq!(vertices.len(), 4 + 8);
         assert_eq!(triangles.len(), 2 + 8);
         // Skirt vertices sit exactly `depth` below their source.
         assert_eq!(vertices[4].z, -2.0);
+    }
+
+    #[test]
+    fn test_add_skirts_slope_makes_aprons() {
+        // A single triangle in the z = 0 plane with `down` = -Z: every
+        // apron vertex must descend by `depth` and move *away* from the
+        // triangle's centroid horizontally (outward), by depth × slope.
+        let mut vertices = vec![
+            Vec3::new(0.0, 0.0, 0.0),
+            Vec3::new(2.0, 0.0, 0.0),
+            Vec3::new(0.0, 2.0, 0.0),
+        ];
+        let mut triangles = vec![[0, 1, 2]];
+        let centroid = (vertices[0] + vertices[1] + vertices[2]) / 3.0;
+
+        add_skirts(&mut vertices, &mut triangles, Vec3::NEG_Z, 1.0, 2.0);
+
+        assert_eq!(vertices.len(), 3 + 6);
+        for apron in &vertices[3..] {
+            assert_eq!(apron.z, -1.0, "aprons descend by depth");
+            let top = Vec3::new(apron.x, apron.y, 0.0);
+            // Each apron vertex sits depth × slope = 2.0 horizontally from
+            // its source vertex, on the side away from the triangle.
+            let source = vertices[..3]
+                .iter()
+                .copied()
+                .min_by(|a, b| (top - *a).length().total_cmp(&(top - *b).length()))
+                .expect("triangle has vertices");
+            let source_dist = (top - source).length();
+            assert!(
+                (source_dist - 2.0).abs() < 1e-4,
+                "apron should sit depth × slope from its source vertex, got {source_dist}"
+            );
+            assert!(
+                (top - centroid).length() > (source - centroid).length(),
+                "aprons must move outward, away from the triangle"
+            );
+        }
     }
 
     #[test]
@@ -542,7 +633,7 @@ mod tests {
         ];
         let mut triangles = vec![[0, 1, 2]];
 
-        add_skirts(&mut vertices, &mut triangles, Vec3::NEG_Z, 0.0);
+        add_skirts(&mut vertices, &mut triangles, Vec3::NEG_Z, 0.0, 1.0);
 
         assert_eq!(vertices.len(), 3);
         assert_eq!(triangles.len(), 1);
