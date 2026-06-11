@@ -167,23 +167,35 @@ pub fn vehicle_physics_system(
         let params = build_car_params(chassis, suspension, engine, transmission, steering, tire);
         let wheel_params = wheel_params(wheels);
 
-        // Suspension casts: a wheel-radius sphere from each hardpoint along
-        // chassis-down, against ground only (not vehicles, not ragdolls).
-        // The sphere footprint rolls over sub-radius terrain lumps and
-        // bridges hairline tile cracks that a zero-width ray reads at full
+        // Suspension casts: a wheel-radius sphere along chassis-down,
+        // against ground only (not vehicles, not ragdolls). The sphere
+        // footprint rolls over sub-radius terrain lumps and bridges
+        // hairline tile cracks that a zero-width ray reads at full
         // amplitude.
+        //
+        // The cast starts a full radius plus travel *above* the hardpoint:
+        // terrain colliders are surfaces, not volumes, so a cast that
+        // begins below the ground sails down for ever and reports the wheel
+        // airborne. A hard landing that briefly shoved the chassis into the
+        // surface then killed all suspension force permanently — the car
+        // belly-slid on its hull at speed with free-spinning wheels until
+        // something snagged. Starting high, contact above the wheel's range
+        // maps to negative suspension length, which the core clamps to full
+        // compression — actively pushing the chassis back out instead.
         let filter = SpatialQueryFilter::default().with_mask([GameLayer::Ground]);
         let down = rotation.0 * Vec3::NEG_Y;
         let Ok(down_dir) = Dir3::new(down) else {
             continue;
         };
-        let cast_config = ShapeCastConfig {
-            max_distance: core::wheel_cast_length(&params),
-            ..Default::default()
-        };
         let mut hits: [Option<WheelCastHit>; 4] = [None; 4];
         for (i, wheel) in wheel_params.iter().enumerate() {
-            let origin = position.0 + rotation.0 * core::wheel_hardpoint(wheel, &params);
+            let raise = wheel.radius + params.suspension_travel;
+            let cast_config = ShapeCastConfig {
+                max_distance: raise + core::wheel_cast_length(&params),
+                ..Default::default()
+            };
+            let origin =
+                position.0 + rotation.0 * (core::wheel_hardpoint(wheel, &params) + Vec3::Y * raise);
             hits[i] = spatial_query
                 .cast_shape(
                     &Collider::sphere(wheel.radius),
@@ -194,7 +206,7 @@ pub fn vehicle_physics_system(
                     &filter,
                 )
                 .map(|hit| WheelCastHit {
-                    distance: hit.distance,
+                    distance: hit.distance - raise,
                     normal: hit.normal1,
                     point: hit.point1,
                 });
