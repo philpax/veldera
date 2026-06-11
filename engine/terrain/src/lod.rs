@@ -620,6 +620,7 @@ fn unified_bfs_traversal(
         OctreePath::ROOT,
         None,
         false, // physics_committed_above
+        false, // physics_chain_requested
         &mut scratch.render_result,
         &mut scratch.physics_result,
     );
@@ -643,6 +644,7 @@ fn unified_walk(
     bulk_key: OctreePath,
     physics_best_ancestor: Option<OctreePath>,
     physics_committed_above: bool,
+    physics_chain_requested: bool,
     render_result: &mut BfsResult,
     physics_result: &mut PhysicsBfsResult,
 ) -> bool {
@@ -754,17 +756,25 @@ fn unified_walk(
                 .discovered_obbs
                 .push((child_node.path, child_node.obb));
         }
-        // Physics: OBB cache + potential set + always request data for
-        // the fallback chain.
+        // Physics: OBB cache + potential set + fallback-chain data requests.
+        //
+        // The whole chain stays in `potential_nodes` (retention), but only
+        // the *shallowest missing* node per path is requested per batch,
+        // plus the target-depth node itself. Requesting every missing chain
+        // node at once flooded the load queue during movement and starved
+        // render-mesh loads; with the trim, chains complete progressively
+        // (each completion re-runs the BFS, which then requests the next
+        // link) while the target node — the one we actually want hosting
+        // the collider — loads in parallel from the start.
+        let child_missing = child_node.has_data
+            && !ctx.lod_state.loaded_nodes.contains(&child_node.path)
+            && !ctx.lod_state.loading_nodes.contains(&child_node.path);
         if physics_in_range {
             physics_result
                 .discovered_obbs
                 .push((child_node.path, child_node.obb));
             physics_result.potential_nodes.insert(child_node.path);
-            if child_node.has_data
-                && !ctx.lod_state.loaded_nodes.contains(&child_node.path)
-                && !ctx.lod_state.loading_nodes.contains(&child_node.path)
-            {
+            if child_missing && (physics_at_or_past_target || !physics_chain_requested) {
                 physics_result.nodes_to_load.push(child_node.clone());
             }
         }
@@ -817,6 +827,7 @@ fn unified_walk(
                 effective_bulk_key,
                 updated_phys_best,
                 octant_handled,
+                physics_chain_requested || child_missing,
                 render_result,
                 physics_result,
             );
@@ -877,9 +888,10 @@ fn commit_physics_collider(
     } else {
         // No ancestor has data loaded either: this region has no terrain
         // collision at all until a load completes. The BFS has already
-        // requested every in-range node on the chain, and physics requests
-        // take priority over render requests in the load queue, so the
-        // window is short — but it must be visible, not silent.
+        // requested the chain's shallowest missing node and the target
+        // node, and physics requests have a reserved share of the load
+        // slots, so the window is short — but it must be visible, not
+        // silent.
         result.uncovered_regions.insert(node_path);
     }
 }
@@ -1200,15 +1212,16 @@ fn update_lod_requests(
     // routinely dropped 40+ excess requests per frame, and only
     // recovered them through the `nodes_completed_version` BFS re-run
     // path which trickles in slowly.
-    let max_node_loads = 64;
+    let max_node_loads: usize = 64;
     let max_bulk_loads = 16;
 
-    // Merge node load requests from both BFSes. Physics requests go first:
-    // they include the fallback ancestor chain that guarantees ground
-    // coverage, so when the per-frame concurrency cap drops the excess, it
-    // drops render detail rather than the collision safety net. Drain the
-    // scratch vectors so capacity is reused next frame; HashSet insert in
-    // the filter dedupes any duplicate path either BFS produced.
+    // Split this frame's free load slots between the two queues, with each
+    // side's unused share rolling over to the other. Physics requests are
+    // the collision safety net and must never be starved by a flood of
+    // fine render meshes; equally, a strict physics-first ordering starved
+    // render loads during movement (visible as slow tile pop-in). Drain
+    // the scratch vectors so capacity is reused next frame; HashSet insert
+    // in the filter dedupes any duplicate path either BFS produced.
     // Disjoint mutable borrows of the two BFS result fields via
     // destructuring so chained drains compile.
     let LodScratch {
@@ -1217,18 +1230,28 @@ fn update_lod_requests(
         ..
     } = &mut *scratch;
     let mut seen_paths: HashSet<OctreePath> = HashSet::new();
-    let merged_nodes: Vec<NodeMetadata> = physics_result
+    let physics_nodes: Vec<NodeMetadata> = physics_result
         .nodes_to_load
         .drain(..)
-        .chain(render_result.nodes_to_load.drain(..))
+        .filter(|n| seen_paths.insert(n.path))
+        .collect();
+    let render_nodes: Vec<NodeMetadata> = render_result
+        .nodes_to_load
+        .drain(..)
         .filter(|n| seen_paths.insert(n.path))
         .collect();
 
-    for node_meta in merged_nodes {
-        if lod_state.loading_nodes.len() >= max_node_loads {
-            break;
-        }
+    let available = max_node_loads.saturating_sub(lod_state.loading_nodes.len());
+    let physics_take = physics_nodes.len().min(available.div_ceil(2));
+    let render_take = render_nodes.len().min(available - physics_take);
+    // Roll any unused render share back to physics.
+    let physics_take = physics_nodes.len().min(available - render_take);
 
+    for node_meta in physics_nodes
+        .into_iter()
+        .take(physics_take)
+        .chain(render_nodes.into_iter().take(render_take))
+    {
         let path = node_meta.path;
         lod_state.loading_nodes.insert(path);
 
