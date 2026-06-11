@@ -369,6 +369,14 @@ impl LodState {
         self.physics_colliders.len()
     }
 
+    /// The current target mask for a collider path, or `None` when the path
+    /// is no longer selected (a stale collider awaiting replacement). For
+    /// the diagnostics UI.
+    #[must_use]
+    pub fn collider_target_mask(&self, path: OctreePath) -> Option<u8> {
+        self.physics_target_paths.get(&path).copied()
+    }
+
     /// Iterate the active terrain colliders as `(path, obb)` pairs, for the
     /// in-world viz overlay. Colliders whose OBB is no longer cached are
     /// skipped.
@@ -406,6 +414,69 @@ impl LodState {
             ancestor = p.parent();
         }
         self.live_descendant_bits(path) == 0xff
+    }
+
+    /// Every strict prefix of a live collider path, for O(1) "anything live
+    /// below this node?" checks during coverage recursion.
+    fn live_collider_prefixes(&self) -> HashSet<OctreePath> {
+        let mut prefixes = HashSet::new();
+        for path in self.physics_colliders.keys() {
+            let mut current = *path;
+            while let Some(parent) = current.parent() {
+                if !prefixes.insert(parent) {
+                    break;
+                }
+                current = parent;
+            }
+        }
+        prefixes
+    }
+
+    /// Whether `path`'s region is *fully* covered by live colliders at or
+    /// below it: a live collider here covers its unmasked octants itself and
+    /// defers its masked octants to the recursion; without one, all eight
+    /// children must be covered. `live_prefixes` (from
+    /// [`Self::live_collider_prefixes`]) prunes empty subtrees.
+    fn region_live_covered(&self, live_prefixes: &HashSet<OctreePath>, path: OctreePath) -> bool {
+        if let Some((_, mask)) = self.physics_colliders.get(&path) {
+            return (0u8..8).all(|octant| {
+                mask & (1 << octant) == 0
+                    || self.region_live_covered(live_prefixes, path.push(octant))
+            });
+        }
+        if path.depth() >= OctreePath::MAX_DEPTH || !live_prefixes.contains(&path) {
+            return false;
+        }
+        (0u8..8).all(|octant| self.region_live_covered(live_prefixes, path.push(octant)))
+    }
+
+    /// Whether a live strict ancestor's collider covers `path`'s region: the
+    /// ancestor's octant containing `path` must be *unmasked* (a masked
+    /// octant means the ancestor defers that region to someone else —
+    /// possibly `path` itself).
+    fn ancestor_collider_covers(&self, path: OctreePath) -> bool {
+        let mut ancestor = path.parent();
+        while let Some(a) = ancestor {
+            if let Some((_, mask)) = self.physics_colliders.get(&a)
+                && let Some(octant) = path.octant_at(a.depth())
+                && mask & (1 << octant) == 0
+            {
+                return true;
+            }
+            ancestor = a.parent();
+        }
+        false
+    }
+
+    /// Bitmask of `path`'s octants whose regions are fully covered by live
+    /// colliders below them — the octants a collider build may safely drop.
+    fn covered_octant_bits(&self, live_prefixes: &HashSet<OctreePath>, path: OctreePath) -> u8 {
+        if path.depth() >= OctreePath::MAX_DEPTH {
+            return 0;
+        }
+        (0u8..8)
+            .filter(|&octant| self.region_live_covered(live_prefixes, path.push(octant)))
+            .fold(0, |bits, octant| bits | 1 << octant)
     }
 }
 
@@ -1734,6 +1805,28 @@ fn update_physics_colliders(
             Some((*path, *mask, distance))
         })
         .collect();
+
+    // Stale colliders (live but no longer selected) are progressively
+    // masked out of the octants whose replacements have gone live, instead
+    // of lingering at full coverage until *every* replacement is ready: a
+    // kilometres-wide stale ancestor would otherwise overlap the already
+    // replaced fine terrain under the player for as long as any one of its
+    // far-away replacements was still loading — a walkable, drivable step
+    // wherever the two reconstructions disagree.
+    pending.extend(
+        lod_state
+            .physics_colliders
+            .iter()
+            .filter(|(path, _)| !target_paths.contains_key(*path))
+            .filter_map(|(path, _)| {
+                let node_data = lod_state.node_data.get(path)?;
+                let distance = (node_data.world_position - camera_pos).length();
+                // Request everything droppable; the build loop intersects
+                // with the live coverage.
+                Some((*path, 0xffu8, distance))
+            }),
+    );
+
     pending.sort_by(|a, b| {
         std::cmp::Reverse(a.0.depth())
             .cmp(&std::cmp::Reverse(b.0.depth()))
@@ -1748,8 +1841,9 @@ fn update_physics_colliders(
         n => n,
     };
     let mut builds = 0usize;
+    let mut live_prefixes = lod_state.live_collider_prefixes();
 
-    for (path, target_mask, distance) in pending {
+    for (path, requested_mask, distance) in pending {
         if builds >= max_builds {
             break;
         }
@@ -1780,11 +1874,12 @@ fn update_physics_colliders(
             continue;
         };
 
-        // Only mask out octants that actually have live collider coverage
-        // below: a committed child whose build failed (or is still pending)
-        // must not leave a hole in the parent. Extra coverage from an unmasked
-        // octant overlaps the late child briefly — jitter, not a fall.
-        let mask = target_mask & lod_state.live_descendant_bits(path);
+        // Only mask out octants whose regions are *fully* covered by live
+        // colliders below: a replacement that failed, is still pending, or
+        // only partially covers its octant must not leave a hole. Extra
+        // coverage from an unmasked octant overlaps the late replacement
+        // briefly — jitter, not a fall.
+        let mask = requested_mask & lod_state.covered_octant_bits(&live_prefixes, path);
 
         match lod_state.physics_colliders.get(&path) {
             Some((_, built_mask)) if *built_mask == mask => continue,
@@ -1858,6 +1953,7 @@ fn update_physics_colliders(
         if let Some((old_entity, _)) = lod_state.physics_colliders.insert(path, (entity, mask)) {
             commands.entity(old_entity).despawn();
         }
+        live_prefixes = lod_state.live_collider_prefixes();
         tracing::debug!(
             "Created physics collider for node '{}' (depth {}, mask {:#04x})",
             path,
@@ -1866,10 +1962,13 @@ fn update_physics_colliders(
         );
     }
 
-    // Despawn colliders no longer in the target set — but only once every
-    // overlapping target path (ancestor or descendant — the replacement
-    // coverage for this region) is live with its current mask, so a
+    // Despawn colliders no longer in the target set — but only once their
+    // region is fully covered by other live colliders (an unmasked ancestor
+    // octant, or live coverage in all eight of their own octants), so a
     // deferred or failed replacement build never leaves the region bare.
+    // Partial replacement is handled by the progressive masking above, so a
+    // stale collider stops overlapping replaced areas long before it can be
+    // despawned outright.
     let obsolete: Vec<OctreePath> = lod_state
         .physics_colliders
         .keys()
@@ -1878,19 +1977,14 @@ fn update_physics_colliders(
         .collect();
 
     for path in obsolete {
-        let replacements_live = target_paths.iter().all(|(t, m)| {
-            let overlaps = t.starts_with(path) || path.starts_with(*t);
-            !overlaps
-                || lod_state
-                    .physics_colliders
-                    .get(t)
-                    .is_some_and(|(_, built)| built == m)
-        });
-        if !replacements_live {
+        let fully_replaced = lod_state.ancestor_collider_covers(path)
+            || lod_state.covered_octant_bits(&live_prefixes, path) == 0xff;
+        if !fully_replaced {
             continue;
         }
         if let Some((entity, _)) = lod_state.physics_colliders.remove(&path) {
             commands.entity(entity).despawn();
+            live_prefixes = lod_state.live_collider_prefixes();
             tracing::debug!("Removed physics collider for node '{}'", path);
         }
     }
