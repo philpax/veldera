@@ -60,7 +60,8 @@ use crate::{
     },
     terrain_material::{TerrainMaterial, TerrainMaterialExtension},
     viz::{
-        ColliderVizFilter, LodVizGizmos, LodVizSettings, configure_lod_viz_gizmos, draw_lod_viz,
+        ColliderVizFilter, LodVizGizmos, LodVizSettings, RenderMeshVizFilter,
+        configure_lod_viz_gizmos, draw_lod_viz, draw_render_mesh_wireframes,
         reconcile_collider_wireframes,
     },
 };
@@ -168,11 +169,17 @@ impl Plugin for LodPlugin {
             .add_systems(Update, update_physics_colliders.after(poll_lod_node_tasks))
             .init_resource::<ColliderVizFilter>()
             .init_resource::<LodVizSettings>()
+            .init_resource::<RenderMeshVizFilter>()
             .init_gizmo_group::<LodVizGizmos>()
             .add_systems(Startup, configure_lod_viz_gizmos)
             .add_systems(
                 Update,
-                (reconcile_collider_wireframes, draw_lod_viz).after(update_physics_colliders),
+                (
+                    reconcile_collider_wireframes,
+                    draw_lod_viz,
+                    draw_render_mesh_wireframes,
+                )
+                    .after(update_physics_colliders),
             );
     }
 }

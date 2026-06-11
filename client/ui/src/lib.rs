@@ -8,6 +8,7 @@ mod inspector;
 mod location;
 mod physics;
 mod profiler;
+mod rendering;
 mod shadow_diag;
 mod streaming;
 mod vehicle;
@@ -104,6 +105,7 @@ enum DebugTab {
     Atmosphere,
     Streaming,
     Physics,
+    Rendering,
     Profiler,
 }
 
@@ -116,6 +118,7 @@ impl DebugTab {
             DebugTab::Atmosphere => "Atmosphere",
             DebugTab::Streaming => "Streaming",
             DebugTab::Physics => "Physics",
+            DebugTab::Rendering => "Rendering",
             DebugTab::Profiler => "Profiler",
         }
     }
@@ -144,6 +147,7 @@ impl Default for DebugUiState {
                 DebugTab::Atmosphere,
                 DebugTab::Streaming,
                 DebugTab::Physics,
+                DebugTab::Rendering,
                 DebugTab::Profiler,
             ]),
             atmosphere_subtab: clouds::AtmosphereSubTab::default(),
@@ -201,6 +205,7 @@ fn debug_ui_system(
     mut clouds_params: clouds::CloudParams,
     mut streaming_params: streaming::StreamingParams,
     mut physics_params: physics::PhysicsParams,
+    mut rendering_params: rendering::RenderingParams,
     mut vehicle_params: vehicle::VehicleParams,
     mut inspector_params: inspector::InspectorParams,
     mut shadow_diag_params: shadow_diag::ShadowDiagParams,
@@ -284,6 +289,9 @@ fn debug_ui_system(
         }
         DebugTab::Physics => {
             physics::render_physics_tab(ui, &mut physics_params);
+        }
+        DebugTab::Rendering => {
+            rendering::render_rendering_tab(ui, &mut rendering_params);
         }
         DebugTab::Profiler => {
             profiler::render_profiler_tab(ui, &profiler_params, profiler_subtab);

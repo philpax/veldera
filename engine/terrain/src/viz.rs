@@ -14,7 +14,11 @@
 use std::collections::HashSet;
 
 use avian3d::prelude::ColliderAabb;
-use bevy::{gizmos::config::GizmoConfigStore, prelude::*};
+use bevy::{
+    gizmos::config::GizmoConfigStore,
+    mesh::{Indices, VertexAttributeValues},
+    prelude::*,
+};
 use glam::{DQuat, DVec3};
 use rocktree_decode::{OctreePath, OrientedBoundingBox};
 use veldera_geo::floating_origin::FloatingOriginCamera;
@@ -267,4 +271,135 @@ fn draw_obb(
         ),
         color,
     );
+}
+
+// ============================================================================
+// Render-mesh wireframes
+// ============================================================================
+
+/// Filter for the render-mesh wireframe overlay: the triangles the renderer
+/// actually rasterizes near the camera, with the shader's octant-mask
+/// vertex collapse replicated. Side by side with the collider wireframes,
+/// this separates "the photogrammetry is lumpy" from "the collider diverges
+/// from the display".
+#[derive(Resource, Clone, Copy)]
+pub struct RenderMeshVizFilter {
+    /// Whether the overlay draws at all.
+    pub enabled: bool,
+    /// Only draw meshes whose OBB is within this distance of the camera (m).
+    pub radius_m: f32,
+}
+
+impl Default for RenderMeshVizFilter {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            radius_m: 15.0,
+        }
+    }
+}
+
+/// Draw the wireframes of nearby *displayed* terrain meshes, mirroring the
+/// render path: hidden tiles are skipped and masked-octant vertices collapse
+/// to the mesh origin exactly like `terrain_material.wgsl`, so a triangle
+/// the GPU degenerates away vanishes here too. Orange, to read against the
+/// depth-coloured collider wireframes.
+#[allow(clippy::type_complexity)]
+pub(crate) fn draw_render_mesh_wireframes(
+    filter: Res<RenderMeshVizFilter>,
+    camera_query: Query<&FloatingOriginCamera>,
+    meshes: Res<Assets<Mesh>>,
+    materials: Res<Assets<crate::terrain_material::TerrainMaterial>>,
+    tiles: Query<(
+        &RocktreeMeshMarker,
+        &Mesh3d,
+        &MeshMaterial3d<crate::terrain_material::TerrainMaterial>,
+        &GlobalTransform,
+        &Visibility,
+    )>,
+    mut gizmos: Gizmos<LodVizGizmos>,
+) {
+    if !filter.enabled {
+        return;
+    }
+    let Ok(camera) = camera_query.single() else {
+        return;
+    };
+
+    const COLOR: Color = Color::srgb(1.0, 0.55, 0.1);
+
+    for (marker, mesh_handle, material_handle, transform, visibility) in &tiles {
+        if *visibility == Visibility::Hidden {
+            continue;
+        }
+        let near_distance =
+            (marker.obb.center - camera.position).length() - marker.obb.extents.length();
+        if near_distance > f64::from(filter.radius_m) {
+            continue;
+        }
+        let Some(mesh) = meshes.get(&mesh_handle.0) else {
+            continue;
+        };
+        let octant_mask = materials
+            .get(&material_handle.0)
+            .map_or(0, |m| m.extension.octant_mask.x);
+
+        let Some(VertexAttributeValues::Float32x3(positions)) =
+            mesh.attribute(Mesh::ATTRIBUTE_POSITION)
+        else {
+            continue;
+        };
+        // Per-vertex octant index lives in the red channel of vertex color
+        // (sentinel 255 = never masked), exactly as the shader reads it.
+        let octants: Option<&Vec<[f32; 4]>> = match mesh.attribute(Mesh::ATTRIBUTE_COLOR) {
+            Some(VertexAttributeValues::Float32x4(colors)) => Some(colors),
+            _ => None,
+        };
+
+        let collapsed = |index: usize| -> Vec3 {
+            let masked = octants.is_some_and(|colors| {
+                let octant = (colors[index][0] + 0.5) as u32;
+                octant < 32 && octant_mask >> octant & 1 != 0
+            });
+            if masked {
+                Vec3::ZERO
+            } else {
+                Vec3::from_array(positions[index])
+            }
+        };
+
+        let mut draw_triangle = |a: usize, b: usize, c: usize| {
+            let (la, lb, lc) = (collapsed(a), collapsed(b), collapsed(c));
+            // Fully collapsed triangles are degenerate and never rasterized.
+            if la == lb && lb == lc {
+                return;
+            }
+            let (wa, wb, wc) = (
+                transform.transform_point(la),
+                transform.transform_point(lb),
+                transform.transform_point(lc),
+            );
+            gizmos.line(wa, wb, COLOR);
+            gizmos.line(wb, wc, COLOR);
+            gizmos.line(wc, wa, COLOR);
+        };
+
+        match mesh.indices() {
+            Some(Indices::U16(indices)) => {
+                for tri in indices.chunks_exact(3) {
+                    draw_triangle(tri[0] as usize, tri[1] as usize, tri[2] as usize);
+                }
+            }
+            Some(Indices::U32(indices)) => {
+                for tri in indices.chunks_exact(3) {
+                    draw_triangle(tri[0] as usize, tri[1] as usize, tri[2] as usize);
+                }
+            }
+            None => {
+                for tri in (0..positions.len()).collect::<Vec<_>>().chunks_exact(3) {
+                    draw_triangle(tri[0], tri[1], tri[2]);
+                }
+            }
+        }
+    }
 }
