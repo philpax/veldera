@@ -2,14 +2,15 @@
 //!
 //! Avian's debug renderer draws every triangle of every collider it renders;
 //! at hundreds of trimesh terrain tiles that is millions of line segments per
-//! frame and single-digit framerates. Instead of attaching a blanket
-//! [`DebugRender`] to every terrain collider, [`reconcile_collider_wireframes`]
-//! reconciles a per-entity [`DebugRender`] override each frame from
-//! [`ColliderVizFilter`], so only the colliders near the camera (and within
-//! the configured depth range) pay the wireframe cost. Wireframes are coloured
-//! by octree depth via [`depth_color`], the same gradient the streaming
-//! diagnostics tab uses, so the in-world view and the top-down map read as one
-//! visualisation.
+//! frame and single-digit framerates. Terrain colliders therefore carry a
+//! permanent [`DebugRender::none`](veldera_physics::DebugRender) override,
+//! and [`draw_collider_wireframes`] draws them itself from the trimesh data,
+//! restricted by [`ColliderVizFilter`] and faded to transparent with
+//! distance (per vertex), so only the geometry near the camera pays the
+//! wireframe cost — and the overlay reads as depth-cued instead of as a
+//! solid wall of lines. Wireframes are coloured by octree depth via
+//! [`depth_color`], the same gradient the streaming diagnostics tab uses,
+//! so the in-world view and the top-down map read as one visualisation.
 
 use std::collections::HashSet;
 
@@ -22,7 +23,7 @@ use bevy::{
 use glam::{DQuat, DVec3};
 use rocktree_decode::{OctreePath, OrientedBoundingBox};
 use veldera_geo::floating_origin::FloatingOriginCamera;
-use veldera_physics::{DebugRender, TerrainCollider, is_physics_debug_enabled};
+use veldera_physics::{TerrainCollider, is_physics_debug_enabled};
 
 use crate::{
     lod::{LodSnapshot, LodSnapshotRequest, LodState, SnapshotNodeState},
@@ -128,40 +129,65 @@ pub fn depth_color(depth: usize) -> Color {
 /// Reconcile per-entity [`DebugRender`] overrides on terrain colliders against
 /// [`ColliderVizFilter`].
 ///
-/// Colliders inside the filter get a depth-coloured wireframe; everything else
-/// gets [`DebugRender::none`], which suppresses the global collider rendering
-/// for that entity. Skipped entirely while the physics debug visualisation is
-/// disabled, so the filter costs nothing in normal play.
-pub(crate) fn reconcile_collider_wireframes(
-    mut commands: Commands,
+/// Alpha for a wireframe vertex at `distance` from the camera, fading
+/// linearly to fully transparent at `radius`.
+fn wireframe_alpha(distance: f32, radius: f32) -> f32 {
+    (1.0 - distance / radius.max(1e-3)).clamp(0.0, 1.0)
+}
+
+/// Draw the terrain-collider wireframes near the camera, coloured by octree
+/// depth and faded to transparent with distance per vertex. Reads the
+/// trimesh data straight from the colliders (Avian's own renderer is
+/// suppressed for terrain — see the module docs). Skipped entirely while
+/// the physics debug visualisation is disabled.
+pub(crate) fn draw_collider_wireframes(
     filter: Res<ColliderVizFilter>,
     config_store: Res<GizmoConfigStore>,
     colliders: Query<(
-        Entity,
         &TerrainCollider,
+        &avian3d::prelude::Collider,
+        &avian3d::prelude::Position,
         &ColliderAabb,
-        Option<&DebugRender>,
     )>,
+    mut gizmos: Gizmos<LodVizGizmos>,
 ) {
     if !is_physics_debug_enabled(&config_store) {
         return;
     }
 
-    for (entity, terrain, aabb, current) in &colliders {
+    for (terrain, collider, position, aabb) in &colliders {
         let depth = terrain.path.depth();
         // The camera sits at the render-space origin (floating origin), so
         // the distance from the camera is the distance from zero to the AABB.
         let closest = Vec3::ZERO.clamp(aabb.min, aabb.max);
-        let within = closest.length() <= filter.radius_m
-            && (filter.depth_min..=filter.depth_max).contains(&depth);
-
-        let desired = if within {
-            DebugRender::collider(depth_color(depth))
-        } else {
-            DebugRender::none()
+        if closest.length() > filter.radius_m
+            || !(filter.depth_min..=filter.depth_max).contains(&depth)
+        {
+            continue;
+        }
+        let Some(trimesh) = collider.shape().as_trimesh() else {
+            continue;
         };
-        if current != Some(&desired) {
-            commands.entity(entity).insert(desired);
+        let color = depth_color(depth);
+        let vertex_world = |index: u32| position.0 + trimesh.vertices()[index as usize];
+
+        // Each interior edge is shared by two triangles; draw it once.
+        let mut drawn: HashSet<(u32, u32)> = HashSet::new();
+        for tri in trimesh.indices() {
+            for (a, b) in [(tri[0], tri[1]), (tri[1], tri[2]), (tri[2], tri[0])] {
+                if !drawn.insert((a.min(b), a.max(b))) {
+                    continue;
+                }
+                let (wa, wb) = (vertex_world(a), vertex_world(b));
+                let (alpha_a, alpha_b) = (
+                    wireframe_alpha(wa.length(), filter.radius_m),
+                    wireframe_alpha(wb.length(), filter.radius_m),
+                );
+                if alpha_a <= 0.0 && alpha_b <= 0.0 {
+                    continue;
+                }
+                gizmos.line_gradient(wa, wb, color.with_alpha(alpha_a), color.with_alpha(alpha_b));
+            }
         }
     }
 }
@@ -379,9 +405,13 @@ pub(crate) fn draw_render_mesh_wireframes(
                 transform.transform_point(lb),
                 transform.transform_point(lc),
             );
-            gizmos.line(wa, wb, COLOR);
-            gizmos.line(wb, wc, COLOR);
-            gizmos.line(wc, wa, COLOR);
+            // The camera sits at the render-space origin, so a vertex's
+            // distance is its length; lines fade out at the filter radius.
+            let alpha = |p: Vec3| COLOR.with_alpha(wireframe_alpha(p.length(), filter.radius_m));
+            let (ca, cb, cc) = (alpha(wa), alpha(wb), alpha(wc));
+            gizmos.line_gradient(wa, wb, ca, cb);
+            gizmos.line_gradient(wb, wc, cb, cc);
+            gizmos.line_gradient(wc, wa, cc, ca);
         };
 
         match mesh.indices() {

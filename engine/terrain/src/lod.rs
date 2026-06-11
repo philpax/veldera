@@ -61,8 +61,8 @@ use crate::{
     terrain_material::{TerrainMaterial, TerrainMaterialExtension},
     viz::{
         ColliderVizFilter, LodVizGizmos, LodVizSettings, RenderMeshVizFilter,
-        configure_lod_viz_gizmos, draw_lod_viz, draw_render_mesh_wireframes,
-        reconcile_collider_wireframes,
+        configure_lod_viz_gizmos, draw_collider_wireframes, draw_lod_viz,
+        draw_render_mesh_wireframes,
     },
 };
 
@@ -175,7 +175,7 @@ impl Plugin for LodPlugin {
             .add_systems(
                 Update,
                 (
-                    reconcile_collider_wireframes,
+                    draw_collider_wireframes,
                     draw_lod_viz,
                     draw_render_mesh_wireframes,
                 )
@@ -2048,6 +2048,10 @@ fn update_physics_colliders(
                 path,
                 octant_mask: mask,
             },
+            // Avian's debug renderer would draw every triangle of every
+            // terrain trimesh; suppress it permanently — the depth-filtered,
+            // distance-faded wireframes in `viz` draw these instead.
+            veldera_physics::DebugRender::none(),
         ));
         if let Some(collider) = collider {
             entity_commands.insert((
