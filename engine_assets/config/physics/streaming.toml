@@ -16,6 +16,15 @@ min_collider_triangle_height = 0.01
 # depths. Covers vertical mismatches up to this size. Zero disables.
 collider_skirt_depth = 5.0
 
+# Max trimesh collider builds per frame (the expensive part of collider
+# streaming); bounds the frame cost during fast flight. Zero = uncapped.
+max_collider_builds_per_frame = 4
+
+# Seconds a newly selected collider path must stay selected before its
+# trimesh is built, so selections that flicker during fast movement never
+# pay a build. Regions with no live coverage bypass the gate. Zero disables.
+collider_spawn_persistence_secs = 1.0
+
 # Lead vector: load colliders ahead of the player before they arrive.
 lead_time = 1.0          # lookahead time (s)
 max_lead = 200.0         # cap on lead distance (m) so fast runs don't starve nearby

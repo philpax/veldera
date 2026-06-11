@@ -347,6 +347,10 @@ pub struct LodState {
     /// Uncovered-region count from the last BFS run, for logging coverage
     /// transitions exactly once.
     last_uncovered_regions: usize,
+    /// Elapsed-seconds timestamp of when each path first entered the
+    /// current collider target set, for the spawn-persistence gate.
+    /// Entries are dropped the moment a path leaves the target set.
+    collider_candidate_since: HashMap<OctreePath, f64>,
 }
 
 impl LodState {
@@ -384,6 +388,21 @@ impl LodState {
             }
         }
         bits
+    }
+
+    /// Whether `path`'s region already has live collider coverage: a live
+    /// strict ancestor (which always covers the whole region), or live
+    /// descendants in all eight octants. Used by the spawn-persistence
+    /// gate — only already-covered regions may wait the gate out.
+    fn collider_region_covered(&self, path: OctreePath) -> bool {
+        let mut ancestor = path.parent();
+        while let Some(p) = ancestor {
+            if self.physics_colliders.contains_key(&p) {
+                return true;
+            }
+            ancestor = p.parent();
+        }
+        self.live_descendant_bits(path) == 0xff
     }
 }
 
@@ -1587,8 +1606,16 @@ fn cull_meshes(
 ///   is still pending can't punch a hole in the parent.
 /// - Despawns only happen once every overlapping target path is live with
 ///   its current mask.
+///
+/// Build cost is throttled (see
+/// [`PhysicsStreamingConfig::max_collider_builds_per_frame`] and
+/// [`PhysicsStreamingConfig::collider_spawn_persistence_secs`]): builds are
+/// capped per frame, and newly selected paths whose region already has live
+/// coverage must stay selected for a dwell time before paying a trimesh
+/// build. The despawn rules above are what make deferring builds safe.
 fn update_physics_colliders(
     mut commands: Commands,
+    time: Res<Time>,
     mut lod_state: ResMut<LodState>,
     physics_state: Res<PhysicsState>,
     streaming: Res<PhysicsStreamingConfig>,
@@ -1609,24 +1636,79 @@ fn update_physics_colliders(
         .origin_camera_position()
         .unwrap_or(camera.position);
     let target_paths = lod_state.physics_target_paths.clone();
+    let now = time.elapsed_secs_f64();
+
+    // Track when each path entered the target set; the timestamp resets the
+    // moment a path drops out, so re-selections start a fresh wait.
+    lod_state
+        .collider_candidate_since
+        .retain(|p, _| target_paths.contains_key(p));
+    for path in target_paths.keys() {
+        lod_state
+            .collider_candidate_since
+            .entry(*path)
+            .or_insert(now);
+    }
 
     // Collect spawns and rebuilds: paths with no entity, or whose live
     // entity was built with a different mask. Deepest first, so children
-    // are live before any parent rebuild masks their octants out.
-    let mut pending: Vec<(OctreePath, u8)> = target_paths
+    // are live before any parent rebuild masks their octants out; nearest
+    // first within a depth so the ground under the player wins the build
+    // budget.
+    let mut pending: Vec<(OctreePath, u8, f64)> = target_paths
         .iter()
         .filter(|(path, mask)| match lod_state.physics_colliders.get(path) {
             None => true,
             Some((_, built_mask)) => built_mask != *mask,
         })
-        .map(|(p, m)| (*p, *m))
+        .filter_map(|(path, mask)| {
+            // BFS-selected paths whose data hasn't fully loaded yet are
+            // skipped; we'll catch them in a later frame.
+            let node_data = lod_state.node_data.get(path)?;
+            let distance = (node_data.world_position - camera_pos).length();
+            Some((*path, *mask, distance))
+        })
         .collect();
-    pending.sort_by_key(|(path, _)| std::cmp::Reverse(path.depth()));
+    pending.sort_by(|a, b| {
+        std::cmp::Reverse(a.0.depth())
+            .cmp(&std::cmp::Reverse(b.0.depth()))
+            .then(a.2.total_cmp(&b.2))
+    });
 
-    for (path, target_mask) in pending {
+    // Trimesh construction is the expensive part of collider streaming;
+    // capping builds per frame bounds the frame cost during fast flight
+    // when the band boundaries sweep the world.
+    let max_builds = match streaming.max_collider_builds_per_frame {
+        0 => usize::MAX,
+        n => n,
+    };
+    let mut builds = 0usize;
+
+    for (path, target_mask, _) in pending {
+        if builds >= max_builds {
+            break;
+        }
+
+        // Spawn-persistence gate for brand-new paths: selections must
+        // survive a config-set dwell time before paying a trimesh build, so
+        // selections that flicker during fast movement never build at all.
+        // Regions with no live coverage bypass the gate — first coverage is
+        // never delayed. Mask rebuilds of live entities skip the gate too:
+        // they refine existing coverage and the despawn rules depend on
+        // them converging.
+        if !lod_state.physics_colliders.contains_key(&path) {
+            let since = lod_state
+                .collider_candidate_since
+                .get(&path)
+                .copied()
+                .unwrap_or(now);
+            let waited = now - since >= streaming.collider_spawn_persistence_secs;
+            if !waited && lod_state.collider_region_covered(path) {
+                continue;
+            }
+        }
+
         let Some(node_data) = lod_state.node_data.get(&path) else {
-            // BFS selected this path but data hasn't fully loaded yet;
-            // skip this frame, we'll catch it next frame.
             continue;
         };
 
@@ -1640,6 +1722,8 @@ fn update_physics_colliders(
             Some((_, built_mask)) if *built_mask == mask => continue,
             _ => {}
         }
+
+        builds += 1;
 
         // Radial down at the node; the direction varies negligibly across a
         // single tile, so one vector serves the whole collider's skirts.

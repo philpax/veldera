@@ -118,6 +118,17 @@ pub struct PhysicsStreamingConfig {
     /// watertight as long as the vertical mismatch between neighbours stays
     /// under this depth. Zero disables.
     pub collider_skirt_depth: f64,
+    /// Maximum trimesh collider builds per frame. Building a trimesh is the
+    /// expensive part of collider streaming; capping it bounds the frame
+    /// cost during fast flight when the band boundaries sweep the world.
+    /// Pending builds queue deepest-first, then nearest-first. Zero means
+    /// uncapped.
+    pub max_collider_builds_per_frame: usize,
+    /// Seconds a newly selected collider path must stay selected before its
+    /// trimesh is built. Selections that flicker during fast movement then
+    /// never pay a build at all. Regions with no live collider coverage
+    /// bypass the gate — first coverage is never delayed. Zero disables.
+    pub collider_spawn_persistence_secs: f64,
     /// Lookahead time for the lead vector (s); colliders ahead of the player
     /// load at the next-finer band before the player arrives.
     pub lead_time: f64,
