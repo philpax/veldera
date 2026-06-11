@@ -12,9 +12,12 @@
 //!   [`PhysicsStreamingConfig::bands`](veldera_physics::PhysicsStreamingConfig))
 //!   with no frustum culling, producing exactly one terrain collider per region
 //!   within [`PhysicsStreamingConfig::range`](veldera_physics::PhysicsStreamingConfig).
-//!   Within the innermost band, commits additionally follow the renderer:
-//!   whenever all eight children of a node are displayed (the parent is
-//!   fully octant-masked), the commit moves down to the children, so
+//!   Commits carry a per-octant coverage mask mirroring the render octant
+//!   mask: when descendants cover some of a node's octants, the node's own
+//!   collider is built without the covered octants' triangles, so colliders
+//!   at mixed depths tile space exactly the way the rendered composite
+//!   does. Within the innermost band, commits additionally follow the
+//!   renderer down to whatever children are displayed (WYSIWYG), so
 //!   near-field collision converges on exactly the meshes on screen.
 //!   If the target depth isn't available
 //!   the deepest loaded ancestor with data is used as a fallback so the
@@ -307,16 +310,18 @@ pub struct LodState {
     /// sizes in the thousands per frame, this turns tens of thousands of
     /// per-frame HashMap inserts into amortised zero.
     bulk_node_indices: HashMap<OctreePath, HashMap<OctreePath, usize>>,
-    /// Physics collider entities, keyed by node path.
-    physics_colliders: HashMap<OctreePath, Entity>,
-    /// Paths the physics BFS selected as collider hosts this frame.
+    /// Physics collider entities keyed by node path, with the octant mask
+    /// each entity was built with (so mask changes trigger a rebuild).
+    physics_colliders: HashMap<OctreePath, (Entity, u8)>,
+    /// Paths the physics BFS selected as collider hosts this frame, with
+    /// their octant-coverage masks.
     ///
-    /// Computed by [`physics_bfs_traversal`] in `update_lod_requests` and
-    /// consumed by `update_physics_colliders` to spawn/despawn the actual
-    /// trimesh entities. Stored on `LodState` rather than passed directly
-    /// so the two systems can run as separate Bevy systems without a
-    /// shared parameter.
-    physics_target_paths: HashSet<OctreePath>,
+    /// Computed by the physics side of [`unified_bfs_traversal`] in
+    /// `update_lod_requests` and consumed by `update_physics_colliders` to
+    /// spawn/despawn the actual trimesh entities. Stored on `LodState`
+    /// rather than passed directly so the two systems can run as separate
+    /// Bevy systems without a shared parameter.
+    physics_target_paths: HashMap<OctreePath, u8>,
     /// Elapsed-seconds timestamp of the last frame each node was in any
     /// BFS's potential set. Drives the unload grace period (see
     /// [`UNLOAD_GRACE_PERIOD_SECS`]).
@@ -364,6 +369,21 @@ impl LodState {
         self.physics_colliders
             .keys()
             .filter_map(|p| self.node_obbs.get(p).map(|obb| (*p, *obb)))
+    }
+
+    /// Bitmask of `path`'s octants that have at least one live collider
+    /// entity strictly below them.
+    fn live_descendant_bits(&self, path: OctreePath) -> u8 {
+        let mut bits = 0u8;
+        for key in self.physics_colliders.keys() {
+            if key.depth() > path.depth()
+                && key.starts_with(path)
+                && let Some(octant) = key.octant_at(path.depth())
+            {
+                bits |= 1 << octant;
+            }
+        }
+        bits
     }
 }
 
@@ -424,10 +444,13 @@ impl BfsResult {
 /// Result of the physics BFS traversal.
 #[derive(Default)]
 struct PhysicsBfsResult {
-    /// Paths that should currently host a terrain collider. One entry per
-    /// "region" — the octree partitioning means colliders never overlap
-    /// even though they may be at different depths.
-    collider_paths: HashSet<OctreePath>,
+    /// Paths that should currently host a terrain collider, with the
+    /// octant-coverage mask each should be built with: bits for octants
+    /// covered by other (deeper) commits, whose triangles the collider
+    /// builder drops. `0` means the full mesh. The octree partitioning
+    /// plus the masks mean colliders tile space without overlap even
+    /// though they may be at different depths.
+    collider_paths: HashMap<OctreePath, u8>,
     /// Nodes the physics BFS would like loaded.
     nodes_to_load: Vec<NodeMetadata>,
     /// Bulks the physics BFS needs (for traversal).
@@ -628,15 +651,21 @@ fn unified_bfs_traversal(
 
 /// Recursive worker for [`unified_bfs_traversal`].
 ///
-/// Returns `true` if this subtree has been "handled" by physics — either
-/// a collider was committed somewhere within it, or an ancestor's commit
-/// already covers it. The caller uses this to decide whether to fall
-/// back at its own depth when no descendant produced coverage.
+/// Returns a per-octant coverage mask for `path`: bit `o` is set when
+/// octant `o`'s region needs no coverage from an ancestor — a collider was
+/// committed at or below it, an ancestor's commit already covers it, or it
+/// lies beyond the outermost physics band. The caller commits its own node
+/// with the *uncovered* remainder: a full collider when nothing below
+/// committed, or a partial one (triangles in covered octants dropped,
+/// mirroring the render octant mask) when descendants cover some octants.
+/// Empty octants — where the octree has no finer data but the node's own
+/// mesh may still have geometry — stay unset, so the geometry the renderer
+/// shows there always ends up inside some ancestor's commit.
 ///
 /// `physics_committed_above` is the key invariant for preventing
 /// overlapping commits when render wants to descend past the physics
-/// target depth: once a node has committed, all its descendants are
-/// already covered and must not commit again.
+/// target depth: once a node has committed in full, all its descendants
+/// are already covered and must not commit again.
 #[allow(clippy::too_many_arguments)]
 fn unified_walk(
     ctx: &UnifiedWalkCtx<'_>,
@@ -647,17 +676,17 @@ fn unified_walk(
     physics_chain_requested: bool,
     render_result: &mut BfsResult,
     physics_result: &mut PhysicsBfsResult,
-) -> bool {
+) -> u8 {
     // Bulk boundary handling: every 4 octants we cross into a new bulk.
     // If we're at a boundary, switch the lookup key to `path` and
     // ensure that bulk is loaded.
     let effective_bulk_key: OctreePath = if !path.is_root() && path.depth().is_multiple_of(4) {
         let rel = path.tail(4).expect("depth >= 4 by guard above");
         let Some(parent_bulk) = ctx.lod_state.bulks.get(&bulk_key) else {
-            return false;
+            return 0;
         };
         let Some(&child_epoch) = parent_bulk.child_bulk_paths.get(&rel) else {
-            return false;
+            return 0;
         };
 
         // Either BFS walking through this bulk wants it retained.
@@ -673,7 +702,7 @@ fn unified_walk(
                 // just `render_result` is enough to avoid double-fetch.
                 render_result.bulks_to_load.push((path, child_epoch));
             }
-            return false;
+            return 0;
         }
         path
     } else {
@@ -681,17 +710,18 @@ fn unified_walk(
     };
 
     let Some(bulk) = ctx.lod_state.bulks.get(&effective_bulk_key) else {
-        return false;
+        return 0;
     };
     let Some(node_index) = ctx.lod_state.bulk_node_indices.get(&effective_bulk_key) else {
-        return false;
+        return 0;
     };
     render_result.potential_bulks.insert(effective_bulk_key);
     physics_result.potential_bulks.insert(effective_bulk_key);
 
-    let mut any_physics_handled = false;
+    let mut handled_mask: u8 = 0;
 
     for octant in 0u8..=7 {
+        let octant_bit = 1u8 << octant;
         let child_path = path.push(octant);
 
         let Some(child_rel) = child_path.strip_prefix(effective_bulk_key) else {
@@ -706,7 +736,10 @@ fn unified_walk(
             );
         };
         let Some(&child_idx) = node_index.get(&child_rel) else {
-            // Empty octant — no terrain, no contribution.
+            // Empty octant — no finer data exists, but this node's own mesh
+            // may still carry geometry here (coastlines, data-sparse areas),
+            // so the octant stays unhandled: whichever ancestor commits must
+            // include it.
             continue;
         };
         let child_node = &bulk.nodes[child_idx];
@@ -727,27 +760,14 @@ fn unified_walk(
         let physics_in_range = phys_target.is_some();
         let physics_at_or_past_target =
             physics_in_range && phys_target.is_some_and(|t| child_path.depth() >= t);
-        // Physics wants to refine if it's in range AND not yet at target.
-        let physics_should_refine = physics_in_range && !physics_at_or_past_target;
-
-        // WYSIWYG near field: within the innermost band, when the renderer
-        // has fully replaced this node with its eight children (the octant
-        // mask hides the parent entirely — see `cull_meshes`), commit the
-        // children instead of this node so collision matches the displayed
-        // meshes exactly. Applied recursively, this walks commits down to
-        // the exact render leaves. Requiring *all eight* children mirrors
-        // the renderer's parent-hiding rule and guarantees no coverage
-        // holes: with any child missing, the parent stays the collider,
-        // just as it stays on screen.
-        let wysiwyg_descend = physics_in_range
-            && physics_at_or_past_target
-            && !physics_committed_above
-            && within_innermost_band(ctx.physics_bands, phys_dist)
-            && all_children_displayed(ctx.lod_state, child_node.path);
-
-        // No consumer cares about this subtree.
-        if !render_visible && !physics_in_range {
-            continue;
+        // Beyond the outermost band no collider is wanted, so there is
+        // nothing for an ancestor to cover here.
+        if !physics_in_range {
+            handled_mask |= octant_bit;
+            // No consumer cares about this subtree.
+            if !render_visible {
+                continue;
+            }
         }
 
         // Render: OBB cache for visible nodes.
@@ -798,30 +818,50 @@ fn unified_walk(
             physics_best_ancestor
         };
 
-        // Has this region's physics already been handled by either an
-        // ancestor's commit or one we make right here? Tracked per
-        // octant so descendants of THIS octant know not to re-commit.
+        // Has this region's physics already been handled by an ancestor's
+        // full commit, or one we make right here? Tracked per octant so
+        // descendants of THIS octant know not to re-commit.
         let mut octant_handled = physics_committed_above;
+        if physics_in_range && octant_handled {
+            handled_mask |= octant_bit;
+        }
 
-        // Commit at this depth if we're in range, at target, no ancestor
-        // has already committed for our region, and the WYSIWYG rule isn't
-        // pushing the commit down to the displayed children. This is the
-        // primary commit site — at the physics target depth.
+        // WYSIWYG near field: within the innermost band, when the renderer
+        // displays at least one child of this node, push the commit down so
+        // collision matches the displayed meshes. The recursion's coverage
+        // mask lets this node's own (post-recursion) commit cover exactly
+        // the octants the children don't, mirroring the render compositing
+        // in every partial-load state.
+        let wysiwyg_descend = physics_in_range
+            && physics_at_or_past_target
+            && !octant_handled
+            && within_innermost_band(ctx.physics_bands, phys_dist)
+            && any_children_displayed(ctx.lod_state, child_node.path);
+
+        // Banded commit at/past the target depth (the WYSIWYG path defers
+        // to the post-recursion masked commit instead). This is the primary
+        // commit site.
         if physics_in_range && !octant_handled && physics_at_or_past_target && !wysiwyg_descend {
-            commit_physics_collider(
+            if commit_physics_collider(
                 child_node.path,
                 child_phys_loaded,
+                0,
                 updated_phys_best,
                 physics_result,
-            );
+            ) {
+                handled_mask |= octant_bit;
+            }
+            // Committed (or tracked as uncovered) — descendants must not
+            // commit either way.
             octant_handled = true;
         }
 
-        // Recurse if either consumer needs more detail. Physics only
-        // needs to descend if it hasn't been handled yet.
-        let need_recurse = render_should_refine || (physics_in_range && !octant_handled);
+        // Physics descends while its region is unhandled: above the target
+        // depth, or deferred to the displayed children by WYSIWYG.
+        let physics_wants_deeper = physics_in_range && !octant_handled;
+        let need_recurse = render_should_refine || physics_wants_deeper;
         if need_recurse {
-            let descended_handled = unified_walk(
+            let child_mask = unified_walk(
                 ctx,
                 child_path,
                 effective_bulk_key,
@@ -831,60 +871,63 @@ fn unified_walk(
                 render_result,
                 physics_result,
             );
-            if descended_handled {
-                octant_handled = true;
-            }
 
-            // Fallback: physics wanted to refine (or deferred to the
-            // displayed children) but the recursion didn't commit
-            // anywhere. Commit at this depth so the region has some
-            // coverage.
-            if physics_in_range && (physics_should_refine || wysiwyg_descend) && !octant_handled {
-                commit_physics_collider(
+            if physics_wants_deeper {
+                if child_mask == 0xff {
+                    // Fully covered below — nothing left for this node.
+                    handled_mask |= octant_bit;
+                } else if commit_physics_collider(
                     child_node.path,
                     child_phys_loaded,
+                    child_mask,
                     updated_phys_best,
                     physics_result,
-                );
-                octant_handled = true;
+                ) {
+                    // Commit this node minus the octants covered below: a
+                    // full collider when nothing below committed, a partial
+                    // one when descendants cover some octants — closing the
+                    // coastline hole and the WYSIWYG waist-clip mismatch.
+                    handled_mask |= octant_bit;
+                }
             }
-        }
-
-        if physics_in_range && octant_handled {
-            any_physics_handled = true;
         }
     }
 
-    any_physics_handled
+    handled_mask
 }
 
-/// Whether the renderer currently displays all eight children of `path` —
-/// the condition under which `cull_meshes` hides the parent entirely (octant
-/// mask `0xff`) and the WYSIWYG rule may push collider commits down to the
-/// children. Also requires the children's node data so they can actually
-/// host commits.
-fn all_children_displayed(lod_state: &LodState, path: OctreePath) -> bool {
+/// Whether the renderer currently displays any child of `path` (with node
+/// data present so the child can host a commit) — the gate for the WYSIWYG
+/// descent. The recursion's coverage mask handles partially loaded child
+/// sets, so a single displayed child is enough to descend.
+fn any_children_displayed(lod_state: &LodState, path: OctreePath) -> bool {
     if path.depth() >= OctreePath::MAX_DEPTH {
         return false;
     }
-    (0u8..=7).all(|octant| {
+    (0u8..=7).any(|octant| {
         let child = path.push(octant);
         lod_state.loaded_nodes.contains(&child) && lod_state.node_data.contains_key(&child)
     })
 }
 
-/// Helper: commit a collider for a node, using the deepest loaded ancestor
-/// as a fallback if the node itself isn't loaded yet.
+/// Helper: commit a collider for a node with the given octant-coverage mask
+/// (bits for octants covered by other commits, whose triangles the builder
+/// drops; `0` = full mesh), using the deepest loaded ancestor as a full
+/// fallback if the node itself isn't loaded yet. Returns whether anything
+/// was committed.
 fn commit_physics_collider(
     node_path: OctreePath,
     node_loaded: bool,
+    octant_mask: u8,
     best_ancestor: Option<OctreePath>,
     result: &mut PhysicsBfsResult,
-) {
+) -> bool {
     if node_loaded {
-        result.collider_paths.insert(node_path);
+        merge_commit(&mut result.collider_paths, node_path, octant_mask);
+        true
     } else if let Some(anc) = best_ancestor {
-        result.collider_paths.insert(anc);
+        merge_commit(&mut result.collider_paths, anc, 0);
+        true
     } else {
         // No ancestor has data loaded either: this region has no terrain
         // collision at all until a load completes. The BFS has already
@@ -893,7 +936,20 @@ fn commit_physics_collider(
         // slots, so the window is short — but it must be visible, not
         // silent.
         result.uncovered_regions.insert(node_path);
+        false
     }
+}
+
+/// Insert a commit, intersecting masks when the path is already committed
+/// (its own masked commit plus an ancestor fallback from another subregion
+/// can land on the same path). Intersection keeps the larger geometry —
+/// when in doubt, more coverage: overlap is transient jitter, a hole is a
+/// fall.
+fn merge_commit(commits: &mut HashMap<OctreePath, u8>, path: OctreePath, mask: u8) {
+    commits
+        .entry(path)
+        .and_modify(|existing| *existing &= mask)
+        .or_insert(mask);
 }
 
 /// Despawn entities for nodes no longer in the retention set, and remove
@@ -913,7 +969,7 @@ fn unload_obsolete(
     commands: &mut Commands,
     retained_nodes: &HashSet<OctreePath>,
     retained_bulks: &HashSet<OctreePath>,
-    physics_collider_paths: &HashSet<OctreePath>,
+    physics_collider_paths: &HashMap<OctreePath, u8>,
 ) {
     // Despawn render entities for nodes no longer in the retention set.
     let obsolete_render_nodes: Vec<OctreePath> = lod_state
@@ -940,7 +996,7 @@ fn unload_obsolete(
             if lod_state.loaded_nodes.contains(*path) {
                 return false;
             }
-            if retained_nodes.contains(*path) || physics_collider_paths.contains(*path) {
+            if retained_nodes.contains(*path) || physics_collider_paths.contains_key(*path) {
                 return false;
             }
             true
@@ -952,7 +1008,7 @@ fn unload_obsolete(
         // If a physics collider was using this node_data, remove the
         // collider entity too — it would point at no-longer-existent
         // mesh data otherwise.
-        if let Some(entity) = lod_state.physics_colliders.remove(&path) {
+        if let Some((entity, _)) = lod_state.physics_colliders.remove(&path) {
             commands.entity(entity).despawn();
         }
     }
@@ -1191,7 +1247,7 @@ fn update_lod_requests(
     // Physics collider paths are also retained as defense in depth.
     let mut retained_nodes: HashSet<OctreePath> =
         lod_state.node_last_seen.keys().copied().collect();
-    retained_nodes.extend(scratch.physics_result.collider_paths.iter().copied());
+    retained_nodes.extend(scratch.physics_result.collider_paths.keys().copied());
     let retained_bulks: HashSet<OctreePath> = lod_state.bulk_last_seen.keys().copied().collect();
 
     // When frozen, keep every currently-loaded tile alive: the BFS skip stops
@@ -1516,15 +1572,21 @@ fn cull_meshes(
 
 /// Update physics colliders to match the physics BFS's current selection.
 ///
-/// The set of paths that should host colliders right now lives in
-/// `lod_state.physics_target_paths`, written by `update_lod_requests` after
-/// running the physics BFS. This system reconciles spawned collider
-/// entities against that target set: spawn for newly-selected paths,
-/// despawn for paths no longer selected.
+/// The `(path, octant mask)` pairs that should host colliders right now
+/// live in `lod_state.physics_target_paths`, written by
+/// `update_lod_requests` after running the physics BFS. This system
+/// reconciles spawned collider entities against that target: spawn for
+/// newly-selected paths, rebuild when a path's mask changed, despawn paths
+/// no longer selected.
 ///
-/// Spawn happens before despawn so a region transitioning from depth N to
-/// depth N+1 (finer collider replacing coarser, or vice versa) never has
-/// a frame with no collider underneath the player.
+/// Ordering rules that keep every transition hole-free:
+/// - Builds go deepest-first, so when a parent's rebuilt collider masks an
+///   octant out, the children covering that octant are already live.
+/// - A parent's mask is intersected with its *live* descendant coverage
+///   ([`LodState::live_descendant_bits`]), so a child whose build failed or
+///   is still pending can't punch a hole in the parent.
+/// - Despawns only happen once every overlapping target path is live with
+///   its current mask.
 fn update_physics_colliders(
     mut commands: Commands,
     mut lod_state: ResMut<LodState>,
@@ -1548,17 +1610,36 @@ fn update_physics_colliders(
         .unwrap_or(camera.position);
     let target_paths = lod_state.physics_target_paths.clone();
 
-    // Spawn colliders for newly-selected paths.
-    for path in &target_paths {
-        if lod_state.physics_colliders.contains_key(path) {
-            continue;
-        }
+    // Collect spawns and rebuilds: paths with no entity, or whose live
+    // entity was built with a different mask. Deepest first, so children
+    // are live before any parent rebuild masks their octants out.
+    let mut pending: Vec<(OctreePath, u8)> = target_paths
+        .iter()
+        .filter(|(path, mask)| match lod_state.physics_colliders.get(path) {
+            None => true,
+            Some((_, built_mask)) => built_mask != *mask,
+        })
+        .map(|(p, m)| (*p, *m))
+        .collect();
+    pending.sort_by_key(|(path, _)| std::cmp::Reverse(path.depth()));
 
-        let Some(node_data) = lod_state.node_data.get(path) else {
+    for (path, target_mask) in pending {
+        let Some(node_data) = lod_state.node_data.get(&path) else {
             // BFS selected this path but data hasn't fully loaded yet;
             // skip this frame, we'll catch it next frame.
             continue;
         };
+
+        // Only mask out octants that actually have live collider coverage
+        // below: a committed child whose build failed (or is still pending)
+        // must not leave a hole in the parent. Extra coverage from an unmasked
+        // octant overlaps the late child briefly — jitter, not a fall.
+        let mask = target_mask & lod_state.live_descendant_bits(path);
+
+        match lod_state.physics_colliders.get(&path) {
+            Some((_, built_mask)) if *built_mask == mask => continue,
+            _ => {}
+        }
 
         // Radial down at the node; the direction varies negligibly across a
         // single tile, so one vector serves the whole collider's skirts.
@@ -1569,6 +1650,7 @@ fn update_physics_colliders(
             streaming.min_collider_triangle_height as f32,
             down,
             streaming.collider_skirt_depth as f32,
+            mask,
         ) else {
             tracing::debug!("Skipping invalid mesh for physics collider: '{}'", path);
             continue;
@@ -1595,7 +1677,10 @@ fn update_physics_colliders(
                 // reads GlobalTransform).
                 Transform::from_translation(physics_pos),
                 WorldPosition::from_dvec3(node_data.world_position),
-                TerrainCollider { path: *path },
+                TerrainCollider {
+                    path,
+                    octant_mask: mask,
+                },
                 CollisionLayers::new(
                     [GameLayer::Ground],
                     [GameLayer::Ground, GameLayer::Vehicle, GameLayer::Ragdoll],
@@ -1603,24 +1688,43 @@ fn update_physics_colliders(
             ))
             .id();
 
-        lod_state.physics_colliders.insert(*path, entity);
+        // Replace any previous entity for this path (mask rebuild) in the
+        // same frame, so the swap is atomic from physics's point of view.
+        if let Some((old_entity, _)) = lod_state.physics_colliders.insert(path, (entity, mask)) {
+            commands.entity(old_entity).despawn();
+        }
         tracing::debug!(
-            "Created physics collider for node '{}' (depth {})",
+            "Created physics collider for node '{}' (depth {}, mask {:#04x})",
             path,
-            path.depth()
+            path.depth(),
+            mask,
         );
     }
 
-    // Despawn colliders that are no longer in the target set.
+    // Despawn colliders no longer in the target set — but only once every
+    // overlapping target path (ancestor or descendant — the replacement
+    // coverage for this region) is live with its current mask, so a
+    // deferred or failed replacement build never leaves the region bare.
     let obsolete: Vec<OctreePath> = lod_state
         .physics_colliders
         .keys()
-        .filter(|p| !target_paths.contains(*p))
+        .filter(|p| !target_paths.contains_key(*p))
         .copied()
         .collect();
 
     for path in obsolete {
-        if let Some(entity) = lod_state.physics_colliders.remove(&path) {
+        let replacements_live = target_paths.iter().all(|(t, m)| {
+            let overlaps = t.starts_with(path) || path.starts_with(*t);
+            !overlaps
+                || lod_state
+                    .physics_colliders
+                    .get(t)
+                    .is_some_and(|(_, built)| built == m)
+        });
+        if !replacements_live {
+            continue;
+        }
+        if let Some((entity, _)) = lod_state.physics_colliders.remove(&path) {
             commands.entity(entity).despawn();
             tracing::debug!("Removed physics collider for node '{}'", path);
         }
@@ -1650,7 +1754,7 @@ fn populate_snapshot(
     snapshot.camera_pos = Some(camera_pos);
     snapshot.lead = motion.lead();
     snapshot.velocity = motion.smoothed_velocity();
-    snapshot.physics_collider_paths = physics.collider_paths.clone();
+    snapshot.physics_collider_paths = physics.collider_paths.keys().copied().collect();
     snapshot.physics_uncovered_paths = physics.uncovered_regions.clone();
 
     let mut counters = SnapshotCounters {
@@ -1724,7 +1828,7 @@ fn populate_snapshot(
         });
     }
 
-    for path in &physics.collider_paths {
+    for path in physics.collider_paths.keys() {
         let depth = path.depth();
         if depth < counters.physics_colliders_by_depth.len() {
             counters.physics_colliders_by_depth[depth] += 1;

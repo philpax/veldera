@@ -18,6 +18,10 @@ use rocktree::Mesh as RocktreeMesh;
 pub struct TerrainCollider {
     /// The octant path for this collider's source node.
     pub path: rocktree_decode::OctreePath,
+    /// Octant-coverage mask the collider was built with: triangles lying
+    /// fully inside masked octants were dropped because deeper colliders
+    /// cover them (mirroring the render octant mask). `0` = full mesh.
+    pub octant_mask: u8,
 }
 
 /// Create a terrain collider covering all of a node's meshes.
@@ -38,6 +42,9 @@ pub struct TerrainCollider {
 /// * `down` - Unit vector toward the planet centre in the baked vertex space.
 /// * `skirt_depth` - Boundary-skirt depth (m); see
 ///   [`PhysicsStreamingConfig::collider_skirt_depth`](crate::PhysicsStreamingConfig::collider_skirt_depth).
+/// * `octant_mask` - Octants covered by deeper colliders: triangles whose
+///   vertices all lie in masked octants are dropped, mirroring the render
+///   octant mask's vertex collapse. `0` keeps the full mesh.
 ///
 /// # Returns
 /// A trimesh collider with vertices transformed to match the GPU rendering,
@@ -48,8 +55,10 @@ pub fn create_terrain_collider(
     min_triangle_height: f32,
     down: Vec3,
     skirt_depth: f32,
+    octant_mask: u8,
 ) -> Option<Collider> {
-    let (mut vertices, mut triangles) = merge_meshes(meshes, transform, min_triangle_height);
+    let (mut vertices, mut triangles) =
+        merge_meshes(meshes, transform, min_triangle_height, octant_mask);
     if triangles.is_empty() {
         return None;
     }
@@ -62,11 +71,21 @@ pub fn create_terrain_collider(
 /// Merge all meshes of a node into one vertex/triangle soup, with the node
 /// transform's scale and rotation baked into the vertices. Triangle indices
 /// of later meshes are offset past the vertices of earlier ones. Sliver
-/// triangles below `min_triangle_height` are dropped.
+/// triangles below `min_triangle_height` and triangles fully inside masked
+/// octants are dropped.
+///
+/// The octant filter mirrors the render shader: vertices in masked octants
+/// collapse there, so a triangle with all three vertices masked vanishes
+/// from the screen and must vanish from physics too. Triangles straddling
+/// an octant boundary stay whole (slight overlap with the deeper collider
+/// at the seam — and the seam's cut edge then grows a skirt, sealing the
+/// parent/child border). Meshes without per-vertex octant data are never
+/// masked by the renderer, so they keep their full geometry here as well.
 fn merge_meshes(
     meshes: &[RocktreeMesh],
     transform: &Transform,
     min_triangle_height: f32,
+    octant_mask: u8,
 ) -> (Vec<Vec3>, Vec<[u32; 3]>) {
     let total_vertices: usize = meshes.iter().map(|m| m.vertices.len()).sum();
     let mut vertices: Vec<Vec3> = Vec::with_capacity(total_vertices);
@@ -74,6 +93,12 @@ fn merge_meshes(
 
     for mesh in meshes {
         let base = vertices.len() as u32;
+        let apply_octant_mask = octant_mask != 0 && mesh.has_octant_data;
+        let vertex_masked = |index: u32| {
+            let octant = mesh.vertices[(index - base) as usize].w & 7;
+            octant_mask & (1 << octant) != 0
+        };
+
         // Mesh vertices are in the 0-255 range.
         vertices.extend(mesh.vertices.iter().map(|v| {
             let local = Vec3::new(f32::from(v.x), f32::from(v.y), f32::from(v.z));
@@ -83,6 +108,9 @@ fn merge_meshes(
             strip_to_triangles(&mesh.indices)
                 .into_iter()
                 .map(|[a, b, c]| [a + base, b + base, c + base])
+                .filter(|&[a, b, c]| {
+                    !(apply_octant_mask && vertex_masked(a) && vertex_masked(b) && vertex_masked(c))
+                })
                 .filter(|&[a, b, c]| {
                     !is_sliver(
                         vertices[a as usize],
@@ -188,14 +216,31 @@ mod tests {
 
     /// Build a minimal mesh with the given vertex positions and strip indices.
     fn test_mesh(positions: &[(u8, u8, u8)], indices: Vec<u16>) -> RocktreeMesh {
+        test_mesh_with_octants(
+            &positions
+                .iter()
+                .map(|&(x, y, z)| (x, y, z, 0))
+                .collect::<Vec<_>>(),
+            indices,
+            false,
+        )
+    }
+
+    /// Build a minimal mesh with per-vertex octants (`w`) and explicit
+    /// `has_octant_data`.
+    fn test_mesh_with_octants(
+        positions: &[(u8, u8, u8, u8)],
+        indices: Vec<u16>,
+        has_octant_data: bool,
+    ) -> RocktreeMesh {
         RocktreeMesh {
             vertices: positions
                 .iter()
-                .map(|&(x, y, z)| Vertex {
+                .map(|&(x, y, z, w)| Vertex {
                     x,
                     y,
                     z,
-                    w: 0,
+                    w,
                     u: 0,
                     v: 0,
                 })
@@ -207,7 +252,7 @@ mod tests {
             texture_format: TextureFormat::Rgb,
             texture_width: 0,
             texture_height: 0,
-            has_octant_data: false,
+            has_octant_data,
         }
     }
 
@@ -219,7 +264,7 @@ mod tests {
             test_mesh(&quad, vec![0, 1, 2, 3]),
         ];
 
-        let (vertices, triangles) = merge_meshes(&meshes, &Transform::IDENTITY, 0.0);
+        let (vertices, triangles) = merge_meshes(&meshes, &Transform::IDENTITY, 0.0, 0);
 
         assert_eq!(vertices.len(), 8);
         // Second mesh's triangles must be offset past the first's vertices.
@@ -231,7 +276,7 @@ mod tests {
         let meshes = vec![test_mesh(&[(1, 2, 3)], vec![])];
         let transform = Transform::from_scale(Vec3::splat(2.0));
 
-        let (vertices, _) = merge_meshes(&meshes, &transform, 0.0);
+        let (vertices, _) = merge_meshes(&meshes, &transform, 0.0, 0);
 
         assert_eq!(vertices, vec![Vec3::new(2.0, 4.0, 6.0)]);
     }
@@ -244,10 +289,11 @@ mod tests {
         let meshes = vec![test_mesh(&quad, vec![]), test_mesh(&quad, vec![0, 1, 2, 3])];
 
         assert!(
-            create_terrain_collider(&meshes, &Transform::IDENTITY, 0.0, Vec3::NEG_Z, 0.0).is_some()
+            create_terrain_collider(&meshes, &Transform::IDENTITY, 0.0, Vec3::NEG_Z, 0.0, 0)
+                .is_some()
         );
         assert!(
-            create_terrain_collider(&meshes[..1], &Transform::IDENTITY, 0.0, Vec3::NEG_Z, 0.0)
+            create_terrain_collider(&meshes[..1], &Transform::IDENTITY, 0.0, Vec3::NEG_Z, 0.0, 0)
                 .is_none()
         );
     }
@@ -289,6 +335,38 @@ mod tests {
     }
 
     #[test]
+    fn test_merge_meshes_octant_mask() {
+        // Two triangles: one fully in octant 3, one straddling octants 3
+        // and 5. Masking octant 3 must drop only the first.
+        let positions = [(0, 0, 0, 3), (10, 0, 0, 3), (0, 10, 0, 3), (10, 10, 0, 5)];
+        let mesh = test_mesh_with_octants(&positions, vec![0, 1, 2, 3], true);
+
+        let (_, triangles) = merge_meshes(
+            std::slice::from_ref(&mesh),
+            &Transform::IDENTITY,
+            0.0,
+            1 << 3,
+        );
+        assert_eq!(triangles, vec![[1, 3, 2]]);
+
+        // Mask 0 keeps everything.
+        let (_, all) = merge_meshes(std::slice::from_ref(&mesh), &Transform::IDENTITY, 0.0, 0);
+        assert_eq!(all.len(), 2);
+    }
+
+    #[test]
+    fn test_merge_meshes_octant_mask_ignored_without_octant_data() {
+        // The renderer never masks meshes lacking octant data, so physics
+        // must keep their full geometry too.
+        let positions = [(0, 0, 0, 0), (10, 0, 0, 0), (0, 10, 0, 0)];
+        let mesh = test_mesh_with_octants(&positions, vec![0, 1, 2], false);
+
+        let (_, triangles) =
+            merge_meshes(std::slice::from_ref(&mesh), &Transform::IDENTITY, 0.0, 0xff);
+        assert_eq!(triangles.len(), 1);
+    }
+
+    #[test]
     fn test_sliver_filter() {
         // A 1 m × 1 m right triangle: smallest altitude ≈ 0.7 m.
         let healthy = (
@@ -322,7 +400,7 @@ mod tests {
             test_mesh(&line, vec![0, 1, 2, 3]),
         ];
 
-        let (_, triangles) = merge_meshes(&meshes, &Transform::IDENTITY, 0.01);
+        let (_, triangles) = merge_meshes(&meshes, &Transform::IDENTITY, 0.01, 0);
 
         // Only the healthy quad's two triangles survive.
         assert_eq!(triangles, vec![[0, 1, 2], [1, 3, 2]]);
