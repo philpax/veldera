@@ -21,7 +21,7 @@ use super::{
         VehicleSteeringConfig, VehicleSuspensionConfig, VehicleTireConfig,
         VehicleTransmissionConfig, VehicleWheels,
     },
-    core::{self, CarInput, CarParams, CarSimState, CarStepContext, WheelParams, WheelRayHit},
+    core::{self, CarInput, CarParams, CarSimState, CarStepContext, WheelCastHit, WheelParams},
     telemetry::{self, TelemetrySnapshot},
 };
 
@@ -120,7 +120,9 @@ pub fn vehicle_physics_system(
     physics_config: Res<veldera_physics::PhysicsConfig>,
     vehicle_config: Res<VehicleConfig>,
     spatial_query: SpatialQuery,
+    follow_query: Query<&FollowEntityTarget>,
     mut query: Query<(
+        Entity,
         (
             &VehicleChassisConfig,
             &VehicleSuspensionConfig,
@@ -144,8 +146,10 @@ pub fn vehicle_physics_system(
 ) {
     let dt = time.delta_secs();
     let elapsed = time.elapsed_secs();
+    let followed = follow_query.iter().next().map(|follow| follow.target);
 
     for (
+        entity,
         (chassis, suspension, engine, transmission, steering, tire),
         wheels,
         input,
@@ -163,27 +167,36 @@ pub fn vehicle_physics_system(
         let params = build_car_params(chassis, suspension, engine, transmission, steering, tire);
         let wheel_params = wheel_params(wheels);
 
-        // Suspension raycasts: from each hardpoint along chassis-down,
-        // against ground only (not vehicles, not ragdolls).
+        // Suspension casts: a wheel-radius sphere from each hardpoint along
+        // chassis-down, against ground only (not vehicles, not ragdolls).
+        // The sphere footprint rolls over sub-radius terrain lumps and
+        // bridges hairline tile cracks that a zero-width ray reads at full
+        // amplitude.
         let filter = SpatialQueryFilter::default().with_mask([GameLayer::Ground]);
         let down = rotation.0 * Vec3::NEG_Y;
         let Ok(down_dir) = Dir3::new(down) else {
             continue;
         };
-        let mut hits: [Option<WheelRayHit>; 4] = [None; 4];
+        let cast_config = ShapeCastConfig {
+            max_distance: core::wheel_cast_length(&params),
+            ..Default::default()
+        };
+        let mut hits: [Option<WheelCastHit>; 4] = [None; 4];
         for (i, wheel) in wheel_params.iter().enumerate() {
             let origin = position.0 + rotation.0 * core::wheel_hardpoint(wheel, &params);
             hits[i] = spatial_query
-                .cast_ray(
+                .cast_shape(
+                    &Collider::sphere(wheel.radius),
                     origin,
+                    Quat::IDENTITY,
                     down_dir,
-                    core::wheel_ray_length(wheel, &params),
-                    true,
+                    &cast_config,
                     &filter,
                 )
-                .map(|hit| WheelRayHit {
+                .map(|hit| WheelCastHit {
                     distance: hit.distance,
-                    normal: hit.normal,
+                    normal: hit.normal1,
+                    point: hit.point1,
                 });
         }
 
@@ -242,7 +255,9 @@ pub fn vehicle_physics_system(
         state.drive_force = output.drive_force;
         state.mass = computed_mass.value();
 
-        if vehicle_config.emit_telemetry {
+        // Only the followed vehicle logs telemetry: with several vehicles
+        // spawned, interleaved rows make the CSV unusable for analysis.
+        if vehicle_config.emit_telemetry && followed == Some(entity) {
             telemetry::emit_telemetry(
                 &TelemetrySnapshot {
                     elapsed,

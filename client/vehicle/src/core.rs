@@ -166,13 +166,19 @@ pub struct CarInput {
     pub handbrake: bool,
 }
 
-/// A suspension raycast hit for one wheel.
+/// A suspension cast hit for one wheel: a wheel-radius sphere cast from the
+/// hardpoint along chassis-down. The sphere footprint rolls over steps
+/// smaller than the wheel radius and bridges hairline tile cracks that a
+/// zero-width ray would fall into.
 #[derive(Clone, Copy, Debug)]
-pub struct WheelRayHit {
-    /// Hit distance along the ray from the hardpoint.
+pub struct WheelCastHit {
+    /// How far the sphere travelled from the hardpoint before contact —
+    /// i.e. the suspension length from hardpoint to axle (unclamped).
     pub distance: f32,
-    /// Ground normal at the hit.
+    /// Ground normal at the contact.
     pub normal: Vec3,
+    /// Contact point on the ground, in physics space.
+    pub point: Vec3,
 }
 
 /// Chassis state for one step, in physics space.
@@ -255,10 +261,11 @@ pub fn wheel_hardpoint(wheel: &WheelParams, params: &CarParams) -> Vec3 {
     wheel.rest_position + Vec3::Y * (params.suspension_travel * 0.5)
 }
 
-/// Maximum suspension ray length: full travel plus the wheel radius.
+/// Maximum suspension cast length: the full travel (the cast sphere already
+/// carries the wheel radius).
 #[must_use]
-pub fn wheel_ray_length(wheel: &WheelParams, params: &CarParams) -> f32 {
-    params.suspension_travel + wheel.radius
+pub fn wheel_cast_length(params: &CarParams) -> f32 {
+    params.suspension_travel
 }
 
 /// Box angular inertia (principal moments) for a body of `mass` and full
@@ -294,15 +301,16 @@ pub fn engine_torque(params: &CarParams, rpm: f32) -> f32 {
 // ============================================================================
 
 /// Advance the car one fixed step, returning new velocities and per-wheel
-/// state. `hits` are the suspension raycast results for each wheel (cast from
-/// [`wheel_hardpoint`] along chassis-down for [`wheel_ray_length`]).
+/// state. `hits` are the suspension cast results for each wheel (a
+/// wheel-radius sphere cast from [`wheel_hardpoint`] along chassis-down for
+/// [`wheel_cast_length`]).
 #[allow(clippy::too_many_lines)]
 pub fn step_car(
     params: &CarParams,
     wheels: &[WheelParams; 4],
     state: &mut CarSimState,
     input: &CarInput,
-    hits: &[Option<WheelRayHit>; 4],
+    hits: &[Option<WheelCastHit>; 4],
     ctx: &CarStepContext,
 ) -> CarStepOutput {
     let dt = ctx.dt.max(1e-6);
@@ -400,8 +408,8 @@ pub fn step_car(
         };
 
         let hardpoint = ctx.position + rotation * wheel_hardpoint(wheel, params);
-        let ray_dir = rotation * Vec3::NEG_Y;
-        let suspension_length = (hit.distance - wheel.radius).clamp(0.0, params.suspension_travel);
+        let cast_dir = rotation * Vec3::NEG_Y;
+        let suspension_length = hit.distance.clamp(0.0, params.suspension_travel);
         let compression_x = rest_length - suspension_length;
         out.grounded = true;
         out.compression = 1.0 - suspension_length / params.suspension_travel;
@@ -410,7 +418,7 @@ pub fn step_car(
 
         // Spring + speed-dependent damper along the suspension axis.
         let v_hardpoint = velocity + ctx.angular_velocity.cross(hardpoint - ctx.world_com);
-        let compression_rate = v_hardpoint.dot(ray_dir);
+        let compression_rate = v_hardpoint.dot(cast_dir);
         let damping = if compression_rate > 0.0 {
             params.damping_compression
         } else {
@@ -421,7 +429,7 @@ pub fn step_car(
             .clamp(0.0, max_suspension_force);
         out.suspension_force = force;
 
-        let contact_point = hardpoint + ray_dir * hit.distance;
+        let contact_point = hit.point;
         if force > 0.0 {
             forces.push((up * force, contact_point));
         }
@@ -773,19 +781,23 @@ mod tests {
         fn step(&mut self, input: CarInput) {
             self.velocity += (Vec3::NEG_Y * GRAVITY + self.extra_accel) * DT;
 
-            // Synthesize suspension ray hits against the y = 0 plane.
-            let mut hits: [Option<WheelRayHit>; 4] = [None; 4];
+            // Synthesize suspension sphere-cast hits against the y = 0
+            // plane: the wheel-radius sphere touches when its centre is one
+            // radius above the plane.
+            let mut hits: [Option<WheelCastHit>; 4] = [None; 4];
             for (i, wheel) in self.wheels.iter().enumerate() {
                 let origin = self.position + self.rotation * wheel_hardpoint(wheel, &self.params);
                 let dir = self.rotation * Vec3::NEG_Y;
                 if dir.y >= -1e-3 {
                     continue;
                 }
-                let t = -origin.y / dir.y;
-                if t >= 0.0 && t <= wheel_ray_length(wheel, &self.params) {
-                    hits[i] = Some(WheelRayHit {
+                let t = ((origin.y - wheel.radius) / -dir.y).max(0.0);
+                if t <= wheel_cast_length(&self.params) {
+                    let center = origin + dir * t;
+                    hits[i] = Some(WheelCastHit {
                         distance: t,
                         normal: Vec3::Y,
+                        point: Vec3::new(center.x, 0.0, center.z),
                     });
                 }
             }

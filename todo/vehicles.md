@@ -9,11 +9,6 @@
 - exclude the glass meshes from the body's convex hull collider
 - engine audio: per-car character beyond cylinder count (intake/exhaust
   balance, turbo whistle for the sport car?)
-- if terrain seams still jolt the car after the collider-wall fixes: switch
-  the wheel suspension raycasts to sphere casts of the wheel radius, so the
-  wheel rolls over sub-radius steps and bridges hairline tile cracks instead
-  of falling into them (contained change: the cast in physics.rs plus the
-  suspension-length arithmetic in core.rs).
 
 Done in the car-physics rewrite (see `veldera_game_vehicle`):
 - raycast-suspension car physics with slip-based tires, torque-curve engine,
