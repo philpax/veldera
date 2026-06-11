@@ -1756,6 +1756,7 @@ fn update_physics_colliders(
     physics_state: Res<PhysicsState>,
     streaming: Res<PhysicsStreamingConfig>,
     camera_query: Query<&FloatingOriginCamera>,
+    spatial_query: SpatialQuery,
 ) {
     use veldera_physics::terrain::create_terrain_collider;
 
@@ -1891,15 +1892,6 @@ fn update_physics_colliders(
         // Radial down at the node; the direction varies negligibly across a
         // single tile, so one vector serves the whole collider's skirts.
         let down = (-node_data.world_position.normalize()).as_vec3();
-        let collider = create_terrain_collider(
-            &node_data.meshes,
-            &node_data.transform,
-            streaming.min_collider_triangle_height as f32,
-            down,
-            streaming.collider_skirt_depth as f32,
-            streaming.collider_skirt_slope as f32,
-            mask,
-        );
 
         // Camera-relative position so the floating origin shift keeps it
         // in f32 range.
@@ -1908,6 +1900,39 @@ fn update_physics_colliders(
             relative_pos.x as f32,
             relative_pos.y as f32,
             relative_pos.z as f32,
+        );
+
+        // Edge fusion: snap this tile's rim onto whatever live neighbour
+        // surface a short vertical raycast finds, so the newer collider
+        // conforms to the older and the border step disappears. The tile's
+        // own previous entity is excluded — a rebuild must not snap to
+        // itself.
+        let fusion_range = streaming.edge_fusion_range as f32;
+        let fusion_dir = Dir3::new(down).ok();
+        let old_entity = lod_state.physics_colliders.get(&path).map(|(e, _)| *e);
+        let snap_filter = SpatialQueryFilter::default()
+            .with_mask([GameLayer::Ground])
+            .with_excluded_entities(old_entity);
+        let snap = |vertex: Vec3| -> Option<Vec3> {
+            let dir = fusion_dir?;
+            let origin = physics_pos + vertex - down * fusion_range;
+            let hit =
+                spatial_query.cast_ray(origin, dir, 2.0 * fusion_range, true, &snap_filter)?;
+            Some(origin + down * hit.distance - physics_pos)
+        };
+        let snap_ref: &dyn Fn(Vec3) -> Option<Vec3> = &snap;
+
+        let collider = create_terrain_collider(
+            &node_data.meshes,
+            &node_data.transform,
+            &veldera_physics::terrain::ColliderBuildSettings {
+                min_triangle_height: streaming.min_collider_triangle_height as f32,
+                skirt_depth: streaming.collider_skirt_depth as f32,
+                skirt_slope: streaming.collider_skirt_slope as f32,
+            },
+            down,
+            mask,
+            (fusion_range > 0.0).then_some(snap_ref),
         );
 
         // A mask that drops every triangle (common on flat terrain, where

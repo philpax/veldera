@@ -29,6 +29,22 @@ pub struct TerrainCollider {
     pub octant_mask: u8,
 }
 
+/// Geometry-processing knobs for a collider build, mirroring the
+/// hot-reloadable fields of
+/// [`PhysicsStreamingConfig`](crate::PhysicsStreamingConfig).
+#[derive(Clone, Copy, Debug)]
+pub struct ColliderBuildSettings {
+    /// Sliver filter threshold (m); see
+    /// [`PhysicsStreamingConfig::min_collider_triangle_height`](crate::PhysicsStreamingConfig::min_collider_triangle_height).
+    pub min_triangle_height: f32,
+    /// Boundary-skirt depth (m); see
+    /// [`PhysicsStreamingConfig::collider_skirt_depth`](crate::PhysicsStreamingConfig::collider_skirt_depth).
+    pub skirt_depth: f32,
+    /// Horizontal outward displacement per metre of skirt descent; see
+    /// [`PhysicsStreamingConfig::collider_skirt_slope`](crate::PhysicsStreamingConfig::collider_skirt_slope).
+    pub skirt_slope: f32,
+}
+
 /// Create a terrain collider covering all of a node's meshes.
 ///
 /// A node can carry several meshes; the renderer spawns one entity per mesh,
@@ -42,17 +58,15 @@ pub struct TerrainCollider {
 /// # Arguments
 /// * `meshes` - The node's mesh data.
 /// * `transform` - The node's Transform (has scale and rotation, translation is zero).
-/// * `min_triangle_height` - Sliver filter threshold (m); see
-///   [`PhysicsStreamingConfig::min_collider_triangle_height`](crate::PhysicsStreamingConfig::min_collider_triangle_height).
+/// * `settings` - Sliver filter and skirt knobs.
 /// * `down` - Unit vector toward the planet centre in the baked vertex space.
-/// * `skirt_depth` - Boundary-skirt depth (m); see
-///   [`PhysicsStreamingConfig::collider_skirt_depth`](crate::PhysicsStreamingConfig::collider_skirt_depth).
-/// * `skirt_slope` - Horizontal outward displacement per metre of skirt
-///   descent; see
-///   [`PhysicsStreamingConfig::collider_skirt_slope`](crate::PhysicsStreamingConfig::collider_skirt_slope).
 /// * `octant_mask` - Octants covered by deeper colliders: their geometry is
 ///   removed, with boundary-crossing triangles clipped at the octant
 ///   midplanes (see `merge_meshes`). `0` keeps the full mesh.
+/// * `snap_border` - Edge fusion: called for each outer border vertex (in
+///   the same baked space as the output); returning `Some` replaces the
+///   vertex, snapping the tile's rim onto a live neighbour's surface. See
+///   [`PhysicsStreamingConfig::edge_fusion_range`](crate::PhysicsStreamingConfig::edge_fusion_range).
 ///
 /// # Returns
 /// A trimesh collider with vertices transformed to match the GPU rendering,
@@ -60,23 +74,38 @@ pub struct TerrainCollider {
 pub fn create_terrain_collider(
     meshes: &[RocktreeMesh],
     transform: &Transform,
-    min_triangle_height: f32,
+    settings: &ColliderBuildSettings,
     down: Vec3,
-    skirt_depth: f32,
-    skirt_slope: f32,
     octant_mask: u8,
+    snap_border: Option<&dyn Fn(Vec3) -> Option<Vec3>>,
 ) -> Option<Collider> {
-    let (mut vertices, mut triangles) =
-        merge_meshes(meshes, transform, min_triangle_height, octant_mask);
+    let (mut vertices, mut triangles, border) = merge_meshes(
+        meshes,
+        transform,
+        settings.min_triangle_height,
+        octant_mask,
+        down,
+    );
     if triangles.is_empty() {
         return None;
     }
+
+    // Edge fusion happens before the skirts so the aprons hang from the
+    // fused rim and only have to cover whatever the snap couldn't reach.
+    if let Some(snap) = snap_border {
+        for (vertex, is_border) in vertices.iter_mut().zip(&border) {
+            if *is_border && let Some(snapped) = snap(*vertex) {
+                *vertex = snapped;
+            }
+        }
+    }
+
     add_skirts(
         &mut vertices,
         &mut triangles,
         down,
-        skirt_depth,
-        skirt_slope,
+        settings.skirt_depth,
+        settings.skirt_slope,
     );
 
     // Use try_trimesh to avoid panicking on invalid input.
@@ -106,15 +135,31 @@ pub fn create_terrain_collider(
 /// be established confidently, boundary-crossing triangles are dropped as a
 /// safe fallback. Meshes without per-vertex octant data are never masked by
 /// the renderer, so they keep their full geometry here as well.
+///
+/// The third return value flags each vertex on the tile's *outer border*:
+/// its mesh-local position touches the 0..255 box on a non-vertical axis
+/// (vertical determined from `down`). These are the edge-fusion snap
+/// candidates — the rim shared with neighbouring tiles.
 fn merge_meshes(
     meshes: &[RocktreeMesh],
     transform: &Transform,
     min_triangle_height: f32,
     octant_mask: u8,
-) -> (Vec<Vec3>, Vec<[u32; 3]>) {
+    down: Vec3,
+) -> (Vec<Vec3>, Vec<[u32; 3]>, Vec<bool>) {
     let total_vertices: usize = meshes.iter().map(|m| m.vertices.len()).sum();
     let mut vertices: Vec<Vec3> = Vec::with_capacity(total_vertices);
     let mut triangles: Vec<[u32; 3]> = Vec::new();
+    let mut border: Vec<bool> = Vec::with_capacity(total_vertices);
+
+    // The tile's vertical axis in mesh-local space, for telling its side
+    // faces (shared with neighbours) from its top and bottom.
+    let local_down = transform.rotation.inverse() * down;
+    let vertical_axis = (0..3)
+        .max_by(|&i, &j| local_down[i].abs().total_cmp(&local_down[j].abs()))
+        .expect("three axes");
+    let is_border_local =
+        |p: Vec3| (0..3).any(|axis| axis != vertical_axis && (p[axis] <= 0.5 || p[axis] >= 254.5));
 
     for mesh in meshes {
         let base = vertices.len() as u32;
@@ -133,6 +178,7 @@ fn merge_meshes(
             .collect();
         let to_world = |p: Vec3| transform.rotation * (transform.scale * p);
         vertices.extend(locals.iter().map(|&p| to_world(p)));
+        border.extend(locals.iter().map(|&p| is_border_local(p)));
 
         let push_triangle =
             |vertices: &mut Vec<Vec3>, triangles: &mut Vec<[u32; 3]>, [a, b, c]: [u32; 3]| {
@@ -173,6 +219,7 @@ fn merge_meshes(
                     clip_to_unmasked_octants(&poly, axes, octant_mask, &mut |piece| {
                         let start = vertices.len() as u32;
                         vertices.extend(piece.iter().map(|&p| to_world(p)));
+                        border.extend(piece.iter().map(|&p| is_border_local(p)));
                         for i in 1..piece.len() as u32 - 1 {
                             push_triangle(
                                 &mut vertices,
@@ -197,7 +244,7 @@ fn merge_meshes(
         }
     }
 
-    (vertices, triangles)
+    (vertices, triangles, border)
 }
 
 /// Octant midplane in the mesh-local 0-255 vertex space.
@@ -473,6 +520,14 @@ mod tests {
     use rocktree::TextureFormat;
     use rocktree_decode::{UvTransform, Vertex};
 
+    /// No sliver filtering, no skirts: the geometry-shape tests want the
+    /// raw merge output.
+    const TEST_SETTINGS: ColliderBuildSettings = ColliderBuildSettings {
+        min_triangle_height: 0.0,
+        skirt_depth: 0.0,
+        skirt_slope: 0.0,
+    };
+
     /// Build a minimal mesh with the given vertex positions and strip indices.
     fn test_mesh(positions: &[(u8, u8, u8)], indices: Vec<u16>) -> RocktreeMesh {
         test_mesh_with_octants(
@@ -523,7 +578,8 @@ mod tests {
             test_mesh(&quad, vec![0, 1, 2, 3]),
         ];
 
-        let (vertices, triangles) = merge_meshes(&meshes, &Transform::IDENTITY, 0.0, 0);
+        let (vertices, triangles, _) =
+            merge_meshes(&meshes, &Transform::IDENTITY, 0.0, 0, Vec3::NEG_Z);
 
         assert_eq!(vertices.len(), 8);
         // Second mesh's triangles must be offset past the first's vertices.
@@ -535,7 +591,7 @@ mod tests {
         let meshes = vec![test_mesh(&[(1, 2, 3)], vec![])];
         let transform = Transform::from_scale(Vec3::splat(2.0));
 
-        let (vertices, _) = merge_meshes(&meshes, &transform, 0.0, 0);
+        let (vertices, _, _) = merge_meshes(&meshes, &transform, 0.0, 0, Vec3::NEG_Z);
 
         assert_eq!(vertices, vec![Vec3::new(2.0, 4.0, 6.0)]);
     }
@@ -548,18 +604,24 @@ mod tests {
         let meshes = vec![test_mesh(&quad, vec![]), test_mesh(&quad, vec![0, 1, 2, 3])];
 
         assert!(
-            create_terrain_collider(&meshes, &Transform::IDENTITY, 0.0, Vec3::NEG_Z, 0.0, 0.0, 0)
-                .is_some()
+            create_terrain_collider(
+                &meshes,
+                &Transform::IDENTITY,
+                &TEST_SETTINGS,
+                Vec3::NEG_Z,
+                0,
+                None
+            )
+            .is_some()
         );
         assert!(
             create_terrain_collider(
                 &meshes[..1],
                 &Transform::IDENTITY,
-                0.0,
+                &TEST_SETTINGS,
                 Vec3::NEG_Z,
-                0.0,
-                0.0,
-                0
+                0,
+                None
             )
             .is_none()
         );
@@ -584,6 +646,54 @@ mod tests {
         assert_eq!(triangles.len(), 2 + 8);
         // Skirt vertices sit exactly `depth` below their source.
         assert_eq!(vertices[4].z, -2.0);
+    }
+
+    #[test]
+    fn test_merge_meshes_flags_border_vertices() {
+        // With down = -Z, the z axis is vertical: x/y at 0 or 255 flag a
+        // vertex as outer border; interior and purely-vertical extremes
+        // don't.
+        let positions = [
+            (0, 100, 0),     // x = 0 → border.
+            (255, 100, 0),   // x = 255 → border.
+            (100, 255, 0),   // y = 255 → border.
+            (100, 100, 0),   // interior.
+            (100, 100, 255), // only z extreme → not border (vertical axis).
+        ];
+        let mesh = test_mesh(&positions, vec![]);
+        let (_, _, border) = merge_meshes(
+            std::slice::from_ref(&mesh),
+            &Transform::IDENTITY,
+            0.0,
+            0,
+            Vec3::NEG_Z,
+        );
+        assert_eq!(border, vec![true, true, true, false, false]);
+    }
+
+    #[test]
+    fn test_create_terrain_collider_snaps_border() {
+        // The snap callback sees exactly the border vertices and its
+        // replacement positions land in the final collider (smoke-tested
+        // via the callback being consulted; the collider itself is opaque).
+        let quad = [(0, 0, 0), (255, 0, 0), (0, 200, 0), (255, 200, 0)];
+        let meshes = vec![test_mesh(&quad, vec![0, 1, 2, 3])];
+        let consulted = std::cell::RefCell::new(Vec::new());
+        let snap = |v: Vec3| -> Option<Vec3> {
+            consulted.borrow_mut().push(v);
+            Some(v + Vec3::Z)
+        };
+        let collider = create_terrain_collider(
+            &meshes,
+            &Transform::IDENTITY,
+            &TEST_SETTINGS,
+            Vec3::NEG_Z,
+            0,
+            Some(&snap),
+        );
+        assert!(collider.is_some());
+        // All four quad vertices touch x = 0/255, so all are border.
+        assert_eq!(consulted.borrow().len(), 4);
     }
 
     #[test]
@@ -658,11 +768,12 @@ mod tests {
         // 3 and 5; [3,5,4] all octant 5.
         let mesh = test_mesh_with_octants(&positions, vec![0, 1, 2, 3, 4, 5], true);
 
-        let (vertices, triangles) = merge_meshes(
+        let (vertices, triangles, _) = merge_meshes(
             std::slice::from_ref(&mesh),
             &Transform::IDENTITY,
             0.0,
             1 << 3,
+            Vec3::NEG_Z,
         );
         assert_eq!(triangles, vec![[3, 5, 4]]);
         // Vertex positions are never deformed.
@@ -670,7 +781,13 @@ mod tests {
         assert_eq!(vertices[3], Vec3::new(10.0, 10.0, 0.0));
 
         // Mask 0 keeps everything, including the straddlers.
-        let (_, all) = merge_meshes(std::slice::from_ref(&mesh), &Transform::IDENTITY, 0.0, 0);
+        let (_, all, _) = merge_meshes(
+            std::slice::from_ref(&mesh),
+            &Transform::IDENTITY,
+            0.0,
+            0,
+            Vec3::NEG_Z,
+        );
         assert_eq!(all.len(), 4);
     }
 
@@ -688,11 +805,12 @@ mod tests {
         ];
         let mesh = test_mesh_with_octants(&positions, vec![0, 1, 2, 3], true);
 
-        let (vertices, triangles) = merge_meshes(
+        let (vertices, triangles, _) = merge_meshes(
             std::slice::from_ref(&mesh),
             &Transform::IDENTITY,
             0.0,
             1 << 1,
+            Vec3::NEG_Z,
         );
         assert!(!triangles.is_empty(), "the unmasked half must survive");
         let mut area = 0.0f32;
@@ -719,11 +837,12 @@ mod tests {
         );
 
         // Masking octant 0 keeps the complementary half.
-        let (vertices, triangles) = merge_meshes(
+        let (vertices, triangles, _) = merge_meshes(
             std::slice::from_ref(&mesh),
             &Transform::IDENTITY,
             0.0,
             1 << 0,
+            Vec3::NEG_Z,
         );
         for [a, b, c] in &triangles {
             for i in [a, b, c] {
@@ -739,8 +858,13 @@ mod tests {
         let positions = [(0, 0, 0, 0), (10, 0, 0, 0), (0, 10, 0, 0)];
         let mesh = test_mesh_with_octants(&positions, vec![0, 1, 2], false);
 
-        let (_, triangles) =
-            merge_meshes(std::slice::from_ref(&mesh), &Transform::IDENTITY, 0.0, 0xff);
+        let (_, triangles, _) = merge_meshes(
+            std::slice::from_ref(&mesh),
+            &Transform::IDENTITY,
+            0.0,
+            0xff,
+            Vec3::NEG_Z,
+        );
         assert_eq!(triangles.len(), 1);
     }
 
@@ -778,7 +902,7 @@ mod tests {
             test_mesh(&line, vec![0, 1, 2, 3]),
         ];
 
-        let (_, triangles) = merge_meshes(&meshes, &Transform::IDENTITY, 0.01, 0);
+        let (_, triangles, _) = merge_meshes(&meshes, &Transform::IDENTITY, 0.01, 0, Vec3::NEG_Z);
 
         // Only the healthy quad's two triangles survive.
         assert_eq!(triangles, vec![[0, 1, 2], [1, 3, 2]]);
