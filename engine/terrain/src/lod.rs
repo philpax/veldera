@@ -8,31 +8,32 @@
 //!
 //! - **Render rule** refines on screen-space error and frustum-culls,
 //!   producing renderable nodes and the meshes shown on screen.
-//! - **Physics rule** refines on distance-banded target depth (see
-//!   [`PhysicsStreamingConfig::bands`](veldera_physics::PhysicsStreamingConfig))
-//!   with no frustum culling, producing exactly one terrain collider per region
-//!   within [`PhysicsStreamingConfig::range`](veldera_physics::PhysicsStreamingConfig).
-//!   Commits carry a per-octant coverage mask mirroring the render octant
-//!   mask: when descendants cover some of a node's octants, the node's own
-//!   collider is built without the covered octants' triangles, so colliders
-//!   at mixed depths tile space exactly the way the rendered composite
-//!   does. Within the innermost band, commits additionally follow the
-//!   renderer down to whatever children are displayed (WYSIWYG), so
-//!   near-field collision converges on exactly the meshes on screen.
-//!   If the target depth isn't available
-//!   the deepest loaded ancestor with data is used as a fallback so the
-//!   player can't fall through ground whose data simply hasn't streamed in
-//!   yet. When *nothing* on a region's ancestor chain is loaded, the region
-//!   is genuinely uncovered: it's counted, logged on transition, and shown
-//!   in the diagnostics until loads (which prioritise the physics chain)
-//!   close the gap.
+//! - **Physics rule** (distance only, no frustum culling) covers the
+//!   annulus between
+//!   [`PhysicsStreamingConfig::wysiwyg_radius`](veldera_physics::PhysicsStreamingConfig)
+//!   and [`PhysicsStreamingConfig::range`](veldera_physics::PhysicsStreamingConfig)
+//!   with distance-banded coarse colliders (see
+//!   [`PhysicsStreamingConfig::bands`](veldera_physics::PhysicsStreamingConfig)),
+//!   falling back to the deepest loaded ancestor while data streams in,
+//!   so distant collision exists omnidirectionally for ranged entities
+//!   even where the renderer has nothing loaded.
+//!
+//! Within `wysiwyg_radius` there is deliberately *no* physics tree-walk:
+//! the collider selection ([`compute_physics_targets`]) simply mirrors
+//! the loaded render set, with each node's octant mask derived from its
+//! selected children exactly the way the render shader masks the drawn
+//! meshes. Near-field collision is the displayed composite by
+//! construction — it cannot float above or sink below what the player
+//! sees. The banded walk treats every region whose near distance is
+//! within the radius as already covered (the mirror provably covers
+//! those), so the two layers never double-commit.
 //!
 //! Both rules share the same bulk + node caches. Retention takes the
-//! union of both rules' potential sets *over a rolling grace window*
-//! (see [`LodTuning::unload_grace_period_secs`]) — a node stays alive
-//! as long as either consumer asked for it within the last few seconds.
-//! The grace window prevents thrash when the view briefly turns away
-//! and back.
+//! union of the walk's potential sets and the collider targets *over a
+//! rolling grace window* (see [`LodTuning::unload_grace_period_secs`]) —
+//! a node stays alive as long as some consumer wanted it within the last
+//! few seconds. The grace window prevents thrash when the view briefly
+//! turns away and back.
 //!
 //! Uses platform-agnostic `async_channel` for communication between async tasks
 //! and the main thread. Task spawning is handled by `TaskSpawner` from the
@@ -72,7 +73,7 @@ use veldera_constants::EARTH_RADIUS_M_F64;
 use veldera_geo::floating_origin::{FloatingOriginCamera, WorldPosition};
 use veldera_physics::{
     GameLayer, MotionTracker, PhysicsState, PhysicsStreamingConfig, TerrainCollider,
-    desired_physics_depth, within_innermost_band,
+    desired_physics_depth,
 };
 
 /// Hot-reloadable LoD streaming parameters, loaded from
@@ -185,7 +186,7 @@ impl Plugin for LodPlugin {
 pub struct NodeSources {
     /// The render BFS visited this node.
     pub render: bool,
-    /// The physics BFS visited this node.
+    /// The physics selection targets a collider on this node.
     pub physics: bool,
 }
 
@@ -218,6 +219,9 @@ pub struct SnapshotCounters {
     pub render_loaded: usize,
     pub render_loading: usize,
     pub physics_colliders: usize,
+    /// Target paths whose collider hasn't been built yet (throttled,
+    /// dwelling, or just selected).
+    pub physics_pending: usize,
     /// In-range regions currently without any collider coverage.
     pub physics_uncovered: usize,
     pub bulks_cached: usize,
@@ -242,13 +246,13 @@ pub struct SnapshotCounters {
 pub struct LodSnapshot {
     /// ECEF camera position at the moment the snapshot was taken.
     pub camera_pos: Option<DVec3>,
-    /// Lead vector used by the physics BFS this frame.
+    /// Lead vector used by the physics selection this frame.
     pub lead: DVec3,
     /// Smoothed camera velocity in m/s.
     pub velocity: DVec3,
-    /// Per-node detail for everything either BFS visited.
+    /// Per-node detail for everything the walk visited or physics targets.
     pub nodes: Vec<SnapshotNode>,
-    /// Paths the physics BFS currently has colliders for.
+    /// Paths the physics selection currently targets for colliders.
     pub physics_collider_paths: HashSet<OctreePath>,
     /// In-range regions with no loaded collider data anywhere on their
     /// ancestor chain — no terrain collision until a load completes.
@@ -313,14 +317,13 @@ pub struct LodState {
     /// Physics collider entities keyed by node path, with the octant mask
     /// each entity was built with (so mask changes trigger a rebuild).
     physics_colliders: HashMap<OctreePath, (Entity, u8)>,
-    /// Paths the physics BFS selected as collider hosts this frame, with
-    /// their octant-coverage masks.
-    ///
-    /// Computed by the physics side of [`unified_bfs_traversal`] in
-    /// `update_lod_requests` and consumed by `update_physics_colliders` to
-    /// spawn/despawn the actual trimesh entities. Stored on `LodState`
-    /// rather than passed directly so the two systems can run as separate
-    /// Bevy systems without a shared parameter.
+    /// Paths that should host colliders right now, with their
+    /// octant-coverage masks: the loaded render set within physics range,
+    /// mirrored by [`compute_physics_targets`] in `update_lod_requests`
+    /// and consumed by `update_physics_colliders` to spawn/despawn the
+    /// actual trimesh entities. Stored on `LodState` rather than passed
+    /// directly so the two systems can run as separate Bevy systems
+    /// without a shared parameter.
     physics_target_paths: HashMap<OctreePath, u8>,
     /// Elapsed-seconds timestamp of the last frame each node was in any
     /// BFS's potential set. Drives the unload grace period (see
@@ -601,6 +604,9 @@ struct UnifiedWalkCtx<'a> {
     lod_state: &'a LodState,
     tuning: &'a LodTuning,
     physics_bands: &'a [(f64, usize)],
+    /// Radius within which the WYSIWYG mirror (not this walk) owns the
+    /// collider selection; regions nearer than this are treated as covered.
+    wysiwyg_radius: f64,
     frustum: Frustum,
     lod_metrics: LodMetrics,
     is_low_altitude: bool,
@@ -618,11 +624,12 @@ struct UnifiedWalkCtx<'a> {
 /// - **Render contribution.** Visible if in frustum or within
 ///   `keep_loaded_radius`. Caches the OBB. If `should_refine`, marks the
 ///   node as a refinement parent (potential_nodes + nodes_to_load).
-/// - **Physics contribution.** Wanted if its OBB-distance is within the
-///   outermost band. Visited nodes get added to `potential_nodes` and
-///   their data is requested as a possible fallback. A collider commit
-///   happens at either the target depth or as a fallback when descent
-///   can't proceed.
+/// - **Physics contribution.** Wanted if its OBB-distance is beyond the
+///   WYSIWYG radius (the near field belongs to the render-mirroring
+///   selection) but within the outermost band. Visited nodes get added to
+///   `potential_nodes` and their data is requested as a possible fallback.
+///   A collider commit happens at either the banded target depth or as a
+///   fallback when descent can't proceed.
 ///
 /// We descend if either rule wants to. Refining for one consumer
 /// effectively gives the other a free walk through that subtree, which
@@ -633,6 +640,7 @@ fn unified_bfs_traversal(
     scratch: &mut LodScratch,
     tuning: &LodTuning,
     physics_bands: &[(f64, usize)],
+    wysiwyg_radius: f64,
     frustum: Frustum,
     lod_metrics: LodMetrics,
     camera_pos: DVec3,
@@ -648,6 +656,7 @@ fn unified_bfs_traversal(
         lod_state,
         tuning,
         physics_bands,
+        wysiwyg_radius,
         frustum,
         lod_metrics,
         is_low_altitude,
@@ -775,11 +784,22 @@ fn unified_walk(
 
         // -------- physics-side decision --------
         let phys_dist = effective_distance(&child_node.obb, ctx.camera_pos, ctx.lead);
-        let phys_target = desired_physics_depth(ctx.physics_bands, phys_dist);
+        // The near field belongs to the WYSIWYG mirror selection
+        // (`compute_physics_targets`): every region whose near distance is
+        // inside the radius is covered by the mirrored render composite,
+        // so this walk treats it exactly like "beyond the outermost band" —
+        // covered by someone else, nothing to do here.
+        let mirror_covered = phys_dist <= ctx.wysiwyg_radius;
+        let phys_target = if mirror_covered {
+            None
+        } else {
+            desired_physics_depth(ctx.physics_bands, phys_dist)
+        };
         let physics_in_range = phys_target.is_some();
         let physics_at_or_past_target =
             physics_in_range && phys_target.is_some_and(|t| child_path.depth() >= t);
-        // Beyond the outermost band no collider is wanted, so there is
+        // Beyond the outermost band no collider is wanted, and within the
+        // WYSIWYG radius the mirror covers the region — either way there is
         // nothing for an ancestor to cover here.
         if !physics_in_range {
             handled_mask |= octant_bit;
@@ -845,22 +865,9 @@ fn unified_walk(
             handled_mask |= octant_bit;
         }
 
-        // WYSIWYG near field: within the innermost band, when the renderer
-        // displays at least one child of this node, push the commit down so
-        // collision matches the displayed meshes. The recursion's coverage
-        // mask lets this node's own (post-recursion) commit cover exactly
-        // the octants the children don't, mirroring the render compositing
-        // in every partial-load state.
-        let wysiwyg_descend = physics_in_range
-            && physics_at_or_past_target
-            && !octant_handled
-            && within_innermost_band(ctx.physics_bands, phys_dist)
-            && any_children_displayed(ctx.lod_state, child_node.path);
-
-        // Banded commit at/past the target depth (the WYSIWYG path defers
-        // to the post-recursion masked commit instead). This is the primary
+        // Banded commit at/past the target depth. This is the primary
         // commit site.
-        if physics_in_range && !octant_handled && physics_at_or_past_target && !wysiwyg_descend {
+        if physics_in_range && !octant_handled && physics_at_or_past_target {
             if commit_physics_collider(
                 child_node.path,
                 child_phys_loaded,
@@ -875,8 +882,11 @@ fn unified_walk(
             octant_handled = true;
         }
 
-        // Physics descends while its region is unhandled: above the target
-        // depth, or deferred to the displayed children by WYSIWYG.
+        // Physics descends while its region is unhandled (above the target
+        // depth). Descent also splits regions straddling the WYSIWYG
+        // radius: octants inside it are marked mirror-covered, so the
+        // post-recursion masked commit excludes them and the banded layer
+        // never overlaps the mirror by more than a straddling octant.
         let physics_wants_deeper = physics_in_range && !octant_handled;
         let need_recurse = render_should_refine || physics_wants_deeper;
         if need_recurse {
@@ -902,10 +912,11 @@ fn unified_walk(
                     updated_phys_best,
                     physics_result,
                 ) {
-                    // Commit this node minus the octants covered below: a
-                    // full collider when nothing below committed, a partial
-                    // one when descendants cover some octants — closing the
-                    // coastline hole and the WYSIWYG waist-clip mismatch.
+                    // Commit this node minus the octants covered below
+                    // (deeper commits, or the WYSIWYG mirror): a full
+                    // collider when nothing below is covered, a partial one
+                    // otherwise — closing the coastline hole without
+                    // overlapping the near-field mirror.
                     handled_mask |= octant_bit;
                 }
             }
@@ -915,18 +926,50 @@ fn unified_walk(
     handled_mask
 }
 
-/// Whether the renderer currently displays any child of `path` (with node
-/// data present so the child can host a commit) — the gate for the WYSIWYG
-/// descent. The recursion's coverage mask handles partially loaded child
-/// sets, so a single displayed child is enough to descend.
-fn any_children_displayed(lod_state: &LodState, path: OctreePath) -> bool {
-    if path.depth() >= OctreePath::MAX_DEPTH {
-        return false;
+/// Mirror the loaded render set into the near-field collider selection:
+/// every loaded node whose near distance is within `wysiwyg_radius` hosts a
+/// collider, with its octant mask derived from its *selected* children —
+/// exactly the way the render shader masks the drawn meshes. Near-field
+/// collision is therefore the displayed composite by construction.
+///
+/// Masking only by in-mirror children (rather than all loaded children)
+/// matters at the radius edge: a loaded child beyond the radius is the
+/// banded walk's responsibility at *its* granularity, so the parent keeps
+/// that octant's geometry rather than trusting a collider that may not
+/// exist. Fully-masked nodes are skipped, just as the renderer hides them.
+fn compute_physics_targets(
+    lod_state: &LodState,
+    camera_pos: DVec3,
+    lead: DVec3,
+    wysiwyg_radius: f64,
+) -> HashMap<OctreePath, u8> {
+    let mut targets: HashMap<OctreePath, u8> = HashMap::new();
+    for path in &lod_state.loaded_nodes {
+        if !lod_state.node_data.contains_key(path) {
+            continue;
+        }
+        let Some(obb) = lod_state.node_obbs.get(path) else {
+            continue;
+        };
+        if effective_distance(obb, camera_pos, lead) > wysiwyg_radius {
+            continue;
+        }
+        targets.entry(*path).or_insert(0);
     }
-    (0u8..=7).any(|octant| {
-        let child = path.push(octant);
-        lod_state.loaded_nodes.contains(&child) && lod_state.node_data.contains_key(&child)
-    })
+    let paths: Vec<OctreePath> = targets.keys().copied().collect();
+    for path in &paths {
+        let Some(parent) = path.parent() else {
+            continue;
+        };
+        let octant = path
+            .octant_at(path.depth() - 1)
+            .expect("non-root path has a last octant");
+        if let Some(mask) = targets.get_mut(&parent) {
+            *mask |= 1 << octant;
+        }
+    }
+    targets.retain(|_, mask| *mask != 0xff);
+    targets
 }
 
 /// Helper: commit a collider for a node with the given octant-coverage mask
@@ -1182,6 +1225,7 @@ fn update_lod_requests(
             &mut scratch,
             &tuning,
             &streaming.bands,
+            streaming.wysiwyg_radius,
             frustum,
             lod_metrics,
             lod_metrics.camera_position,
@@ -1190,6 +1234,26 @@ fn update_lod_requests(
 
         scratch.last_bfs_signature = Some(current_signature);
     }
+
+    // Near-field collider targets mirror the loaded render set (WYSIWYG);
+    // the banded walk covers everything beyond the radius. The two are
+    // disjoint by construction: the walk treats every region whose near
+    // distance is inside the radius as covered. Computed every frame (the
+    // loaded set and camera change independently of the BFS skip) — it's a
+    // single pass over the loaded nodes.
+    let mut collider_targets = compute_physics_targets(
+        &lod_state,
+        lod_metrics.camera_position,
+        motion.lead(),
+        streaming.wysiwyg_radius,
+    );
+    collider_targets.extend(
+        scratch
+            .physics_result
+            .collider_paths
+            .iter()
+            .map(|(path, mask)| (*path, *mask)),
+    );
 
     // Merge discovered OBBs from both BFSes (immutable borrow scope).
     {
@@ -1237,15 +1301,12 @@ fn update_lod_requests(
                 &lod_state,
                 bfs,
                 physics_bfs,
+                &collider_targets,
                 &motion,
                 lod_metrics.camera_position,
                 &mut snapshot,
             );
         }
-
-        // Stash the latest physics collider selection for
-        // `update_physics_colliders`.
-        lod_state.physics_target_paths = physics_bfs.collider_paths.clone();
 
         // Coverage-loss transitions are logged (not just counted) because a
         // fall-through-the-world window is a correctness event, not detail.
@@ -1262,11 +1323,15 @@ fn update_lod_requests(
         lod_state.last_uncovered_regions = uncovered;
     }
 
+    // Stash the latest physics collider selection for
+    // `update_physics_colliders`.
+    lod_state.physics_target_paths = collider_targets.clone();
+
     // Derive the retention sets: anything still inside the grace window.
     // Physics collider paths are also retained as defense in depth.
     let mut retained_nodes: HashSet<OctreePath> =
         lod_state.node_last_seen.keys().copied().collect();
-    retained_nodes.extend(scratch.physics_result.collider_paths.keys().copied());
+    retained_nodes.extend(collider_targets.keys().copied());
     let retained_bulks: HashSet<OctreePath> = lod_state.bulk_last_seen.keys().copied().collect();
 
     // When frozen, keep every currently-loaded tile alive: the BFS skip stops
@@ -1278,7 +1343,7 @@ fn update_lod_requests(
             &mut commands,
             &retained_nodes,
             &retained_bulks,
-            &scratch.physics_result.collider_paths,
+            &collider_targets,
         );
     }
 
@@ -1830,6 +1895,7 @@ fn populate_snapshot(
     lod_state: &LodState,
     render: &BfsResult,
     physics: &PhysicsBfsResult,
+    collider_targets: &HashMap<OctreePath, u8>,
     motion: &MotionTracker,
     camera_pos: DVec3,
     snapshot: &mut LodSnapshot,
@@ -1838,7 +1904,7 @@ fn populate_snapshot(
     snapshot.camera_pos = Some(camera_pos);
     snapshot.lead = motion.lead();
     snapshot.velocity = motion.smoothed_velocity();
-    snapshot.physics_collider_paths = physics.collider_paths.keys().copied().collect();
+    snapshot.physics_collider_paths = collider_targets.keys().copied().collect();
     snapshot.physics_uncovered_paths = physics.uncovered_regions.clone();
 
     let mut counters = SnapshotCounters {
@@ -1846,6 +1912,10 @@ fn populate_snapshot(
         bulks_loading: lod_state.loading_bulks.len(),
         bulks_failed: lod_state.failed_bulks.len(),
         physics_colliders: lod_state.physics_colliders.len(),
+        physics_pending: collider_targets
+            .keys()
+            .filter(|path| !lod_state.physics_colliders.contains_key(*path))
+            .count(),
         physics_uncovered: physics.uncovered_regions.len(),
         ..Default::default()
     };
@@ -1864,6 +1934,7 @@ fn populate_snapshot(
         .potential_nodes
         .iter()
         .chain(physics.potential_nodes.iter())
+        .chain(collider_targets.keys())
         .copied()
         .collect();
 
@@ -1871,7 +1942,8 @@ fn populate_snapshot(
         let depth = path.depth();
         let sources = NodeSources {
             render: render.potential_nodes.contains(&path),
-            physics: physics.potential_nodes.contains(&path),
+            physics: physics.potential_nodes.contains(&path)
+                || collider_targets.contains_key(&path),
         };
 
         let state = if lod_state.node_data.contains_key(&path) {
@@ -1912,7 +1984,7 @@ fn populate_snapshot(
         });
     }
 
-    for path in physics.collider_paths.keys() {
+    for path in collider_targets.keys() {
         let depth = path.depth();
         if depth < counters.physics_colliders_by_depth.len() {
             counters.physics_colliders_by_depth[depth] += 1;

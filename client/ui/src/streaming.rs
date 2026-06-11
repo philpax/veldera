@@ -456,8 +456,9 @@ fn draw_counters_panel(ui: &mut egui::Ui, snapshot: &LodSnapshot, mesh_count: us
     ));
     let (phys_min, phys_max) = collider_depth_range(snapshot);
     ui.monospace(format!(
-        "Physics BFS  colliders {:>4}   depth {}..{}",
+        "Physics      colliders {:>4}   pending {:>4}   depth {}..{}",
         c.physics_colliders,
+        c.physics_pending,
         phys_min.map_or("—".to_string(), |d| d.to_string()),
         phys_max.map_or("—".to_string(), |d| d.to_string()),
     ));

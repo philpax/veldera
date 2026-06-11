@@ -4,9 +4,15 @@
 # Max distance colliders load at, and the despawn radius for ranged entities (m).
 range = 1000.0
 
+# Radius (m) within which colliders mirror the loaded render set exactly
+# (WYSIWYG): collision is the displayed composite by construction, so the
+# ground under the player can never float above or sink below what's drawn.
+# Beyond this radius the distance bands below take over.
+wysiwyg_radius = 150.0
+
 # Collider triangles thinner than this across their longest edge (m) are
 # dropped as photogrammetry slivers (contact artifacts). Zero disables.
-# Within the innermost band, colliders follow the exact displayed meshes
+# Within the WYSIWYG radius, colliders follow the exact displayed meshes
 # (which reach the deepest LoD tier), so this filter is what keeps the
 # deepest tier's degenerate triangles out of physics.
 min_collider_triangle_height = 0.01
@@ -31,12 +37,11 @@ max_lead = 200.0         # cap on lead distance (m) so fast runs don't starve ne
 lead_speed_epsilon = 0.1 # below this speed (m/s) the lead is zero
 velocity_smoothing = 0.25 # EWMA factor (~4-frame half-life at 60 Hz)
 
-# Distance bands: each [max_distance_m, depth_below_finest]. First band covering
-# the (lead-adjusted) distance wins; resolved depth = finest octree depth minus
+# Distance bands beyond the WYSIWYG radius: each
+# [max_distance_m, depth_below_finest]. First band covering the
+# (lead-adjusted) distance wins; resolved depth = finest octree depth minus
 # the offset. Sorted ascending; beyond the last band, no collider loads.
 bands = [
-  [50.0, 0],
-  [150.0, 1],
   [400.0, 2],
   [1000.0, 3],
 ]

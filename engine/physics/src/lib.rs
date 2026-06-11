@@ -1,18 +1,19 @@
 //! Physics integration using Avian 3D.
 //!
-//! Integrates Avian physics with the rocktree LOD system. Physics colliders
+//! Integrates Avian physics with the rocktree LOD system. Within
+//! [`PhysicsStreamingConfig::wysiwyg_radius`] of the camera, colliders
+//! mirror the loaded render set exactly (WYSIWYG — see
+//! `compute_physics_targets` in `veldera_terrain`), so near-field collision
+//! is the displayed composite by construction. Beyond that radius colliders
 //! are loaded at a distance-banded target depth (see
-//! [`PhysicsStreamingConfig::bands`]): the area immediately around the player
-//! gets the finest LoD ([`PHYSICS_FINEST_DEPTH`]), and the target depth steps
-//! down as distance grows. If the tree doesn't go that deep at a given
-//! location, or the data isn't loaded yet, the deepest available ancestor
-//! is used as a fallback so the player can never fall through the ground.
-//! The octree partitioning of space gives us non-overlapping colliders for
-//! free regardless of which depth each one ended up at.
+//! [`PhysicsStreamingConfig::bands`]), stepping down as distance grows; if
+//! the tree doesn't go that deep at a given location, or the data isn't
+//! loaded yet, the deepest available ancestor is used as a fallback so
+//! entities can never fall through the ground.
 //!
 //! Under motion, distances along the velocity vector are compressed via
-//! [`MotionTracker::lead`] so colliders ahead of the player are loaded at
-//! the next-finer band before the player gets there.
+//! [`MotionTracker::lead`] so colliders ahead of the player are upgraded
+//! before the player gets there.
 //!
 //! All physics runs in camera-relative space to handle floating origin.
 //! When the camera moves, all physics positions shift by -delta to maintain
@@ -99,10 +100,16 @@ pub struct PhysicsStreamingConfig {
     /// Maximum distance from the camera at which colliders are loaded (m), and
     /// the despawn radius for [`DespawnOutsidePhysicsRange`] entities.
     pub range: f64,
-    /// Distance bands mapping effective camera distance to a target collider
-    /// depth, each `(max_distance_m, depth_below_finest)`. Sorted ascending;
-    /// the first band covering the queried distance wins, and the resolved depth
-    /// is `PHYSICS_FINEST_DEPTH - depth_below_finest`. Anything beyond the last
+    /// Radius (m) within which colliders mirror the loaded render set
+    /// exactly (WYSIWYG): no banded selection, no fallbacks — collision is
+    /// the displayed composite by construction. Beyond this radius the
+    /// distance bands take over.
+    pub wysiwyg_radius: f64,
+    /// Distance bands mapping effective camera distance (beyond
+    /// `wysiwyg_radius`) to a target collider depth, each
+    /// `(max_distance_m, depth_below_finest)`. Sorted ascending; the first
+    /// band covering the queried distance wins, and the resolved depth is
+    /// `PHYSICS_FINEST_DEPTH - depth_below_finest`. Anything beyond the last
     /// band gets no collider.
     pub bands: Vec<(f64, usize)>,
     /// Minimum triangle altitude (m) for collider triangles: triangles
@@ -162,15 +169,6 @@ pub fn desired_physics_depth(bands: &[(f64, usize)], effective_distance_m: f64) 
         .iter()
         .find(|(max_d, _)| effective_distance_m <= *max_d)
         .map(|&(_, offset)| PHYSICS_FINEST_DEPTH.saturating_sub(offset))
-}
-
-/// Whether `effective_distance_m` falls within the innermost (finest) distance
-/// band. Within it, the LoD walk upgrades colliders to the exact meshes the
-/// renderer displays (see the WYSIWYG rule in `veldera_terrain`'s LoD walk).
-pub fn within_innermost_band(bands: &[(f64, usize)], effective_distance_m: f64) -> bool {
-    bands
-        .first()
-        .is_some_and(|(max_d, _)| effective_distance_m <= *max_d)
 }
 
 /// Plugin for physics integration with the rocktree LOD system.

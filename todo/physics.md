@@ -1,10 +1,14 @@
-- verify in-game that collider wireframes hug the rendered terrain near the
-  player after the masked-vertex-collapse fix (207e98d). The confirmed bug:
-  the collider builder kept octant-straddling parent triangles whole while
-  the render shader collapses any masked vertex to the mesh origin, leaving
-  invisible elevated shelves wherever parent/child reconstructions disagree
-  vertically (the floating car/player screenshot). If floating persists,
-  the next suspect is collider selection rather than geometry — add a debug
-  readout of the committed collider paths/depths/masks within ~100 m of the
-  camera to the Physics tab so the selected-vs-displayed depths can be
-  compared live.
+- verify in-game that near-field collider wireframes hug the rendered
+  terrain after the WYSIWYG-mirror rework: within
+  `streaming.wysiwyg_radius` the collider selection now mirrors the loaded
+  render set exactly (no banded selection, no fallback blankets), so any
+  remaining float/sink at the player's feet would mean the mirror masks
+  diverge from the shader (`compute_physics_targets` vs `cull_meshes` /
+  `terrain_material.wgsl`) — diff those first.
+- the banded annulus (beyond the WYSIWYG radius) still uses full-mask
+  ancestor fallbacks while data streams in, which can briefly double-layer
+  distant terrain. Harmless at range; if it ever matters, mask the fallback
+  commit to the octant chain leading to the missing region.
+- node load failures are only logged and retried forever (bulks have
+  `failed_bulks`, nodes have no equivalent); consider failure tracking with
+  backoff if load spam ever shows up in the logs.
