@@ -1,0 +1,71 @@
+(
+  resources: {},
+  entities: {
+    1: (
+      components: {
+        "veldera_game_vehicle::components::Vehicle": (
+          name: "SUV",
+          description: "Three tonnes of suburban confidence, all-wheel drive",
+        ),
+        "veldera_game_vehicle::components::VehicleChassisConfig": (
+          mass: 2400.0,
+          center_of_mass: (0.0, 0.65, -0.1),
+          drag_coefficient_area: 1.05,
+        ),
+        "veldera_game_vehicle::components::VehicleSuspensionConfig": (
+          travel: 0.22,
+          stiffness: 83500.0,
+          damping_compression: 6400.0,
+          damping_rebound: 7800.0,
+        ),
+        "veldera_game_vehicle::components::VehicleEngineConfig": (
+          idle_rpm: 700.0,
+          redline_rpm: 5800.0,
+          peak_torque_nm: 380.0,
+          peak_torque_rpm: 3500.0,
+          idle_torque_frac: 0.62,
+          redline_torque_frac: 0.7,
+          engine_braking_nm: 85.0,
+          cylinders: 8,
+        ),
+        "veldera_game_vehicle::components::VehicleTransmissionConfig": (
+          gear_ratios: [3.8, 2.2, 1.5, 1.0, 0.75],
+          reverse_ratio: 3.6,
+          final_drive: 4.0,
+          efficiency: 0.9,
+          drive: All,
+          shift_up_rpm_frac: (0.45, 0.88),
+          shift_down_rpm_frac: (0.28, 0.58),
+          shift_time: 0.25,
+          min_shift_interval: 0.8,
+          stall_torque_multiplier: 1.9,
+          coupling_rpm: 2000.0,
+        ),
+        "veldera_game_vehicle::components::VehicleSteeringConfig": (
+          max_angle_deg: 33.0,
+          high_speed_angle_deg: 7.0,
+          falloff_speed: 27.0,
+          steer_rate_deg: 170.0,
+        ),
+        "veldera_game_vehicle::components::VehicleTireConfig": (
+          longitudinal_grip: 1.0,
+          lateral_grip: 0.9,
+          handbrake_grip_factor: 0.3,
+          rolling_resistance: 0.017,
+          brake_force: 20500.0,
+          brake_bias: 0.6,
+          handbrake_force: 10000.0,
+        ),
+        "veldera_game_vehicle::components::VehicleModel": (
+          path: "game/vehicles/suv.glb#Scene0",
+          scale: 1.0,
+        ),
+        "veldera_game_camera::follow::FollowCameraConfig": (
+          camera_offset: (0.0, 3.1, 9.8),
+          look_target_offset: (0.0, 1.5, 0.0),
+          position_smoothing: 0.28,
+        ),
+      },
+    ),
+  },
+)

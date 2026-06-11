@@ -43,7 +43,7 @@ use veldera_game_player::controller as fps;
 use veldera_game_teleport::TeleportAnimation;
 use veldera_geo::floating_origin::{FloatingOriginCamera, WorldPosition};
 
-pub use follow::{FollowCameraConfig, FollowEntityTarget, FollowedEntity};
+pub use follow::{FollowCameraConfig, FollowEntityTarget, FollowExitAnchor, FollowedEntity};
 pub use veldera_camera::{
     AltitudeRequest, CameraConfig, FlightCamera, HeadingRequest, TeleportAnimationMode,
     TranslateRequest,
@@ -96,6 +96,7 @@ impl Plugin for CameraControllerPlugin {
             .register_type::<follow::FollowCameraConfig>()
             .init_resource::<CameraModeState>()
             .init_resource::<CameraModeTransitions>()
+            .init_resource::<follow::FollowExitAnchor>()
             .add_plugins((follow::FollowCameraPlugin, input::CameraInputPlugin))
             // Run the mode machine, then translate the resulting mode into the
             // engine's freelook control, before the freelook systems read it.
@@ -158,6 +159,7 @@ fn process_mode_transitions(
     mut transitions: ResMut<CameraModeTransitions>,
     mut state: ResMut<CameraModeState>,
     mut preserved_fps: ResMut<fps::PreservedFpsState>,
+    mut exit_anchor: ResMut<follow::FollowExitAnchor>,
     player_config: Res<fps::FpsPlayerConfig>,
     camera_query: Query<(Entity, &FloatingOriginCamera, Option<&FlightCamera>)>,
     logical_player_query: Query<
@@ -181,6 +183,7 @@ fn process_mode_transitions(
                     &mut commands,
                     &mut state,
                     &mut preserved_fps,
+                    &mut exit_anchor,
                     &player_config,
                     &camera_query,
                 );
@@ -200,6 +203,7 @@ fn process_mode_transitions(
                     &mut commands,
                     &mut state,
                     &mut preserved_fps,
+                    &mut exit_anchor,
                     &player_config,
                     &camera_query,
                     &logical_player_query,
@@ -248,6 +252,7 @@ fn transition_to_fps_controller(
     commands: &mut Commands,
     state: &mut ResMut<CameraModeState>,
     preserved_fps: &mut ResMut<fps::PreservedFpsState>,
+    exit_anchor: &mut ResMut<follow::FollowExitAnchor>,
     player_config: &fps::FpsPlayerConfig,
     camera_query: &Query<(Entity, &FloatingOriginCamera, Option<&FlightCamera>)>,
 ) {
@@ -269,12 +274,15 @@ fn transition_to_fps_controller(
         CameraMode::FollowEntity => {
             if let Ok((camera_entity, camera, _)) = camera_query.single() {
                 follow::cleanup(commands, camera_entity, camera);
+                // Gameplay may have placed an exit anchor (e.g. beside the
+                // vehicle); otherwise the player appears at the camera.
+                let spawn_ecef = exit_anchor.0.take().unwrap_or(camera.position);
                 fps::setup_from_follow_entity(
                     commands,
                     player_config,
                     preserved_fps,
                     camera_entity,
-                    camera,
+                    spawn_ecef,
                 );
             }
         }
@@ -337,6 +345,7 @@ fn exit_current_mode(
     commands: &mut Commands,
     state: &mut ResMut<CameraModeState>,
     preserved_fps: &mut ResMut<fps::PreservedFpsState>,
+    exit_anchor: &mut ResMut<follow::FollowExitAnchor>,
     player_config: &fps::FpsPlayerConfig,
     camera_query: &Query<(Entity, &FloatingOriginCamera, Option<&FlightCamera>)>,
     logical_player_query: &Query<
@@ -360,26 +369,20 @@ fn exit_current_mode(
         CameraMode::FollowEntity => {
             let return_mode = state.return_mode().unwrap_or(CameraMode::Flycam);
             match return_mode {
-                CameraMode::Flycam => {
-                    transition_to_flycam(
-                        commands,
-                        state,
-                        preserved_fps,
-                        camera_query,
-                        logical_player_query,
-                    );
-                }
                 CameraMode::FpsController => {
                     transition_to_fps_controller(
                         commands,
                         state,
                         preserved_fps,
+                        exit_anchor,
                         player_config,
                         camera_query,
                     );
                 }
-                CameraMode::FollowEntity => {
-                    // Shouldn't happen, fall back to Flycam.
+                // Flycam, or FollowEntity (which shouldn't happen): the
+                // anchor only applies to a first-person exit.
+                CameraMode::Flycam | CameraMode::FollowEntity => {
+                    exit_anchor.0 = None;
                     transition_to_flycam(
                         commands,
                         state,

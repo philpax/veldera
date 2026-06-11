@@ -1,418 +1,287 @@
-//! Vehicle physics simulation.
+//! Vehicle physics: the Bevy/Avian layer over the pure car model.
 //!
-//! Implements PID-controlled hover thrusters with radial gravity integration.
-//! Uses core physics calculations for handling (thrust, turning, banking, drag).
+//! Casts one suspension ray per wheel, hands the results to
+//! [`core::step_car`], and writes the resulting velocities back to Avian.
+//! Runs in `FixedPreUpdate` after the floating-origin shift so the rays and
+//! the terrain colliders agree on the frame.
 
 use avian3d::prelude::*;
 use bevy::prelude::*;
+use leafwing_input_manager::prelude::*;
+
+use veldera_game_camera::FollowEntityTarget;
+use veldera_game_camera_state::CameraModeState;
+use veldera_geo::{coords::RadialFrame, floating_origin::WorldPosition};
+use veldera_physics::GameLayer;
 
 use super::{
-    GameLayer, VehicleConfig,
+    VehicleConfig, VehicleRightRequest,
     components::{
-        Vehicle, VehicleDragConfig, VehicleHoverConfig, VehicleInput, VehicleMovementConfig,
-        VehicleState,
+        Vehicle, VehicleChassisConfig, VehicleEngineConfig, VehicleInput, VehicleState,
+        VehicleSteeringConfig, VehicleSuspensionConfig, VehicleTireConfig,
+        VehicleTransmissionConfig, VehicleWheels,
     },
-    core::{self, VehicleFrame, VehiclePhysicsParams, VehicleSimInput, VehicleSimState},
+    core::{self, CarInput, CarParams, CarSimState, CarStepContext, WheelParams, WheelRayHit},
     telemetry::{self, TelemetrySnapshot},
 };
-use leafwing_input_manager::prelude::*;
-use veldera_game_camera_state::CameraModeState;
-use veldera_geo::{
-    coords::RadialFrame,
-    floating_origin::{FloatingOriginCamera, WorldPosition},
-};
 
-use crate::VehicleRightRequest;
+/// Persistent core-simulation state (gear, rpm, steer angle, wheel speeds),
+/// inserted alongside [`VehicleWheels`] once the model has loaded.
+#[derive(Component, Default)]
+pub struct VehicleSim(pub CarSimState);
 
-/// Capture vehicle input from action state.
+/// Capture vehicle input from the action state.
+///
+/// Only the vehicle the camera is following receives input; every other
+/// vehicle (parked cars, the vehicle just exited) gets zeroed so it doesn't
+/// keep driving itself.
 pub fn vehicle_input_system(
+    mode: Res<CameraModeState>,
     action_query: Query<&ActionState<veldera_game_input::VehicleAction>>,
-    mut query: Query<&mut VehicleInput, With<Vehicle>>,
+    follow_query: Query<&FollowEntityTarget>,
+    mut query: Query<(Entity, &mut VehicleInput), With<Vehicle>>,
 ) {
-    let Ok(action_state) = action_query.single() else {
-        return;
-    };
+    let followed = follow_query.iter().next().map(|follow| follow.target);
+    let action_state = action_query.single().ok();
 
-    let drive = action_state.clamped_axis_pair(&veldera_game_input::VehicleAction::Drive);
-
-    for mut input in &mut query {
-        input.throttle = drive.y;
-        input.turn = drive.x;
-        input.jump = action_state.just_pressed(&veldera_game_input::VehicleAction::Jump);
+    for (entity, mut input) in &mut query {
+        let driven = mode.is_follow_entity() && followed == Some(entity);
+        match (driven, action_state) {
+            (true, Some(action_state)) => {
+                let drive =
+                    action_state.clamped_axis_pair(&veldera_game_input::VehicleAction::Drive);
+                input.drive = drive.y;
+                input.steer = drive.x;
+                input.handbrake =
+                    action_state.pressed(&veldera_game_input::VehicleAction::Handbrake);
+            }
+            _ => {
+                input.drive = 0.0;
+                input.steer = 0.0;
+                input.handbrake = false;
+            }
+        }
     }
 }
 
-/// Run condition: FollowEntity mode is active.
-pub fn is_follow_entity_mode(state: Res<CameraModeState>) -> bool {
-    state.is_follow_entity()
-}
-
-/// Build physics params from components.
-fn build_physics_params(
-    movement_config: &VehicleMovementConfig,
-    drag_config: &VehicleDragConfig,
-    mass: f32,
-    inertia: f32,
-) -> VehiclePhysicsParams {
-    VehiclePhysicsParams {
-        mass,
-        inertia,
-        forward_force: movement_config.forward_force,
-        backward_force: movement_config.backward_force.abs(),
-        acceleration_time: movement_config.acceleration_time,
-        base_turn_rate: movement_config.base_turn_rate,
-        speed_turn_falloff: movement_config.speed_turn_falloff,
-        reference_speed: movement_config.reference_speed,
-        max_bank_angle: movement_config.max_bank_angle,
-        bank_rate: movement_config.bank_rate,
-        upright_spring: movement_config.upright_spring,
-        upright_damper: movement_config.upright_damper,
-        air_control_authority: movement_config.air_control_authority,
-        forward_drag: drag_config.forward_drag,
-        lateral_drag: drag_config.lateral_drag,
-        angular_drag: drag_config.angular_drag,
-        jump_velocity: movement_config.jump_force,
+/// Flatten the per-vehicle config components into core parameters.
+fn build_car_params(
+    chassis: &VehicleChassisConfig,
+    suspension: &VehicleSuspensionConfig,
+    engine: &VehicleEngineConfig,
+    transmission: &VehicleTransmissionConfig,
+    steering: &VehicleSteeringConfig,
+    tire: &VehicleTireConfig,
+) -> CarParams {
+    CarParams {
+        mass: chassis.mass,
+        drag_coefficient_area: chassis.drag_coefficient_area,
+        suspension_travel: suspension.travel,
+        suspension_stiffness: suspension.stiffness,
+        damping_compression: suspension.damping_compression,
+        damping_rebound: suspension.damping_rebound,
+        idle_rpm: engine.idle_rpm,
+        redline_rpm: engine.redline_rpm,
+        peak_torque_nm: engine.peak_torque_nm,
+        peak_torque_rpm: engine.peak_torque_rpm,
+        idle_torque_frac: engine.idle_torque_frac,
+        redline_torque_frac: engine.redline_torque_frac,
+        engine_braking_nm: engine.engine_braking_nm,
+        gear_ratios: transmission.gear_ratios.clone(),
+        reverse_ratio: transmission.reverse_ratio,
+        final_drive: transmission.final_drive,
+        efficiency: transmission.efficiency,
+        shift_up_rpm_frac: transmission.shift_up_rpm_frac,
+        shift_down_rpm_frac: transmission.shift_down_rpm_frac,
+        shift_time: transmission.shift_time,
+        min_shift_interval: transmission.min_shift_interval,
+        stall_torque_multiplier: transmission.stall_torque_multiplier,
+        coupling_rpm: transmission.coupling_rpm,
+        max_steer_angle: steering.max_angle_deg.to_radians(),
+        high_speed_steer_angle: steering.high_speed_angle_deg.to_radians(),
+        steer_falloff_speed: steering.falloff_speed,
+        steer_rate: steering.steer_rate_deg.to_radians(),
+        longitudinal_grip: tire.longitudinal_grip,
+        lateral_grip: tire.lateral_grip,
+        handbrake_grip_factor: tire.handbrake_grip_factor,
+        rolling_resistance: tire.rolling_resistance,
+        brake_force: tire.brake_force,
+        brake_bias: tire.brake_bias,
+        handbrake_force: tire.handbrake_force,
     }
 }
 
-/// Build sim state from vehicle state.
-fn build_sim_state(state: &VehicleState, altitude_ratio: f32) -> VehicleSimState {
-    VehicleSimState {
-        current_power: state.current_power,
-        current_bank: state.current_bank,
-        surface_normal: state.surface_normal,
-        time_grounded: state.time_grounded,
-        time_since_grounded: state.time_since_grounded,
-        grounded: state.grounded,
-        altitude_ratio,
-    }
-}
-
-/// Copy sim state back to vehicle state.
-fn copy_sim_state_back(state: &mut VehicleState, sim_state: &VehicleSimState) {
-    state.current_power = sim_state.current_power;
-    state.current_bank = sim_state.current_bank;
-    state.surface_normal = sim_state.surface_normal;
-    state.time_grounded = sim_state.time_grounded;
-    state.time_since_grounded = sim_state.time_since_grounded;
-    state.grounded = sim_state.grounded;
-}
-
-/// Apply physics forces to vehicles.
-///
-/// Implements PID-controlled hover thrusters with radial gravity, Wipeout-style
-/// handling including banking, surface alignment, momentum-based turning, and
-/// directional drag.
-///
-/// Uses the radial frame from the camera's ECEF position for spherical-Earth
-/// physics; falls back to Y-up when there's no camera.
-#[allow(clippy::too_many_lines, clippy::type_complexity)]
+/// Advance every loaded vehicle one fixed step.
+#[allow(clippy::type_complexity)]
 pub fn vehicle_physics_system(
     time: Res<Time<Fixed>>,
     physics_config: Res<veldera_physics::PhysicsConfig>,
     vehicle_config: Res<VehicleConfig>,
     spatial_query: SpatialQuery,
-    camera_query: Query<&FloatingOriginCamera>,
     mut query: Query<(
-        Entity,
-        &Vehicle,
-        &VehicleHoverConfig,
-        &VehicleMovementConfig,
-        &VehicleDragConfig,
+        (
+            &VehicleChassisConfig,
+            &VehicleSuspensionConfig,
+            &VehicleEngineConfig,
+            &VehicleTransmissionConfig,
+            &VehicleSteeringConfig,
+            &VehicleTireConfig,
+        ),
+        &VehicleWheels,
         &VehicleInput,
+        &mut VehicleSim,
         &mut VehicleState,
-        &Transform,
+        &Position,
+        &Rotation,
         &mut LinearVelocity,
         &mut AngularVelocity,
         &ComputedMass,
         &ComputedAngularInertia,
+        &ComputedCenterOfMass,
     )>,
 ) {
     let dt = time.delta_secs();
     let elapsed = time.elapsed_secs();
 
-    // Get camera position for ECEF calculation, or use flat plane mode.
-    let camera_pos = camera_query.single().ok().map(|c| c.position);
-
     for (
-        entity,
-        vehicle,
-        hover_config,
-        movement_config,
-        drag_config,
+        (chassis, suspension, engine, transmission, steering, tire),
+        wheels,
         input,
+        mut sim,
         mut state,
-        transform,
+        position,
+        rotation,
         mut linear_velocity,
         mut angular_velocity,
         computed_mass,
         computed_inertia,
+        computed_com,
     ) in &mut query
     {
-        // Local up: radial frame from ECEF position when a camera is present,
-        // else Y-up.
-        let (local_up, gravity) = if let Some(cam_pos) = camera_pos {
-            let ecef_pos = cam_pos + transform.translation.as_dvec3();
-            let frame = RadialFrame::from_ecef_position(ecef_pos);
-            (frame.up, physics_config.gravity)
-        } else {
-            (Vec3::Y, physics_config.gravity)
+        let params = build_car_params(chassis, suspension, engine, transmission, steering, tire);
+        let wheel_params = wheel_params(wheels);
+
+        // Suspension raycasts: from each hardpoint along chassis-down,
+        // against ground only (not vehicles, not ragdolls).
+        let filter = SpatialQueryFilter::default().with_mask([GameLayer::Ground]);
+        let down = rotation.0 * Vec3::NEG_Y;
+        let Ok(down_dir) = Dir3::new(down) else {
+            continue;
+        };
+        let mut hits: [Option<WheelRayHit>; 4] = [None; 4];
+        for (i, wheel) in wheel_params.iter().enumerate() {
+            let origin = position.0 + rotation.0 * core::wheel_hardpoint(wheel, &params);
+            hits[i] = spatial_query
+                .cast_ray(
+                    origin,
+                    down_dir,
+                    core::wheel_ray_length(wheel, &params),
+                    true,
+                    &filter,
+                )
+                .map(|hit| WheelRayHit {
+                    distance: hit.distance,
+                    normal: hit.normal,
+                });
+        }
+
+        // World-space inverse inertia from the principal moments.
+        let (principal, local_frame) =
+            computed_inertia.principal_angular_inertia_with_local_frame();
+        let principal_rotation = Mat3::from_quat(rotation.0 * local_frame);
+        let inv_inertia_world = principal_rotation
+            * Mat3::from_diagonal(principal.max(Vec3::splat(1.0)).recip())
+            * principal_rotation.transpose();
+
+        let ctx = CarStepContext {
+            position: position.0,
+            rotation: rotation.0,
+            world_com: position.0 + rotation.0 * computed_com.0,
+            linear_velocity: linear_velocity.0,
+            angular_velocity: angular_velocity.0,
+            inv_inertia_world,
+            gravity: physics_config.gravity,
+            dt,
         };
 
-        vehicle_physics_inner(
-            dt,
-            elapsed,
-            &spatial_query,
-            entity,
-            vehicle,
-            hover_config,
-            movement_config,
-            drag_config,
-            input,
-            &mut state,
-            transform,
-            &mut linear_velocity,
-            &mut angular_velocity,
-            computed_mass,
-            computed_inertia,
-            local_up,
-            gravity,
-            vehicle_config.jump_cooldown,
-            vehicle_config.emit_telemetry,
-            &vehicle_config.telemetry_path,
-        );
+        let car_input = CarInput {
+            drive: input.drive,
+            steer: input.steer,
+            handbrake: input.handbrake,
+        };
+        let output = core::step_car(&params, &wheel_params, &mut sim.0, &car_input, &hits, &ctx);
+
+        linear_velocity.0 = output.linear_velocity;
+        angular_velocity.0 = output.angular_velocity;
+
+        // Mirror the step into the diagnostic state.
+        for (wheel_state, wheel_out) in state.wheels.iter_mut().zip(output.wheels.iter()) {
+            wheel_state.grounded = wheel_out.grounded;
+            wheel_state.compression = wheel_out.compression;
+            wheel_state.suspension_force = wheel_out.suspension_force;
+            wheel_state.contact_normal = wheel_out.contact_normal;
+            wheel_state.lateral_slip = wheel_out.lateral_slip;
+            wheel_state.longitudinal_force = wheel_out.longitudinal_force;
+            wheel_state.lateral_force = wheel_out.lateral_force;
+            wheel_state.saturation = wheel_out.saturation;
+            wheel_state.angular_speed = wheel_out.angular_speed;
+            wheel_state.steer_angle = wheel_out.steer_angle;
+            wheel_state.visual_offset = wheel_out.visual_offset;
+        }
+        state.gear = sim.0.gear;
+        state.rpm = sim.0.rpm;
+        state.shift_cooldown = sim.0.shift_cooldown;
+        state.shift_torque_cut = sim.0.shift_torque_cut;
+        state.throttle = output.throttle;
+        state.brake = output.brake;
+        state.speed = output.speed;
+        state.forward_speed = output.forward_speed;
+        state.grounded_wheels = output.wheels.iter().filter(|w| w.grounded).count();
+        state.drive_force = output.drive_force;
+        state.mass = computed_mass.value();
+
+        if vehicle_config.emit_telemetry {
+            telemetry::emit_telemetry(
+                &TelemetrySnapshot {
+                    elapsed,
+                    dt,
+                    drive: input.drive,
+                    steer: input.steer,
+                    handbrake: input.handbrake,
+                    throttle: output.throttle,
+                    brake: output.brake,
+                    gear: sim.0.gear,
+                    rpm: sim.0.rpm,
+                    speed: output.speed,
+                    forward_speed: output.forward_speed,
+                    steer_angle: sim.0.steer_angle,
+                    wheels: output.wheels,
+                },
+                &vehicle_config.telemetry_path,
+            );
+        }
     }
 }
 
-/// Inner physics computation for a single vehicle.
-///
-/// Uses a simple spring-damper hover system with a single central raycast.
-#[allow(clippy::too_many_arguments)]
-fn vehicle_physics_inner(
-    dt: f32,
-    elapsed: f32,
-    spatial_query: &SpatialQuery,
-    _entity: Entity,
-    vehicle: &Vehicle,
-    hover_config: &VehicleHoverConfig,
-    movement_config: &VehicleMovementConfig,
-    drag_config: &VehicleDragConfig,
-    input: &VehicleInput,
-    state: &mut VehicleState,
-    transform: &Transform,
-    linear_velocity: &mut LinearVelocity,
-    angular_velocity: &mut AngularVelocity,
-    computed_mass: &ComputedMass,
-    computed_inertia: &ComputedAngularInertia,
-    local_up: Vec3,
-    gravity: f32,
-    jump_cooldown: f32,
-    emit_telemetry: bool,
-    telemetry_path: &str,
-) {
-    let scale = vehicle.scale;
-    let target_altitude = hover_config.target_altitude;
-
-    // Track input timing for angular drag delay.
-    let has_input = input.throttle.abs() > 0.01 || input.turn.abs() > 0.01;
-    if has_input {
-        state.last_input_time = elapsed;
-    }
-
-    // Raycast filter: only check ground layer (not vehicle colliders).
-    let filter = SpatialQueryFilter::default().with_mask([GameLayer::Ground]);
-    let down_dir = Dir3::new(-local_up).unwrap_or(Dir3::NEG_Y);
-
-    // Use computed mass and inertia from Avian3D (aggregated from collider hierarchy).
-    // Fall back to defaults if colliders haven't been generated yet.
-    let mass = if computed_mass.is_finite() {
-        computed_mass.value()
-    } else {
-        100.0
-    };
-    let inv_mass = 1.0 / mass.max(0.1);
-
-    // Use average of principal angular inertia for simplified scalar inertia.
-    let inertia = if computed_inertia.is_finite() {
-        let (principal, _) = computed_inertia.principal_angular_inertia_with_local_frame();
-        (principal.x + principal.y + principal.z) / 3.0
-    } else {
-        100.0
-    };
-
-    // Simple spring-damper hover: single raycast from vehicle center.
-    // Includes gravity compensation so vehicle hovers at target altitude, not below.
-    let max_ray_distance = target_altitude * 3.0;
-    let weight = mass * gravity;
-    let (hover_force, grounded, altitude, surface_normal) = if let Some(hit) = spatial_query
-        .cast_ray(
-            transform.translation,
-            down_dir,
-            max_ray_distance,
-            true,
-            &filter,
-        ) {
-        let altitude = hit.distance;
-        let vertical_vel = linear_velocity.0.dot(local_up);
-
-        // Clamp error to prevent explosive force on hard impacts.
-        // Max error of target_altitude means spring force caps at spring * target.
-        let raw_error = target_altitude - altitude;
-        let error = raw_error.clamp(-target_altitude, target_altitude);
-
-        // Progressive damping: extra damping when approaching ground fast.
-        // This prevents bouncing on hard landings.
-        let impact_damping = if vertical_vel < -5.0 && altitude < target_altitude {
-            // Falling fast toward ground - add extra damping proportional to speed.
-            hover_config.damper * (-vertical_vel / 10.0).min(2.0)
-        } else {
-            0.0
-        };
-        let effective_damper = hover_config.damper + impact_damping;
-
-        // Spring-damper formula with gravity compensation: F = k*error - c*velocity + weight.
-        // At target altitude (error=0, velocity=0), force equals weight, achieving equilibrium.
-        let force_magnitude =
-            hover_config.spring * error - effective_damper * vertical_vel + weight;
-
-        // Clamp to [0, max_force] - no pushing down, and safety cap.
-        let force_magnitude = force_magnitude.clamp(0.0, hover_config.max_force);
-
-        let grounded = altitude < target_altitude * 1.5;
-        (local_up * force_magnitude, grounded, altitude, hit.normal)
-    } else {
-        (Vec3::ZERO, false, f32::INFINITY, local_up)
-    };
-
-    // Update state.
-    state.grounded = grounded;
-    state.altitude = altitude;
-
-    // Smoothly update surface normal.
-    if grounded {
-        let lerp_rate = (5.0 * dt).min(1.0);
-        state.surface_normal = state.surface_normal.lerp(surface_normal, lerp_rate);
-    }
-    if state.surface_normal == Vec3::ZERO {
-        state.surface_normal = local_up;
-    }
-
-    // Apply hover force.
-    linear_velocity.0 += hover_force * inv_mass * dt;
-
-    // Clamp collision ejection velocities.
-    // When grounded but moving upward very fast, it's likely a physics collision ejection
-    // (collider intersecting terrain). Dampen this to prevent launching into the sky.
-    let vertical_vel_after = linear_velocity.0.dot(local_up);
-    let max_upward_vel_when_grounded = 10.0; // m/s - reasonable jump/hover velocity
-    if grounded && vertical_vel_after > max_upward_vel_when_grounded {
-        // Decompose velocity and clamp the vertical component.
-        let vertical_component = local_up * vertical_vel_after;
-        let horizontal_component = linear_velocity.0 - vertical_component;
-        let clamped_vertical = local_up * max_upward_vel_when_grounded;
-        linear_velocity.0 = horizontal_component + clamped_vertical;
-    }
-
-    // Front-heavy center of mass creates natural pitch-down torque when airborne.
-    // When grounded, hover thrusters counteract this; when airborne, it causes natural nose-down.
-    if !grounded {
-        let inv_inertia = 1.0 / inertia.max(0.1);
-        let com_forward_offset = 0.08 * scale;
-        let local_com_offset = Vec3::new(0.0, 0.0, -com_forward_offset);
-        let world_com_offset = transform.rotation * local_com_offset;
-        let gravity_force = -local_up * gravity * mass;
-        let gravity_torque = world_com_offset.cross(gravity_force);
-        angular_velocity.0 += gravity_torque * inv_inertia * dt;
-    }
-
-    // Compute altitude ratio for thrust tapering.
-    let altitude_ratio = if altitude.is_finite() {
-        altitude / target_altitude
-    } else {
-        10.0
-    };
-
-    // Build params and state for core physics.
-    let physics_params = build_physics_params(movement_config, drag_config, mass, inertia);
-    let mut sim_state = build_sim_state(state, altitude_ratio);
-
-    // Handle jump cooldown.
-    let can_jump = input.jump && state.grounded && (elapsed - state.last_jump_time) > jump_cooldown;
-    if can_jump {
-        state.last_jump_time = elapsed;
-    }
-
-    let sim_input = VehicleSimInput {
-        throttle: input.throttle,
-        turn: input.turn,
-        jump: can_jump,
-    };
-
-    let sim_frame = VehicleFrame::new(transform.rotation, local_up);
-
-    // Compute core physics step (thrust, turning, banking, drag, upright torque).
-    let output = core::compute_physics_step(
-        &physics_params,
-        &mut sim_state,
-        &sim_input,
-        &sim_frame,
-        linear_velocity.0,
-        angular_velocity.0,
-        dt,
-    );
-
-    // Apply output.
-    linear_velocity.0 = output.linear_velocity_after_drag;
-    angular_velocity.0 = output.angular_velocity_after_drag;
-
-    // Copy state back.
-    copy_sim_state_back(state, &sim_state);
-
-    // Update diagnostics.
-    state.speed = linear_velocity.0.length();
-    state.total_force = output.total_force + hover_force;
-    state.total_torque = output.total_torque;
-    state.gravity_force = -local_up * gravity * mass;
-    state.hover_force = hover_force;
-    state.mass = mass;
-
-    // Telemetry logging.
-    if emit_telemetry {
-        let snapshot = TelemetrySnapshot {
-            elapsed,
-            dt,
-            throttle: input.throttle,
-            turn: input.turn,
-            jump: input.jump,
-            grounded: state.grounded,
-            altitude_ratio,
-            current_power: sim_state.current_power,
-            current_bank: sim_state.current_bank,
-            surface_normal: state.surface_normal,
-            rotation: *transform.rotation.as_ref(),
-            linear_vel: linear_velocity.0,
-            angular_vel: angular_velocity.0,
-            local_up,
-            hover_force,
-            core_force: output.total_force,
-            core_torque: output.total_torque,
-            altitude,
-            mass,
-            time_grounded: state.time_grounded,
-            time_since_grounded: state.time_since_grounded,
-        };
-        telemetry::emit_telemetry(&snapshot, telemetry_path);
-    }
+/// Build per-wheel core parameters from the discovered geometry.
+fn wheel_params(wheels: &VehicleWheels) -> [WheelParams; 4] {
+    wheels.wheels.map(|w| WheelParams {
+        rest_position: w.rest_position,
+        radius: w.radius,
+        steered: w.steered,
+        driven: w.driven,
+        handbraked: w.handbraked,
+    })
 }
 
 /// Process requests to right the vehicle (reset orientation to upright).
 pub fn process_vehicle_right_request(
     mut right_request: ResMut<VehicleRightRequest>,
-    camera_query: Query<&FloatingOriginCamera>,
     mut vehicle_query: Query<
         (
             &WorldPosition,
-            &mut Transform,
+            &mut Rotation,
+            &mut Position,
             &mut LinearVelocity,
             &mut AngularVelocity,
         ),
@@ -424,37 +293,25 @@ pub fn process_vehicle_right_request(
     }
     right_request.pending = false;
 
-    let Ok(camera) = camera_query.single() else {
-        return;
-    };
-
-    for (world_pos, mut transform, mut linear_vel, mut angular_vel) in &mut vehicle_query {
-        // Compute radial frame for local up.
+    for (world_pos, mut rotation, mut position, mut linear_vel, mut angular_vel) in
+        &mut vehicle_query
+    {
         let frame = RadialFrame::from_ecef_position(world_pos.position);
         let local_up = frame.up;
 
-        // Project current forward onto the ground plane (perpendicular to local up).
-        let current_forward = transform.rotation * Vec3::NEG_Z;
+        // Project the current forward onto the ground plane.
+        let current_forward = rotation.0 * Vec3::NEG_Z;
         let forward_projected =
             (current_forward - local_up * current_forward.dot(local_up)).normalize_or_zero();
         let forward = if forward_projected.length_squared() > 0.01 {
             forward_projected
         } else {
-            // Fallback to camera direction projected onto ground.
-            let camera_dir = (camera.position - world_pos.position).normalize().as_vec3();
-            let camera_projected =
-                (camera_dir - local_up * camera_dir.dot(local_up)).normalize_or_zero();
-            if camera_projected.length_squared() > 0.01 {
-                camera_projected
-            } else {
-                frame.north
-            }
+            frame.north
         };
 
-        // Set rotation to face forward with local up.
-        transform.rotation = Transform::default().looking_to(forward, local_up).rotation;
-
-        // Reset velocities to stop any spinning/tumbling.
+        rotation.0 = Transform::default().looking_to(forward, local_up).rotation;
+        // Pop the car up a little so the wheels can settle.
+        position.0 += local_up * 1.0;
         linear_vel.0 = Vec3::ZERO;
         angular_vel.0 = Vec3::ZERO;
     }

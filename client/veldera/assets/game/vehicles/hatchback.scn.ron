@@ -1,0 +1,71 @@
+(
+  resources: {},
+  entities: {
+    1: (
+      components: {
+        "veldera_game_vehicle::components::Vehicle": (
+          name: "Hatchback",
+          description: "Practical all-rounder with a warm hatch streak",
+        ),
+        "veldera_game_vehicle::components::VehicleChassisConfig": (
+          mass: 1250.0,
+          center_of_mass: (0.0, 0.45, -0.1),
+          drag_coefficient_area: 0.65,
+        ),
+        "veldera_game_vehicle::components::VehicleSuspensionConfig": (
+          travel: 0.17,
+          stiffness: 60000.0,
+          damping_compression: 3900.0,
+          damping_rebound: 4800.0,
+        ),
+        "veldera_game_vehicle::components::VehicleEngineConfig": (
+          idle_rpm: 800.0,
+          redline_rpm: 6400.0,
+          peak_torque_nm: 200.0,
+          peak_torque_rpm: 3500.0,
+          idle_torque_frac: 0.55,
+          redline_torque_frac: 0.72,
+          engine_braking_nm: 55.0,
+          cylinders: 4,
+        ),
+        "veldera_game_vehicle::components::VehicleTransmissionConfig": (
+          gear_ratios: [3.5, 2.0, 1.35, 1.0, 0.8],
+          reverse_ratio: 3.3,
+          final_drive: 4.1,
+          efficiency: 0.9,
+          drive: Front,
+          shift_up_rpm_frac: (0.5, 0.92),
+          shift_down_rpm_frac: (0.28, 0.6),
+          shift_time: 0.25,
+          min_shift_interval: 0.8,
+          stall_torque_multiplier: 1.8,
+          coupling_rpm: 2200.0,
+        ),
+        "veldera_game_vehicle::components::VehicleSteeringConfig": (
+          max_angle_deg: 32.0,
+          high_speed_angle_deg: 8.0,
+          falloff_speed: 30.0,
+          steer_rate_deg: 190.0,
+        ),
+        "veldera_game_vehicle::components::VehicleTireConfig": (
+          longitudinal_grip: 1.05,
+          lateral_grip: 1.0,
+          handbrake_grip_factor: 0.25,
+          rolling_resistance: 0.015,
+          brake_force: 12500.0,
+          brake_bias: 0.62,
+          handbrake_force: 6000.0,
+        ),
+        "veldera_game_vehicle::components::VehicleModel": (
+          path: "game/vehicles/hatchback.glb#Scene0",
+          scale: 1.0,
+        ),
+        "veldera_game_camera::follow::FollowCameraConfig": (
+          camera_offset: (0.0, 2.5, 7.8),
+          look_target_offset: (0.0, 1.1, 0.0),
+          position_smoothing: 0.25,
+        ),
+      },
+    ),
+  },
+)

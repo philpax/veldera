@@ -1,38 +1,32 @@
 //! Vehicle physics telemetry logging.
 //!
 //! Outputs CSV data for analysis. Supports multiple output destinations via
-//! the `TelemetryOutput` trait. File output is reset each time a vehicle is entered.
+//! the `TelemetryOutput` trait. File output is reset each time a vehicle is
+//! entered.
 
 use std::{
     fs::{File, OpenOptions},
     io::Write,
 };
 
-use bevy::prelude::*;
+use super::core::WheelStepOutput;
 
 /// Snapshot of all physics state for telemetry logging.
 pub struct TelemetrySnapshot {
     pub elapsed: f32,
     pub dt: f32,
+    pub drive: f32,
+    pub steer: f32,
+    pub handbrake: bool,
     pub throttle: f32,
-    pub turn: f32,
-    pub jump: bool,
-    pub grounded: bool,
-    pub altitude_ratio: f32,
-    pub time_grounded: f32,
-    pub time_since_grounded: f32,
-    pub current_power: f32,
-    pub current_bank: f32,
-    pub surface_normal: Vec3,
-    pub rotation: [f32; 4],
-    pub linear_vel: Vec3,
-    pub angular_vel: Vec3,
-    pub local_up: Vec3,
-    pub hover_force: Vec3,
-    pub core_force: Vec3,
-    pub core_torque: Vec3,
-    pub altitude: f32,
-    pub mass: f32,
+    pub brake: f32,
+    pub gear: i32,
+    pub rpm: f32,
+    pub speed: f32,
+    pub forward_speed: f32,
+    pub steer_angle: f32,
+    /// Per-wheel step outputs in fl, fr, rl, rr order.
+    pub wheels: [WheelStepOutput; 4],
 }
 
 /// Trait for telemetry output destinations.
@@ -68,7 +62,7 @@ impl TelemetryOutput for FileTelemetryOutput {
     }
 }
 
-/// Stdout output for headless tuner.
+/// Stdout output for headless analysis.
 #[allow(dead_code)]
 pub struct StdoutTelemetryOutput;
 
@@ -82,133 +76,56 @@ impl TelemetryOutput for StdoutTelemetryOutput {
     }
 }
 
-/// Macro to define CSV schema and generate telemetry functions.
-///
-/// This generates `reset_telemetry_to()`, `emit_telemetry_to()` (trait-based),
-/// and `reset_telemetry()`, `emit_telemetry()` (file-based convenience wrappers)
-/// from a single schema definition, keeping column names and formats in sync.
-macro_rules! define_telemetry {
-    (
-        columns: { $( $name:ident : $fmt:literal ),* $(,)? },
-        prelude: |$snapshot:ident| { $( $prelude:stmt );* $(;)? },
-        row_values: { $( $val:expr ),* $(,)? }
-    ) => {
-        /// CSV header string.
-        const CSV_HEADER: &str = concat!( $( stringify!($name), "," ),* );
+/// CSV header: car-level columns followed by four wheel column groups.
+const CSV_HEADER: &str = "t,dt,drive,steer,handbrake,throttle,brake,gear,rpm,speed,fwd_speed,steer_deg,\
+fl_grounded,fl_comp,fl_load,fl_slip,fl_flong,fl_flat,fl_sat,\
+fr_grounded,fr_comp,fr_load,fr_slip,fr_flong,fr_flat,fr_sat,\
+rl_grounded,rl_comp,rl_load,rl_slip,rl_flong,rl_flat,rl_sat,\
+rr_grounded,rr_comp,rr_load,rr_slip,rr_flong,rr_flat,rr_sat";
 
-        /// Reset telemetry (write header) to the specified output.
-        pub fn reset_telemetry_to(output: &mut dyn TelemetryOutput) {
-            output.write_header(CSV_HEADER.trim_end_matches(','));
-        }
-
-        /// Write telemetry data to the specified output.
-        #[allow(clippy::redundant_closure_call)]
-        pub fn emit_telemetry_to($snapshot: &TelemetrySnapshot, output: &mut dyn TelemetryOutput) {
-            // Execute prelude to compute derived values.
-            $( $prelude )*
-
-            // Generate row from schema, then trim trailing comma.
-            let line = format!( concat!( $( $fmt, "," ),* ), $( $val ),* );
-            let line = line.trim_end_matches(',');
-
-            output.write_row(line);
-        }
-
-        /// Reset the telemetry CSV at `path` (call when entering a vehicle).
-        pub fn reset_telemetry(path: &str) {
-            reset_telemetry_to(&mut FileTelemetryOutput::new(path));
-        }
-
-        /// Write telemetry data to the CSV at `path`.
-        pub fn emit_telemetry($snapshot: &TelemetrySnapshot, path: &str) {
-            emit_telemetry_to($snapshot, &mut FileTelemetryOutput::new(path));
-        }
-    };
+/// Reset telemetry (write the header) to the specified output.
+pub fn reset_telemetry_to(output: &mut dyn TelemetryOutput) {
+    output.write_header(CSV_HEADER);
 }
 
-define_telemetry! {
-    columns: {
-        t: "{:.4}",
-        dt: "{:.5}",
-        throttle: "{:.3}",
-        turn: "{:.3}",
-        jump: "{}",
-        grounded: "{}",
-        altitude: "{:.3}",
-        alt_ratio: "{:.3}",
-        t_grounded: "{:.3}",
-        t_airborne: "{:.3}",
-        power: "{:.3}",
-        bank_deg: "{:.2}",
-        pitch_deg: "{:.2}",
-        yaw_deg: "{:.2}",
-        roll_deg: "{:.2}",
-        speed: "{:.2}",
-        h_speed: "{:.2}",
-        v_vel: "{:.2}",
-        vel_x: "{:.2}",
-        vel_y: "{:.2}",
-        vel_z: "{:.2}",
-        ang_x: "{:.3}",
-        ang_y: "{:.3}",
-        ang_z: "{:.3}",
-        hover_mag: "{:.1}",
-        core_mag: "{:.1}",
-        core_x: "{:.1}",
-        core_y: "{:.1}",
-        core_z: "{:.1}",
-        torque_x: "{:.2}",
-        torque_y: "{:.2}",
-        torque_z: "{:.2}",
-        surf_x: "{:.3}",
-        surf_y: "{:.3}",
-        surf_z: "{:.3}",
-        mass: "{:.1}",
-    },
-    prelude: |t| {
-        let vertical_vel = t.linear_vel.dot(t.local_up);
-        let horizontal_vel = t.linear_vel - t.local_up * vertical_vel;
-        let horizontal_speed = horizontal_vel.length();
-        let quat = Quat::from_array(t.rotation);
-        let (yaw, pitch, roll) = quat.to_euler(EulerRot::YXZ);
-        let altitude_display = if t.altitude.is_finite() { t.altitude } else { -1.0 };
-    },
-    row_values: {
-        t.elapsed,
-        t.dt,
-        t.throttle,
-        t.turn,
-        t.jump as u8,
-        t.grounded as u8,
-        altitude_display,
-        t.altitude_ratio,
-        t.time_grounded,
-        t.time_since_grounded,
-        t.current_power,
-        t.current_bank.to_degrees(),
-        pitch.to_degrees(),
-        yaw.to_degrees(),
-        roll.to_degrees(),
-        t.linear_vel.length(),
-        horizontal_speed,
-        vertical_vel,
-        t.linear_vel.x,
-        t.linear_vel.y,
-        t.linear_vel.z,
-        t.angular_vel.x,
-        t.angular_vel.y,
-        t.angular_vel.z,
-        t.hover_force.length(),
-        t.core_force.length(),
-        t.core_force.x,
-        t.core_force.y,
-        t.core_force.z,
-        t.core_torque.x,
-        t.core_torque.y,
-        t.core_torque.z,
-        t.surface_normal.x,
-        t.surface_normal.y,
-        t.surface_normal.z,
-        t.mass,
+/// Write a telemetry row to the specified output.
+pub fn emit_telemetry_to(snapshot: &TelemetrySnapshot, output: &mut dyn TelemetryOutput) {
+    let mut line = format!(
+        "{:.4},{:.5},{:.3},{:.3},{},{:.3},{:.3},{},{:.0},{:.2},{:.2},{:.2}",
+        snapshot.elapsed,
+        snapshot.dt,
+        snapshot.drive,
+        snapshot.steer,
+        snapshot.handbrake as u8,
+        snapshot.throttle,
+        snapshot.brake,
+        snapshot.gear,
+        snapshot.rpm,
+        snapshot.speed,
+        snapshot.forward_speed,
+        snapshot.steer_angle.to_degrees(),
+    );
+    for wheel in &snapshot.wheels {
+        line.push_str(&format!(
+            ",{},{:.3},{:.0},{:.2},{:.0},{:.0},{:.2}",
+            wheel.grounded as u8,
+            wheel.compression,
+            wheel.suspension_force,
+            wheel.lateral_slip,
+            wheel.longitudinal_force,
+            wheel.lateral_force,
+            wheel.saturation,
+        ));
     }
+    output.write_row(&line);
+}
+
+/// Reset the telemetry CSV at `path` (call when entering a vehicle).
+pub fn reset_telemetry(path: &str) {
+    reset_telemetry_to(&mut FileTelemetryOutput::new(path));
+}
+
+/// Write telemetry data to the CSV at `path`.
+pub fn emit_telemetry(snapshot: &TelemetrySnapshot, path: &str) {
+    emit_telemetry_to(snapshot, &mut FileTelemetryOutput::new(path));
 }

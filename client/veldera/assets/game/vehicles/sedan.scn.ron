@@ -1,0 +1,71 @@
+(
+  resources: {},
+  entities: {
+    1: (
+      components: {
+        "veldera_game_vehicle::components::Vehicle": (
+          name: "Sedan",
+          description: "The default car: balanced, predictable, dependable",
+        ),
+        "veldera_game_vehicle::components::VehicleChassisConfig": (
+          mass: 1450.0,
+          center_of_mass: (0.0, 0.45, -0.1),
+          drag_coefficient_area: 0.66,
+        ),
+        "veldera_game_vehicle::components::VehicleSuspensionConfig": (
+          travel: 0.17,
+          stiffness: 69500.0,
+          damping_compression: 4500.0,
+          damping_rebound: 5500.0,
+        ),
+        "veldera_game_vehicle::components::VehicleEngineConfig": (
+          idle_rpm: 800.0,
+          redline_rpm: 6500.0,
+          peak_torque_nm: 240.0,
+          peak_torque_rpm: 4000.0,
+          idle_torque_frac: 0.55,
+          redline_torque_frac: 0.75,
+          engine_braking_nm: 60.0,
+          cylinders: 4,
+        ),
+        "veldera_game_vehicle::components::VehicleTransmissionConfig": (
+          gear_ratios: [3.5, 2.1, 1.4, 1.0, 0.8],
+          reverse_ratio: 3.3,
+          final_drive: 3.9,
+          efficiency: 0.9,
+          drive: Front,
+          shift_up_rpm_frac: (0.5, 0.92),
+          shift_down_rpm_frac: (0.28, 0.6),
+          shift_time: 0.25,
+          min_shift_interval: 0.8,
+          stall_torque_multiplier: 1.8,
+          coupling_rpm: 2200.0,
+        ),
+        "veldera_game_vehicle::components::VehicleSteeringConfig": (
+          max_angle_deg: 32.0,
+          high_speed_angle_deg: 8.0,
+          falloff_speed: 30.0,
+          steer_rate_deg: 180.0,
+        ),
+        "veldera_game_vehicle::components::VehicleTireConfig": (
+          longitudinal_grip: 1.1,
+          lateral_grip: 1.0,
+          handbrake_grip_factor: 0.25,
+          rolling_resistance: 0.015,
+          brake_force: 14500.0,
+          brake_bias: 0.62,
+          handbrake_force: 7000.0,
+        ),
+        "veldera_game_vehicle::components::VehicleModel": (
+          path: "game/vehicles/sedan.glb#Scene0",
+          scale: 1.0,
+        ),
+        "veldera_game_camera::follow::FollowCameraConfig": (
+          camera_offset: (0.0, 2.6, 8.5),
+          look_target_offset: (0.0, 1.1, 0.0),
+          position_smoothing: 0.25,
+        ),
+      },
+    ),
+  },
+)

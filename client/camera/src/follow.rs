@@ -3,6 +3,7 @@
 //! Third-person camera that follows a target entity (e.g., vehicle).
 
 use bevy::prelude::*;
+use glam::DVec3;
 
 use veldera_geo::{
     coords::RadialFrame,
@@ -62,6 +63,14 @@ pub struct FollowEntityTarget {
     pub target: Entity,
 }
 
+/// Where the player should appear when leaving FollowEntity mode for the
+/// first-person controller, instead of at the chase-camera position.
+///
+/// Set by gameplay (e.g. the vehicle crate places it beside the car on exit)
+/// and consumed by the next FollowEntity → FpsController transition.
+#[derive(Resource, Default)]
+pub struct FollowExitAnchor(pub Option<DVec3>);
+
 /// Marker component for entities that can be followed by the camera.
 #[derive(Component)]
 pub struct FollowedEntity;
@@ -74,6 +83,9 @@ pub struct FollowCameraConfig {
     pub camera_offset: Vec3,
     /// Look-at target offset in entity-local space.
     pub look_target_offset: Vec3,
+    /// Position smoothing time constant (s): the camera lags toward its
+    /// target position, giving it swing and weight. 0 snaps rigidly.
+    pub position_smoothing: f32,
 }
 
 impl Default for FollowCameraConfig {
@@ -81,6 +93,7 @@ impl Default for FollowCameraConfig {
         Self {
             camera_offset: Vec3::new(0.0, 4.5, 20.0),
             look_target_offset: Vec3::new(0.0, 4.5, 12.0),
+            position_smoothing: 0.25,
         }
     }
 }
@@ -118,10 +131,12 @@ pub(super) fn cleanup(
 
 /// Camera follows a target entity in third-person view.
 ///
-/// Positions the camera behind and above the entity, looking at it.
-/// Uses `FollowCameraConfig` if present on the target, otherwise uses defaults.
+/// Positions the camera behind and above the entity, looking at it, with
+/// exponential position smoothing so the camera swings into corners and
+/// catches up rather than tracking rigidly. Uses `FollowCameraConfig` if
+/// present on the target, otherwise uses defaults.
 fn follow_entity_camera_system(
-    _time: Res<Time>,
+    time: Res<Time>,
     mut camera_query: Query<
         (
             &mut FloatingOriginCamera,
@@ -151,17 +166,30 @@ fn follow_entity_camera_system(
 
         // Transform the local-space offsets to world space using entity rotation.
         let camera_offset = target_transform.rotation * fc.camera_offset;
-        let look_target_offset = target_transform.rotation * fc.look_target_offset;
+        let look_target = target_world_pos.position
+            + (target_transform.rotation * fc.look_target_offset).as_dvec3();
 
-        // Camera position in world space.
-        let camera_pos = target_world_pos.position + camera_offset.as_dvec3();
-        camera.position = camera_pos;
+        // Desired camera position, approached exponentially. The smoothing is
+        // skipped on the first frame after a large jump (e.g. just entered
+        // the vehicle) so the camera doesn't swoop across the map.
+        let desired = target_world_pos.position + camera_offset.as_dvec3();
+        let blend = if fc.position_smoothing > 1e-3 {
+            1.0 - (-time.delta_secs_f64() / f64::from(fc.position_smoothing)).exp()
+        } else {
+            1.0
+        };
+        let snap = camera.position.distance_squared(desired) > 100.0 * 100.0;
+        camera.position = if snap {
+            desired
+        } else {
+            camera.position + (desired - camera.position) * blend
+        };
 
         // Camera transform stays at origin (floating origin system).
         camera_transform.translation = Vec3::ZERO;
 
-        // Look at the target offset point (direction from camera to look target).
-        let look_direction = (look_target_offset - camera_offset).normalize();
+        // Look at the target offset point from the smoothed position.
+        let look_direction = (look_target - camera.position).normalize().as_vec3();
 
         camera_transform.rotation = Transform::default()
             .looking_to(look_direction, local_up)

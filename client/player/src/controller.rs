@@ -530,22 +530,23 @@ pub fn setup_from_flycam(
         .insert(RenderPlayer { logical_entity });
 }
 
-/// Set up FPS mode from FollowEntity: spawn logical player at camera position with preserved angles.
+/// Set up FPS mode from FollowEntity: spawn the logical player at
+/// `spawn_ecef` (e.g. beside the vehicle that was just exited) with the
+/// preserved view angles.
 pub fn setup_from_follow_entity(
     commands: &mut Commands,
     config: &FpsPlayerConfig,
     preserved_fps: &mut PreservedFpsState,
     camera_entity: Entity,
-    camera: &FloatingOriginCamera,
+    spawn_ecef: DVec3,
 ) {
-    let camera_ecef = camera.position;
     let yaw = preserved_fps.yaw;
     let pitch = preserved_fps.pitch;
 
     let logical_entity = spawn_fps_player(
         commands,
         config,
-        camera_ecef,
+        spawn_ecef,
         Vec3::ZERO,
         Vec3::ZERO,
         yaw,

@@ -1,17 +1,19 @@
-# Global vehicle behaviour. Per-vehicle physics (hover/movement/drag) lives in
-# each vehicle's .scn.ron; this is cross-vehicle tuning.
+# Global vehicle behaviour. Per-vehicle physics (chassis/suspension/engine/
+# transmission/steering/tires) lives in each vehicle's .scn.ron; this is
+# cross-vehicle tuning.
 
 # Max distance (m) from a vehicle at which you can enter it, and the minimum
 # look dot(toward_vehicle) required (~0.7 ≈ within 45° of facing it).
 entry_distance = 10.0
 look_threshold = 0.7
 
-# Scale for the hover-force debug gizmos (metres per Newton).
-force_gizmo_scale = 0.00005
-
-# Cooldown (s) between vehicle jumps.
-jump_cooldown = 2.0
+# Scale for the suspension-force debug gizmos (metres per Newton).
+force_gizmo_scale = 0.0002
 
 # Vehicle physics telemetry: log to a CSV while driving (debugging), and where.
 emit_telemetry = true
 telemetry_path = "telemetry.csv"
+
+# Synthesized engine voice volume at full load and at idle.
+engine_volume = 0.5
+engine_idle_volume = 0.12

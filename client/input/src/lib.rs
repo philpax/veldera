@@ -60,11 +60,11 @@ pub enum CameraAction {
 /// Actions for vehicle control.
 #[derive(Actionlike, PartialEq, Eq, Hash, Clone, Copy, Debug, Reflect)]
 pub enum VehicleAction {
-    /// Drive input (WASD: throttle on Y, turn on X).
+    /// Drive input (WASD: throttle/brake on Y, steering on X).
     #[actionlike(DualAxis)]
     Drive,
-    /// Jump (Space).
-    Jump,
+    /// Handbrake (Space).
+    Handbrake,
 }
 
 // ============================================================================
@@ -95,7 +95,7 @@ pub fn default_camera_input_map() -> InputMap<CameraAction> {
 pub fn default_vehicle_input_map() -> InputMap<VehicleAction> {
     InputMap::default()
         .with_dual_axis(VehicleAction::Drive, VirtualDPad::wasd())
-        .with(VehicleAction::Jump, KeyCode::Space)
+        .with(VehicleAction::Handbrake, KeyCode::Space)
 }
 
 // ============================================================================

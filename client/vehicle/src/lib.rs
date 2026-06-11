@@ -1,13 +1,17 @@
-//! Hovercraft vehicle system.
+//! Car vehicle system.
 //!
-//! Provides PID-controlled hover vehicles defined declaratively in `.scn.ron`
-//! scene files in `assets/vehicles/`. Vehicle definitions are discovered at
-//! runtime by loading the folder contents.
+//! Raycast-suspension cars with a torque-curve engine and automatic
+//! transmission, defined declaratively in `.scn.ron` scene files in
+//! `assets/game/vehicles/`. Vehicle definitions are discovered at runtime by
+//! loading the folder contents; each definition references a car glb whose
+//! named wheel nodes drive the physics geometry (see `tools/split_car_pack`).
 
+mod audio;
 mod components;
 pub mod core;
 pub mod physics;
 pub mod telemetry;
+mod visuals;
 
 use avian3d::prelude::*;
 use bevy::{
@@ -23,23 +27,27 @@ use leafwing_input_manager::prelude::*;
 use serde::Deserialize;
 
 use veldera_config::ConfigPlugin;
-use veldera_game_camera::{CameraModeState, CameraModeTransitions, FlightCamera, FollowedEntity};
+use veldera_game_camera::{
+    CameraModeState, CameraModeTransitions, FlightCamera, FollowEntityTarget, FollowExitAnchor,
+    FollowedEntity,
+};
 use veldera_game_input::CameraAction;
 use veldera_game_player::{FpsController, LogicalPlayer};
 use veldera_geo::{
     coords::RadialFrame,
     floating_origin::{FloatingOriginCamera, WorldPosition},
 };
-use veldera_physics::{DespawnOutsidePhysicsRange, GameLayer};
+use veldera_physics::{DespawnOutsidePhysicsRange, OriginShiftSystems, PhysicsState};
 
 pub use components::{
-    Vehicle, VehicleDragConfig, VehicleHoverConfig, VehicleInput, VehicleModel,
-    VehicleMovementConfig, VehiclePhysicsConfig, VehicleState,
+    DriveLayout, Vehicle, VehicleChassisConfig, VehicleEngineConfig, VehicleInput, VehicleModel,
+    VehicleState, VehicleSteeringConfig, VehicleSuspensionConfig, VehicleTireConfig,
+    VehicleTransmissionConfig, VehicleWheels, WheelState,
 };
 
 /// Whether the debug UI's vehicle tab is currently open.
 ///
-/// The host's debug UI sets this; vehicle systems (e.g. the thruster-gizmo
+/// The host's debug UI sets this; vehicle systems (e.g. the wheel-gizmo
 /// overlay) consult it to skip per-frame work when the user isn't looking at
 /// the tab. Owned here so the vehicle crate doesn't depend on the UI.
 #[derive(Resource, Default)]
@@ -55,8 +63,8 @@ pub struct VehicleRightRequest {
 }
 
 /// Hot-reloadable global vehicle tuning, loaded from
-/// `assets/config/game/vehicle/vehicle.toml`. Per-vehicle physics (hover/movement/
-/// drag) lives in each vehicle's `.scn.ron`; this is the cross-vehicle behaviour.
+/// `assets/game/config/vehicle/vehicle.toml`. Per-vehicle physics lives in
+/// each vehicle's `.scn.ron`; this is the cross-vehicle behaviour.
 #[derive(Default, Asset, Resource, TypePath, Clone, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct VehicleConfig {
@@ -65,14 +73,16 @@ pub struct VehicleConfig {
     /// Minimum look `dot(toward_vehicle)` required to enter (must be roughly
     /// facing the vehicle).
     pub look_threshold: f64,
-    /// Scale applied to hover-force debug gizmos.
+    /// Scale applied to suspension-force debug gizmos (m per N).
     pub force_gizmo_scale: f32,
-    /// Cooldown (s) between vehicle jumps.
-    pub jump_cooldown: f32,
     /// Whether to log vehicle physics telemetry to CSV while driving.
     pub emit_telemetry: bool,
     /// Path of the telemetry CSV (relative to the working directory).
     pub telemetry_path: String,
+    /// Engine voice volume at full load.
+    pub engine_volume: f32,
+    /// Engine voice volume at idle.
+    pub engine_idle_volume: f32,
 }
 
 /// Gizmo config group for vehicle debug visualization.
@@ -99,12 +109,16 @@ impl Plugin for VehiclePlugin {
     fn build(&self, app: &mut App) {
         // Register reflectable types for scene serialization.
         app.add_plugins(ConfigPlugin::<VehicleConfig>::new(self.config_path))
+            .add_plugins(audio::EngineAudioPlugin)
             .init_gizmo_group::<VehicleDebugGizmos>()
             .register_type::<Vehicle>()
-            .register_type::<VehicleHoverConfig>()
-            .register_type::<VehicleMovementConfig>()
-            .register_type::<VehicleDragConfig>()
-            .register_type::<VehiclePhysicsConfig>()
+            .register_type::<VehicleChassisConfig>()
+            .register_type::<VehicleSuspensionConfig>()
+            .register_type::<VehicleEngineConfig>()
+            .register_type::<VehicleTransmissionConfig>()
+            .register_type::<VehicleSteeringConfig>()
+            .register_type::<VehicleTireConfig>()
+            .register_type::<DriveLayout>()
             .register_type::<VehicleModel>()
             .init_resource::<VehicleDefinitions>()
             .init_resource::<VehicleActions>()
@@ -116,12 +130,16 @@ impl Plugin for VehiclePlugin {
                 Startup,
                 (start_loading_vehicle_folder, configure_vehicle_debug_gizmos),
             )
-            .add_systems(FixedPreUpdate, physics::vehicle_physics_system)
+            .add_systems(
+                FixedPreUpdate,
+                physics::vehicle_physics_system.after(OriginShiftSystems),
+            )
             .add_systems(
                 Update,
                 (
-                    physics::vehicle_input_system.run_if(physics::is_follow_entity_mode),
+                    physics::vehicle_input_system,
                     physics::process_vehicle_right_request,
+                    visuals::animate_wheels,
                 ),
             );
 
@@ -131,10 +149,11 @@ impl Plugin for VehiclePlugin {
                 check_vehicle_folder_loaded,
                 process_vehicle_actions,
                 toggle_vehicle_mode,
-                draw_thruster_gizmos.run_if(|tab: Res<VehicleTabOpen>| tab.0),
+                draw_wheel_gizmos.run_if(|tab: Res<VehicleTabOpen>| tab.0),
             ),
         )
-        .add_observer(on_vehicle_scene_ready);
+        .add_observer(on_vehicle_scene_ready)
+        .add_observer(visuals::on_vehicle_model_ready);
     }
 }
 
@@ -343,6 +362,10 @@ impl VehicleActions {
 // Vehicle spawning
 // ============================================================================
 
+/// Forward offset (m) from the camera for a newly spawned vehicle, so it
+/// doesn't materialize inside the player or an existing car.
+const SPAWN_FORWARD_OFFSET: f32 = 6.0;
+
 /// Tracks pending vehicle spawn data for the scene ready observer.
 #[derive(Resource, Default)]
 struct PendingVehicleSpawn {
@@ -362,11 +385,13 @@ fn process_vehicle_actions(
     mut actions: ResMut<VehicleActions>,
     mut pending_spawn: ResMut<PendingVehicleSpawn>,
     mut mode_transitions: ResMut<CameraModeTransitions>,
+    mut exit_anchor: ResMut<FollowExitAnchor>,
     definitions: Res<VehicleDefinitions>,
     asset_server: Res<AssetServer>,
     camera_query: Query<(Entity, &FloatingOriginCamera, Option<&FlightCamera>)>,
+    follow_query: Query<&FollowEntityTarget>,
     fps_query: Query<&FpsController, With<LogicalPlayer>>,
-    existing_vehicles: Query<Entity, With<Vehicle>>,
+    vehicle_query: Query<(&WorldPosition, &Rotation, &VehicleWheels), With<Vehicle>>,
 ) {
     // Handle spawn request.
     if let Some(vehicle_index) = actions.spawn_vehicle.take() {
@@ -378,20 +403,33 @@ fn process_vehicle_actions(
             &asset_server,
             &camera_query,
             &fps_query,
-            &existing_vehicles,
             vehicle_index,
         );
     }
 
-    // Handle exit request.
+    // Handle exit request: step out beside the vehicle rather than at the
+    // (chase) camera position.
     if actions.exit_vehicle {
         actions.exit_vehicle = false;
-        // Keep the vehicle in the world; just exit to the previous camera mode.
+        if let Some(follow) = follow_query.iter().next()
+            && let Ok((world_pos, rotation, wheels)) = vehicle_query.get(follow.target)
+        {
+            let half_width = wheels
+                .wheels
+                .iter()
+                .map(|w| w.rest_position.x.abs())
+                .fold(0.0, f32::max);
+            let frame = RadialFrame::from_ecef_position(world_pos.position);
+            // Driver's side (-X), pushed out past the body, raised to
+            // standing height.
+            let side = rotation.0 * Vec3::new(-(half_width + 1.2), 0.0, 0.0);
+            exit_anchor.0 = Some(world_pos.position + side.as_dvec3() + frame.up.as_dvec3() * 1.0);
+        }
         mode_transitions.request_exit();
     }
 }
 
-/// Spawn a vehicle scene at the camera position.
+/// Spawn a vehicle scene near the camera position.
 #[allow(clippy::too_many_arguments)]
 fn spawn_vehicle_scene(
     commands: &mut Commands,
@@ -401,7 +439,6 @@ fn spawn_vehicle_scene(
     asset_server: &AssetServer,
     camera_query: &Query<(Entity, &FloatingOriginCamera, Option<&FlightCamera>)>,
     fps_query: &Query<&FpsController, With<LogicalPlayer>>,
-    existing_vehicles: &Query<Entity, With<Vehicle>>,
     vehicle_index: usize,
 ) {
     let Some(def) = definitions.vehicles.get(vehicle_index) else {
@@ -414,21 +451,14 @@ fn spawn_vehicle_scene(
         telemetry::reset_telemetry(&config.telemetry_path);
     }
 
-    // Despawn any existing vehicles.
-    for entity in existing_vehicles.iter() {
-        commands.entity(entity).despawn();
-    }
-
     // Get camera position for spawn location.
     let Ok((_, camera, flight_camera)) = camera_query.single() else {
         tracing::warn!("No camera found for vehicle spawn");
         return;
     };
 
-    let spawn_ecef = camera.position;
-
     // Compute spawn orientation aligned with radial frame.
-    let frame = RadialFrame::from_ecef_position(spawn_ecef);
+    let frame = RadialFrame::from_ecef_position(camera.position);
     let local_up = frame.up;
 
     // Get yaw from either FPS controller or flycam direction.
@@ -450,8 +480,11 @@ fn spawn_vehicle_scene(
         frame.north
     };
 
+    // Spawn a few metres ahead so the car doesn't land on the player or an
+    // existing vehicle parked at their feet.
+    let spawn_ecef = camera.position + (forward * SPAWN_FORWARD_OFFSET).as_dvec3();
+
     // Use look_to to properly orient the vehicle with both forward and up constraints.
-    // looking_to takes the direction to look (our forward becomes -Z) and the up vector.
     let rotation = Transform::default().looking_to(forward, local_up).rotation;
 
     // Load the scene.
@@ -469,14 +502,17 @@ fn spawn_vehicle_scene(
 }
 
 /// Observer called when a vehicle scene finishes loading.
+#[allow(clippy::too_many_arguments)]
 fn on_vehicle_scene_ready(
     trigger: On<SceneInstanceReady>,
     mut commands: Commands,
     mut pending_spawn: ResMut<PendingVehicleSpawn>,
     mut mode_transitions: ResMut<CameraModeTransitions>,
     asset_server: Res<AssetServer>,
+    physics_state: Res<PhysicsState>,
     camera_query: Query<Entity, With<FloatingOriginCamera>>,
-    vehicle_query: Query<(Entity, &Vehicle, &VehiclePhysicsConfig, &VehicleModel)>,
+    children_query: Query<&Children>,
+    vehicle_query: Query<(&Vehicle, &VehicleChassisConfig, &VehicleModel)>,
 ) {
     // Check if this is our pending vehicle scene.
     let Some(scene_entity) = pending_spawn.scene_entity else {
@@ -495,34 +531,46 @@ fn on_vehicle_scene_ready(
     };
     pending_spawn.scene_entity = None;
 
-    // Find the vehicle entity that was spawned from the scene.
-    let Some((vehicle_entity, vehicle, physics_config, model)) = vehicle_query.iter().next() else {
+    // Find the vehicle entity spawned from *this* scene instance (other
+    // vehicles may already exist in the world).
+    let Some((vehicle_entity, (_, chassis, model))) = children_query
+        .iter_descendants(scene_entity)
+        .find_map(|entity| Some((entity, vehicle_query.get(entity).ok()?)))
+    else {
         tracing::warn!("Vehicle scene loaded but no Vehicle component found");
         return;
     };
 
-    // Clone data we need before borrowing commands.
-    // Apply vehicle scale to both physics and visuals.
-    let vehicle_scale = vehicle.scale;
-    let density = physics_config.density;
-    let model_path = model.path.clone();
-    let model_scale = model.scale * vehicle_scale;
+    // Physics Position is relative to the origin-shift camera position, not
+    // the live camera (see PhysicsState::origin_camera_position).
+    let origin = physics_state
+        .origin_camera_position()
+        .unwrap_or(ecef_position);
+    let physics_pos = (ecef_position - origin).as_vec3();
 
-    // Add runtime components not stored in scene.
-    // Collider will be generated from the mesh via ColliderConstructorHierarchy.
+    let model_path = model.path.clone();
+    let model_scale = model.scale;
+
+    // Add runtime components not stored in the scene. Mass properties are
+    // explicit (with collider auto-computation disabled): real cars have a
+    // far lower centre of mass than their uniform-density hull suggests,
+    // and that difference is most of what keeps a car flat in corners.
     commands.entity(vehicle_entity).insert((
         VehicleState::default(),
         VehicleInput::default(),
         WorldPosition::from_dvec3(ecef_position),
-        Position(Vec3::ZERO),
-        Transform::from_rotation(rotation),
+        Position(physics_pos),
+        Rotation(rotation),
+        Transform::from_translation(physics_pos).with_rotation(rotation),
         RigidBody::Dynamic,
-        // Provide initial mass to prevent "no mass or inertia" warning from Avian3D
-        // before colliders are generated from the GLTF mesh. This will be superseded
-        // by the computed mass once the `ColliderConstructorHierarchy` processes the mesh.
-        Mass(100.0),
+        Mass(chassis.mass),
+        CenterOfMass(chassis.center_of_mass),
+        NoAutoMass,
+        NoAutoCenterOfMass,
         LinearVelocity::default(),
         AngularVelocity::default(),
+    ));
+    commands.entity(vehicle_entity).insert((
         // Mark as followable for the camera system.
         FollowedEntity,
         // Despawn when outside physics range.
@@ -531,19 +579,16 @@ fn on_vehicle_scene_ready(
         veldera_game_input::default_vehicle_input_map(),
     ));
 
-    // Load the GLTF model as a child with automatic convex hull collider generation.
-    // Colliders on descendants are associated with the ancestor rigid body.
-    // Uses Vehicle layer so hover raycast ignores the vehicle's own colliders.
+    // Load the car model as a child. Wheel discovery, colliders, and the
+    // angular inertia are completed by `visuals::on_vehicle_model_ready`
+    // once the model's scene instance is ready.
     let model_entity = commands
         .spawn((
             SceneRoot(asset_server.load(&model_path)),
             Transform::from_scale(Vec3::splat(model_scale)),
-            ColliderConstructorHierarchy::new(ColliderConstructor::ConvexHullFromMesh)
-                .with_default_density(density)
-                .with_default_layers(CollisionLayers::new(
-                    [GameLayer::Vehicle],
-                    [GameLayer::Ground, GameLayer::Vehicle],
-                )),
+            visuals::VehicleModelRoot {
+                vehicle: vehicle_entity,
+            },
         ))
         .id();
     commands.entity(vehicle_entity).add_child(model_entity);
@@ -624,38 +669,43 @@ fn toggle_vehicle_mode(
 }
 
 // ============================================================================
-// Hover gizmos
+// Wheel gizmos
 // ============================================================================
 
-/// Draw gizmos showing hover raycast and force.
-///
-/// Uses the physics `Position` component for accurate placement that stays
-/// synchronized with the physics simulation.
-fn draw_thruster_gizmos(
+/// Draw per-wheel gizmos: the suspension ray, the contact point, and the
+/// suspension force (colored green → red by tire saturation).
+fn draw_wheel_gizmos(
     config: Res<VehicleConfig>,
     mut gizmos: Gizmos<VehicleDebugGizmos>,
-    vehicle_query: Query<(&Position, &Transform, &VehicleState)>,
+    vehicle_query: Query<(
+        &Position,
+        &Rotation,
+        &VehicleState,
+        &VehicleWheels,
+        &VehicleSuspensionConfig,
+    )>,
 ) {
-    for (position, transform, state) in &vehicle_query {
-        let local_up = transform.rotation * Vec3::Y;
-        let vehicle_pos = position.0;
+    for (position, rotation, state, wheels, suspension) in &vehicle_query {
+        let up = rotation.0 * Vec3::Y;
+        for (geometry, wheel) in wheels.wheels.iter().zip(state.wheels.iter()) {
+            let hardpoint = position.0
+                + rotation.0 * (geometry.rest_position + Vec3::Y * (suspension.travel * 0.5));
 
-        if state.altitude.is_finite() {
-            // Draw raycast line from vehicle center to ground.
-            let ground_pos = vehicle_pos - local_up * state.altitude;
-            gizmos.line(vehicle_pos, ground_pos, css::ORANGE);
+            if wheel.grounded {
+                // Reconstruct the contact from the compression.
+                let suspension_length = suspension.travel * (1.0 - wheel.compression);
+                let contact = hardpoint - up * (suspension_length + geometry.radius);
+                gizmos.line(hardpoint, contact, css::ORANGE);
+                gizmos.sphere(Isometry3d::from_translation(contact), 0.06, css::ORANGE);
 
-            // Draw small sphere at ground contact point.
-            gizmos.sphere(Isometry3d::from_translation(ground_pos), 0.1, css::ORANGE);
-
-            // Draw hover force vector (upward from vehicle center).
-            let force_length = state.hover_force.length() * config.force_gizmo_scale;
-            let force_end = vehicle_pos + local_up * force_length;
-            gizmos.arrow(vehicle_pos, force_end, css::LIME);
-        } else {
-            // No ground hit - draw a short red line to indicate no contact.
-            let no_hit_end = vehicle_pos - local_up * 2.0;
-            gizmos.line(vehicle_pos, no_hit_end, css::RED);
+                // Suspension force arrow, colored by tire saturation.
+                let color = Color::from(css::LIME).mix(&Color::from(css::RED), wheel.saturation);
+                let force_end = contact + up * (wheel.suspension_force * config.force_gizmo_scale);
+                gizmos.arrow(contact, force_end, color);
+            } else {
+                let droop_end = hardpoint - up * (suspension.travel + geometry.radius);
+                gizmos.line(hardpoint, droop_end, css::RED);
+            }
         }
     }
 }

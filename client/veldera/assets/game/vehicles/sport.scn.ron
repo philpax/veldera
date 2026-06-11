@@ -1,0 +1,71 @@
+(
+  resources: {},
+  entities: {
+    1: (
+      components: {
+        "veldera_game_vehicle::components::Vehicle": (
+          name: "Sport",
+          description: "Mid-engine missile: stiff, savage, and loud",
+        ),
+        "veldera_game_vehicle::components::VehicleChassisConfig": (
+          mass: 1380.0,
+          center_of_mass: (0.0, 0.35, 0.1),
+          drag_coefficient_area: 0.6,
+        ),
+        "veldera_game_vehicle::components::VehicleSuspensionConfig": (
+          travel: 0.1,
+          stiffness: 135500.0,
+          damping_compression: 6200.0,
+          damping_rebound: 7500.0,
+        ),
+        "veldera_game_vehicle::components::VehicleEngineConfig": (
+          idle_rpm: 900.0,
+          redline_rpm: 8200.0,
+          peak_torque_nm: 560.0,
+          peak_torque_rpm: 5500.0,
+          idle_torque_frac: 0.5,
+          redline_torque_frac: 0.85,
+          engine_braking_nm: 110.0,
+          cylinders: 8,
+        ),
+        "veldera_game_vehicle::components::VehicleTransmissionConfig": (
+          gear_ratios: [3.1, 2.2, 1.7, 1.35, 1.1, 0.9],
+          reverse_ratio: 3.0,
+          final_drive: 3.4,
+          efficiency: 0.9,
+          drive: Rear,
+          shift_up_rpm_frac: (0.55, 0.95),
+          shift_down_rpm_frac: (0.3, 0.65),
+          shift_time: 0.25,
+          min_shift_interval: 0.8,
+          stall_torque_multiplier: 1.6,
+          coupling_rpm: 3000.0,
+        ),
+        "veldera_game_vehicle::components::VehicleSteeringConfig": (
+          max_angle_deg: 28.0,
+          high_speed_angle_deg: 6.0,
+          falloff_speed: 40.0,
+          steer_rate_deg: 220.0,
+        ),
+        "veldera_game_vehicle::components::VehicleTireConfig": (
+          longitudinal_grip: 1.5,
+          lateral_grip: 1.35,
+          handbrake_grip_factor: 0.3,
+          rolling_resistance: 0.013,
+          brake_force: 20000.0,
+          brake_bias: 0.6,
+          handbrake_force: 8500.0,
+        ),
+        "veldera_game_vehicle::components::VehicleModel": (
+          path: "game/vehicles/sport.glb#Scene0",
+          scale: 1.0,
+        ),
+        "veldera_game_camera::follow::FollowCameraConfig": (
+          camera_offset: (0.0, 2.1, 7.5),
+          look_target_offset: (0.0, 0.85, 0.0),
+          position_smoothing: 0.18,
+        ),
+      },
+    ),
+  },
+)

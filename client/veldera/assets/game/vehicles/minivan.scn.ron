@@ -1,0 +1,71 @@
+(
+  resources: {},
+  entities: {
+    1: (
+      components: {
+        "veldera_game_vehicle::components::Vehicle": (
+          name: "Minivan",
+          description: "Family hauler: soft, sensible, surprisingly brisk",
+        ),
+        "veldera_game_vehicle::components::VehicleChassisConfig": (
+          mass: 1900.0,
+          center_of_mass: (0.0, 0.6, -0.1),
+          drag_coefficient_area: 0.95,
+        ),
+        "veldera_game_vehicle::components::VehicleSuspensionConfig": (
+          travel: 0.2,
+          stiffness: 66500.0,
+          damping_compression: 5100.0,
+          damping_rebound: 6200.0,
+        ),
+        "veldera_game_vehicle::components::VehicleEngineConfig": (
+          idle_rpm: 700.0,
+          redline_rpm: 6000.0,
+          peak_torque_nm: 280.0,
+          peak_torque_rpm: 4000.0,
+          idle_torque_frac: 0.6,
+          redline_torque_frac: 0.7,
+          engine_braking_nm: 70.0,
+          cylinders: 6,
+        ),
+        "veldera_game_vehicle::components::VehicleTransmissionConfig": (
+          gear_ratios: [3.7, 2.1, 1.4, 1.0, 0.75],
+          reverse_ratio: 3.5,
+          final_drive: 3.9,
+          efficiency: 0.9,
+          drive: Front,
+          shift_up_rpm_frac: (0.45, 0.85),
+          shift_down_rpm_frac: (0.26, 0.55),
+          shift_time: 0.25,
+          min_shift_interval: 0.8,
+          stall_torque_multiplier: 1.9,
+          coupling_rpm: 2100.0,
+        ),
+        "veldera_game_vehicle::components::VehicleSteeringConfig": (
+          max_angle_deg: 33.0,
+          high_speed_angle_deg: 7.0,
+          falloff_speed: 26.0,
+          steer_rate_deg: 170.0,
+        ),
+        "veldera_game_vehicle::components::VehicleTireConfig": (
+          longitudinal_grip: 1.0,
+          lateral_grip: 0.9,
+          handbrake_grip_factor: 0.3,
+          rolling_resistance: 0.016,
+          brake_force: 17000.0,
+          brake_bias: 0.64,
+          handbrake_force: 8000.0,
+        ),
+        "veldera_game_vehicle::components::VehicleModel": (
+          path: "game/vehicles/minivan.glb#Scene0",
+          scale: 1.0,
+        ),
+        "veldera_game_camera::follow::FollowCameraConfig": (
+          camera_offset: (0.0, 3.0, 9.5),
+          look_target_offset: (0.0, 1.4, 0.0),
+          position_smoothing: 0.3,
+        ),
+      },
+    ),
+  },
+)
