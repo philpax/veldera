@@ -34,7 +34,8 @@ pub struct VehicleSim(pub CarSimState);
 ///
 /// Only the vehicle the camera is following receives input; every other
 /// vehicle (parked cars, the vehicle just exited) gets zeroed so it doesn't
-/// keep driving itself.
+/// keep driving itself — except the handbrake, which engages as a parking
+/// brake so an empty car holds on a slope instead of rolling away.
 pub fn vehicle_input_system(
     mode: Res<CameraModeState>,
     follow_query: Query<&FollowEntityTarget>,
@@ -61,7 +62,8 @@ pub fn vehicle_input_system(
         } else {
             input.drive = 0.0;
             input.steer = 0.0;
-            input.handbrake = false;
+            // Parking brake: an unoccupied car locks its rear axle.
+            input.handbrake = true;
         }
     }
 }
