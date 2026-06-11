@@ -37,29 +37,31 @@ pub struct VehicleSim(pub CarSimState);
 /// keep driving itself.
 pub fn vehicle_input_system(
     mode: Res<CameraModeState>,
-    action_query: Query<&ActionState<veldera_game_input::VehicleAction>>,
     follow_query: Query<&FollowEntityTarget>,
-    mut query: Query<(Entity, &mut VehicleInput), With<Vehicle>>,
+    mut query: Query<
+        (
+            Entity,
+            &ActionState<veldera_game_input::VehicleAction>,
+            &mut VehicleInput,
+        ),
+        With<Vehicle>,
+    >,
 ) {
     let followed = follow_query.iter().next().map(|follow| follow.target);
-    let action_state = action_query.single().ok();
 
-    for (entity, mut input) in &mut query {
-        let driven = mode.is_follow_entity() && followed == Some(entity);
-        match (driven, action_state) {
-            (true, Some(action_state)) => {
-                let drive =
-                    action_state.clamped_axis_pair(&veldera_game_input::VehicleAction::Drive);
-                input.drive = drive.y;
-                input.steer = drive.x;
-                input.handbrake =
-                    action_state.pressed(&veldera_game_input::VehicleAction::Handbrake);
-            }
-            _ => {
-                input.drive = 0.0;
-                input.steer = 0.0;
-                input.handbrake = false;
-            }
+    // Each vehicle carries its own ActionState (all fed from the same
+    // keyboard), so read the followed entity's rather than expecting a
+    // single one to exist in the world.
+    for (entity, action_state, mut input) in &mut query {
+        if mode.is_follow_entity() && followed == Some(entity) {
+            let drive = action_state.clamped_axis_pair(&veldera_game_input::VehicleAction::Drive);
+            input.drive = drive.y;
+            input.steer = drive.x;
+            input.handbrake = action_state.pressed(&veldera_game_input::VehicleAction::Handbrake);
+        } else {
+            input.drive = 0.0;
+            input.steer = 0.0;
+            input.handbrake = false;
         }
     }
 }
