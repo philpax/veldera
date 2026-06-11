@@ -1749,7 +1749,7 @@ fn update_physics_colliders(
     };
     let mut builds = 0usize;
 
-    for (path, target_mask, _) in pending {
+    for (path, target_mask, distance) in pending {
         if builds >= max_builds {
             break;
         }
@@ -1758,10 +1758,13 @@ fn update_physics_colliders(
         // survive a config-set dwell time before paying a trimesh build, so
         // selections that flicker during fast movement never build at all.
         // Regions with no live coverage bypass the gate — first coverage is
-        // never delayed. Mask rebuilds of live entities skip the gate too:
-        // they refine existing coverage and the despawn rules depend on
-        // them converging.
-        if !lod_state.physics_colliders.contains_key(&path) {
+        // never delayed — and so does everything within the WYSIWYG radius:
+        // the near-field selection mirrors the render's loaded set (already
+        // debounced by render streaming), and a dwell there means a driving
+        // player permanently rides colliders a second behind the display.
+        // Mask rebuilds of live entities skip the gate too: they refine
+        // existing coverage and the despawn rules depend on them converging.
+        if !lod_state.physics_colliders.contains_key(&path) && distance > streaming.wysiwyg_radius {
             let since = lod_state
                 .collider_candidate_since
                 .get(&path)
@@ -1793,17 +1796,14 @@ fn update_physics_colliders(
         // Radial down at the node; the direction varies negligibly across a
         // single tile, so one vector serves the whole collider's skirts.
         let down = (-node_data.world_position.normalize()).as_vec3();
-        let Some(collider) = create_terrain_collider(
+        let collider = create_terrain_collider(
             &node_data.meshes,
             &node_data.transform,
             streaming.min_collider_triangle_height as f32,
             down,
             streaming.collider_skirt_depth as f32,
             mask,
-        ) else {
-            tracing::debug!("Skipping invalid mesh for physics collider: '{}'", path);
-            continue;
-        };
+        );
 
         // Camera-relative position so the floating origin shift keeps it
         // in f32 range.
@@ -1814,28 +1814,44 @@ fn update_physics_colliders(
             relative_pos.z as f32,
         );
 
-        let entity = commands
-            .spawn((
+        // A mask that drops every triangle (common on flat terrain, where
+        // all geometry sits in the lower octants) is a *successful empty*
+        // commit, not a failure: spawn a collider-less marker so the path
+        // counts as live for masking and despawn ordering. Treating it as
+        // a retryable failure made the same paths consume the entire build
+        // budget every frame, starving real builds — colliders then lagged
+        // the display indefinitely (the floating-car livelock).
+        let mut entity_commands = commands.spawn((
+            Position(physics_pos),
+            // Rotation is identity since rotation is baked into the
+            // collider vertices.
+            Rotation::default(),
+            // Transform is needed for Avian's debug rendering (it
+            // reads GlobalTransform).
+            Transform::from_translation(physics_pos),
+            WorldPosition::from_dvec3(node_data.world_position),
+            TerrainCollider {
+                path,
+                octant_mask: mask,
+            },
+        ));
+        if let Some(collider) = collider {
+            entity_commands.insert((
                 RigidBody::Static,
                 collider,
-                Position(physics_pos),
-                // Rotation is identity since rotation is baked into the
-                // collider vertices.
-                Rotation::default(),
-                // Transform is needed for Avian's debug rendering (it
-                // reads GlobalTransform).
-                Transform::from_translation(physics_pos),
-                WorldPosition::from_dvec3(node_data.world_position),
-                TerrainCollider {
-                    path,
-                    octant_mask: mask,
-                },
                 CollisionLayers::new(
                     [GameLayer::Ground],
                     [GameLayer::Ground, GameLayer::Vehicle, GameLayer::Ragdoll],
                 ),
-            ))
-            .id();
+            ));
+        } else {
+            tracing::debug!(
+                "Empty collider commit for node '{}' (mask {:#04x} drops all geometry)",
+                path,
+                mask,
+            );
+        }
+        let entity = entity_commands.id();
 
         // Replace any previous entity for this path (mask rebuild) in the
         // same frame, so the swap is atomic from physics's point of view.

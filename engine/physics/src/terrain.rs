@@ -1,8 +1,11 @@
 //! Terrain collider creation and management.
 //!
 //! Creates trimesh colliders from rocktree mesh data for physics simulation.
-//! Colliders are created at the distance-banded target depth selected by the
-//! LoD walk (see [`PhysicsStreamingConfig::bands`](crate::PhysicsStreamingConfig)).
+//! Colliders are selected by the LoD machinery in `veldera_terrain`: a
+//! render-mirroring set within
+//! [`PhysicsStreamingConfig::wysiwyg_radius`](crate::PhysicsStreamingConfig)
+//! and distance-banded coverage beyond it (see
+//! [`PhysicsStreamingConfig::bands`](crate::PhysicsStreamingConfig)).
 
 use std::collections::HashMap;
 
@@ -18,10 +21,11 @@ use rocktree::Mesh as RocktreeMesh;
 pub struct TerrainCollider {
     /// The octant path for this collider's source node.
     pub path: rocktree_decode::OctreePath,
-    /// Octant-coverage mask the collider was built with: triangles touching
-    /// masked octants were dropped because deeper colliders cover them
-    /// (see `merge_meshes` for why this is stricter than the render
-    /// shader's vertex collapse). `0` = full mesh.
+    /// Octant-coverage mask the collider was built with: geometry in masked
+    /// octants was removed (boundary-crossing triangles clipped at the
+    /// octant midplanes) because deeper colliders cover those regions. `0`
+    /// = full mesh. An entity may carry this component with *no* collider:
+    /// a mask that removes all geometry is a live empty commit.
     pub octant_mask: u8,
 }
 
@@ -43,9 +47,9 @@ pub struct TerrainCollider {
 /// * `down` - Unit vector toward the planet centre in the baked vertex space.
 /// * `skirt_depth` - Boundary-skirt depth (m); see
 ///   [`PhysicsStreamingConfig::collider_skirt_depth`](crate::PhysicsStreamingConfig::collider_skirt_depth).
-/// * `octant_mask` - Octants covered by deeper colliders: triangles touching
-///   masked octants are dropped (see `merge_meshes`). `0` keeps the full
-///   mesh.
+/// * `octant_mask` - Octants covered by deeper colliders: their geometry is
+///   removed, with boundary-crossing triangles clipped at the octant
+///   midplanes (see `merge_meshes`). `0` keeps the full mesh.
 ///
 /// # Returns
 /// A trimesh collider with vertices transformed to match the GPU rendering,
@@ -75,20 +79,23 @@ pub fn create_terrain_collider(
 /// triangles below `min_triangle_height` and triangles fully inside masked
 /// octants are dropped.
 ///
-/// The octant handling is deliberately *stricter* than the render shader:
-/// any triangle touching a masked octant is dropped entirely. The decoder
-/// assigns vertex octants from the index-stream runs, so real surface
-/// triangles live wholly inside one octant and mixed-octant triangles are
-/// strip-transition artifacts; the shader handles those by collapsing
-/// masked vertices to the mesh origin, which makes most of them degenerate
-/// and leaves the rest as near-invisible slivers. Reproducing that collapse
-/// in the collider turned those slivers into solid invisible walls (a fan
-/// of triangles converging on the tile-box corner), and keeping mixed
-/// triangles whole instead leaves invisible shelves wherever the parent
-/// reconstruction sits above its children's. Dropping them costs at most a
-/// hairline crack at the octant seam, which the boundary skirts seal like
-/// any other tile border. Meshes without per-vertex octant data are never
-/// masked by the renderer, so they keep their full geometry here as well.
+/// The octant handling is geometric rather than a copy of the render
+/// shader's vertex collapse: triangles wholly inside masked octants are
+/// dropped, triangles wholly inside unmasked octants are kept whole, and
+/// triangles crossing an octant boundary are *clipped* at the octant
+/// midplanes so the collider covers the unmasked region exactly up to the
+/// boundary. The earlier alternatives both failed in production: keeping
+/// boundary triangles whole left invisible shelves wherever a parent
+/// reconstruction sits above its children's; collapsing masked vertices
+/// like the shader turned strip-transition slivers into invisible walls;
+/// and dropping any masked-touching triangle left both an uncovered strip
+/// and elevated skirt fins at the seam.
+///
+/// The mapping from octant-index bits to mesh-local axes is derived per
+/// mesh from the tagged vertices ([`derive_octant_axes`]); when it cannot
+/// be established confidently, boundary-crossing triangles are dropped as a
+/// safe fallback. Meshes without per-vertex octant data are never masked by
+/// the renderer, so they keep their full geometry here as well.
 fn merge_meshes(
     meshes: &[RocktreeMesh],
     transform: &Transform,
@@ -102,36 +109,234 @@ fn merge_meshes(
     for mesh in meshes {
         let base = vertices.len() as u32;
         let apply_octant_mask = octant_mask != 0 && mesh.has_octant_data;
-        let vertex_masked = |index: u32| {
-            let octant = mesh.vertices[(index - base) as usize].w & 7;
-            octant_mask & (1 << octant) != 0
+        let axes = if apply_octant_mask {
+            derive_octant_axes(mesh)
+        } else {
+            None
         };
 
         // Mesh vertices are in the 0-255 range.
-        vertices.extend(mesh.vertices.iter().map(|v| {
-            let local = Vec3::new(f32::from(v.x), f32::from(v.y), f32::from(v.z));
-            transform.rotation * (transform.scale * local)
-        }));
-        triangles.extend(
-            strip_to_triangles(&mesh.indices)
-                .into_iter()
-                .map(|[a, b, c]| [a + base, b + base, c + base])
-                .filter(|&[a, b, c]| {
-                    !(apply_octant_mask
-                        && (vertex_masked(a) || vertex_masked(b) || vertex_masked(c)))
-                })
-                .filter(|&[a, b, c]| {
-                    !is_sliver(
-                        vertices[a as usize],
-                        vertices[b as usize],
-                        vertices[c as usize],
-                        min_triangle_height,
-                    )
-                }),
-        );
+        let locals: Vec<Vec3> = mesh
+            .vertices
+            .iter()
+            .map(|v| Vec3::new(f32::from(v.x), f32::from(v.y), f32::from(v.z)))
+            .collect();
+        let to_world = |p: Vec3| transform.rotation * (transform.scale * p);
+        vertices.extend(locals.iter().map(|&p| to_world(p)));
+
+        let push_triangle =
+            |vertices: &mut Vec<Vec3>, triangles: &mut Vec<[u32; 3]>, [a, b, c]: [u32; 3]| {
+                if !is_sliver(
+                    vertices[a as usize],
+                    vertices[b as usize],
+                    vertices[c as usize],
+                    min_triangle_height,
+                ) {
+                    triangles.push([a, b, c]);
+                }
+            };
+
+        for [a, b, c] in strip_to_triangles(&mesh.indices) {
+            let tri = [a + base, b + base, c + base];
+            if !apply_octant_mask {
+                push_triangle(&mut vertices, &mut triangles, tri);
+                continue;
+            }
+
+            match &axes {
+                Some(axes) => {
+                    // Geometric classification: vertex tags are derived from
+                    // index runs and can be noisy at boundaries, but the
+                    // midplanes are exact.
+                    let octants = [a, b, c].map(|i| axes.octant_of(locals[i as usize]));
+                    let masked = |octant: u8| octant_mask & (1 << octant) != 0;
+                    if octants.iter().all(|&o| masked(o)) {
+                        continue;
+                    }
+                    if octants.iter().all(|&o| !masked(o)) {
+                        push_triangle(&mut vertices, &mut triangles, tri);
+                        continue;
+                    }
+                    // Boundary-crossing: clip at the octant midplanes and
+                    // keep the pieces lying in unmasked octants.
+                    let poly = [a, b, c].map(|i| locals[i as usize]);
+                    clip_to_unmasked_octants(&poly, axes, octant_mask, &mut |piece| {
+                        let start = vertices.len() as u32;
+                        vertices.extend(piece.iter().map(|&p| to_world(p)));
+                        for i in 1..piece.len() as u32 - 1 {
+                            push_triangle(
+                                &mut vertices,
+                                &mut triangles,
+                                [start, start + i, start + i + 1],
+                            );
+                        }
+                    });
+                }
+                None => {
+                    // No confident bit-to-axis mapping: drop anything whose
+                    // tags touch a masked octant (safe, slightly lossy).
+                    let tag_masked = |i: u32| {
+                        let octant = mesh.vertices[i as usize].w & 7;
+                        octant_mask & (1 << octant) != 0
+                    };
+                    if !(tag_masked(a) || tag_masked(b) || tag_masked(c)) {
+                        push_triangle(&mut vertices, &mut triangles, tri);
+                    }
+                }
+            }
+        }
     }
 
     (vertices, triangles)
+}
+
+/// Octant midplane in the mesh-local 0-255 vertex space.
+const OCTANT_MIDPOINT: f32 = 127.5;
+
+/// Minimum separation (in 0-255 vertex units) between the mean positions of
+/// a bit's set and unset vertex populations for the bit-to-axis mapping to
+/// count as confident. Real octant populations separate by roughly half a
+/// tile (~128); transition noise separates by far less.
+const OCTANT_AXIS_MIN_SEPARATION: f32 = 16.0;
+
+/// How one bit of the vertex octant index relates to mesh-local space.
+#[derive(Clone, Copy, Debug, PartialEq)]
+enum OctantBit {
+    /// Every tagged vertex agrees on this bit (e.g. flat terrain whose
+    /// geometry sits entirely in the lower-half octants).
+    Constant(bool),
+    /// The bit selects a half of `axis`; `set_is_upper` is whether a set
+    /// bit corresponds to coordinates above the midplane.
+    Axis { axis: usize, set_is_upper: bool },
+}
+
+/// Per-mesh mapping from octant-index bits to mesh-local axes, derived from
+/// the tagged vertices.
+#[derive(Clone, Copy, Debug)]
+struct OctantAxes {
+    bits: [OctantBit; 3],
+}
+
+impl OctantAxes {
+    /// The octant index of a point in mesh-local space.
+    fn octant_of(&self, p: Vec3) -> u8 {
+        let mut octant = 0u8;
+        for (b, bit) in self.bits.iter().enumerate() {
+            let set = match *bit {
+                OctantBit::Constant(value) => value,
+                OctantBit::Axis { axis, set_is_upper } => {
+                    (p[axis] > OCTANT_MIDPOINT) == set_is_upper
+                }
+            };
+            if set {
+                octant |= 1 << b;
+            }
+        }
+        octant
+    }
+}
+
+/// Derive which octant-index bit selects which mesh-local axis by comparing
+/// the mean positions of each bit's set and unset vertex populations. The
+/// decoder assigns octants from index runs, not positions, so the spatial
+/// convention isn't fixed in code anywhere — but the populations separate
+/// cleanly around the midplane, making the mapping recoverable per mesh.
+/// Returns `None` when any varying bit lacks a confident axis, or two bits
+/// map to the same axis.
+fn derive_octant_axes(mesh: &RocktreeMesh) -> Option<OctantAxes> {
+    let mut sums = [[Vec3::ZERO; 2]; 3];
+    let mut counts = [[0usize; 2]; 3];
+    for v in &mesh.vertices {
+        let p = Vec3::new(f32::from(v.x), f32::from(v.y), f32::from(v.z));
+        let octant = v.w & 7;
+        for (b, (sums, counts)) in sums.iter_mut().zip(counts.iter_mut()).enumerate() {
+            let side = usize::from(octant >> b & 1);
+            sums[side] += p;
+            counts[side] += 1;
+        }
+    }
+
+    let mut bits = [OctantBit::Constant(false); 3];
+    let mut used_axes = [false; 3];
+    for b in 0..3 {
+        bits[b] = match counts[b] {
+            [_, 0] => OctantBit::Constant(false),
+            [0, _] => OctantBit::Constant(true),
+            [unset, set] => {
+                let mean_unset = sums[b][0] / unset as f32;
+                let mean_set = sums[b][1] / set as f32;
+                let diff = mean_set - mean_unset;
+                let axis = (0..3).max_by(|&i, &j| diff[i].abs().total_cmp(&diff[j].abs()))?;
+                if diff[axis].abs() < OCTANT_AXIS_MIN_SEPARATION || used_axes[axis] {
+                    return None;
+                }
+                used_axes[axis] = true;
+                OctantBit::Axis {
+                    axis,
+                    set_is_upper: diff[axis] > 0.0,
+                }
+            }
+        };
+    }
+    Some(OctantAxes { bits })
+}
+
+/// Split a boundary-crossing triangle at the octant midplanes and emit each
+/// piece lying in an unmasked octant (as a convex polygon in mesh-local
+/// space, ready for fan triangulation).
+fn clip_to_unmasked_octants(
+    triangle: &[Vec3; 3],
+    axes: &OctantAxes,
+    octant_mask: u8,
+    emit: &mut dyn FnMut(&[Vec3]),
+) {
+    let mut pieces: Vec<Vec<Vec3>> = vec![triangle.to_vec()];
+    for bit in axes.bits {
+        let OctantBit::Axis { axis, .. } = bit else {
+            continue;
+        };
+        pieces = pieces
+            .into_iter()
+            .flat_map(|piece| {
+                let (below, above) = split_polygon(&piece, axis, OCTANT_MIDPOINT);
+                [below, above]
+            })
+            .filter(|piece| piece.len() >= 3)
+            .collect();
+    }
+    for piece in &pieces {
+        // Classify by centroid: each piece lies wholly in one octant.
+        let centroid = piece.iter().sum::<Vec3>() / piece.len() as f32;
+        if octant_mask & (1 << axes.octant_of(centroid)) == 0 {
+            emit(piece);
+        }
+    }
+}
+
+/// Split a convex polygon by the plane `p[axis] = value`, returning the
+/// below and above halves (either may be empty). Points on the plane belong
+/// to both, so the halves share their cut edge exactly.
+fn split_polygon(poly: &[Vec3], axis: usize, value: f32) -> (Vec<Vec3>, Vec<Vec3>) {
+    let mut below = Vec::with_capacity(poly.len() + 1);
+    let mut above = Vec::with_capacity(poly.len() + 1);
+    for (i, &current) in poly.iter().enumerate() {
+        let next = poly[(i + 1) % poly.len()];
+        let c = current[axis] - value;
+        let n = next[axis] - value;
+        if c <= 0.0 {
+            below.push(current);
+        }
+        if c >= 0.0 {
+            above.push(current);
+        }
+        if (c < 0.0 && n > 0.0) || (c > 0.0 && n < 0.0) {
+            let t = c / (c - n);
+            let intersection = current + (next - current) * t;
+            below.push(intersection);
+            above.push(intersection);
+        }
+    }
+    (below, above)
 }
 
 /// Extrude the trimesh's boundary edges (edges used by exactly one triangle)
@@ -346,12 +551,10 @@ mod tests {
     #[test]
     fn test_merge_meshes_octant_mask() {
         // Three triangles: one fully in octant 3, one straddling octants 3
-        // and 5, one fully in octant 5. Masking octant 3 must drop both the
-        // first and the straddler: mixed-octant triangles are
-        // strip-transition artifacts whose collapsed render counterparts
-        // are (near-)degenerate, but as collider geometry they form
-        // invisible walls or shelves. The octant-5 triangle survives,
-        // untouched.
+        // and 5, one fully in octant 5. The vertex populations here are far
+        // too close together for a confident bit-to-axis mapping, so this
+        // exercises the *fallback* path: drop every triangle whose tags
+        // touch a masked octant. The octant-5 triangle survives, untouched.
         let positions = [
             (0, 0, 0, 3),
             (10, 0, 0, 3),
@@ -378,6 +581,64 @@ mod tests {
         // Mask 0 keeps everything, including the straddlers.
         let (_, all) = merge_meshes(std::slice::from_ref(&mesh), &Transform::IDENTITY, 0.0, 0);
         assert_eq!(all.len(), 4);
+    }
+
+    #[test]
+    fn test_merge_meshes_clips_boundary_triangles() {
+        // A quad spanning the x midplane: left vertices tagged octant 0,
+        // right tagged octant 1, populations cleanly separated so the
+        // bit-to-axis mapping derives (bit 0 ↔ x). Masking octant 1 must
+        // keep exactly the left half of the quad, clipped at x = 127.5.
+        let positions = [
+            (0, 0, 0, 0),
+            (255, 0, 0, 1),
+            (0, 200, 0, 0),
+            (255, 200, 0, 1),
+        ];
+        let mesh = test_mesh_with_octants(&positions, vec![0, 1, 2, 3], true);
+
+        let (vertices, triangles) = merge_meshes(
+            std::slice::from_ref(&mesh),
+            &Transform::IDENTITY,
+            0.0,
+            1 << 1,
+        );
+        assert!(!triangles.is_empty(), "the unmasked half must survive");
+        let mut area = 0.0f32;
+        for [a, b, c] in &triangles {
+            let (a, b, c) = (
+                vertices[*a as usize],
+                vertices[*b as usize],
+                vertices[*c as usize],
+            );
+            for p in [a, b, c] {
+                assert!(
+                    p.x <= 127.5 + 1e-3,
+                    "kept geometry must not cross the masked midplane, got x = {}",
+                    p.x
+                );
+            }
+            area += (b - a).cross(c - a).length() * 0.5;
+        }
+        // Exactly the left half of the 255 × 200 quad.
+        let expected = 127.5 * 200.0;
+        assert!(
+            (area - expected).abs() < expected * 0.01,
+            "clipped area should be half the quad, got {area} vs {expected}"
+        );
+
+        // Masking octant 0 keeps the complementary half.
+        let (vertices, triangles) = merge_meshes(
+            std::slice::from_ref(&mesh),
+            &Transform::IDENTITY,
+            0.0,
+            1 << 0,
+        );
+        for [a, b, c] in &triangles {
+            for i in [a, b, c] {
+                assert!(vertices[*i as usize].x >= 127.5 - 1e-3);
+            }
+        }
     }
 
     #[test]
