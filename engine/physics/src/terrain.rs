@@ -18,9 +18,10 @@ use rocktree::Mesh as RocktreeMesh;
 pub struct TerrainCollider {
     /// The octant path for this collider's source node.
     pub path: rocktree_decode::OctreePath,
-    /// Octant-coverage mask the collider was built with: triangles lying
-    /// fully inside masked octants were dropped because deeper colliders
-    /// cover them (mirroring the render octant mask). `0` = full mesh.
+    /// Octant-coverage mask the collider was built with: vertices in masked
+    /// octants collapse to the mesh origin because deeper colliders cover
+    /// them (mirroring the render shader's octant mask exactly). `0` = full
+    /// mesh.
     pub octant_mask: u8,
 }
 
@@ -42,9 +43,9 @@ pub struct TerrainCollider {
 /// * `down` - Unit vector toward the planet centre in the baked vertex space.
 /// * `skirt_depth` - Boundary-skirt depth (m); see
 ///   [`PhysicsStreamingConfig::collider_skirt_depth`](crate::PhysicsStreamingConfig::collider_skirt_depth).
-/// * `octant_mask` - Octants covered by deeper colliders: triangles whose
-///   vertices all lie in masked octants are dropped, mirroring the render
-///   octant mask's vertex collapse. `0` keeps the full mesh.
+/// * `octant_mask` - Octants covered by deeper colliders: vertices in masked
+///   octants collapse to the mesh origin, mirroring the render shader's
+///   vertex collapse exactly. `0` keeps the full mesh.
 ///
 /// # Returns
 /// A trimesh collider with vertices transformed to match the GPU rendering,
@@ -74,13 +75,15 @@ pub fn create_terrain_collider(
 /// triangles below `min_triangle_height` and triangles fully inside masked
 /// octants are dropped.
 ///
-/// The octant filter mirrors the render shader: vertices in masked octants
-/// collapse there, so a triangle with all three vertices masked vanishes
-/// from the screen and must vanish from physics too. Triangles straddling
-/// an octant boundary stay whole (slight overlap with the deeper collider
-/// at the seam — and the seam's cut edge then grows a skirt, sealing the
-/// parent/child border). Meshes without per-vertex octant data are never
-/// masked by the renderer, so they keep their full geometry here as well.
+/// The octant handling mirrors the render shader *exactly*: vertices in
+/// masked octants collapse to the mesh-local origin, so a triangle with all
+/// three vertices masked vanishes, and a triangle straddling an octant
+/// boundary deforms into the same shape the GPU rasterizes. Keeping
+/// straddling triangles whole instead leaves invisible shelves wherever the
+/// parent reconstruction sits above its children's — the player and
+/// vehicles then float on collision the renderer doesn't show. Meshes
+/// without per-vertex octant data are never masked by the renderer, so they
+/// keep their full geometry here as well.
 fn merge_meshes(
     meshes: &[RocktreeMesh],
     transform: &Transform,
@@ -99,8 +102,13 @@ fn merge_meshes(
             octant_mask & (1 << octant) != 0
         };
 
-        // Mesh vertices are in the 0-255 range.
+        // Mesh vertices are in the 0-255 range. Masked vertices collapse to
+        // the local origin, exactly like `masked_position` in the terrain
+        // shader.
         vertices.extend(mesh.vertices.iter().map(|v| {
+            if apply_octant_mask && octant_mask & (1 << (v.w & 7)) != 0 {
+                return Vec3::ZERO;
+            }
             let local = Vec3::new(f32::from(v.x), f32::from(v.y), f32::from(v.z));
             transform.rotation * (transform.scale * local)
         }));
@@ -337,21 +345,31 @@ mod tests {
     #[test]
     fn test_merge_meshes_octant_mask() {
         // Two triangles: one fully in octant 3, one straddling octants 3
-        // and 5. Masking octant 3 must drop only the first.
+        // and 5. Masking octant 3 must drop the first and collapse the
+        // straddling triangle's masked vertices to the origin, exactly as
+        // the render shader does — keeping them in place leaves invisible
+        // collision shelves wherever parent and child reconstructions
+        // disagree vertically.
         let positions = [(0, 0, 0, 3), (10, 0, 0, 3), (0, 10, 0, 3), (10, 10, 0, 5)];
         let mesh = test_mesh_with_octants(&positions, vec![0, 1, 2, 3], true);
 
-        let (_, triangles) = merge_meshes(
+        let (vertices, triangles) = merge_meshes(
             std::slice::from_ref(&mesh),
             &Transform::IDENTITY,
             0.0,
             1 << 3,
         );
         assert_eq!(triangles, vec![[1, 3, 2]]);
+        // Masked vertices collapsed; the unmasked one keeps its position.
+        assert_eq!(vertices[1], Vec3::ZERO);
+        assert_eq!(vertices[2], Vec3::ZERO);
+        assert_eq!(vertices[3], Vec3::new(10.0, 10.0, 0.0));
 
-        // Mask 0 keeps everything.
-        let (_, all) = merge_meshes(std::slice::from_ref(&mesh), &Transform::IDENTITY, 0.0, 0);
+        // Mask 0 keeps everything, uncollapsed.
+        let (all_vertices, all) =
+            merge_meshes(std::slice::from_ref(&mesh), &Transform::IDENTITY, 0.0, 0);
         assert_eq!(all.len(), 2);
+        assert_eq!(all_vertices[1], Vec3::new(10.0, 0.0, 0.0));
     }
 
     #[test]
