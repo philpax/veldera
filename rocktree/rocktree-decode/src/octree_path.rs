@@ -39,8 +39,11 @@ const OCTANT_MASK: u128 = (1u128 << DEPTH_SHIFT) - 1;
 ///
 /// `Copy` and 16 bytes wide. Equality and hashing compare the canonical
 /// representation, so two paths with the same octants and depth are
-/// always identical regardless of how they were constructed.
-#[derive(Clone, Copy, PartialEq, Eq, Hash, Default)]
+/// always identical regardless of how they were constructed. The `Ord`
+/// implementation orders by the packed encoding: deterministic and total,
+/// but not meaningful beyond that — use it for stable iteration order, not
+/// for tree semantics.
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Default, PartialOrd, Ord)]
 pub struct OctreePath {
     /// Packed encoding — see the module-level layout docs.
     packed: u128,

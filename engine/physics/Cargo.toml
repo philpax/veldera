@@ -19,6 +19,7 @@ tracing = { workspace = true }
 rocktree = { workspace = true }
 rocktree-decode = { workspace = true }
 veldera_config = { workspace = true }
+veldera_terrain_collider = { workspace = true }
 veldera_geo = { workspace = true }
 
 [lints]

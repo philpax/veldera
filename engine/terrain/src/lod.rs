@@ -316,7 +316,10 @@ pub struct LodState {
     bulk_node_indices: HashMap<OctreePath, HashMap<OctreePath, usize>>,
     /// Physics collider entities keyed by node path, with the octant mask
     /// each entity was built with (so mask changes trigger a rebuild).
-    physics_colliders: HashMap<OctreePath, (Entity, u8)>,
+    physics_colliders: HashMap<OctreePath, LiveCollider>,
+    /// Cumulative count of meshes whose octant bit-to-axis mapping fell
+    /// back to tag-based dropping during collider builds (diagnostics).
+    octant_axis_fallbacks: usize,
     /// Paths that should host colliders right now, with their
     /// octant-coverage masks: the loaded render set within physics range,
     /// mirrored by [`compute_physics_targets`] in `update_lod_requests`
@@ -375,6 +378,38 @@ impl LodState {
     #[must_use]
     pub fn collider_target_mask(&self, path: OctreePath) -> Option<u8> {
         self.physics_target_paths.get(&path).copied()
+    }
+
+    /// Cumulative count of collider-build meshes that fell back from
+    /// geometric octant clipping to tag-based dropping. For the
+    /// diagnostics UI; a high rate explains masked-build geometry leaks.
+    #[must_use]
+    pub fn octant_axis_fallbacks(&self) -> usize {
+        self.octant_axis_fallbacks
+    }
+
+    /// The laterally adjacent selected tiles of `path`: selection entries
+    /// whose bounding spheres touch `path`'s, excluding `path` itself and
+    /// anything on its own ancestor chain. These are the tiles a collider
+    /// build fuses its rim against.
+    fn lateral_neighbour_paths(&self, path: OctreePath) -> Vec<OctreePath> {
+        let Some(obb) = self.node_obbs.get(&path) else {
+            return Vec::new();
+        };
+        let radius = obb.extents.length();
+        let mut laterals: Vec<OctreePath> = self
+            .physics_target_paths
+            .keys()
+            .filter(|n| **n != path && !n.starts_with(path) && !path.starts_with(**n))
+            .filter(|n| {
+                self.node_obbs.get(*n).is_some_and(|nobb| {
+                    nobb.center.distance(obb.center) <= radius + nobb.extents.length()
+                })
+            })
+            .copied()
+            .collect();
+        laterals.sort_unstable();
+        laterals
     }
 
     /// Iterate the active terrain colliders as `(path, obb)` pairs, for the
@@ -438,9 +473,9 @@ impl LodState {
     /// children must be covered. `live_prefixes` (from
     /// [`Self::live_collider_prefixes`]) prunes empty subtrees.
     fn region_live_covered(&self, live_prefixes: &HashSet<OctreePath>, path: OctreePath) -> bool {
-        if let Some((_, mask)) = self.physics_colliders.get(&path) {
+        if let Some(live) = self.physics_colliders.get(&path) {
             return (0u8..8).all(|octant| {
-                mask & (1 << octant) == 0
+                live.mask & (1 << octant) == 0
                     || self.region_live_covered(live_prefixes, path.push(octant))
             });
         }
@@ -457,9 +492,9 @@ impl LodState {
     fn ancestor_collider_covers(&self, path: OctreePath) -> bool {
         let mut ancestor = path.parent();
         while let Some(a) = ancestor {
-            if let Some((_, mask)) = self.physics_colliders.get(&a)
+            if let Some(live) = self.physics_colliders.get(&a)
                 && let Some(octant) = path.octant_at(a.depth())
-                && mask & (1 << octant) == 0
+                && live.mask & (1 << octant) == 0
             {
                 return true;
             }
@@ -478,6 +513,20 @@ impl LodState {
             .filter(|&octant| self.region_live_covered(live_prefixes, path.push(octant)))
             .fold(0, |bits, octant| bits | 1 << octant)
     }
+}
+
+/// A live terrain-collider commit.
+#[derive(Clone, Copy)]
+struct LiveCollider {
+    entity: Entity,
+    /// Octant mask the collider was built with.
+    mask: u8,
+    /// Fingerprint of the lateral-neighbour set the rim was fused against.
+    /// When the selection's adjacency changes (a neighbour was replaced),
+    /// the collider rebuilds so its rim re-conforms — a one-hop correction
+    /// with no cascades, since fusion targets depend only on source meshes
+    /// and the selection, never on built collider state.
+    adjacency: u64,
 }
 
 /// Channels for receiving loaded data from background tasks.
@@ -1141,8 +1190,8 @@ fn unload_obsolete(
         // If a physics collider was using this node_data, remove the
         // collider entity too — it would point at no-longer-existent
         // mesh data otherwise.
-        if let Some((entity, _)) = lod_state.physics_colliders.remove(&path) {
-            commands.entity(entity).despawn();
+        if let Some(live) = lod_state.physics_colliders.remove(&path) {
+            commands.entity(live.entity).despawn();
         }
     }
 
@@ -1756,9 +1805,8 @@ fn update_physics_colliders(
     physics_state: Res<PhysicsState>,
     streaming: Res<PhysicsStreamingConfig>,
     camera_query: Query<&FloatingOriginCamera>,
-    spatial_query: SpatialQuery,
 ) {
-    use veldera_physics::terrain::create_terrain_collider;
+    use veldera_physics::terrain::{TileMeshes, create_terrain_collider};
 
     let Ok(camera) = camera_query.single() else {
         return;
@@ -1787,17 +1835,14 @@ fn update_physics_colliders(
             .or_insert(now);
     }
 
-    // Collect spawns and rebuilds: paths with no entity, or whose live
-    // entity was built with a different mask. Deepest first, so children
-    // are live before any parent rebuild masks their octants out; nearest
-    // first within a depth so the ground under the player wins the build
-    // budget.
+    // Collect spawns and rebuilds: paths with no entity, whose live entity
+    // was built with a different mask, or — within the WYSIWYG radius —
+    // whose fused adjacency changed (a neighbour was replaced, so the rim
+    // must re-conform). Deepest first, so children are live before any
+    // parent rebuild masks their octants out; nearest first within a depth
+    // so the ground under the player wins the build budget.
     let mut pending: Vec<(OctreePath, u8, f64)> = target_paths
         .iter()
-        .filter(|(path, mask)| match lod_state.physics_colliders.get(path) {
-            None => true,
-            Some((_, built_mask)) => built_mask != *mask,
-        })
         .filter_map(|(path, mask)| {
             // BFS-selected paths whose data hasn't fully loaded yet are
             // skipped; we'll catch them in a later frame.
@@ -1805,6 +1850,20 @@ fn update_physics_colliders(
             let distance = (node_data.world_position - camera_pos).length();
             Some((*path, *mask, distance))
         })
+        .filter(
+            |(path, mask, distance)| match lod_state.physics_colliders.get(path) {
+                None => true,
+                Some(live) => {
+                    live.mask != *mask
+                        || (*distance <= streaming.wysiwyg_radius
+                            && live.adjacency
+                                != adjacency_fingerprint(
+                                    &lod_state.lateral_neighbour_paths(*path),
+                                    &lod_state.node_data,
+                                ))
+                }
+            },
+        )
         .collect();
 
     // Stale colliders (live but no longer selected) are progressively
@@ -1842,6 +1901,7 @@ fn update_physics_colliders(
         n => n,
     };
     let mut builds = 0usize;
+    let mut fallbacks = 0usize;
     let mut live_prefixes = lod_state.live_collider_prefixes();
 
     for (path, requested_mask, distance) in pending {
@@ -1871,6 +1931,32 @@ fn update_physics_colliders(
             }
         }
 
+        // The lateral neighbours of the current selection: the rim fuses
+        // against their *source meshes*, so the fused border is a pure
+        // function of immutable data plus the selection — both sides of a
+        // border compute the same curve in any build order.
+        let laterals = lod_state.lateral_neighbour_paths(path);
+
+        // Deferral: a selected lateral whose data is still streaming will
+        // change this rim's fusion when it lands, so give it a moment
+        // rather than building blind and correcting straight after. Capped
+        // so a stuck load can't hold coverage hostage.
+        if laterals
+            .iter()
+            .any(|n| !lod_state.node_data.contains_key(n))
+        {
+            let since = lod_state
+                .collider_candidate_since
+                .get(&path)
+                .copied()
+                .unwrap_or(now);
+            if now - since < streaming.fusion_defer_secs && lod_state.collider_region_covered(path)
+            {
+                continue;
+            }
+        }
+        let adjacency = adjacency_fingerprint(&laterals, &lod_state.node_data);
+
         let Some(node_data) = lod_state.node_data.get(&path) else {
             continue;
         };
@@ -1883,7 +1969,7 @@ fn update_physics_colliders(
         let mask = requested_mask & lod_state.covered_octant_bits(&live_prefixes, path);
 
         match lod_state.physics_colliders.get(&path) {
-            Some((_, built_mask)) if *built_mask == mask => continue,
+            Some(live) if live.mask == mask && live.adjacency == adjacency => continue,
             _ => {}
         }
 
@@ -1902,38 +1988,38 @@ fn update_physics_colliders(
             relative_pos.z as f32,
         );
 
-        // Edge fusion: snap this tile's rim onto whatever live neighbour
-        // surface a short vertical raycast finds, so the newer collider
-        // conforms to the older and the border step disappears. The tile's
-        // own previous entity is excluded — a rebuild must not snap to
-        // itself.
-        let fusion_range = streaming.edge_fusion_range as f32;
-        let fusion_dir = Dir3::new(down).ok();
-        let old_entity = lod_state.physics_colliders.get(&path).map(|(e, _)| *e);
-        let snap_filter = SpatialQueryFilter::default()
-            .with_mask([GameLayer::Ground])
-            .with_excluded_entities(old_entity);
-        let snap = |vertex: Vec3| -> Option<Vec3> {
-            let dir = fusion_dir?;
-            let origin = physics_pos + vertex - down * fusion_range;
-            let hit =
-                spatial_query.cast_ray(origin, dir, 2.0 * fusion_range, true, &snap_filter)?;
-            Some(origin + down * hit.distance - physics_pos)
+        let tile = TileMeshes {
+            meshes: &node_data.meshes,
+            rotation: node_data.transform.rotation,
+            scale: node_data.transform.scale,
+            offset: Vec3::ZERO,
         };
-        let snap_ref: &dyn Fn(Vec3) -> Option<Vec3> = &snap;
+        let neighbour_meshes: Vec<TileMeshes> = laterals
+            .iter()
+            .filter_map(|n| {
+                let neighbour = lod_state.node_data.get(n)?;
+                Some(TileMeshes {
+                    meshes: &neighbour.meshes,
+                    rotation: neighbour.transform.rotation,
+                    scale: neighbour.transform.scale,
+                    offset: (neighbour.world_position - node_data.world_position).as_vec3(),
+                })
+            })
+            .collect();
 
-        let collider = create_terrain_collider(
-            &node_data.meshes,
-            &node_data.transform,
-            &veldera_physics::terrain::ColliderBuildSettings {
+        let (collider, stats) = create_terrain_collider(
+            &tile,
+            mask,
+            &neighbour_meshes,
+            down,
+            &veldera_physics::terrain::BuildSettings {
                 min_triangle_height: streaming.min_collider_triangle_height as f32,
                 skirt_depth: streaming.collider_skirt_depth as f32,
                 skirt_slope: streaming.collider_skirt_slope as f32,
+                fusion_range: streaming.edge_fusion_range as f32,
             },
-            down,
-            mask,
-            (fusion_range > 0.0).then_some(snap_ref),
         );
+        fallbacks += stats.octant_axis_fallbacks;
 
         // A mask that drops every triangle (common on flat terrain, where
         // all geometry sits in the lower octants) is a *successful empty*
@@ -1976,8 +2062,15 @@ fn update_physics_colliders(
 
         // Replace any previous entity for this path (mask rebuild) in the
         // same frame, so the swap is atomic from physics's point of view.
-        if let Some((old_entity, _)) = lod_state.physics_colliders.insert(path, (entity, mask)) {
-            commands.entity(old_entity).despawn();
+        if let Some(old) = lod_state.physics_colliders.insert(
+            path,
+            LiveCollider {
+                entity,
+                mask,
+                adjacency,
+            },
+        ) {
+            commands.entity(old.entity).despawn();
         }
         live_prefixes = lod_state.live_collider_prefixes();
         tracing::debug!(
@@ -2002,18 +2095,38 @@ fn update_physics_colliders(
         .copied()
         .collect();
 
+    lod_state.octant_axis_fallbacks += fallbacks;
+
     for path in obsolete {
         let fully_replaced = lod_state.ancestor_collider_covers(path)
             || lod_state.covered_octant_bits(&live_prefixes, path) == 0xff;
         if !fully_replaced {
             continue;
         }
-        if let Some((entity, _)) = lod_state.physics_colliders.remove(&path) {
-            commands.entity(entity).despawn();
+        if let Some(live) = lod_state.physics_colliders.remove(&path) {
+            commands.entity(live.entity).despawn();
             live_prefixes = lod_state.live_collider_prefixes();
             tracing::debug!("Removed physics collider for node '{}'", path);
         }
     }
+}
+
+/// Fingerprint of the lateral-neighbour set a rim is fused against: the
+/// sorted neighbours that have source data present (the ones actually
+/// sampled). Stored on the live collider so adjacency changes trigger a
+/// one-hop re-conform rebuild.
+fn adjacency_fingerprint(
+    laterals: &[OctreePath],
+    node_data: &HashMap<OctreePath, LoadedNodeData>,
+) -> u64 {
+    use std::hash::{Hash, Hasher};
+    let mut hasher = std::hash::DefaultHasher::new();
+    for path in laterals {
+        if node_data.contains_key(path) {
+            path.hash(&mut hasher);
+        }
+    }
+    hasher.finish()
 }
 
 // ============================================================================

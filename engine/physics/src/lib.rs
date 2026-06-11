@@ -130,13 +130,19 @@ pub struct PhysicsStreamingConfig {
     /// turns into a ramp of this grade that wheels and feet ride over
     /// instead of striking a wall. Zero keeps the skirts vertical.
     pub collider_skirt_slope: f64,
-    /// Edge fusion: when a collider is built, its outer border vertices are
-    /// snapped vertically onto any live neighbouring collider surface found
-    /// within this range (m), eliminating the step between adjacent tiles
-    /// whose reconstructions disagree. The newer tile always conforms to
-    /// the older, so seams self-heal on every (re)build with no
-    /// neighbour-change tracking. Zero disables.
+    /// Edge fusion: when a collider is built, each outer border vertex is
+    /// snapped vertically to the mean of every adjacent selected tile's
+    /// source-mesh surface at that point (within this range, m). The target
+    /// is a pure function of the source meshes and the selection, so both
+    /// sides of a border independently compute the same curve in any build
+    /// order. Zero disables.
     pub edge_fusion_range: f64,
+    /// Maximum time (s) a collider build waits for a lateral neighbour's
+    /// source data to finish streaming before building (and fusing) without
+    /// it. A build that went ahead re-conforms when the data lands, so this
+    /// only trades a little latency against rebuild churn on streaming
+    /// fronts. Zero disables the wait.
+    pub fusion_defer_secs: f64,
     /// Maximum trimesh collider builds per frame. Building a trimesh is the
     /// expensive part of collider streaming; capping it bounds the frame
     /// cost during fast flight when the band boundaries sweep the world.

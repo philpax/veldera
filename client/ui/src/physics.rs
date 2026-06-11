@@ -34,8 +34,11 @@ pub(super) struct PhysicsParams<'w, 's> {
 /// Render the physics tab content.
 pub(super) fn render_physics_tab(ui: &mut egui::Ui, params: &mut PhysicsParams) {
     let collider_count = params.lod_state.physics_collider_count();
+    let fallbacks = params.lod_state.octant_axis_fallbacks();
 
-    ui.label(format!("Colliders: {collider_count}"));
+    ui.label(format!(
+        "Colliders: {collider_count}   (octant-clip fallbacks: {fallbacks})"
+    ));
 
     // Terrain colliders near the camera (the floating origin, so the
     // camera sits at zero): the ground truth for "what am I standing on".

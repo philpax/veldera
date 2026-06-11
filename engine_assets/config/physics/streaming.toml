@@ -28,10 +28,16 @@ collider_skirt_depth = 5.0
 # Zero keeps skirts vertical.
 collider_skirt_slope = 2.0
 
-# Edge fusion: snap a freshly built collider's outer border vertices onto
-# any live neighbouring collider surface within this vertical range (m),
-# closing the step between adjacent tiles outright. Zero disables.
+# Edge fusion: snap a freshly built collider's outer border vertices to the
+# mean of the adjacent selected tiles' source-mesh surfaces within this
+# vertical range (m), closing the step between adjacent tiles outright.
+# Zero disables.
 edge_fusion_range = 4.0
+
+# Max time (s) a collider build waits for a lateral neighbour's source data
+# to stream in before building without it (it re-conforms when the data
+# lands). Zero disables the wait.
+fusion_defer_secs = 0.25
 
 # Max trimesh collider builds per frame (the expensive part of collider
 # streaming); bounds the frame cost during fast flight. Zero = uncapped.

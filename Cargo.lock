@@ -7281,6 +7281,7 @@ dependencies = [
  "tracing",
  "veldera_config",
  "veldera_geo",
+ "veldera_terrain_collider",
 ]
 
 [[package]]
@@ -7347,6 +7348,16 @@ dependencies = [
  "veldera_constants",
  "veldera_geo",
  "veldera_physics",
+]
+
+[[package]]
+name = "veldera_terrain_collider"
+version = "0.1.0"
+dependencies = [
+ "glam",
+ "proptest",
+ "rocktree",
+ "rocktree-decode",
 ]
 
 [[package]]

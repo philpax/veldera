@@ -1,0 +1,18 @@
+[package]
+name = "veldera_terrain_collider"
+version = "0.1.0"
+edition.workspace = true
+repository.workspace = true
+license.workspace = true
+description = "Pure terrain-collider geometry: octant-mask clipping, mesh-space border fusion, and boundary skirts over rocktree tile meshes"
+
+[dependencies]
+glam = { workspace = true }
+rocktree = { workspace = true }
+rocktree-decode = { workspace = true }
+
+[dev-dependencies]
+proptest = { workspace = true }
+
+[lints]
+workspace = true

@@ -20,6 +20,7 @@ veldera_engine = { path = "engine/engine" }
 veldera_geo = { path = "engine/geo" }
 veldera_input = { path = "engine/input" }
 veldera_physics = { path = "engine/physics" }
+veldera_terrain_collider = { path = "engine/terrain_collider" }
 veldera_sky = { path = "engine/sky" }
 veldera_terrain = { path = "engine/terrain" }
 # Extras.
