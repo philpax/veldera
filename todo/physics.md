@@ -13,11 +13,12 @@
 - node load failures are only logged and retried forever (bulks have
   `failed_bulks`, nodes have no equivalent); consider failure tracking with
   backoff if load spam ever shows up in the logs.
-- if apron skirts (collider_skirt_slope) aren't enough at tile borders, the
-  escalation is true runtime edge-merging: when building a collider, snap
-  its boundary vertices to the live neighbouring colliders' border edges
-  (and rebuild when a neighbour changes). Stateful and ordering-sensitive —
-  only worth it if ramps demonstrably fail.
+- edge fusion (564286c) snaps a fresh collider's rim onto live neighbours
+  (snap-to-elder, no rebuild cascades). Known gap: two neighbours built in
+  the same frame can't see each other (deferred commands) and keep their
+  seam until one rebuilds — the aprons cover it meanwhile. If that gap
+  shows up in practice, queue a one-shot resnap rebuild for rims built
+  blind.
 - if telemetry keeps showing all-four-wheel simultaneous load spikes while
   the Physics tab reads all-ok, the remaining culprit is temporal: a
   collider rebuild swapping the floor height under the car. Mitigation
