@@ -98,6 +98,10 @@ pub struct BuildStats {
 pub struct BuiltGeometry {
     pub vertices: Vec<Vec3>,
     pub triangles: Vec<[u32; 3]>,
+    /// Per-vertex outer-border flags (skirt vertices, appended after the
+    /// surface, are always `false`). Used by offline tooling to measure
+    /// rim agreement between adjacent builds.
+    pub border: Vec<bool>,
     pub stats: BuildStats,
 }
 
@@ -147,9 +151,12 @@ pub fn build_tile_geometry(
         settings.skirt_slope,
     );
 
+    let mut border = border;
+    border.resize(vertices.len(), false);
     Some(BuiltGeometry {
         vertices,
         triangles,
+        border,
         stats,
     })
 }
@@ -758,3 +765,5 @@ fn strip_to_triangles(strip: &[u16]) -> Vec<[u32; 3]> {
 
 #[cfg(test)]
 mod tests;
+
+pub mod dump;

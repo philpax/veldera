@@ -3073,6 +3073,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "fuse-lab"
+version = "0.1.0"
+dependencies = [
+ "glam",
+ "rocktree",
+ "serde_json",
+ "veldera_terrain_collider",
+]
+
+[[package]]
 name = "futures-channel"
 version = "0.3.31"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -7342,12 +7352,14 @@ dependencies = [
  "rocktree",
  "rocktree-decode",
  "serde",
+ "serde_json",
  "tracing",
  "veldera_async",
  "veldera_config",
  "veldera_constants",
  "veldera_geo",
  "veldera_physics",
+ "veldera_terrain_collider",
 ]
 
 [[package]]
@@ -7358,6 +7370,7 @@ dependencies = [
  "proptest",
  "rocktree",
  "rocktree-decode",
+ "serde",
 ]
 
 [[package]]

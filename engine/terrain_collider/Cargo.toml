@@ -10,6 +10,7 @@ description = "Pure terrain-collider geometry: octant-mask clipping, mesh-space 
 glam = { workspace = true }
 rocktree = { workspace = true }
 rocktree-decode = { workspace = true }
+serde = { workspace = true, features = ["derive"] }
 
 [dev-dependencies]
 proptest = { workspace = true }

@@ -170,6 +170,7 @@ impl Plugin for LodPlugin {
             .init_resource::<ColliderVizFilter>()
             .init_resource::<LodVizSettings>()
             .init_resource::<RenderMeshVizFilter>()
+            .init_resource::<TileDumpRequest>()
             .init_gizmo_group::<LodVizGizmos>()
             .add_systems(Startup, configure_lod_viz_gizmos)
             .add_systems(
@@ -181,6 +182,11 @@ impl Plugin for LodPlugin {
                 )
                     .after(update_physics_colliders),
             );
+        // The dump writer needs filesystem access; the request resource
+        // exists everywhere so the UI button stays wired on the web (where
+        // it is a no-op).
+        #[cfg(not(target_arch = "wasm32"))]
+        app.add_systems(Update, process_tile_dump_requests);
     }
 }
 
@@ -393,6 +399,90 @@ impl LodState {
     #[must_use]
     pub fn octant_axis_fallbacks(&self) -> usize {
         self.octant_axis_fallbacks
+    }
+
+    /// Capture the selected tiles within `radius` of `camera_pos` (plus
+    /// any lateral neighbours they fuse against) as a serializable dump,
+    /// for offline fusion experiments in `tools/fuse_lab`.
+    #[must_use]
+    pub fn capture_tile_dump(
+        &self,
+        streaming: &PhysicsStreamingConfig,
+        camera_pos: DVec3,
+        radius: f64,
+    ) -> veldera_terrain_collider::dump::TileSetDump {
+        use veldera_terrain_collider::dump::{DumpMesh, DumpSettings, DumpTile, TileSetDump};
+
+        let capture = |path: OctreePath, mask: u8| -> Option<DumpTile> {
+            let node_data = self.node_data.get(&path)?;
+            Some(DumpTile {
+                path: path.to_string(),
+                depth: path.depth(),
+                world_position: node_data.world_position.to_array(),
+                rotation: node_data.transform.rotation.to_array(),
+                scale: node_data.transform.scale.to_array(),
+                octant_mask: mask,
+                laterals: self
+                    .lateral_neighbour_paths(path)
+                    .iter()
+                    .map(OctreePath::to_string)
+                    .collect(),
+                meshes: node_data.meshes.iter().map(DumpMesh::from_mesh).collect(),
+            })
+        };
+
+        // The selected tiles in radius, then one ring of referenced
+        // laterals so every captured tile's adjacency is materialized.
+        let mut captured: HashSet<OctreePath> = HashSet::new();
+        let mut tiles = Vec::new();
+        for (path, mask) in &self.physics_target_paths {
+            let Some(node_data) = self.node_data.get(path) else {
+                continue;
+            };
+            if (node_data.world_position - camera_pos).length() > radius {
+                continue;
+            }
+            if let Some(tile) = capture(*path, *mask)
+                && captured.insert(*path)
+            {
+                tiles.push(tile);
+            }
+        }
+        let referenced: Vec<OctreePath> = tiles
+            .iter()
+            .flat_map(|t| {
+                // Resolve lateral display strings back through the live
+                // selection (string round-trips would need parsing).
+                self.physics_target_paths
+                    .keys()
+                    .filter(|p| t.laterals.contains(&p.to_string()))
+                    .copied()
+                    .collect::<Vec<_>>()
+            })
+            .collect();
+        for path in referenced {
+            if captured.contains(&path) {
+                continue;
+            }
+            let mask = self.physics_target_paths.get(&path).copied().unwrap_or(0);
+            if let Some(tile) = capture(path, mask)
+                && captured.insert(path)
+            {
+                tiles.push(tile);
+            }
+        }
+
+        TileSetDump {
+            camera_position: camera_pos.to_array(),
+            settings: DumpSettings {
+                min_triangle_height: streaming.min_collider_triangle_height as f32,
+                skirt_depth: streaming.collider_skirt_depth as f32,
+                skirt_slope: streaming.collider_skirt_slope as f32,
+                fusion_range: streaming.edge_fusion_range as f32,
+                wysiwyg_radius: streaming.wysiwyg_radius,
+            },
+            tiles,
+        }
     }
 
     /// The laterally adjacent selected tiles of `path`: selection entries
@@ -2138,6 +2228,60 @@ fn adjacency_fingerprint(
         }
     }
     hasher.finish()
+}
+
+// ============================================================================
+// Tile dumps
+// ============================================================================
+
+/// UI → streaming request: when `wanted` is set, the next frame captures
+/// the nearby selected tiles to `dumps/tiles-<unix-secs>.json` for offline
+/// fusion experiments (`tools/fuse_lab`). Native only; a no-op on wasm.
+#[derive(Resource, Default)]
+pub struct TileDumpRequest {
+    pub wanted: bool,
+}
+
+/// Capture and write a tile dump when requested.
+#[cfg(not(target_arch = "wasm32"))]
+fn process_tile_dump_requests(
+    mut request: ResMut<TileDumpRequest>,
+    lod_state: Res<LodState>,
+    streaming: Res<PhysicsStreamingConfig>,
+    viz_filter: Res<crate::viz::ColliderVizFilter>,
+    camera_query: Query<&FloatingOriginCamera>,
+) {
+    if !request.wanted {
+        return;
+    }
+    request.wanted = false;
+    let Ok(camera) = camera_query.single() else {
+        return;
+    };
+
+    // Capture what the user is inspecting: the collider-wireframe radius,
+    // with a floor so a tight wireframe view still grabs the neighbourhood.
+    let radius = f64::from(viz_filter.radius_m).max(50.0);
+    let dump = lod_state.capture_tile_dump(&streaming, camera.position, radius);
+
+    let path = format!(
+        "dumps/tiles-{}.json",
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(0, |d| d.as_secs())
+    );
+    let write = || -> std::io::Result<()> {
+        std::fs::create_dir_all("dumps")?;
+        let file = std::fs::File::create(&path)?;
+        serde_json::to_writer(std::io::BufWriter::new(file), &dump).map_err(std::io::Error::other)
+    };
+    match write() {
+        Ok(()) => tracing::info!(
+            "dumped {} tile(s) within {radius:.0} m to {path}",
+            dump.tiles.len()
+        ),
+        Err(e) => tracing::warn!("failed to write tile dump to {path}: {e}"),
+    }
 }
 
 // ============================================================================

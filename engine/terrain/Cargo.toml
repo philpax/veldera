@@ -17,6 +17,7 @@ bevy = { workspace = true, features = [
     "bevy_render",
 ] }
 glam = { workspace = true }
+serde_json = { workspace = true }
 serde = { workspace = true, features = ["derive"] }
 tracing = { workspace = true }
 rocktree = { workspace = true }
@@ -26,6 +27,7 @@ veldera_config = { workspace = true }
 veldera_constants = { workspace = true }
 veldera_geo = { workspace = true }
 veldera_physics = { workspace = true }
+veldera_terrain_collider = { workspace = true }
 
 [lints]
 workspace = true

@@ -1,0 +1,16 @@
+[package]
+name = "fuse-lab"
+version = "0.1.0"
+edition.workspace = true
+repository.workspace = true
+license.workspace = true
+description = "Offline workbench for terrain-collider border fusion: load an in-game tile dump, rebuild the colliders, and report per-border discrepancies"
+
+[dependencies]
+glam = { workspace = true }
+rocktree = { workspace = true }
+serde_json = { workspace = true }
+veldera_terrain_collider = { workspace = true }
+
+[lints]
+workspace = true

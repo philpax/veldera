@@ -9,7 +9,10 @@ use bevy_egui::egui;
 
 use rocktree_decode::OctreePath;
 use veldera_physics::{is_physics_debug_enabled, terrain::TerrainCollider, toggle_physics_debug};
-use veldera_terrain::{lod::LodState, viz::ColliderVizFilter};
+use veldera_terrain::{
+    lod::{LodState, TileDumpRequest},
+    viz::ColliderVizFilter,
+};
 
 /// Radius (m) for the nearby-collider diagnostics table.
 const NEARBY_RADIUS_M: f32 = 30.0;
@@ -29,6 +32,7 @@ pub(super) struct PhysicsParams<'w, 's> {
             Has<Collider>,
         ),
     >,
+    pub dump_request: ResMut<'w, TileDumpRequest>,
 }
 
 /// Render the physics tab content.
@@ -36,9 +40,22 @@ pub(super) fn render_physics_tab(ui: &mut egui::Ui, params: &mut PhysicsParams) 
     let collider_count = params.lod_state.physics_collider_count();
     let fallbacks = params.lod_state.octant_axis_fallbacks();
 
-    ui.label(format!(
-        "Colliders: {collider_count}   (octant-clip fallbacks: {fallbacks})"
-    ));
+    ui.horizontal(|ui| {
+        ui.label(format!(
+            "Colliders: {collider_count}   (octant-clip fallbacks: {fallbacks})"
+        ));
+        if ui
+            .button("Dump nearby tiles")
+            .on_hover_text(
+                "Capture the selected tiles within the wireframe radius to \
+                 dumps/tiles-<time>.json, for offline fusion experiments \
+                 with tools/fuse_lab. Native builds only.",
+            )
+            .clicked()
+        {
+            params.dump_request.wanted = true;
+        }
+    });
 
     // Terrain colliders near the camera (the floating origin, so the
     // camera sits at zero): the ground truth for "what am I standing on".
