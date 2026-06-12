@@ -48,6 +48,18 @@ collider_simplify_tolerance = 0.25
 # streaming); bounds the frame cost during fast flight. Zero = uncapped.
 max_collider_builds_per_frame = 4
 
+# Per-frame wall-clock budget (ms) for trimesh collider builds. Build cost
+# varies wildly with mesh density and fusion neighbour count, so the count
+# cap alone can't bound the frame cost; spent budget pushes the rest to the
+# next frame. At least one pending build always runs. Zero = count cap only.
+collider_build_budget_ms = 1.5
+
+# Camera speed (m/s) above which collider refinement rebuilds (rim
+# re-conform, mask refinement, progressive stale masking) pause; first
+# coverage and coverage-critical rebuilds always run. Deferred refinements
+# retry on a short timer and catch up when the camera slows. Zero disables.
+collider_refine_max_speed = 50.0
+
 # Seconds a newly selected collider path must stay selected before its
 # trimesh is built, so selections that flicker during fast movement never
 # pay a build. Regions with no live coverage bypass the gate. Zero disables.

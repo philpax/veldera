@@ -76,6 +76,7 @@ use veldera_physics::{
     GameLayer, MotionTracker, PhysicsState, PhysicsStreamingConfig, TerrainCollider,
     desired_physics_depth,
 };
+use web_time::Instant;
 
 /// Hot-reloadable LoD streaming parameters, loaded from
 /// `assets/config/engine/world/lod.toml`. Tune these to trade memory and CPU against
@@ -370,6 +371,19 @@ pub struct LodState {
     /// current collider target set, for the spawn-persistence gate.
     /// Entries are dropped the moment a path leaves the target set.
     collider_candidate_since: HashMap<OctreePath, f64>,
+    /// Refcounted strict prefixes of live collider paths, maintained
+    /// incrementally by [`Self::insert_live_collider`] /
+    /// [`Self::remove_live_collider`]. Powers O(1) "anything live below
+    /// this node?" checks during coverage recursion without rebuilding a
+    /// prefix set every frame (which dominated the reconcile cost at a few
+    /// hundred live colliders).
+    collider_prefix_refs: HashMap<OctreePath, u32>,
+    /// Monotonic counter bumped whenever any input of the collider
+    /// reconcile changes: the target selection, the cached node data, or
+    /// the live collider set. `update_physics_colliders` skips its scan
+    /// entirely while this (plus camera position) is unchanged, so a
+    /// converged scene costs nothing per frame.
+    collider_inputs_generation: u64,
 }
 
 impl LodState {
@@ -530,19 +544,60 @@ impl LodState {
             .filter_map(|p| self.node_obbs.get(p).map(|obb| (*p, *obb)))
     }
 
+    /// Commit a live collider, keeping the prefix refcounts and the inputs
+    /// generation in sync. Returns the previous entry for the path, whose
+    /// entity the caller must despawn.
+    fn insert_live_collider(
+        &mut self,
+        path: OctreePath,
+        live: LiveCollider,
+    ) -> Option<LiveCollider> {
+        self.collider_inputs_generation += 1;
+        let old = self.physics_colliders.insert(path, live);
+        if old.is_none() {
+            let mut current = path;
+            while let Some(parent) = current.parent() {
+                *self.collider_prefix_refs.entry(parent).or_insert(0) += 1;
+                current = parent;
+            }
+        }
+        old
+    }
+
+    /// Remove a live collider, keeping the prefix refcounts and the inputs
+    /// generation in sync. Returns the removed entry, whose entity the
+    /// caller must despawn.
+    fn remove_live_collider(&mut self, path: OctreePath) -> Option<LiveCollider> {
+        let old = self.physics_colliders.remove(&path)?;
+        self.collider_inputs_generation += 1;
+        let mut current = path;
+        while let Some(parent) = current.parent() {
+            match self.collider_prefix_refs.get_mut(&parent) {
+                Some(count) if *count > 1 => *count -= 1,
+                Some(_) => {
+                    self.collider_prefix_refs.remove(&parent);
+                }
+                None => {}
+            }
+            current = parent;
+        }
+        Some(old)
+    }
+
+    /// Whether any live collider exists at `path` or anywhere below it.
+    fn live_at_or_below(&self, path: OctreePath) -> bool {
+        self.physics_colliders.contains_key(&path) || self.collider_prefix_refs.contains_key(&path)
+    }
+
     /// Bitmask of `path`'s octants that have at least one live collider
     /// entity strictly below them.
     fn live_descendant_bits(&self, path: OctreePath) -> u8 {
-        let mut bits = 0u8;
-        for key in self.physics_colliders.keys() {
-            if key.depth() > path.depth()
-                && key.starts_with(path)
-                && let Some(octant) = key.octant_at(path.depth())
-            {
-                bits |= 1 << octant;
-            }
+        if path.depth() >= OctreePath::MAX_DEPTH {
+            return 0;
         }
-        bits
+        (0u8..8)
+            .filter(|&octant| self.live_at_or_below(path.push(octant)))
+            .fold(0, |bits, octant| bits | 1 << octant)
     }
 
     /// Whether `path`'s region already has live collider coverage: a live
@@ -560,38 +615,21 @@ impl LodState {
         self.live_descendant_bits(path) == 0xff
     }
 
-    /// Every strict prefix of a live collider path, for O(1) "anything live
-    /// below this node?" checks during coverage recursion.
-    fn live_collider_prefixes(&self) -> HashSet<OctreePath> {
-        let mut prefixes = HashSet::new();
-        for path in self.physics_colliders.keys() {
-            let mut current = *path;
-            while let Some(parent) = current.parent() {
-                if !prefixes.insert(parent) {
-                    break;
-                }
-                current = parent;
-            }
-        }
-        prefixes
-    }
-
     /// Whether `path`'s region is *fully* covered by live colliders at or
     /// below it: a live collider here covers its unmasked octants itself and
     /// defers its masked octants to the recursion; without one, all eight
-    /// children must be covered. `live_prefixes` (from
-    /// [`Self::live_collider_prefixes`]) prunes empty subtrees.
-    fn region_live_covered(&self, live_prefixes: &HashSet<OctreePath>, path: OctreePath) -> bool {
+    /// children must be covered. The maintained prefix refcounts prune
+    /// empty subtrees.
+    fn region_live_covered(&self, path: OctreePath) -> bool {
         if let Some(live) = self.physics_colliders.get(&path) {
             return (0u8..8).all(|octant| {
-                live.mask & (1 << octant) == 0
-                    || self.region_live_covered(live_prefixes, path.push(octant))
+                live.mask & (1 << octant) == 0 || self.region_live_covered(path.push(octant))
             });
         }
-        if path.depth() >= OctreePath::MAX_DEPTH || !live_prefixes.contains(&path) {
+        if path.depth() >= OctreePath::MAX_DEPTH || !self.collider_prefix_refs.contains_key(&path) {
             return false;
         }
-        (0u8..8).all(|octant| self.region_live_covered(live_prefixes, path.push(octant)))
+        (0u8..8).all(|octant| self.region_live_covered(path.push(octant)))
     }
 
     /// Whether a live strict ancestor's collider covers `path`'s region: the
@@ -614,12 +652,12 @@ impl LodState {
 
     /// Bitmask of `path`'s octants whose regions are fully covered by live
     /// colliders below them — the octants a collider build may safely drop.
-    fn covered_octant_bits(&self, live_prefixes: &HashSet<OctreePath>, path: OctreePath) -> u8 {
+    fn covered_octant_bits(&self, path: OctreePath) -> u8 {
         if path.depth() >= OctreePath::MAX_DEPTH {
             return 0;
         }
         (0u8..8)
-            .filter(|&octant| self.region_live_covered(live_prefixes, path.push(octant)))
+            .filter(|&octant| self.region_live_covered(path.push(octant)))
             .fold(0, |bits, octant| bits | 1 << octant)
     }
 }
@@ -1296,10 +1334,11 @@ fn unload_obsolete(
         .collect();
     for path in stale_node_data {
         lod_state.node_data.remove(&path);
+        lod_state.collider_inputs_generation += 1;
         // If a physics collider was using this node_data, remove the
         // collider entity too — it would point at no-longer-existent
         // mesh data otherwise.
-        if let Some(live) = lod_state.physics_colliders.remove(&path) {
+        if let Some(live) = lod_state.remove_live_collider(path) {
             commands.entity(live.entity).despawn();
         }
     }
@@ -1553,8 +1592,12 @@ fn update_lod_requests(
     }
 
     // Stash the latest physics collider selection for
-    // `update_physics_colliders`.
-    lod_state.physics_target_paths = collider_targets.clone();
+    // `update_physics_colliders`, bumping the reconcile generation only on
+    // a real change so a converged scene skips the reconcile entirely.
+    if lod_state.physics_target_paths != collider_targets {
+        lod_state.physics_target_paths = collider_targets.clone();
+        lod_state.collider_inputs_generation += 1;
+    }
 
     // Derive the retention sets: anything still inside the grace window.
     // Physics collider paths are also retained as defense in depth.
@@ -1747,7 +1790,8 @@ fn poll_lod_node_tasks(
                 let (world_position, transform) =
                     matrix_to_world_position_and_transform(&node.matrix_globe_from_mesh);
 
-                // Cache node data for physics collider creation.
+                // Cache node data for physics collider creation. New data
+                // changes fusion adjacency, so the reconcile must re-run.
                 lod_state.node_data.insert(
                     path,
                     LoadedNodeData {
@@ -1757,6 +1801,7 @@ fn poll_lod_node_tasks(
                         meters_per_texel: node.meters_per_texel,
                     },
                 );
+                lod_state.collider_inputs_generation += 1;
 
                 // Spawn mesh entities and track them for later despawning.
                 let entities = lod_state.node_entities.entry(path).or_default();
@@ -1901,19 +1946,33 @@ fn cull_meshes(
 /// - Despawns only happen once every overlapping target path is live with
 ///   its current mask.
 ///
-/// Build cost is throttled (see
-/// [`PhysicsStreamingConfig::max_collider_builds_per_frame`] and
-/// [`PhysicsStreamingConfig::collider_spawn_persistence_secs`]): builds are
-/// capped per frame, and newly selected paths whose region already has live
-/// coverage must stay selected for a dwell time before paying a trimesh
-/// build. The despawn rules above are what make deferring builds safe.
+/// Build cost is throttled three ways:
+/// - counted and wall-clock-budgeted per frame
+///   ([`PhysicsStreamingConfig::max_collider_builds_per_frame`],
+///   [`PhysicsStreamingConfig::collider_build_budget_ms`]), with newly
+///   selected paths over already-covered regions additionally waiting out a
+///   dwell ([`PhysicsStreamingConfig::collider_spawn_persistence_secs`]);
+/// - refinement rebuilds (rim re-conform, mask refinement, progressive
+///   stale masking) pause above
+///   [`PhysicsStreamingConfig::collider_refine_max_speed`] — at speed the
+///   selection churns faster than refinements can land, so only coverage
+///   work runs;
+/// - the whole reconcile early-outs while its inputs
+///   ([`LodState::collider_inputs_generation`]), the camera position, and
+///   any pending time-gated work are unchanged, so a converged scene pays
+///   nothing per frame.
+///
+/// The despawn rules above are what make all of this deferral safe.
+#[allow(clippy::too_many_arguments)]
 fn update_physics_colliders(
     mut commands: Commands,
     time: Res<Time>,
     mut lod_state: ResMut<LodState>,
     physics_state: Res<PhysicsState>,
     streaming: Res<PhysicsStreamingConfig>,
+    motion: Res<MotionTracker>,
     camera_query: Query<&FloatingOriginCamera>,
+    mut reconcile: Local<ColliderReconcileState>,
 ) {
     use veldera_physics::terrain::{TileMeshes, create_terrain_collider};
 
@@ -1929,8 +1988,47 @@ fn update_physics_colliders(
     let camera_pos = physics_state
         .origin_camera_position()
         .unwrap_or(camera.position);
-    let target_paths = lod_state.physics_target_paths.clone();
     let now = time.elapsed_secs_f64();
+
+    // Camera speed for the refinement gate, from the same smoothed tracker
+    // that drives the streaming lead vector.
+    let speed = motion.smoothed_velocity().length();
+
+    // Early-out: with unchanged inputs, an (almost) unmoved camera, and no
+    // time-gated work waiting, the previous reconcile's conclusions still
+    // hold. The generation stored below is the one read *before* the
+    // reconcile, so any mutation the reconcile itself makes forces another
+    // pass next frame until the state is a true fixpoint.
+    let generation = lod_state.collider_inputs_generation;
+    let moved = reconcile
+        .last_camera_position
+        .map_or(f64::INFINITY, |p| (camera_pos - p).length());
+    let retry_due = reconcile.retry_at.is_some_and(|t| now >= t);
+    if reconcile.last_generation == Some(generation)
+        && moved < COLLIDER_RECONCILE_MOVE_M
+        && !retry_due
+    {
+        return;
+    }
+    reconcile.last_generation = Some(generation);
+    reconcile.last_camera_position = Some(camera_pos);
+    reconcile.retry_at = None;
+    // Set when work is skipped on a timer (dwell, fusion deferral, build
+    // budget, speed gate): schedules a retry so deferred work can't stall
+    // behind the early-out.
+    let mut deferred_work = false;
+
+    // Above the refinement speed threshold, only coverage work runs; see
+    // the config field docs.
+    let refine_allowed =
+        streaming.collider_refine_max_speed <= 0.0 || speed <= streaming.collider_refine_max_speed;
+
+    let target_paths = lod_state.physics_target_paths.clone();
+
+    // Frame-local cache of lateral-neighbour sets and their adjacency
+    // fingerprints: computing one is an O(selection) scan, and both the
+    // pending filter and the build loop need them.
+    let mut adjacency_cache: HashMap<OctreePath, (Vec<OctreePath>, u64)> = HashMap::new();
 
     // Track when each path entered the target set; the timestamp resets the
     // moment a path drops out, so re-selections start a fresh wait.
@@ -1950,30 +2048,41 @@ fn update_physics_colliders(
     // must re-conform). Deepest first, so children are live before any
     // parent rebuild masks their octants out; nearest first within a depth
     // so the ground under the player wins the build budget.
-    let mut pending: Vec<(OctreePath, u8, f64)> = target_paths
-        .iter()
-        .filter_map(|(path, mask)| {
-            // BFS-selected paths whose data hasn't fully loaded yet are
-            // skipped; we'll catch them in a later frame.
-            let node_data = lod_state.node_data.get(path)?;
-            let distance = (node_data.world_position - camera_pos).length();
-            Some((*path, *mask, distance))
-        })
-        .filter(
-            |(path, mask, distance)| match lod_state.physics_colliders.get(path) {
-                None => true,
-                Some(live) => {
+    let mut pending: Vec<(OctreePath, u8, f64)> = Vec::new();
+    for (path, mask) in &target_paths {
+        // BFS-selected paths whose data hasn't fully loaded yet are
+        // skipped; the data landing bumps the inputs generation.
+        let Some(node_data) = lod_state.node_data.get(path) else {
+            continue;
+        };
+        let distance = (node_data.world_position - camera_pos).length();
+        let wanted = match lod_state.physics_colliders.get(path) {
+            None => true,
+            Some(live) => {
+                // A live build whose mask drops octants the selection now
+                // wants from it is coverage-critical (the finer coverage
+                // that justified those mask bits is going away): never
+                // speed-gated. Everything else on a live entity is
+                // refinement.
+                if live.mask & !*mask != 0 {
+                    true
+                } else if !refine_allowed {
+                    deferred_work = true;
+                    false
+                } else {
                     live.mask != *mask
-                        || (*distance <= streaming.wysiwyg_radius
-                            && live.adjacency
-                                != adjacency_fingerprint(
-                                    &lod_state.lateral_neighbour_paths(*path),
-                                    &lod_state.node_data,
-                                ))
+                        || (distance <= streaming.wysiwyg_radius && {
+                            let (_, fingerprint) =
+                                cached_adjacency(&mut adjacency_cache, &lod_state, *path);
+                            live.adjacency != fingerprint
+                        })
                 }
-            },
-        )
-        .collect();
+            }
+        };
+        if wanted {
+            pending.push((*path, *mask, distance));
+        }
+    }
 
     // Stale colliders (live but no longer selected) are progressively
     // masked out of the octants whose replacements have gone live, instead
@@ -1981,20 +2090,29 @@ fn update_physics_colliders(
     // kilometres-wide stale ancestor would otherwise overlap the already
     // replaced fine terrain under the player for as long as any one of its
     // far-away replacements was still loading — a walkable, drivable step
-    // wherever the two reconstructions disagree.
-    pending.extend(
-        lod_state
-            .physics_colliders
-            .iter()
-            .filter(|(path, _)| !target_paths.contains_key(*path))
-            .filter_map(|(path, _)| {
-                let node_data = lod_state.node_data.get(path)?;
-                let distance = (node_data.world_position - camera_pos).length();
-                // Request everything droppable; the build loop intersects
-                // with the live coverage.
-                Some((*path, 0xffu8, distance))
-            }),
-    );
+    // wherever the two reconstructions disagree. Pure refinement: a whole
+    // stale collider is over-coverage, so the speed gate may defer it.
+    if refine_allowed {
+        pending.extend(
+            lod_state
+                .physics_colliders
+                .iter()
+                .filter(|(path, _)| !target_paths.contains_key(*path))
+                .filter_map(|(path, _)| {
+                    let node_data = lod_state.node_data.get(path)?;
+                    let distance = (node_data.world_position - camera_pos).length();
+                    // Request everything droppable; the build loop
+                    // intersects with the live coverage.
+                    Some((*path, 0xffu8, distance))
+                }),
+        );
+    } else if lod_state
+        .physics_colliders
+        .keys()
+        .any(|path| !target_paths.contains_key(path))
+    {
+        deferred_work = true;
+    }
 
     pending.sort_by(|a, b| {
         std::cmp::Reverse(a.0.depth())
@@ -2003,18 +2121,24 @@ fn update_physics_colliders(
     });
 
     // Trimesh construction is the expensive part of collider streaming;
-    // capping builds per frame bounds the frame cost during fast flight
-    // when the band boundaries sweep the world.
+    // the count cap and the wall-clock budget together bound the frame
+    // cost during fast flight when the band boundaries sweep the world.
     let max_builds = match streaming.max_collider_builds_per_frame {
         0 => usize::MAX,
         n => n,
     };
+    let build_budget_secs = streaming.collider_build_budget_ms.max(0.0) / 1000.0;
+    let build_timer = Instant::now();
     let mut builds = 0usize;
     let mut fallbacks = 0usize;
-    let mut live_prefixes = lod_state.live_collider_prefixes();
 
     for (path, requested_mask, distance) in pending {
-        if builds >= max_builds {
+        if builds >= max_builds
+            || (build_budget_secs > 0.0
+                && builds > 0
+                && build_timer.elapsed().as_secs_f64() >= build_budget_secs)
+        {
+            deferred_work = true;
             break;
         }
 
@@ -2036,6 +2160,7 @@ fn update_physics_colliders(
                 .unwrap_or(now);
             let waited = now - since >= streaming.collider_spawn_persistence_secs;
             if !waited && lod_state.collider_region_covered(path) {
+                deferred_work = true;
                 continue;
             }
         }
@@ -2044,7 +2169,7 @@ fn update_physics_colliders(
         // against their *source meshes*, so the fused border is a pure
         // function of immutable data plus the selection — both sides of a
         // border compute the same curve in any build order.
-        let laterals = lod_state.lateral_neighbour_paths(path);
+        let (laterals, adjacency) = cached_adjacency(&mut adjacency_cache, &lod_state, path);
 
         // Deferral: a selected lateral whose data is still streaming will
         // change this rim's fusion when it lands, so give it a moment
@@ -2061,10 +2186,10 @@ fn update_physics_colliders(
                 .unwrap_or(now);
             if now - since < streaming.fusion_defer_secs && lod_state.collider_region_covered(path)
             {
+                deferred_work = true;
                 continue;
             }
         }
-        let adjacency = adjacency_fingerprint(&laterals, &lod_state.node_data);
 
         let Some(node_data) = lod_state.node_data.get(&path) else {
             continue;
@@ -2075,7 +2200,7 @@ fn update_physics_colliders(
         // only partially covers its octant must not leave a hole. Extra
         // coverage from an unmasked octant overlaps the late replacement
         // briefly — jitter, not a fall.
-        let mask = requested_mask & lod_state.covered_octant_bits(&live_prefixes, path);
+        let mask = requested_mask & lod_state.covered_octant_bits(path);
 
         match lod_state.physics_colliders.get(&path) {
             Some(live) if live.mask == mask && live.adjacency == adjacency => continue,
@@ -2176,7 +2301,7 @@ fn update_physics_colliders(
 
         // Replace any previous entity for this path (mask rebuild) in the
         // same frame, so the swap is atomic from physics's point of view.
-        if let Some(old) = lod_state.physics_colliders.insert(
+        if let Some(old) = lod_state.insert_live_collider(
             path,
             LiveCollider {
                 entity,
@@ -2186,7 +2311,6 @@ fn update_physics_colliders(
         ) {
             commands.entity(old.entity).despawn();
         }
-        live_prefixes = lod_state.live_collider_prefixes();
         tracing::debug!(
             "Created physics collider for node '{}' (depth {}, mask {:#04x})",
             path,
@@ -2212,17 +2336,64 @@ fn update_physics_colliders(
     lod_state.octant_axis_fallbacks += fallbacks;
 
     for path in obsolete {
-        let fully_replaced = lod_state.ancestor_collider_covers(path)
-            || lod_state.covered_octant_bits(&live_prefixes, path) == 0xff;
+        let fully_replaced =
+            lod_state.ancestor_collider_covers(path) || lod_state.covered_octant_bits(path) == 0xff;
         if !fully_replaced {
             continue;
         }
-        if let Some(live) = lod_state.physics_colliders.remove(&path) {
+        if let Some(live) = lod_state.remove_live_collider(path) {
             commands.entity(live.entity).despawn();
-            live_prefixes = lod_state.live_collider_prefixes();
             tracing::debug!("Removed physics collider for node '{}'", path);
         }
     }
+
+    if deferred_work {
+        reconcile.retry_at = Some(now + COLLIDER_RETRY_SECS);
+    }
+}
+
+/// Cross-frame state for the collider-reconcile early-out (see
+/// [`update_physics_colliders`]).
+#[derive(Default)]
+struct ColliderReconcileState {
+    /// [`LodState::collider_inputs_generation`] as read at the start of the
+    /// last reconcile. Storing the pre-reconcile value means any mutation
+    /// the reconcile makes forces another pass, until a pass changes
+    /// nothing and the state is a true fixpoint.
+    last_generation: Option<u64>,
+    /// Camera position at the last reconcile.
+    last_camera_position: Option<DVec3>,
+    /// Elapsed-seconds deadline for re-running while time-gated work
+    /// (dwell, fusion deferral, build budget, speed gate) is pending.
+    retry_at: Option<f64>,
+}
+
+/// Camera movement (m) since the last reconcile that forces a re-run even
+/// with unchanged inputs: the reconcile's distance gates (the WYSIWYG
+/// radius, the dwell exemption) depend on camera position. Small enough
+/// that those boundaries stay honest, large enough that walking pace
+/// reconciles a few times per second instead of every frame.
+const COLLIDER_RECONCILE_MOVE_M: f64 = 2.0;
+
+/// Retry cadence (s) while time-gated collider work is pending — an order
+/// of magnitude finer than the gates it re-checks (dwell, fusion deferral).
+const COLLIDER_RETRY_SECS: f64 = 0.1;
+
+/// Look up (or compute and cache) a path's lateral-neighbour set and its
+/// adjacency fingerprint. An O(selection) scan per miss, so the reconcile
+/// caches per frame; values are returned owned because callers go on to
+/// borrow `lod_state` mutably.
+fn cached_adjacency(
+    cache: &mut HashMap<OctreePath, (Vec<OctreePath>, u64)>,
+    lod_state: &LodState,
+    path: OctreePath,
+) -> (Vec<OctreePath>, u64) {
+    let (laterals, fingerprint) = cache.entry(path).or_insert_with(|| {
+        let laterals = lod_state.lateral_neighbour_paths(path);
+        let fingerprint = adjacency_fingerprint(&laterals, &lod_state.node_data);
+        (laterals, fingerprint)
+    });
+    (laterals.clone(), *fingerprint)
 }
 
 /// Fingerprint of the lateral-neighbour set a rim is fused against: the

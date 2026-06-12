@@ -155,6 +155,21 @@ pub struct PhysicsStreamingConfig {
     /// Pending builds queue deepest-first, then nearest-first. Zero means
     /// uncapped.
     pub max_collider_builds_per_frame: usize,
+    /// Per-frame wall-clock budget (ms) for trimesh collider builds. Build
+    /// cost varies wildly with mesh density and fusion neighbour count, so
+    /// a count cap alone can't bound the frame cost; once the budget is
+    /// spent, remaining builds wait for the next frame. At least one build
+    /// always runs when work is pending, so the budget never stalls
+    /// coverage. Zero disables (count cap only).
+    pub collider_build_budget_ms: f64,
+    /// Camera speed (m/s) above which collider *refinement* rebuilds pause:
+    /// rim re-conform after adjacency changes, octant-mask refinements, and
+    /// progressive masking of stale colliders. First coverage of bare
+    /// regions, and rebuilds that re-expose octants whose finer coverage
+    /// was evicted, always run. Refinements deferred this way retry on a
+    /// short timer, so they catch up the moment the camera slows. Zero
+    /// disables the gate.
+    pub collider_refine_max_speed: f64,
     /// Seconds a newly selected collider path must stay selected before its
     /// trimesh is built. Selections that flicker during fast movement then
     /// never pay a build at all. Regions with no live collider coverage
@@ -325,9 +340,8 @@ pub struct MotionTracker {
 }
 
 impl MotionTracker {
-    /// EWMA-smoothed camera velocity (m/s, ECEF). Exposed for the
-    /// streaming diagnostics UI.
-    #[allow(dead_code)]
+    /// EWMA-smoothed camera velocity (m/s, ECEF). Drives the collider
+    /// refinement speed gate and the streaming diagnostics UI.
     pub fn smoothed_velocity(&self) -> DVec3 {
         self.smoothed_velocity
     }
