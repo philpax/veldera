@@ -10,6 +10,7 @@ const RAW: BuildSettings = BuildSettings {
     skirt_depth: 0.0,
     skirt_slope: 0.0,
     fusion_range: 0.0,
+    simplify_tolerance: 0.0,
 };
 
 /// Build a minimal mesh with the given vertex positions and strip indices.
@@ -74,7 +75,7 @@ fn flat_quad() -> RocktreeMesh {
 
 fn merge_raw(tile_meshes: &TileMeshes, octant_mask: u8) -> (Vec<Vec3>, Vec<[u32; 3]>, Vec<bool>) {
     let mut stats = BuildStats::default();
-    merge_meshes(tile_meshes, 0.0, octant_mask, Vec3::NEG_Z, &mut stats)
+    merge_meshes(tile_meshes, 0.0, 0.0, octant_mask, Vec3::NEG_Z, &mut stats)
 }
 
 // ============================================================================
@@ -107,7 +108,7 @@ fn merge_applies_rotation_scale_and_offset() {
     };
 
     let mut stats = BuildStats::default();
-    let (vertices, _, _) = merge_meshes(&t, 0.0, 0, Vec3::NEG_Z, &mut stats);
+    let (vertices, _, _) = merge_meshes(&t, 0.0, 0.0, 0, Vec3::NEG_Z, &mut stats);
     assert_eq!(vertices, vec![Vec3::new(12.0, 4.0, 6.0)]);
 }
 
@@ -137,6 +138,7 @@ fn build_is_deterministic() {
         skirt_depth: 2.0,
         skirt_slope: 2.0,
         fusion_range: 4.0,
+        simplify_tolerance: 0.0,
     };
     let a = build_tile_geometry(&tile(&meshes), 0, &neighbours, Vec3::NEG_Z, &settings).unwrap();
     let b = build_tile_geometry(&tile(&meshes), 0, &neighbours, Vec3::NEG_Z, &settings).unwrap();
@@ -196,7 +198,7 @@ fn octant_mask_fallback_drops_tagged_triangles() {
 
     let mut stats = BuildStats::default();
     let (vertices, triangles, _) =
-        merge_meshes(&tile(&meshes), 0.0, 1 << 3, Vec3::NEG_Z, &mut stats);
+        merge_meshes(&tile(&meshes), 0.0, 0.0, 1 << 3, Vec3::NEG_Z, &mut stats);
     assert_eq!(triangles, vec![[3, 5, 4]]);
     assert_eq!(stats.octant_axis_fallbacks, 1, "fallback must be counted");
     // Vertex positions are never deformed.
@@ -224,7 +226,7 @@ fn octant_mask_clips_boundary_triangles() {
 
     let mut stats = BuildStats::default();
     let (vertices, triangles, _) =
-        merge_meshes(&tile(&meshes), 0.0, 1 << 1, Vec3::NEG_Z, &mut stats);
+        merge_meshes(&tile(&meshes), 0.0, 0.0, 1 << 1, Vec3::NEG_Z, &mut stats);
     assert_eq!(stats.octant_axis_fallbacks, 0);
     assert!(!triangles.is_empty(), "the unmasked half must survive");
     let mut area = 0.0f32;
@@ -513,7 +515,7 @@ fn merge_drops_slivers() {
     ];
 
     let mut stats = BuildStats::default();
-    let (_, triangles, _) = merge_meshes(&tile(&meshes), 0.01, 0, Vec3::NEG_Z, &mut stats);
+    let (_, triangles, _) = merge_meshes(&tile(&meshes), 0.01, 0.0, 0, Vec3::NEG_Z, &mut stats);
 
     // Only the healthy quad's two triangles survive.
     assert_eq!(triangles, vec![[0, 1, 2], [1, 3, 2]]);
@@ -601,4 +603,56 @@ proptest! {
         let split_total = area(&below) + area(&above);
         prop_assert!((split_total - original).abs() <= original.max(1.0) * 1e-3);
     }
+}
+
+// ============================================================================
+// Simplification
+// ============================================================================
+
+#[test]
+fn simplification_clusters_dense_vertices() {
+    // A dense strip along x at unit spacing: with a 5-unit tolerance (scale
+    // 1 → 5 lattice units per cell), runs of vertices merge, triangles that
+    // collapse vanish, and survivors stay within half a cell of the
+    // originals.
+    let positions: Vec<(u8, u8, u8)> = (0..40u8)
+        .map(|i| (i * 2, if i % 2 == 0 { 0 } else { 100 }, 0))
+        .collect();
+    let indices: Vec<u16> = (0..40u16).collect();
+    let mesh = test_mesh(&positions, indices);
+
+    let (raw_locals, _, raw_tris) = cluster_mesh_vertices(&mesh, Vec3::ONE, 0.0);
+    let (locals, _, tris) = cluster_mesh_vertices(&mesh, Vec3::ONE, 5.0);
+    assert!(
+        locals.len() < raw_locals.len(),
+        "clustering should reduce vertices: {} -> {}",
+        raw_locals.len(),
+        locals.len()
+    );
+    assert!(
+        tris.len() < raw_tris.len(),
+        "collapsed triangles should drop: {} -> {}",
+        raw_tris.len(),
+        tris.len()
+    );
+    for &[a, b, c] in &tris {
+        assert!(a != b && b != c && a != c, "no degenerate triangles");
+    }
+    // Every clustered vertex lies within a cell of some original.
+    for p in &locals {
+        let nearest = raw_locals
+            .iter()
+            .map(|r| (*r - *p).length())
+            .fold(f32::INFINITY, f32::min);
+        assert!(nearest <= 5.0, "cluster representative strayed: {nearest}");
+    }
+}
+
+#[test]
+fn simplification_disabled_by_zero_tolerance() {
+    let mesh = flat_quad();
+    let (locals, tags, tris) = cluster_mesh_vertices(&mesh, Vec3::ONE, 0.0);
+    assert_eq!(locals.len(), 4);
+    assert_eq!(tags.len(), 4);
+    assert_eq!(tris.len(), 2);
 }

@@ -143,6 +143,12 @@ pub struct PhysicsStreamingConfig {
     /// only trades a little latency against rebuild churn on streaming
     /// fronts. Zero disables the wait.
     pub fusion_defer_secs: f64,
+    /// Vertex-clustering collider simplification tolerance (m): vertices
+    /// within the same tolerance-sized cell merge before clipping and
+    /// fusion, bounding the surface deviation to roughly half this value
+    /// while culling photogrammetry density collision doesn't need. Zero
+    /// disables.
+    pub collider_simplify_tolerance: f64,
     /// Maximum trimesh collider builds per frame. Building a trimesh is the
     /// expensive part of collider streaming; capping it bounds the frame
     /// cost during fast flight when the band boundaries sweep the world.

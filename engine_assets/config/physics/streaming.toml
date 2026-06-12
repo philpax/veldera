@@ -39,6 +39,11 @@ edge_fusion_range = 4.0
 # lands). Zero disables the wait.
 fusion_defer_secs = 0.25
 
+# Collider simplification: vertices within the same tolerance-sized cell (m)
+# merge before clipping and fusion, bounding surface deviation to roughly
+# half this while culling density collision doesn't need. Zero disables.
+collider_simplify_tolerance = 0.25
+
 # Max trimesh collider builds per frame (the expensive part of collider
 # streaming); bounds the frame cost during fast flight. Zero = uncapped.
 max_collider_builds_per_frame = 4

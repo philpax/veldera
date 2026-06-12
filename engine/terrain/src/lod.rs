@@ -479,6 +479,7 @@ impl LodState {
                 skirt_depth: streaming.collider_skirt_depth as f32,
                 skirt_slope: streaming.collider_skirt_slope as f32,
                 fusion_range: streaming.edge_fusion_range as f32,
+                simplify_tolerance: streaming.collider_simplify_tolerance as f32,
                 wysiwyg_radius: streaming.wysiwyg_radius,
             },
             tiles,
@@ -2125,6 +2126,7 @@ fn update_physics_colliders(
                 skirt_depth: streaming.collider_skirt_depth as f32,
                 skirt_slope: streaming.collider_skirt_slope as f32,
                 fusion_range: streaming.edge_fusion_range as f32,
+                simplify_tolerance: streaming.collider_simplify_tolerance as f32,
             },
         );
         fallbacks += stats.octant_axis_fallbacks;

@@ -91,6 +91,12 @@ pub struct BuildSettings {
     /// surface sample participates in the rim average. Zero disables
     /// fusion.
     pub fusion_range: f32,
+    /// Vertex-clustering simplification tolerance (m): vertices within the
+    /// same tolerance-sized cell merge to their mean before clipping and
+    /// fusion, bounding the surface deviation to roughly half this value
+    /// while culling photogrammetry density that collision doesn't need.
+    /// Zero disables.
+    pub simplify_tolerance: f32,
 }
 
 /// Counters describing one build, for streaming diagnostics.
@@ -137,6 +143,7 @@ pub fn build_tile_geometry(
     let (mut vertices, mut triangles, border) = merge_meshes(
         tile,
         settings.min_triangle_height,
+        settings.simplify_tolerance,
         octant_mask,
         down,
         &mut stats,
@@ -205,6 +212,7 @@ pub fn build_tile_geometry(
 fn merge_meshes(
     tile: &TileMeshes,
     min_triangle_height: f32,
+    simplify_tolerance: f32,
     octant_mask: u8,
     down: Vec3,
     stats: &mut BuildStats,
@@ -221,14 +229,21 @@ fn merge_meshes(
         .max_by(|&i, &j| local_down[i].abs().total_cmp(&local_down[j].abs()))
         .expect("three axes");
 
+    // Decode (and optionally decimate) every mesh up front, so the border
+    // extremes below see the geometry the build will actually use.
+    let prepared: Vec<PreparedMesh> = tile
+        .meshes
+        .iter()
+        .map(|mesh| cluster_mesh_vertices(mesh, tile.scale, simplify_tolerance))
+        .collect();
+
     // The tile's own horizontal extremes across all of its meshes: the rim
     // is wherever the geometry ends, not at the lattice box (real tiles
     // are inset).
     let mut lo = Vec3::splat(f32::INFINITY);
     let mut hi = Vec3::splat(f32::NEG_INFINITY);
-    for mesh in tile.meshes {
-        for v in &mesh.vertices {
-            let p = Vec3::new(f32::from(v.x), f32::from(v.y), f32::from(v.z));
+    for (locals, _, _) in &prepared {
+        for &p in locals {
             lo = lo.min(p);
             hi = hi.max(p);
         }
@@ -242,7 +257,7 @@ fn merge_meshes(
         })
     };
 
-    for mesh in tile.meshes {
+    for (mesh, (locals, tags, tris)) in tile.meshes.iter().zip(&prepared) {
         let base = vertices.len() as u32;
         let apply_octant_mask = octant_mask != 0 && mesh.has_octant_data;
         let axes = if apply_octant_mask {
@@ -255,12 +270,6 @@ fn merge_meshes(
             None
         };
 
-        // Mesh vertices are in the 0-255 range.
-        let locals: Vec<Vec3> = mesh
-            .vertices
-            .iter()
-            .map(|v| Vec3::new(f32::from(v.x), f32::from(v.y), f32::from(v.z)))
-            .collect();
         vertices.extend(locals.iter().map(|&p| tile.to_baked(p)));
         border.extend(locals.iter().map(|&p| is_border_local(p)));
 
@@ -276,7 +285,7 @@ fn merge_meshes(
                 }
             };
 
-        for [a, b, c] in strip_to_triangles(&mesh.indices) {
+        for &[a, b, c] in tris {
             let tri = [a + base, b + base, c + base];
             if !apply_octant_mask {
                 push_triangle(&mut vertices, &mut triangles, tri);
@@ -316,10 +325,7 @@ fn merge_meshes(
                 None => {
                     // No confident bit-to-axis mapping: drop anything whose
                     // tags touch a masked octant (safe, slightly lossy).
-                    let tag_masked = |i: u32| {
-                        let octant = mesh.vertices[i as usize].w & 7;
-                        octant_mask & (1 << octant) != 0
-                    };
+                    let tag_masked = |i: u32| octant_mask & (1 << (tags[i as usize] & 7)) != 0;
                     if !(tag_masked(a) || tag_masked(b) || tag_masked(c)) {
                         push_triangle(&mut vertices, &mut triangles, tri);
                     }
@@ -329,6 +335,71 @@ fn merge_meshes(
     }
 
     (vertices, triangles, border)
+}
+
+/// A decoded (and possibly decimated) mesh: local positions, per-vertex
+/// octant tags, and a triangle list.
+type PreparedMesh = (Vec<Vec3>, Vec<u8>, Vec<[u32; 3]>);
+
+/// Decode a mesh's vertices into local positions, octant tags, and a
+/// triangle list, optionally decimated by vertex clustering: with a
+/// positive `tolerance` (m), vertices within the same tolerance-sized cell
+/// (in tile scale) merge to their mean, and triangles that collapse onto a
+/// shared cluster are dropped. Bounds the surface deviation to roughly half
+/// the tolerance while culling photogrammetry density that collision
+/// doesn't need.
+fn cluster_mesh_vertices(mesh: &RocktreeMesh, scale: Vec3, tolerance: f32) -> PreparedMesh {
+    let locals: Vec<Vec3> = mesh
+        .vertices
+        .iter()
+        .map(|v| Vec3::new(f32::from(v.x), f32::from(v.y), f32::from(v.z)))
+        .collect();
+    let tags: Vec<u8> = mesh.vertices.iter().map(|v| v.w).collect();
+    let triangles = strip_to_triangles(&mesh.indices);
+    if tolerance <= 0.0 {
+        return (locals, tags, triangles);
+    }
+
+    // Cell extents in lattice units, per axis (tile scales are per-axis).
+    let cell = Vec3::new(
+        tolerance / scale.x.max(1e-6),
+        tolerance / scale.y.max(1e-6),
+        tolerance / scale.z.max(1e-6),
+    );
+
+    let mut cluster_ids: HashMap<(i32, i32, i32), u32> = HashMap::new();
+    let mut remap: Vec<u32> = Vec::with_capacity(locals.len());
+    let mut sums: Vec<Vec3> = Vec::new();
+    let mut counts: Vec<u32> = Vec::new();
+    let mut cluster_tags: Vec<u8> = Vec::new();
+    for (&p, &tag) in locals.iter().zip(&tags) {
+        let key = (
+            (p.x / cell.x).floor() as i32,
+            (p.y / cell.y).floor() as i32,
+            (p.z / cell.z).floor() as i32,
+        );
+        let id = *cluster_ids.entry(key).or_insert_with(|| {
+            sums.push(Vec3::ZERO);
+            counts.push(0);
+            cluster_tags.push(tag);
+            (sums.len() - 1) as u32
+        });
+        sums[id as usize] += p;
+        counts[id as usize] += 1;
+        remap.push(id);
+    }
+
+    let clustered: Vec<Vec3> = sums
+        .iter()
+        .zip(&counts)
+        .map(|(sum, &count)| *sum / count as f32)
+        .collect();
+    let triangles: Vec<[u32; 3]> = triangles
+        .into_iter()
+        .map(|[a, b, c]| [remap[a as usize], remap[b as usize], remap[c as usize]])
+        .filter(|&[a, b, c]| a != b && b != c && a != c)
+        .collect();
+    (clustered, cluster_tags, triangles)
 }
 
 // ============================================================================

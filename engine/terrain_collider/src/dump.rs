@@ -124,6 +124,9 @@ pub struct DumpSettings {
     pub skirt_depth: f32,
     pub skirt_slope: f32,
     pub fusion_range: f32,
+    /// Defaulted when loading dumps captured before simplification existed.
+    #[serde(default)]
+    pub simplify_tolerance: f32,
     pub wysiwyg_radius: f64,
 }
 
@@ -135,6 +138,7 @@ impl DumpSettings {
             skirt_depth: self.skirt_depth,
             skirt_slope: self.skirt_slope,
             fusion_range: self.fusion_range,
+            simplify_tolerance: self.simplify_tolerance,
         }
     }
 }
