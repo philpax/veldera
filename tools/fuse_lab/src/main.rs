@@ -17,9 +17,18 @@
 //! `--border <a> <b>` prints a per-station table for one border: how far
 //! each side's rim moved under fusion, and the residual disagreement —
 //! separating "fusion never fired" from "both sides fused toward different
-//! targets".
+//! targets". `--depth-divergence` measures, for each ancestor/descendant
+//! tile pair in the dump, how far the coarse surface sits from the fine
+//! one vertically (both built raw: no masks, no fusion, no skirts) — the
+//! cost, in metres of collider-vs-display error, of running physics at a
+//! coarser LoD than the render.
 
-use std::{collections::HashMap, error::Error, io::Write, path::Path};
+use std::{
+    collections::{BTreeMap, HashMap},
+    error::Error,
+    io::Write,
+    path::Path,
+};
 
 use glam::Vec3;
 use rocktree::Mesh as RocktreeMesh;
@@ -43,6 +52,7 @@ fn main() -> Result<(), Box<dyn Error>> {
     let mut fusion_override: Option<f32> = None;
     let mut obj_dir: Option<String> = None;
     let mut border_pair: Option<(String, String)> = None;
+    let mut depth_divergence = false;
     let mut i = 1;
     while i < args.len() {
         match args[i].as_str() {
@@ -64,6 +74,10 @@ fn main() -> Result<(), Box<dyn Error>> {
                     args.get(i + 2).ok_or("--border needs two paths")?.clone(),
                 ));
                 i += 3;
+            }
+            "--depth-divergence" => {
+                depth_divergence = true;
+                i += 1;
             }
             other if dump_path.is_none() => {
                 dump_path = Some(other.to_string());
@@ -177,6 +191,10 @@ fn main() -> Result<(), Box<dyn Error>> {
         println!("  (no adjacent pairs captured)");
     }
 
+    if depth_divergence {
+        report_depth_divergence(&dump, &meshes, &settings);
+    }
+
     if let Some((a, b)) = &border_pair {
         let (a, b) = (a.as_str(), b.as_str());
         match (built.get(a), built.get(b), tiles.get(a), tiles.get(b)) {
@@ -238,6 +256,88 @@ fn border_disagreement(
         max_dh = Some(max_dh.map_or(dh, |m| m.max(dh)));
     }
     max_dh.map(|m| (m, stations))
+}
+
+/// Measure how far each coarse tile's surface sits, vertically, from the
+/// surfaces of the finer tiles inside it: every descendant tile's vertices
+/// probe the ancestor's surface (both built raw — full mesh, no masks, no
+/// carve, no fusion, no skirts, no simplification), and the |dh| values
+/// aggregate per (coarse depth, fine depth). This is the collider-vs-display
+/// error physics would carry if it ran at the coarse depth while the render
+/// showed the fine one.
+fn report_depth_divergence(
+    dump: &TileSetDump,
+    meshes: &HashMap<&str, Vec<RocktreeMesh>>,
+    settings: &veldera_terrain_collider::BuildSettings,
+) {
+    let raw = |tile: &DumpTile| -> Option<BuiltGeometry> {
+        let tile_meshes = tile.tile_meshes(&meshes[tile.path.as_str()], tile.world_position);
+        let mut settings = *settings;
+        settings.fusion_range = 0.0;
+        settings.skirt_depth = 0.0;
+        settings.simplify_tolerance = 0.0;
+        build_tile_geometry(&tile_meshes, 0, 0, &[], tile.down(), &settings)
+    };
+    let raw_built: HashMap<&str, BuiltGeometry> = dump
+        .tiles
+        .iter()
+        .filter_map(|t| raw(t).map(|g| (t.path.as_str(), g)))
+        .collect();
+
+    let mut buckets: BTreeMap<(usize, usize), Vec<f32>> = BTreeMap::new();
+    let mut pairs: BTreeMap<(usize, usize), usize> = BTreeMap::new();
+    for fine in &dump.tiles {
+        for coarse in &dump.tiles {
+            if coarse.path.len() >= fine.path.len() || !fine.path.starts_with(&coarse.path) {
+                continue;
+            }
+            let (Some(coarse_geometry), Some(fine_geometry)) = (
+                raw_built.get(coarse.path.as_str()),
+                raw_built.get(fine.path.as_str()),
+            ) else {
+                continue;
+            };
+            let offset = relative_offset(coarse, fine);
+            let shifted: Vec<Vec3> = coarse_geometry
+                .vertices
+                .iter()
+                .map(|&v| v + offset)
+                .collect();
+            let probe = SurfaceProbe::new(&shifted, &coarse_geometry.triangles, fine.down());
+            let bucket = buckets.entry((coarse.depth, fine.depth)).or_default();
+            for vertex in &fine_geometry.vertices {
+                if let Some(height) = probe.sample_near(*vertex, PROBE_RANGE) {
+                    bucket.push((height - probe.height_of(*vertex)).abs());
+                }
+            }
+            *pairs.entry((coarse.depth, fine.depth)).or_default() += 1;
+        }
+    }
+
+    println!("\ndepth divergence (fine vertices probed against the coarse surface, |dh| m):");
+    println!(
+        "  {:>8} {:>7} {:>7} {:>8} {:>8} {:>8} {:>8}",
+        "coarse d", "fine d", "pairs", "samples", "mean", "p95", "max"
+    );
+    for ((coarse_depth, fine_depth), mut values) in buckets {
+        if values.is_empty() {
+            continue;
+        }
+        values.sort_by(f32::total_cmp);
+        let mean: f32 = values.iter().sum::<f32>() / values.len() as f32;
+        let p95 = values[(values.len() * 95 / 100).min(values.len() - 1)];
+        let max = *values.last().expect("non-empty");
+        println!(
+            "  {:>8} {:>7} {:>7} {:>8} {:>8.2} {:>8.2} {:>8.2}",
+            coarse_depth,
+            fine_depth,
+            pairs[&(coarse_depth, fine_depth)],
+            values.len(),
+            mean,
+            p95,
+            max,
+        );
+    }
 }
 
 /// Print one border's per-station detail: for each of `a`'s rim vertices
