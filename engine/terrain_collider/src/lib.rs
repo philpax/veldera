@@ -102,9 +102,10 @@ pub struct BuildSettings {
 /// Counters describing one build, for streaming diagnostics.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct BuildStats {
-    /// Meshes whose octant bit-to-axis mapping could not be derived
-    /// confidently, falling back to tag-based triangle dropping. A high
-    /// rate means masked builds are leaking or losing boundary geometry.
+    /// Meshes where at least one varying octant bit could not be mapped to
+    /// an axis and was classified per vertex from the decoded tags instead.
+    /// Geometry survives intact except boundary triangles whose corners
+    /// disagree on such a bit (which the render shader collapses anyway).
     pub octant_axis_fallbacks: usize,
     /// Rim vertices moved by border fusion.
     pub fused_vertices: usize,
@@ -120,6 +121,12 @@ pub struct BuiltGeometry {
     /// surface, are always `false`). Used by offline tooling to measure
     /// rim agreement between adjacent builds.
     pub border: Vec<bool>,
+    /// Per-vertex count of neighbour surface samples that participated in
+    /// the fusion average (zero for non-border vertices, border vertices
+    /// with no neighbour data in range, and skirt vertices). Used by
+    /// offline tooling to tell "fusion never fired" from "fused toward a
+    /// different target".
+    pub fusion_samples: Vec<u8>,
     pub stats: BuildStats,
 }
 
@@ -152,6 +159,7 @@ pub fn build_tile_geometry(
         return None;
     }
 
+    let mut fusion_samples = vec![0u8; vertices.len()];
     if settings.fusion_range > 0.0 && !neighbours.is_empty() {
         stats.fused_vertices = fuse_borders(
             &mut vertices,
@@ -159,6 +167,7 @@ pub fn build_tile_geometry(
             neighbours,
             down,
             settings.fusion_range,
+            &mut fusion_samples,
         );
     }
 
@@ -172,12 +181,70 @@ pub fn build_tile_geometry(
 
     let mut border = border;
     border.resize(vertices.len(), false);
+    fusion_samples.resize(vertices.len(), 0);
     Some(BuiltGeometry {
         vertices,
         triangles,
         border,
+        fusion_samples,
         stats,
     })
+}
+
+/// A height probe over an arbitrary triangle soup (e.g. a [`BuiltGeometry`]),
+/// using the same sheet-aware sampling as border fusion: the query returns
+/// the surface sheet nearest to the query point's own height, so folds and
+/// terraces measure as zero where the geometries genuinely agree. Built for
+/// offline tooling that measures rim agreement between adjacent builds.
+pub struct SurfaceProbe {
+    frame: HorizontalFrame,
+    sampler: SurfaceSampler,
+}
+
+impl SurfaceProbe {
+    /// Build a probe over the given triangle soup; `down` is the
+    /// planet-centre direction in the soup's frame.
+    #[must_use]
+    pub fn new(vertices: &[Vec3], triangles: &[[u32; 3]], down: Vec3) -> Self {
+        let frame = HorizontalFrame::new(down);
+        let corners: Vec<(Vec2, f32)> = vertices
+            .iter()
+            .map(|&v| (frame.horizontal(v), frame.height(v)))
+            .collect();
+        let soup = triangles
+            .iter()
+            .map(|&[a, b, c]| {
+                [
+                    corners[a as usize],
+                    corners[b as usize],
+                    corners[c as usize],
+                ]
+            })
+            .collect();
+        Self {
+            frame,
+            sampler: SurfaceSampler::from_triangles(soup),
+        }
+    }
+
+    /// The surface height at `point`'s horizontal position, restricted to
+    /// sheets within `range` of `point`'s own height. `None` when no
+    /// surface lies within the horizontal sampling slack.
+    #[must_use]
+    pub fn sample_near(&self, point: Vec3, range: f32) -> Option<f32> {
+        self.sampler.sample(
+            self.frame.horizontal(point),
+            self.frame.height(point),
+            range,
+        )
+    }
+
+    /// The height of `point` along the probe's up axis, for comparing
+    /// against [`Self::sample_near`].
+    #[must_use]
+    pub fn height_of(&self, point: Vec3) -> f32 {
+        self.frame.height(point)
+    }
 }
 
 // ============================================================================
@@ -197,10 +264,11 @@ pub fn build_tile_geometry(
 /// skirt fins at the seam. Clipping is exact.
 ///
 /// The bit-to-axis mapping for the geometric clip is derived per mesh from
-/// the tagged vertices ([`derive_octant_axes`]); without a confident
-/// mapping, boundary-crossing triangles are dropped as a safe fallback
-/// (counted in `stats`). Meshes without per-vertex octant data are never
-/// masked by the renderer, so they keep their full geometry here as well.
+/// the tagged vertices ([`derive_octant_axes`]); a bit without a confident
+/// axis is classified per vertex from the decoded tags instead (counted in
+/// `stats`), dropping only boundary triangles whose corners disagree on
+/// that bit. Meshes without per-vertex octant data are never masked by the
+/// renderer, so they keep their full geometry here as well.
 ///
 /// The third return value flags each vertex on the tile's *outer border*:
 /// its mesh-local position lies at the tile's own min or max on a
@@ -260,15 +328,10 @@ fn merge_meshes(
     for (mesh, (locals, tags, tris)) in tile.meshes.iter().zip(&prepared) {
         let base = vertices.len() as u32;
         let apply_octant_mask = octant_mask != 0 && mesh.has_octant_data;
-        let axes = if apply_octant_mask {
-            let axes = derive_octant_axes(mesh);
-            if axes.is_none() {
-                stats.octant_axis_fallbacks += 1;
-            }
-            axes
-        } else {
-            None
-        };
+        let axes = apply_octant_mask.then(|| derive_octant_axes(mesh));
+        if axes.is_some_and(|axes| axes.has_tag_bits()) {
+            stats.octant_axis_fallbacks += 1;
+        }
 
         vertices.extend(locals.iter().map(|&p| tile.to_baked(p)));
         border.extend(locals.iter().map(|&p| is_border_local(p)));
@@ -287,50 +350,47 @@ fn merge_meshes(
 
         for &[a, b, c] in tris {
             let tri = [a + base, b + base, c + base];
-            if !apply_octant_mask {
+            let Some(axes) = &axes else {
+                push_triangle(&mut vertices, &mut triangles, tri);
+                continue;
+            };
+
+            // Geometric classification where the bit-to-axis mapping is
+            // confident (vertex tags are derived from index runs and can be
+            // noisy at boundaries, but the midplanes are exact), with tag
+            // classification filling in the unmappable bits.
+            let corner_tags = [a, b, c].map(|i| tags[i as usize] & 7);
+            let octants =
+                [a, b, c].map(|i| axes.octant_of(locals[i as usize], tags[i as usize] & 7));
+            let masked = |octant: u8| octant_mask & (1 << octant) != 0;
+            if octants.iter().all(|&o| masked(o)) {
+                continue;
+            }
+            if octants.iter().all(|&o| !masked(o)) {
                 push_triangle(&mut vertices, &mut triangles, tri);
                 continue;
             }
-
-            match &axes {
-                Some(axes) => {
-                    // Geometric classification: vertex tags are derived from
-                    // index runs and can be noisy at boundaries, but the
-                    // midplanes are exact.
-                    let octants = [a, b, c].map(|i| axes.octant_of(locals[i as usize]));
-                    let masked = |octant: u8| octant_mask & (1 << octant) != 0;
-                    if octants.iter().all(|&o| masked(o)) {
-                        continue;
-                    }
-                    if octants.iter().all(|&o| !masked(o)) {
-                        push_triangle(&mut vertices, &mut triangles, tri);
-                        continue;
-                    }
-                    // Boundary-crossing: clip at the octant midplanes and
-                    // keep the pieces lying in unmasked octants.
-                    let poly = [a, b, c].map(|i| locals[i as usize]);
-                    clip_to_unmasked_octants(&poly, axes, octant_mask, &mut |piece| {
-                        let start = vertices.len() as u32;
-                        vertices.extend(piece.iter().map(|&p| tile.to_baked(p)));
-                        border.extend(piece.iter().map(|&p| is_border_local(p)));
-                        for i in 1..piece.len() as u32 - 1 {
-                            push_triangle(
-                                &mut vertices,
-                                &mut triangles,
-                                [start, start + i, start + i + 1],
-                            );
-                        }
-                    });
-                }
-                None => {
-                    // No confident bit-to-axis mapping: drop anything whose
-                    // tags touch a masked octant (safe, slightly lossy).
-                    let tag_masked = |i: u32| octant_mask & (1 << (tags[i as usize] & 7)) != 0;
-                    if !(tag_masked(a) || tag_masked(b) || tag_masked(c)) {
-                        push_triangle(&mut vertices, &mut triangles, tri);
-                    }
-                }
+            // A triangle whose corners disagree on a tag-classified bit
+            // can't be clipped geometrically; the render shader collapses
+            // it to an invisible sliver, so dropping it is WYSIWYG.
+            if !axes.tag_bits_agree(corner_tags) {
+                continue;
             }
+            // Boundary-crossing: clip at the octant midplanes and keep the
+            // pieces lying in unmasked octants.
+            let poly = [a, b, c].map(|i| locals[i as usize]);
+            clip_to_unmasked_octants(&poly, axes, octant_mask, corner_tags[0], &mut |piece| {
+                let start = vertices.len() as u32;
+                vertices.extend(piece.iter().map(|&p| tile.to_baked(p)));
+                border.extend(piece.iter().map(|&p| is_border_local(p)));
+                for i in 1..piece.len() as u32 - 1 {
+                    push_triangle(
+                        &mut vertices,
+                        &mut triangles,
+                        [start, start + i, start + i + 1],
+                    );
+                }
+            });
         }
     }
 
@@ -415,6 +475,11 @@ enum OctantBit {
     /// The bit selects a half of `axis`; `set_is_upper` is whether a set
     /// bit corresponds to coordinates above the midplane.
     Axis { axis: usize, set_is_upper: bool },
+    /// The bit varies but its two populations don't separate geometrically
+    /// (e.g. near-flat terrain hugging a midplane), or its best axis is
+    /// already claimed. Classified per vertex from the decoded tag — the
+    /// same source the render shader masks with — instead of by position.
+    Tag,
 }
 
 /// Per-mesh mapping from octant-index bits to mesh-local axes, derived from
@@ -425,8 +490,9 @@ struct OctantAxes {
 }
 
 impl OctantAxes {
-    /// The octant index of a point in mesh-local space.
-    fn octant_of(&self, p: Vec3) -> u8 {
+    /// The octant index of a point in mesh-local space; `tag` supplies the
+    /// bits that lack a geometric mapping.
+    fn octant_of(&self, p: Vec3, tag: u8) -> u8 {
         let mut octant = 0u8;
         for (b, bit) in self.bits.iter().enumerate() {
             let set = match *bit {
@@ -434,12 +500,30 @@ impl OctantAxes {
                 OctantBit::Axis { axis, set_is_upper } => {
                     (p[axis] > OCTANT_MIDPOINT) == set_is_upper
                 }
+                OctantBit::Tag => tag >> b & 1 != 0,
             };
             if set {
                 octant |= 1 << b;
             }
         }
         octant
+    }
+
+    /// Whether any varying bit had to fall back to tag classification.
+    fn has_tag_bits(&self) -> bool {
+        self.bits.contains(&OctantBit::Tag)
+    }
+
+    /// Whether all tag-classified bits agree across the given vertex tags,
+    /// i.e. a triangle with these corners lies in a single half for every
+    /// `Tag` bit and can be clipped on the geometric bits alone.
+    fn tag_bits_agree(&self, tags: [u8; 3]) -> bool {
+        self.bits.iter().enumerate().all(|(b, bit)| {
+            *bit != OctantBit::Tag || {
+                let bits = tags.map(|tag| tag >> b & 1);
+                bits[0] == bits[1] && bits[1] == bits[2]
+            }
+        })
     }
 }
 
@@ -448,9 +532,11 @@ impl OctantAxes {
 /// decoder assigns octants from index runs, not positions, so the spatial
 /// convention isn't fixed in code anywhere — but the populations separate
 /// cleanly around the midplane, making the mapping recoverable per mesh.
-/// Returns `None` when any varying bit lacks a confident axis, or two bits
-/// map to the same axis.
-fn derive_octant_axes(mesh: &RocktreeMesh) -> Option<OctantAxes> {
+/// A varying bit whose populations don't separate (near-flat terrain
+/// hugging a midplane), or whose best axis is already claimed, degrades to
+/// per-vertex tag classification ([`OctantBit::Tag`]) instead of failing
+/// the whole mesh.
+fn derive_octant_axes(mesh: &RocktreeMesh) -> OctantAxes {
     let mut sums = [[Vec3::ZERO; 2]; 3];
     let mut counts = [[0usize; 2]; 3];
     for v in &mesh.vertices {
@@ -473,28 +559,34 @@ fn derive_octant_axes(mesh: &RocktreeMesh) -> Option<OctantAxes> {
                 let mean_unset = sums[b][0] / unset as f32;
                 let mean_set = sums[b][1] / set as f32;
                 let diff = mean_set - mean_unset;
-                let axis = (0..3).max_by(|&i, &j| diff[i].abs().total_cmp(&diff[j].abs()))?;
+                let axis = (0..3)
+                    .max_by(|&i, &j| diff[i].abs().total_cmp(&diff[j].abs()))
+                    .expect("three axes");
                 if diff[axis].abs() < OCTANT_AXIS_MIN_SEPARATION || used_axes[axis] {
-                    return None;
-                }
-                used_axes[axis] = true;
-                OctantBit::Axis {
-                    axis,
-                    set_is_upper: diff[axis] > 0.0,
+                    OctantBit::Tag
+                } else {
+                    used_axes[axis] = true;
+                    OctantBit::Axis {
+                        axis,
+                        set_is_upper: diff[axis] > 0.0,
+                    }
                 }
             }
         };
     }
-    Some(OctantAxes { bits })
+    OctantAxes { bits }
 }
 
 /// Split a boundary-crossing triangle at the octant midplanes and emit each
 /// piece lying in an unmasked octant (as a convex polygon in mesh-local
-/// space, ready for fan triangulation).
+/// space, ready for fan triangulation). `tag` supplies the octant bits that
+/// lack a geometric mapping; the caller guarantees the triangle's corners
+/// agree on those bits.
 fn clip_to_unmasked_octants(
     triangle: &[Vec3; 3],
     axes: &OctantAxes,
     octant_mask: u8,
+    tag: u8,
     emit: &mut dyn FnMut(&[Vec3]),
 ) {
     let mut pieces: Vec<Vec<Vec3>> = vec![triangle.to_vec()];
@@ -514,7 +606,7 @@ fn clip_to_unmasked_octants(
     for piece in &pieces {
         // Classify by centroid: each piece lies wholly in one octant.
         let centroid = piece.iter().sum::<Vec3>() / piece.len() as f32;
-        if octant_mask & (1 << axes.octant_of(centroid)) == 0 {
+        if octant_mask & (1 << axes.octant_of(centroid, tag)) == 0 {
             emit(piece);
         }
     }
@@ -565,6 +657,7 @@ fn fuse_borders(
     neighbours: &[TileMeshes],
     down: Vec3,
     fusion_range: f32,
+    fusion_samples: &mut [u8],
 ) -> usize {
     let frame = HorizontalFrame::new(down);
     let samplers: Vec<SurfaceSampler> = neighbours
@@ -573,7 +666,11 @@ fn fuse_borders(
         .collect();
 
     let mut fused = 0;
-    for (vertex, &is_border) in vertices.iter_mut().zip(border) {
+    for ((vertex, &is_border), samples) in vertices
+        .iter_mut()
+        .zip(border)
+        .zip(fusion_samples.iter_mut())
+    {
         if !is_border {
             continue;
         }
@@ -586,6 +683,7 @@ fn fuse_borders(
             if let Some(height) = sampler.sample(position, own_height, fusion_range) {
                 sum += height;
                 count += 1.0;
+                *samples = samples.saturating_add(1);
             }
         }
         if count > 1.0 {
@@ -637,9 +735,6 @@ struct SurfaceSampler {
 impl SurfaceSampler {
     fn new(tile: &TileMeshes, frame: &HorizontalFrame) -> Self {
         let mut triangles: Vec<[(Vec2, f32); 3]> = Vec::new();
-        let mut min = Vec2::splat(f32::INFINITY);
-        let mut max = Vec2::splat(f32::NEG_INFINITY);
-
         for mesh in tile.meshes {
             let corners: Vec<(Vec2, f32)> = mesh
                 .vertices
@@ -647,10 +742,7 @@ impl SurfaceSampler {
                 .map(|v| {
                     let local = Vec3::new(f32::from(v.x), f32::from(v.y), f32::from(v.z));
                     let baked = tile.to_baked(local);
-                    let h = frame.horizontal(baked);
-                    min = min.min(h);
-                    max = max.max(h);
-                    (h, frame.height(baked))
+                    (frame.horizontal(baked), frame.height(baked))
                 })
                 .collect();
             for [a, b, c] in strip_to_triangles(&mesh.indices) {
@@ -659,6 +751,18 @@ impl SurfaceSampler {
                     corners[b as usize],
                     corners[c as usize],
                 ]);
+            }
+        }
+        Self::from_triangles(triangles)
+    }
+
+    fn from_triangles(triangles: Vec<[(Vec2, f32); 3]>) -> Self {
+        let mut min = Vec2::splat(f32::INFINITY);
+        let mut max = Vec2::splat(f32::NEG_INFINITY);
+        for tri in &triangles {
+            for (h, _) in tri {
+                min = min.min(*h);
+                max = max.max(*h);
             }
         }
 

@@ -15,14 +15,30 @@
   backoff if load spam ever shows up in the logs.
 - edge fusion (aff552a, veldera_terrain_collider) fuses rims to the mean of
   adjacent selected tiles' *source-mesh* surfaces: symmetric, deterministic,
-  order-independent, with adjacency-fingerprint re-conform rebuilds. Watch
-  the octant-clip fallback counter in the Physics tab: a high rate means
-  masked builds are leaking or losing boundary geometry and the derivation
-  threshold needs attention. Remaining known gaps: chord error between the
-  two sides' sample stations (sealed by skirts; fix = insert the union of
-  border stations on both sides), and fusion is physics-only (render still
-  shows hairline cracks; unifying the fused border into the render meshes
-  is the eventual endgame).
+  order-independent, with adjacency-fingerprint re-conform rebuilds.
+  Remaining known gaps: chord error between the two sides' sample stations
+  (sealed by skirts; fix = insert the union of border stations on both
+  sides), and fusion is physics-only (render still shows hairline cracks;
+  unifying the fused border into the render meshes is the eventual endgame).
+- fusion can *worsen* a border when the two sides' lateral sets differ at a
+  cross-depth corner: each rim averages over different neighbour surfaces
+  and they pull apart (dumps/tiles-1781225692.json measured 2/91 borders
+  regressing, worst 0.04 m → 1.21 m at a d17/d18 corner). Fix sketch: both
+  sides restrict their average to the laterals they *share*, which is
+  computable blind from the selection.
+- the source photogrammetry itself contains terrace steps that run exactly
+  along tile borders, identical in both tiles (the dumped playa border has
+  a 0.46 m sheet pair at the same horizontal position in *both* tiles).
+  These are not seams — fusion correctly no-ops on them (the sampler's
+  own-height tie-break), the render shows them, and the collider matches
+  the render. Climbing them is a *controller* problem: the FPS controller
+  has no step-up handling, so any honest ledge over ~0.3 m blocks walking.
+- tag noise on sparse meshes bounds the octant clip's fidelity: run-derived
+  vertex tags disagree with the geometric octant for ~20 % of vertices on
+  big-triangle d17/d18 meshes, so a heavily masked sparse mesh keeps fewer
+  triangles than the renderer shows (the renderer masks by tag, physics
+  clips by position; position matches how sibling tiles actually cover
+  space). Revisit only if a visible-but-unwalkable patch turns up in-game.
 - if telemetry keeps showing all-four-wheel simultaneous load spikes while
   the Physics tab reads all-ok, the remaining culprit is temporal: a
   collider rebuild swapping the floor height under the car. Mitigation

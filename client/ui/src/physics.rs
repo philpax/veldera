@@ -42,8 +42,14 @@ pub(super) fn render_physics_tab(ui: &mut egui::Ui, params: &mut PhysicsParams) 
 
     ui.horizontal(|ui| {
         ui.label(format!(
-            "Colliders: {collider_count}   (octant-clip fallbacks: {fallbacks})"
-        ));
+            "Colliders: {collider_count}   (tag-classified octant bits: {fallbacks})"
+        ))
+        .on_hover_text(
+            "Mesh builds where an octant bit had no confident geometric \
+             axis and was classified from the decoded vertex tags instead. \
+             Geometry survives; only boundary triangles whose corners \
+             disagree on such a bit are dropped. Common on flat terrain.",
+        );
         if ui
             .button("Dump nearby tiles")
             .on_hover_text(

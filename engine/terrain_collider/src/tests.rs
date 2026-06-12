@@ -179,9 +179,11 @@ fn border_flags_lie_at_the_tile_extremes() {
 fn octant_mask_fallback_drops_tagged_triangles() {
     // Three triangles: one fully in octant 3, one straddling octants 3 and
     // 5, one fully in octant 5. The vertex populations here are far too
-    // close together for a confident bit-to-axis mapping, so this exercises
-    // the *fallback* path: drop every triangle whose tags touch a masked
-    // octant. The octant-5 triangle survives, untouched.
+    // close together for a confident bit-to-axis mapping, so the varying
+    // bits degrade to per-vertex tag classification: the octant-3 triangle
+    // drops (its tags are masked), the straddler drops (its corners
+    // disagree on a tag-classified bit), and the octant-5 triangle
+    // survives, untouched.
     let positions = [
         (0, 0, 0, 3),
         (10, 0, 0, 3),
@@ -259,6 +261,83 @@ fn octant_mask_clips_boundary_triangles() {
             assert!(vertices[*i as usize].x >= 127.5 - 1e-3);
         }
     }
+}
+
+#[test]
+fn octant_mask_tag_bit_composes_with_geometric_clip() {
+    // Bit 0 separates cleanly over x (octants 0/1), but bit 1 cannot map to
+    // an axis: the octant-2 quad sits at the same height as everything
+    // else, and its strongest separation is along x, which bit 0 already
+    // claimed. Bit 1 must degrade to per-vertex tag classification while
+    // bit 0 keeps clipping geometrically.
+    let positions = [
+        // A small quad fully tagged octant 2, inside the low-x half and the
+        // same y band as the 0/1 quad, so bit 1's only separation is along
+        // the already-claimed x axis.
+        (0, 100, 100, 2),
+        (50, 100, 100, 2),
+        (0, 200, 100, 2),
+        (50, 200, 100, 2),
+        // A quad spanning the x midplane, tagged octants 0/1.
+        (0, 100, 100, 0),
+        (255, 100, 100, 1),
+        (0, 200, 100, 0),
+        (255, 200, 100, 1),
+    ];
+    let meshes = vec![test_mesh_with_octants(
+        &positions,
+        vec![0, 1, 2, 3, 3, 4, 4, 5, 6, 7],
+        true,
+    )];
+    let total_area = |vertices: &[Vec3], triangles: &[[u32; 3]]| -> f32 {
+        triangles
+            .iter()
+            .map(|&[a, b, c]| {
+                let (a, b, c) = (
+                    vertices[a as usize],
+                    vertices[b as usize],
+                    vertices[c as usize],
+                );
+                (b - a).cross(c - a).length() * 0.5
+            })
+            .sum()
+    };
+
+    // Masking octant 2 removes exactly the tag-2 quad; the 0/1 quad keeps
+    // its full geometry (no spurious whole-mesh fallback).
+    let mut stats = BuildStats::default();
+    let (vertices, triangles, _) =
+        merge_meshes(&tile(&meshes), 0.0, 0.0, 1 << 2, Vec3::NEG_Z, &mut stats);
+    assert_eq!(
+        stats.octant_axis_fallbacks, 1,
+        "the tag bit must be counted"
+    );
+    let area = total_area(&vertices, &triangles);
+    let expected = 255.0 * 100.0;
+    assert!(
+        (area - expected).abs() < expected * 0.01,
+        "the 0/1 quad must survive whole, got area {area} vs {expected}"
+    );
+
+    // Masking octant 1 clips the 0/1 quad at the x midplane and keeps the
+    // tag-2 quad whole: the geometric bit still cuts exactly even though
+    // another bit is tag-classified.
+    let (vertices, triangles, _) = merge_raw(&tile(&meshes), 1 << 1);
+    for &[a, b, c] in &triangles {
+        for i in [a, b, c] {
+            assert!(
+                vertices[i as usize].x <= 127.5 + 1e-3,
+                "kept geometry must not cross the masked midplane, got x = {}",
+                vertices[i as usize].x
+            );
+        }
+    }
+    let area = total_area(&vertices, &triangles);
+    let expected = 127.5 * 100.0 + 50.0 * 100.0;
+    assert!(
+        (area - expected).abs() < expected * 0.01,
+        "left half of the 0/1 quad plus the whole tag-2 quad, got {area} vs {expected}"
+    );
 }
 
 #[test]
