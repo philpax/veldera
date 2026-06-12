@@ -42,5 +42,13 @@ pub(super) fn render_rendering_tab(ui: &mut egui::Ui, params: &mut RenderingPara
                  keep this tight.",
             );
         });
+        ui.checkbox(&mut filter.show_collapsed_slivers, "Collapsed slivers")
+            .on_hover_text(
+                "Also draw triangles the octant mask partially collapses to \
+                 the tile origin. The GPU rasterizes them as invisible \
+                 hairline slivers; as wireframes they read as diagonal fans \
+                 converging on a point in the air. Only useful when \
+                 artifact-hunting the masking shader itself.",
+            );
     });
 }

@@ -314,6 +314,12 @@ pub struct RenderMeshVizFilter {
     pub enabled: bool,
     /// Only draw meshes whose OBB is within this distance of the camera (m).
     pub radius_m: f32,
+    /// Draw triangles with *some* (not all) vertices collapsed by the
+    /// octant mask. The GPU rasterizes these as hairline slivers stretching
+    /// to the tile origin — geometrically real but visually invisible, and
+    /// as wireframes they read as alarming diagonal fans across the sky,
+    /// so they're hidden unless artifact-hunting the shader itself.
+    pub show_collapsed_slivers: bool,
 }
 
 impl Default for RenderMeshVizFilter {
@@ -321,6 +327,7 @@ impl Default for RenderMeshVizFilter {
         Self {
             enabled: false,
             radius_m: 15.0,
+            show_collapsed_slivers: false,
         }
     }
 }
@@ -382,12 +389,14 @@ pub(crate) fn draw_render_mesh_wireframes(
             _ => None,
         };
 
-        let collapsed = |index: usize| -> Vec3 {
-            let masked = octants.is_some_and(|colors| {
+        let masked = |index: usize| -> bool {
+            octants.is_some_and(|colors| {
                 let octant = (colors[index][0] + 0.5) as u32;
                 octant < 32 && octant_mask >> octant & 1 != 0
-            });
-            if masked {
+            })
+        };
+        let collapsed = |index: usize| -> Vec3 {
+            if masked(index) {
                 Vec3::ZERO
             } else {
                 Vec3::from_array(positions[index])
@@ -395,11 +404,14 @@ pub(crate) fn draw_render_mesh_wireframes(
         };
 
         let mut draw_triangle = |a: usize, b: usize, c: usize| {
-            let (la, lb, lc) = (collapsed(a), collapsed(b), collapsed(c));
-            // Fully collapsed triangles are degenerate and never rasterized.
-            if la == lb && lb == lc {
+            // Fully collapsed triangles are degenerate and never rasterized;
+            // partially collapsed ones rasterize as invisible hairline
+            // slivers, hidden here unless requested (see the filter docs).
+            let collapsed_count = [a, b, c].iter().filter(|&&i| masked(i)).count();
+            if collapsed_count == 3 || (collapsed_count > 0 && !filter.show_collapsed_slivers) {
                 return;
             }
+            let (la, lb, lc) = (collapsed(a), collapsed(b), collapsed(c));
             let (wa, wb, wc) = (
                 transform.transform_point(la),
                 transform.transform_point(lb),
