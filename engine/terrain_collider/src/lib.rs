@@ -23,7 +23,7 @@
 //! dependencies: `glam` math over `rocktree` mesh data. The Bevy/Avian
 //! integration lives in `veldera_physics::terrain`.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use glam::{Quat, Vec2, Vec3};
 use rocktree::Mesh as RocktreeMesh;
@@ -41,6 +41,18 @@ const OCTANT_AXIS_MIN_SEPARATION: f32 = 16.0;
 /// sampling. Tiles carry a few thousand triangles; 32×32 keeps buckets to a
 /// handful each.
 const SAMPLE_GRID_CELLS: usize = 32;
+
+/// How close (in 0-255 lattice units) a vertex must be to its tile's
+/// horizontal extreme to count as rim. Rim rows sit exactly at the extreme
+/// in clean tiles; a little slack tolerates quantization.
+const BORDER_EPSILON: f32 = 1.5;
+
+/// Horizontal slack (m) for surface sampling: adjacent tiles' rims don't
+/// overlap — they sit a small horizontal gap apart — so a rim vertex
+/// usually falls just *outside* the neighbour's footprint. Within this
+/// margin the sample clamps to the nearest point on the nearest triangle;
+/// without it, fusion fires from only one side of most borders.
+const SAMPLE_HORIZONTAL_SLACK: f32 = 1.0;
 
 /// One tile's source meshes positioned relative to the tile being built.
 #[derive(Clone, Copy)]
@@ -184,9 +196,12 @@ pub fn build_tile_geometry(
 /// masked by the renderer, so they keep their full geometry here as well.
 ///
 /// The third return value flags each vertex on the tile's *outer border*:
-/// its mesh-local position touches the 0..255 box on a non-vertical axis
-/// (vertical determined from `down`). These are the fusion candidates — the
-/// rim shared with neighbouring tiles.
+/// its mesh-local position lies at the tile's own min or max on a
+/// non-vertical axis (vertical determined from `down`). Real tiles are
+/// inset within the 0..255 lattice (typical horizontal spans run ~33..221
+/// and ~3..251, and partially covered tiles stop wherever their data does),
+/// so the rim is wherever each tile's geometry actually ends — which is
+/// also where it abuts its neighbours. These are the fusion candidates.
 fn merge_meshes(
     tile: &TileMeshes,
     min_triangle_height: f32,
@@ -200,13 +215,32 @@ fn merge_meshes(
     let mut border: Vec<bool> = Vec::with_capacity(total_vertices);
 
     // The tile's vertical axis in mesh-local space, for telling its side
-    // faces (shared with neighbours) from its top and bottom.
+    // edges (shared with neighbours) from its relief.
     let local_down = tile.rotation.inverse() * down;
     let vertical_axis = (0..3)
         .max_by(|&i, &j| local_down[i].abs().total_cmp(&local_down[j].abs()))
         .expect("three axes");
-    let is_border_local =
-        |p: Vec3| (0..3).any(|axis| axis != vertical_axis && (p[axis] <= 0.5 || p[axis] >= 254.5));
+
+    // The tile's own horizontal extremes across all of its meshes: the rim
+    // is wherever the geometry ends, not at the lattice box (real tiles
+    // are inset).
+    let mut lo = Vec3::splat(f32::INFINITY);
+    let mut hi = Vec3::splat(f32::NEG_INFINITY);
+    for mesh in tile.meshes {
+        for v in &mesh.vertices {
+            let p = Vec3::new(f32::from(v.x), f32::from(v.y), f32::from(v.z));
+            lo = lo.min(p);
+            hi = hi.max(p);
+        }
+    }
+    let is_border_local = |p: Vec3| {
+        (0..3).any(|axis| {
+            // A slab-thin axis (e.g. flat relief) is not a border source.
+            axis != vertical_axis
+                && hi[axis] - lo[axis] > 4.0 * BORDER_EPSILON
+                && (p[axis] <= lo[axis] + BORDER_EPSILON || p[axis] >= hi[axis] - BORDER_EPSILON)
+        })
+    };
 
     for mesh in tile.meshes {
         let base = vertices.len() as u32;
@@ -585,50 +619,81 @@ impl SurfaceSampler {
     }
 
     /// The surface height at `position`, restricted to samples within
-    /// `range` of `reference_height`; the closest such sample wins.
+    /// `range` of `reference_height`. Points inside a triangle's footprint
+    /// sample it exactly; points within [`SAMPLE_HORIZONTAL_SLACK`] of one
+    /// clamp to its nearest edge (adjacent tiles' rims don't overlap, so
+    /// border queries land just outside the footprint). The horizontally
+    /// nearest hit wins, then height closeness breaks ties.
     fn sample(&self, position: Vec2, reference_height: f32, range: f32) -> Option<f32> {
-        let cell = (
-            ((position.x - self.origin.x) / self.cell_size).floor() as i32,
-            ((position.y - self.origin.y) / self.cell_size).floor() as i32,
-        );
-        let mut best: Option<f32> = None;
-        for &index in self.grid.get(&cell)? {
-            let tri = &self.triangles[index as usize];
-            let Some(height) = triangle_height_at(tri, position) else {
-                continue;
-            };
-            if (height - reference_height).abs() <= range
-                && best.is_none_or(|b| {
-                    (height - reference_height).abs() < (b - reference_height).abs()
-                })
-            {
-                best = Some(height);
+        let cell_of = |p: Vec2| {
+            (
+                ((p.x - self.origin.x) / self.cell_size).floor() as i32,
+                ((p.y - self.origin.y) / self.cell_size).floor() as i32,
+            )
+        };
+        let lo = cell_of(position - Vec2::splat(SAMPLE_HORIZONTAL_SLACK));
+        let hi = cell_of(position + Vec2::splat(SAMPLE_HORIZONTAL_SLACK));
+
+        // (horizontal distance, |height - reference|) lexicographic best.
+        let mut best: Option<(f32, f32, f32)> = None;
+        let mut visited: HashSet<u32> = HashSet::new();
+        for cx in lo.0..=hi.0 {
+            for cy in lo.1..=hi.1 {
+                let Some(indices) = self.grid.get(&(cx, cy)) else {
+                    continue;
+                };
+                for &index in indices {
+                    if !visited.insert(index) {
+                        continue;
+                    }
+                    let tri = &self.triangles[index as usize];
+                    let (distance, height) = triangle_nearest_height(tri, position);
+                    let height_error = (height - reference_height).abs();
+                    if distance > SAMPLE_HORIZONTAL_SLACK || height_error > range {
+                        continue;
+                    }
+                    if best.is_none_or(|(bd, be, _)| (distance, height_error) < (bd, be)) {
+                        best = Some((distance, height_error, height));
+                    }
+                }
             }
         }
-        best
+        best.map(|(_, _, height)| height)
     }
 }
 
-/// Interpolate a triangle's height at a horizontal position, or `None` if
-/// the point lies outside the triangle's footprint.
-fn triangle_height_at(tri: &[(Vec2, f32); 3], p: Vec2) -> Option<f32> {
+/// The horizontal distance from `p` to a triangle's footprint and the
+/// surface height at the nearest footprint point: `(0, interpolated)` for
+/// points inside, otherwise the closest point on the nearest edge.
+fn triangle_nearest_height(tri: &[(Vec2, f32); 3], p: Vec2) -> (f32, f32) {
     let [(a, ha), (b, hb), (c, hc)] = *tri;
     let v0 = b - a;
     let v1 = c - a;
     let v2 = p - a;
     let denom = v0.x * v1.y - v1.x * v0.y;
-    if denom.abs() < 1e-9 {
-        return None;
+    if denom.abs() > 1e-9 {
+        let u = (v2.x * v1.y - v1.x * v2.y) / denom;
+        let v = (v0.x * v2.y - v2.x * v0.y) / denom;
+        if u >= 0.0 && v >= 0.0 && u + v <= 1.0 {
+            return (0.0, ha + u * (hb - ha) + v * (hc - ha));
+        }
     }
-    let u = (v2.x * v1.y - v1.x * v2.y) / denom;
-    let v = (v0.x * v2.y - v2.x * v0.y) / denom;
-    // A small epsilon keeps points exactly on shared edges inside.
-    const EPS: f32 = 1e-4;
-    if u >= -EPS && v >= -EPS && u + v <= 1.0 + EPS {
-        Some(ha + u * (hb - ha) + v * (hc - ha))
-    } else {
-        None
+    // Outside (or degenerate): nearest point on the nearest edge.
+    let mut best = (f32::INFINITY, 0.0);
+    for ((ea, eha), (eb, ehb)) in [((a, ha), (b, hb)), ((b, hb), (c, hc)), ((c, hc), (a, ha))] {
+        let edge = eb - ea;
+        let t = if edge.length_squared() > 1e-12 {
+            ((p - ea).dot(edge) / edge.length_squared()).clamp(0.0, 1.0)
+        } else {
+            0.0
+        };
+        let nearest = ea + edge * t;
+        let distance = (p - nearest).length();
+        if distance < best.0 {
+            best = (distance, eha + t * (ehb - eha));
+        }
     }
+    best
 }
 
 // ============================================================================

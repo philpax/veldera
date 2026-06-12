@@ -150,19 +150,23 @@ fn build_is_deterministic() {
 // ============================================================================
 
 #[test]
-fn border_flags_touch_side_faces_only() {
-    // With down = -Z, the z axis is vertical: x/y at 0 or 255 flag a vertex
-    // as outer border; interior and purely-vertical extremes don't.
+fn border_flags_lie_at_the_tile_extremes() {
+    // Real tiles are inset within the lattice (rims at e.g. 33..221, never
+    // 0/255), so the rim is at the tile's *own* horizontal extremes. With
+    // down = -Z, the z axis is vertical: x/y at the tile's min/max flag a
+    // vertex as border; strictly interior vertices and purely-vertical
+    // extremes don't.
     let positions = [
-        (0, 100, 0),     // x = 0 → border.
-        (255, 100, 0),   // x = 255 → border.
-        (100, 255, 0),   // y = 255 → border.
+        (33, 100, 0),    // x = tile min → border.
+        (221, 100, 0),   // x = tile max → border.
+        (100, 200, 0),   // y = tile max → border.
+        (100, 40, 0),    // y = tile min → border.
         (100, 100, 0),   // interior.
         (100, 100, 255), // only z extreme → not border (vertical axis).
     ];
     let meshes = vec![test_mesh(&positions, vec![])];
     let (_, _, border) = merge_raw(&tile(&meshes), 0);
-    assert_eq!(border, vec![true, true, true, false, false]);
+    assert_eq!(border, vec![true, true, true, true, false, false]);
 }
 
 // ============================================================================

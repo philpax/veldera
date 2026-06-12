@@ -486,10 +486,16 @@ impl LodState {
     }
 
     /// The laterally adjacent selected tiles of `path`: selection entries
-    /// whose bounding spheres touch `path`'s, excluding `path` itself and
-    /// anything on its own ancestor chain. These are the tiles a collider
-    /// build fuses its rim against.
+    /// whose bounding spheres touch `path`'s, excluding `path` itself,
+    /// anything on its own ancestor chain, and tiles more than a few LoD
+    /// depths away (the camera's coarse chain siblings have planet-scale
+    /// bounding spheres that would otherwise count as neighbours of
+    /// everything). These are the tiles a collider build fuses its rim
+    /// against.
     fn lateral_neighbour_paths(&self, path: OctreePath) -> Vec<OctreePath> {
+        /// Maximum LoD depth difference for a fusable neighbour.
+        const MAX_DEPTH_DIFFERENCE: usize = 3;
+
         let Some(obb) = self.node_obbs.get(&path) else {
             return Vec::new();
         };
@@ -497,7 +503,12 @@ impl LodState {
         let mut laterals: Vec<OctreePath> = self
             .physics_target_paths
             .keys()
-            .filter(|n| **n != path && !n.starts_with(path) && !path.starts_with(**n))
+            .filter(|n| {
+                **n != path
+                    && n.depth().abs_diff(path.depth()) <= MAX_DEPTH_DIFFERENCE
+                    && !n.starts_with(path)
+                    && !path.starts_with(**n)
+            })
             .filter(|n| {
                 self.node_obbs.get(*n).is_some_and(|nobb| {
                     nobb.center.distance(obb.center) <= radius + nobb.extents.length()
