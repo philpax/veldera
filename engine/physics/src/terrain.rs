@@ -30,6 +30,11 @@ pub struct TerrainCollider {
     /// = full mesh. An entity may carry this component with *no* collider:
     /// a mask that removes all geometry is a live empty commit.
     pub octant_mask: u8,
+    /// Sub-octant carve cells the collider was built with (bit
+    /// `octant * 8 + suboctant`, tile depth + 2): coverage finer than whole
+    /// octants, removing a coarse tile's geometry over the finely-covered
+    /// region around the player even when no whole octant is covered.
+    pub sub_cut: u64,
 }
 
 /// Build one tile's terrain collider: the pure geometry pipeline
@@ -42,6 +47,7 @@ pub struct TerrainCollider {
 pub fn create_terrain_collider(
     tile: &TileMeshes,
     octant_mask: u8,
+    sub_cut: u64,
     neighbours: &[TileMeshes],
     down: Vec3,
     settings: &BuildSettings,
@@ -49,6 +55,7 @@ pub fn create_terrain_collider(
     let Some(built) = veldera_terrain_collider::build_tile_geometry(
         tile,
         octant_mask,
+        sub_cut,
         neighbours,
         down,
         settings,

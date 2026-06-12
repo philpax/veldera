@@ -77,6 +77,11 @@ pub struct DumpTile {
     pub scale: [f32; 3],
     /// The selection's octant-coverage mask for this tile.
     pub octant_mask: u8,
+    /// The selection's sub-octant carve cells for this tile (bit
+    /// `octant * 8 + suboctant`, tile depth + 2). Defaults to zero for
+    /// dumps captured before carving existed.
+    #[serde(default)]
+    pub sub_cut: u64,
     /// Paths of the lateral selected neighbours its rim fuses against.
     pub laterals: Vec<String>,
     pub meshes: Vec<DumpMesh>,

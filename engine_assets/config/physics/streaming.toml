@@ -44,15 +44,10 @@ fusion_defer_secs = 0.25
 # half this while culling density collision doesn't need. Zero disables.
 collider_simplify_tolerance = 0.25
 
-# Max trimesh collider builds per frame (the expensive part of collider
-# streaming); bounds the frame cost during fast flight. Zero = uncapped.
-max_collider_builds_per_frame = 4
-
-# Per-frame wall-clock budget (ms) for trimesh collider builds. Build cost
-# varies wildly with mesh density and fusion neighbour count, so the count
-# cap alone can't bound the frame cost; spent budget pushes the rest to the
-# next frame. At least one pending build always runs. Zero = count cap only.
-collider_build_budget_ms = 1.5
+# Max collider builds dispatched to background tasks per reconcile pass, so
+# a band sweep can't queue hundreds at once. Builds run off-thread and
+# commit when ready; pending work queues near-first. Zero = uncapped.
+max_collider_builds_per_frame = 8
 
 # Camera speed (m/s) above which collider refinement rebuilds (rim
 # re-conform, mask refinement, progressive stale masking) pause; first

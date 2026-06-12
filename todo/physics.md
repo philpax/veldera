@@ -8,8 +8,17 @@
   `cull_meshes` / `terrain_material.wgsl`) — diff those first.
 - the banded annulus (beyond the WYSIWYG radius) still uses full-mask
   ancestor fallbacks while data streams in, which can briefly double-layer
-  distant terrain. Harmless at range; if it ever matters, mask the fallback
-  commit to the octant chain leading to the missing region.
+  distant terrain. Sub-octant carving removes the worst case (a coarse
+  tile's giant triangles stacking over the fine terrain around the player —
+  the beach contact-solver meltdown); residual double-layering sits beyond
+  the carve resolution (tile depth + 2 cells), far from the player.
+- collider mesh simplification beyond vertex clustering (quadric edge
+  collapse with a metre error bound) is now affordable since builds run
+  off-thread. The motivating "malformed geometry" turned out to be the
+  carving gap above, not density — re-evaluate against a dense urban dump
+  before building it. Note the colliders were never simplified by Avian:
+  early builds were just locked to a coarser LoD depth than the render
+  (59b7aa3), which WYSIWYG deliberately traded away.
 - node load failures are only logged and retried forever (bulks have
   `failed_bulks`, nodes have no equivalent); consider failure tracking with
   backoff if load spam ever shows up in the logs.

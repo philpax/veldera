@@ -73,10 +73,10 @@ use veldera_config::ConfigPlugin;
 use veldera_constants::EARTH_RADIUS_M_F64;
 use veldera_geo::floating_origin::{FloatingOriginCamera, WorldPosition};
 use veldera_physics::{
-    GameLayer, MotionTracker, PhysicsState, PhysicsStreamingConfig, TerrainCollider,
-    desired_physics_depth,
+    GameLayer, MotionTracker, PHYSICS_FINEST_DEPTH, PhysicsState, PhysicsStreamingConfig,
+    TerrainCollider, desired_physics_depth,
+    terrain::{TileMeshes, create_terrain_collider},
 };
-use web_time::Instant;
 
 /// Hot-reloadable LoD streaming parameters, loaded from
 /// `assets/config/engine/world/lod.toml`. Tune these to trade memory and CPU against
@@ -151,6 +151,7 @@ impl Plugin for LodPlugin {
     fn build(&self, app: &mut App) {
         app.init_resource::<LodState>()
             .init_resource::<LodChannels>()
+            .init_resource::<ColliderBuildChannel>()
             .init_resource::<LodSnapshot>()
             .init_resource::<LodSnapshotRequest>()
             .init_resource::<LodScratch>()
@@ -285,8 +286,9 @@ pub struct LodSnapshotRequest {
 /// Cached data for a loaded node, used for physics collider creation.
 #[derive(Clone)]
 pub struct LoadedNodeData {
-    /// The rocktree meshes for this node.
-    pub meshes: Vec<RocktreeMesh>,
+    /// The rocktree meshes for this node, shared with in-flight collider
+    /// build tasks so dispatch never copies mesh data.
+    pub meshes: Arc<Vec<RocktreeMesh>>,
     /// Transform from mesh-local to globe coordinates.
     pub transform: Transform,
     /// World position of the node.
@@ -378,6 +380,11 @@ pub struct LodState {
     /// prefix set every frame (which dominated the reconcile cost at a few
     /// hundred live colliders).
     collider_prefix_refs: HashMap<OctreePath, u32>,
+    /// Collider builds currently running on background tasks, keyed by
+    /// path with the parameters they were dispatched with. One in-flight
+    /// build per path; a parameter change while one is flying waits for it
+    /// to land and then redispatches.
+    collider_builds_in_flight: HashMap<OctreePath, BuildParams>,
     /// Monotonic counter bumped whenever any input of the collider
     /// reconcile changes: the target selection, the cached node data, or
     /// the live collider set. `update_physics_colliders` skips its scan
@@ -427,6 +434,7 @@ impl LodState {
     ) -> veldera_terrain_collider::dump::TileSetDump {
         use veldera_terrain_collider::dump::{DumpMesh, DumpSettings, DumpTile, TileSetDump};
 
+        let coverage = self.selected_coverage();
         let capture = |path: OctreePath, mask: u8| -> Option<DumpTile> {
             let node_data = self.node_data.get(&path)?;
             Some(DumpTile {
@@ -436,6 +444,7 @@ impl LodState {
                 rotation: node_data.transform.rotation.to_array(),
                 scale: node_data.transform.scale.to_array(),
                 octant_mask: mask,
+                sub_cut: self.sub_cut_cells(&coverage, path),
                 laterals: self
                     .lateral_neighbour_paths(path)
                     .iter()
@@ -635,13 +644,15 @@ impl LodState {
     /// Whether a live strict ancestor's collider covers `path`'s region: the
     /// ancestor's octant containing `path` must be *unmasked* (a masked
     /// octant means the ancestor defers that region to someone else —
-    /// possibly `path` itself).
+    /// possibly `path` itself), and the ancestor's sub-octant carve must not
+    /// have removed the cell containing `path`.
     fn ancestor_collider_covers(&self, path: OctreePath) -> bool {
         let mut ancestor = path.parent();
         while let Some(a) = ancestor {
             if let Some(live) = self.physics_colliders.get(&a)
                 && let Some(octant) = path.octant_at(a.depth())
                 && live.mask & (1 << octant) == 0
+                && !carve_excludes(live.sub_cut, octant, path, a.depth())
             {
                 return true;
             }
@@ -660,6 +671,96 @@ impl LodState {
             .filter(|&octant| self.region_live_covered(path.push(octant)))
             .fold(0, |bits, octant| bits | 1 << octant)
     }
+
+    /// Coverage restricted to colliders that are both live *and* currently
+    /// selected, for sub-octant carving. Carving against all-live coverage
+    /// would deadlock convergence when the selection coarsens: the carved
+    /// parent wouldn't cover the stale fine children, the children couldn't
+    /// despawn, and the carve would never clear. Selected-only coverage
+    /// keeps the carve aligned with where the selection actually intends
+    /// finer colliders to be.
+    fn selected_coverage(&self) -> SelectedCoverage {
+        let mut live: HashMap<OctreePath, u8> = HashMap::new();
+        let mut prefixes: HashSet<OctreePath> = HashSet::new();
+        for (path, collider) in &self.physics_colliders {
+            if !self.physics_target_paths.contains_key(path) {
+                continue;
+            }
+            live.insert(*path, collider.mask);
+            let mut current = *path;
+            while let Some(parent) = current.parent() {
+                if !prefixes.insert(parent) {
+                    break;
+                }
+                current = parent;
+            }
+        }
+        SelectedCoverage { live, prefixes }
+    }
+
+    /// The sub-octant carve cells for `path` (bit `octant * 8 + suboctant`,
+    /// tile depth + 2): cells fully covered by live *selected* colliders,
+    /// which the build may drop even when no whole octant is covered.
+    /// Octant masking alone cannot remove a coarse tile's geometry over the
+    /// finely-covered region around the player unless the whole octant is
+    /// covered — and a tile straddling the streaming range edge never is.
+    /// Zero near the finest physics depth, where nothing finer can cover a
+    /// cell.
+    fn sub_cut_cells(&self, coverage: &SelectedCoverage, path: OctreePath) -> u64 {
+        if path.depth() + 2 > PHYSICS_FINEST_DEPTH || path.depth() + 2 > OctreePath::MAX_DEPTH {
+            return 0;
+        }
+        let mut cut = 0u64;
+        for octant in 0u8..8 {
+            let octant_path = path.push(octant);
+            for sub in 0u8..8 {
+                if region_selected_covered(coverage, octant_path.push(sub)) {
+                    cut |= 1 << (u32::from(octant) * 8 + u32::from(sub));
+                }
+            }
+        }
+        cut
+    }
+}
+
+/// Live ∩ selected collider coverage, for sub-octant carving (see
+/// [`LodState::selected_coverage`]).
+struct SelectedCoverage {
+    /// Live selected collider paths with their built masks.
+    live: HashMap<OctreePath, u8>,
+    /// Strict prefixes of the live selected paths, pruning the recursion.
+    prefixes: HashSet<OctreePath>,
+}
+
+/// Whether `path`'s region is fully covered by live *selected* colliders at
+/// or below it — the selected-only analogue of
+/// [`LodState::region_live_covered`].
+fn region_selected_covered(coverage: &SelectedCoverage, path: OctreePath) -> bool {
+    if let Some(mask) = coverage.live.get(&path) {
+        return (0u8..8).all(|octant| {
+            mask & (1 << octant) == 0 || region_selected_covered(coverage, path.push(octant))
+        });
+    }
+    if path.depth() >= OctreePath::MAX_DEPTH || !coverage.prefixes.contains(&path) {
+        return false;
+    }
+    (0u8..8).all(|octant| region_selected_covered(coverage, path.push(octant)))
+}
+
+/// Whether an ancestor collider's sub-octant carve removed the cell
+/// containing `path`, so the ancestor's unmasked octant no longer vouches
+/// for that region. `octant` is the ancestor's octant containing `path`.
+fn carve_excludes(sub_cut: u64, octant: u8, path: OctreePath, ancestor_depth: usize) -> bool {
+    let byte = sub_cut >> (u32::from(octant) * 8) & 0xff;
+    if byte == 0 {
+        return false;
+    }
+    match path.octant_at(ancestor_depth + 1) {
+        // `path` is the octant itself: any carved cell inside means the
+        // octant isn't fully provided.
+        None => true,
+        Some(sub) => byte >> sub & 1 == 1,
+    }
 }
 
 /// A live terrain-collider commit.
@@ -674,6 +775,40 @@ struct LiveCollider {
     /// with no cascades, since fusion targets depend only on source meshes
     /// and the selection, never on built collider state.
     adjacency: u64,
+    /// Sub-octant carve cells the collider was built with (see
+    /// [`LodState::sub_cut_cells`]). A carve that *shrinks* (covering
+    /// colliders despawned) is a coverage-critical rebuild; one that grows
+    /// is refinement.
+    sub_cut: u64,
+}
+
+/// A finished off-thread collider build, awaiting validation and commit on
+/// the main thread.
+struct ColliderBuildResult {
+    path: OctreePath,
+    /// Octant mask the geometry was built with.
+    mask: u8,
+    /// Adjacency fingerprint of the lateral set the rim was fused against.
+    adjacency: u64,
+    /// Sub-octant carve cells the geometry was built with.
+    sub_cut: u64,
+    /// `None` is a successful *empty* build (the mask dropped everything).
+    collider: Option<avian3d::prelude::Collider>,
+    stats: veldera_physics::terrain::BuildStats,
+}
+
+/// Channel for receiving finished collider builds from background tasks.
+#[derive(Resource)]
+struct ColliderBuildChannel {
+    tx: async_channel::Sender<ColliderBuildResult>,
+    rx: async_channel::Receiver<ColliderBuildResult>,
+}
+
+impl Default for ColliderBuildChannel {
+    fn default() -> Self {
+        let (tx, rx) = async_channel::unbounded();
+        Self { tx, rx }
+    }
 }
 
 /// Channels for receiving loaded data from background tasks.
@@ -1795,7 +1930,7 @@ fn poll_lod_node_tasks(
                 lod_state.node_data.insert(
                     path,
                     LoadedNodeData {
-                        meshes: node.meshes.clone(),
+                        meshes: Arc::new(node.meshes.clone()),
                         transform,
                         world_position: world_position.position,
                         meters_per_texel: node.meters_per_texel,
@@ -1946,12 +2081,14 @@ fn cull_meshes(
 /// - Despawns only happen once every overlapping target path is live with
 ///   its current mask.
 ///
-/// Build cost is throttled three ways:
-/// - counted and wall-clock-budgeted per frame
-///   ([`PhysicsStreamingConfig::max_collider_builds_per_frame`],
-///   [`PhysicsStreamingConfig::collider_build_budget_ms`]), with newly
-///   selected paths over already-covered regions additionally waiting out a
-///   dwell ([`PhysicsStreamingConfig::collider_spawn_persistence_secs`]);
+/// Builds run on background tasks — this system only dispatches inputs and
+/// commits validated results — and the remaining main-thread work is
+/// throttled three ways:
+/// - dispatches are capped per pass
+///   ([`PhysicsStreamingConfig::max_collider_builds_per_frame`]) and
+///   prioritized near-first in distance buckets, with newly selected paths
+///   over already-covered regions additionally waiting out a dwell
+///   ([`PhysicsStreamingConfig::collider_spawn_persistence_secs`]);
 /// - refinement rebuilds (rim re-conform, mask refinement, progressive
 ///   stale masking) pause above
 ///   [`PhysicsStreamingConfig::collider_refine_max_speed`] — at speed the
@@ -1972,10 +2109,10 @@ fn update_physics_colliders(
     streaming: Res<PhysicsStreamingConfig>,
     motion: Res<MotionTracker>,
     camera_query: Query<&FloatingOriginCamera>,
+    channel: Res<ColliderBuildChannel>,
+    spawner: TaskSpawner,
     mut reconcile: Local<ColliderReconcileState>,
 ) {
-    use veldera_physics::terrain::{TileMeshes, create_terrain_collider};
-
     let Ok(camera) = camera_query.single() else {
         return;
     };
@@ -1989,6 +2126,16 @@ fn update_physics_colliders(
         .origin_camera_position()
         .unwrap_or(camera.position);
     let now = time.elapsed_secs_f64();
+
+    // Commit finished off-thread builds first (cheap when the channel is
+    // empty), before the early-out: commits bump the inputs generation, so
+    // their follow-up work flows through the normal reconcile. A *discarded*
+    // result (stale parameters) bumps nothing, so it forces a reconcile
+    // directly to get the path re-dispatched.
+    let mut discarded_any = false;
+    while let Ok(result) = channel.rx.try_recv() {
+        discarded_any |= !commit_collider_result(&mut commands, &mut lod_state, camera_pos, result);
+    }
 
     // Camera speed for the refinement gate, from the same smoothed tracker
     // that drives the streaming lead vector.
@@ -2004,7 +2151,8 @@ fn update_physics_colliders(
         .last_camera_position
         .map_or(f64::INFINITY, |p| (camera_pos - p).length());
     let retry_due = reconcile.retry_at.is_some_and(|t| now >= t);
-    if reconcile.last_generation == Some(generation)
+    if !discarded_any
+        && reconcile.last_generation == Some(generation)
         && moved < COLLIDER_RECONCILE_MOVE_M
         && !retry_due
     {
@@ -2029,6 +2177,11 @@ fn update_physics_colliders(
     // fingerprints: computing one is an O(selection) scan, and both the
     // pending filter and the build loop need them.
     let mut adjacency_cache: HashMap<OctreePath, (Vec<OctreePath>, u64)> = HashMap::new();
+    // Live ∩ selected coverage for sub-octant carving, plus a frame-local
+    // cache of computed carve cells (64 coverage recursions per coarse
+    // tile; the filter and the build loop both need them).
+    let selected_coverage = lod_state.selected_coverage();
+    let mut sub_cut_cache: HashMap<OctreePath, u64> = HashMap::new();
 
     // Track when each path entered the target set; the timestamp resets the
     // moment a path drops out, so re-selections start a fresh wait.
@@ -2047,8 +2200,8 @@ fn update_physics_colliders(
     // whose fused adjacency changed (a neighbour was replaced, so the rim
     // must re-conform). Deepest first, so children are live before any
     // parent rebuild masks their octants out; nearest first within a depth
-    // so the ground under the player wins the build budget.
-    let mut pending: Vec<(OctreePath, u8, f64)> = Vec::new();
+    // so the ground under the player wins the dispatch cap.
+    let mut pending: Vec<PendingBuild> = Vec::new();
     for (path, mask) in &target_paths {
         // BFS-selected paths whose data hasn't fully loaded yet are
         // skipped; the data landing bumps the inputs generation.
@@ -2059,18 +2212,22 @@ fn update_physics_colliders(
         let wanted = match lod_state.physics_colliders.get(path) {
             None => true,
             Some(live) => {
+                let sub_cut = *sub_cut_cache
+                    .entry(*path)
+                    .or_insert_with(|| lod_state.sub_cut_cells(&selected_coverage, *path));
                 // A live build whose mask drops octants the selection now
-                // wants from it is coverage-critical (the finer coverage
-                // that justified those mask bits is going away): never
-                // speed-gated. Everything else on a live entity is
-                // refinement.
-                if live.mask & !*mask != 0 {
+                // wants from it, or whose carve removed cells no longer
+                // covered, is coverage-critical (the finer coverage that
+                // justified the drop is going away): never speed-gated.
+                // Everything else on a live entity is refinement.
+                if live.mask & !*mask != 0 || live.sub_cut & !sub_cut != 0 {
                     true
                 } else if !refine_allowed {
                     deferred_work = true;
                     false
                 } else {
                     live.mask != *mask
+                        || live.sub_cut != sub_cut
                         || (distance <= streaming.wysiwyg_radius && {
                             let (_, fingerprint) =
                                 cached_adjacency(&mut adjacency_cache, &lod_state, *path);
@@ -2080,7 +2237,11 @@ fn update_physics_colliders(
             }
         };
         if wanted {
-            pending.push((*path, *mask, distance));
+            pending.push(PendingBuild {
+                path: *path,
+                requested_mask: *mask,
+                distance,
+            });
         }
     }
 
@@ -2103,7 +2264,11 @@ fn update_physics_colliders(
                     let distance = (node_data.world_position - camera_pos).length();
                     // Request everything droppable; the build loop
                     // intersects with the live coverage.
-                    Some((*path, 0xffu8, distance))
+                    Some(PendingBuild {
+                        path: *path,
+                        requested_mask: 0xff,
+                        distance,
+                    })
                 }),
         );
     } else if lod_state
@@ -2114,30 +2279,36 @@ fn update_physics_colliders(
         deferred_work = true;
     }
 
+    // Near-first, in distance buckets: all work in a nearer bucket precedes
+    // any in a farther one, so the ground under (and just ahead of) the
+    // player always wins the dispatch cap — landing on freshly streamed
+    // terrain must not wait behind far-band coverage. Within a bucket,
+    // deeper tiles build first so children are live before a parent's
+    // rebuild masks their octants out, then nearest first.
+    let bucket = |distance: f64| (distance / BUILD_PRIORITY_BUCKET_M) as u64;
     pending.sort_by(|a, b| {
-        std::cmp::Reverse(a.0.depth())
-            .cmp(&std::cmp::Reverse(b.0.depth()))
-            .then(a.2.total_cmp(&b.2))
+        bucket(a.distance)
+            .cmp(&bucket(b.distance))
+            .then(std::cmp::Reverse(a.path.depth()).cmp(&std::cmp::Reverse(b.path.depth())))
+            .then(a.distance.total_cmp(&b.distance))
     });
 
-    // Trimesh construction is the expensive part of collider streaming;
-    // the count cap and the wall-clock budget together bound the frame
-    // cost during fast flight when the band boundaries sweep the world.
+    // Geometry and trimesh construction run on background tasks; the cap
+    // bounds how many new builds are dispatched per reconcile so a band
+    // sweep can't queue hundreds at once.
     let max_builds = match streaming.max_collider_builds_per_frame {
         0 => usize::MAX,
         n => n,
     };
-    let build_budget_secs = streaming.collider_build_budget_ms.max(0.0) / 1000.0;
-    let build_timer = Instant::now();
     let mut builds = 0usize;
-    let mut fallbacks = 0usize;
 
-    for (path, requested_mask, distance) in pending {
-        if builds >= max_builds
-            || (build_budget_secs > 0.0
-                && builds > 0
-                && build_timer.elapsed().as_secs_f64() >= build_budget_secs)
-        {
+    for PendingBuild {
+        path,
+        requested_mask,
+        distance,
+    } in pending
+    {
+        if builds >= max_builds {
             deferred_work = true;
             break;
         }
@@ -2199,12 +2370,37 @@ fn update_physics_colliders(
         // colliders below: a replacement that failed, is still pending, or
         // only partially covers its octant must not leave a hole. Extra
         // coverage from an unmasked octant overlaps the late replacement
-        // briefly — jitter, not a fall.
+        // briefly — jitter, not a fall. The sub-octant carve additionally
+        // drops cells covered by live *selected* colliders, removing a
+        // coarse tile's giant triangles over the fine terrain around the
+        // player even when no whole octant is covered.
         let mask = requested_mask & lod_state.covered_octant_bits(path);
+        let sub_cut = *sub_cut_cache
+            .entry(path)
+            .or_insert_with(|| lod_state.sub_cut_cells(&selected_coverage, path));
 
+        let params = BuildParams {
+            mask,
+            adjacency,
+            sub_cut,
+        };
         match lod_state.physics_colliders.get(&path) {
-            Some(live) if live.mask == mask && live.adjacency == adjacency => continue,
+            Some(live)
+                if live.mask == mask && live.adjacency == adjacency && live.sub_cut == sub_cut =>
+            {
+                continue;
+            }
             _ => {}
+        }
+        // One in-flight build per path: an exact match is already on its
+        // way; changed parameters wait for it to land and redispatch.
+        match lod_state.collider_builds_in_flight.get(&path) {
+            Some(in_flight) if *in_flight == params => continue,
+            Some(_) => {
+                deferred_work = true;
+                continue;
+            }
+            None => {}
         }
 
         builds += 1;
@@ -2213,110 +2409,55 @@ fn update_physics_colliders(
         // single tile, so one vector serves the whole collider's skirts.
         let down = (-node_data.world_position.normalize()).as_vec3();
 
-        // Camera-relative position so the floating origin shift keeps it
-        // in f32 range.
-        let relative_pos = node_data.world_position - camera_pos;
-        let physics_pos = Vec3::new(
-            relative_pos.x as f32,
-            relative_pos.y as f32,
-            relative_pos.z as f32,
-        );
-
-        let tile = TileMeshes {
-            meshes: &node_data.meshes,
+        // Snapshot the build inputs (Arc'd meshes, transforms, settings)
+        // and run the geometry pipeline and trimesh construction on a
+        // background task; the result commits through the channel.
+        let build_tile = OwnedTileMeshes {
+            meshes: Arc::clone(&node_data.meshes),
             rotation: node_data.transform.rotation,
             scale: node_data.transform.scale,
             offset: Vec3::ZERO,
         };
-        let neighbour_meshes: Vec<TileMeshes> = laterals
+        let neighbour_tiles: Vec<OwnedTileMeshes> = laterals
             .iter()
             .filter_map(|n| {
                 let neighbour = lod_state.node_data.get(n)?;
-                Some(TileMeshes {
-                    meshes: &neighbour.meshes,
+                Some(OwnedTileMeshes {
+                    meshes: Arc::clone(&neighbour.meshes),
                     rotation: neighbour.transform.rotation,
                     scale: neighbour.transform.scale,
                     offset: (neighbour.world_position - node_data.world_position).as_vec3(),
                 })
             })
             .collect();
-
-        let (collider, stats) = create_terrain_collider(
-            &tile,
-            mask,
-            &neighbour_meshes,
-            down,
-            &veldera_physics::terrain::BuildSettings {
-                min_triangle_height: streaming.min_collider_triangle_height as f32,
-                skirt_depth: streaming.collider_skirt_depth as f32,
-                skirt_slope: streaming.collider_skirt_slope as f32,
-                fusion_range: streaming.edge_fusion_range as f32,
-                simplify_tolerance: streaming.collider_simplify_tolerance as f32,
-            },
-        );
-        fallbacks += stats.octant_axis_fallbacks;
-
-        // A mask that drops every triangle (common on flat terrain, where
-        // all geometry sits in the lower octants) is a *successful empty*
-        // commit, not a failure: spawn a collider-less marker so the path
-        // counts as live for masking and despawn ordering. Treating it as
-        // a retryable failure made the same paths consume the entire build
-        // budget every frame, starving real builds — colliders then lagged
-        // the display indefinitely (the floating-car livelock).
-        let mut entity_commands = commands.spawn((
-            Position(physics_pos),
-            // Rotation is identity since rotation is baked into the
-            // collider vertices.
-            Rotation::default(),
-            // Transform is needed for Avian's debug rendering (it
-            // reads GlobalTransform).
-            Transform::from_translation(physics_pos),
-            WorldPosition::from_dvec3(node_data.world_position),
-            TerrainCollider {
-                path,
-                octant_mask: mask,
-            },
-            // Avian's debug renderer would draw every triangle of every
-            // terrain trimesh; suppress it permanently — the depth-filtered,
-            // distance-faded wireframes in `viz` draw these instead.
-            veldera_physics::DebugRender::none(),
-        ));
-        if let Some(collider) = collider {
-            entity_commands.insert((
-                RigidBody::Static,
-                collider,
-                CollisionLayers::new(
-                    [GameLayer::Ground],
-                    [GameLayer::Ground, GameLayer::Vehicle, GameLayer::Ragdoll],
-                ),
-            ));
-        } else {
-            tracing::debug!(
-                "Empty collider commit for node '{}' (mask {:#04x} drops all geometry)",
-                path,
-                mask,
-            );
-        }
-        let entity = entity_commands.id();
-
-        // Replace any previous entity for this path (mask rebuild) in the
-        // same frame, so the swap is atomic from physics's point of view.
-        if let Some(old) = lod_state.insert_live_collider(
-            path,
-            LiveCollider {
-                entity,
-                mask,
-                adjacency,
-            },
-        ) {
-            commands.entity(old.entity).despawn();
-        }
-        tracing::debug!(
-            "Created physics collider for node '{}' (depth {}, mask {:#04x})",
-            path,
-            path.depth(),
-            mask,
-        );
+        let settings = veldera_physics::terrain::BuildSettings {
+            min_triangle_height: streaming.min_collider_triangle_height as f32,
+            skirt_depth: streaming.collider_skirt_depth as f32,
+            skirt_slope: streaming.collider_skirt_slope as f32,
+            fusion_range: streaming.edge_fusion_range as f32,
+            simplify_tolerance: streaming.collider_simplify_tolerance as f32,
+        };
+        let tx = channel.tx.clone();
+        spawner.spawn(async move {
+            let tile = build_tile.as_tile_meshes();
+            let neighbour_meshes: Vec<TileMeshes> = neighbour_tiles
+                .iter()
+                .map(OwnedTileMeshes::as_tile_meshes)
+                .collect();
+            let (collider, stats) =
+                create_terrain_collider(&tile, mask, sub_cut, &neighbour_meshes, down, &settings);
+            let _ = tx
+                .send(ColliderBuildResult {
+                    path,
+                    mask,
+                    adjacency,
+                    sub_cut,
+                    collider,
+                    stats,
+                })
+                .await;
+        });
+        lod_state.collider_builds_in_flight.insert(path, params);
     }
 
     // Despawn colliders no longer in the target set — but only once their
@@ -2332,8 +2473,6 @@ fn update_physics_colliders(
         .filter(|p| !target_paths.contains_key(*p))
         .copied()
         .collect();
-
-    lod_state.octant_axis_fallbacks += fallbacks;
 
     for path in obsolete {
         let fully_replaced =
@@ -2364,7 +2503,7 @@ struct ColliderReconcileState {
     /// Camera position at the last reconcile.
     last_camera_position: Option<DVec3>,
     /// Elapsed-seconds deadline for re-running while time-gated work
-    /// (dwell, fusion deferral, build budget, speed gate) is pending.
+    /// (dwell, fusion deferral, dispatch cap, speed gate) is pending.
     retry_at: Option<f64>,
 }
 
@@ -2378,6 +2517,162 @@ const COLLIDER_RECONCILE_MOVE_M: f64 = 2.0;
 /// Retry cadence (s) while time-gated collider work is pending — an order
 /// of magnitude finer than the gates it re-checks (dwell, fusion deferral).
 const COLLIDER_RETRY_SECS: f64 = 0.1;
+
+/// Distance bucket size (m) for build dispatch priority: all pending work
+/// in a nearer bucket dispatches before any in a farther one.
+const BUILD_PRIORITY_BUCKET_M: f64 = 100.0;
+
+/// One queued collider build request.
+struct PendingBuild {
+    path: OctreePath,
+    /// Requested octant mask: selection intent for targeted paths, `0xff`
+    /// (everything droppable) for progressive masking of stale colliders.
+    /// The dispatch intersects it with live coverage.
+    requested_mask: u8,
+    /// Distance (m) from the camera to the tile origin, for priority.
+    distance: f64,
+}
+
+/// The parameters a collider build task was dispatched with, for matching
+/// in-flight builds against current wants.
+#[derive(Clone, Copy, PartialEq, Eq)]
+struct BuildParams {
+    mask: u8,
+    adjacency: u64,
+    sub_cut: u64,
+}
+
+/// Owned snapshot of one tile's build inputs, shareable with a background
+/// task (the mesh data is `Arc`'d, so dispatch never copies it).
+struct OwnedTileMeshes {
+    meshes: Arc<Vec<RocktreeMesh>>,
+    rotation: Quat,
+    scale: Vec3,
+    offset: Vec3,
+}
+
+impl OwnedTileMeshes {
+    fn as_tile_meshes(&self) -> TileMeshes<'_> {
+        TileMeshes {
+            meshes: &self.meshes,
+            rotation: self.rotation,
+            scale: self.scale,
+            offset: self.offset,
+        }
+    }
+}
+
+/// Validate and commit a finished off-thread collider build, spawning its
+/// entity and registering it live. Returns `false` when the result is
+/// stale and discarded — the parameters no longer match what the current
+/// selection and coverage would request, and committing anyway could mask
+/// or carve regions whose covering colliders have since despawned (a
+/// hole). A discarded path simply re-pends in the next reconcile.
+fn commit_collider_result(
+    commands: &mut Commands,
+    lod_state: &mut LodState,
+    camera_pos: DVec3,
+    result: ColliderBuildResult,
+) -> bool {
+    lod_state.collider_builds_in_flight.remove(&result.path);
+    lod_state.octant_axis_fallbacks += result.stats.octant_axis_fallbacks;
+
+    // The requested mask for the path right now: its selection entry, or
+    // 0xff for a live stale collider being progressively masked.
+    let requested = match lod_state.physics_target_paths.get(&result.path) {
+        Some(mask) => *mask,
+        None if lod_state.physics_colliders.contains_key(&result.path) => 0xff,
+        None => return false,
+    };
+    let Some(node_data) = lod_state.node_data.get(&result.path) else {
+        return false;
+    };
+    let world_position = node_data.world_position;
+    // Masking or carving beyond what current coverage supports would open
+    // a hole; less than currently possible is just over-coverage that the
+    // next refinement pass tightens.
+    if result.mask & !(requested & lod_state.covered_octant_bits(result.path)) != 0 {
+        return false;
+    }
+    let coverage = lod_state.selected_coverage();
+    if result.sub_cut & !lod_state.sub_cut_cells(&coverage, result.path) != 0 {
+        return false;
+    }
+
+    // Camera-relative position so the floating origin shift keeps it in
+    // f32 range, in the *commit-time* origin frame.
+    let relative_pos = world_position - camera_pos;
+    let physics_pos = Vec3::new(
+        relative_pos.x as f32,
+        relative_pos.y as f32,
+        relative_pos.z as f32,
+    );
+
+    // A mask that drops every triangle (common on flat terrain, where all
+    // geometry sits in the lower octants) is a *successful empty* commit,
+    // not a failure: spawn a collider-less marker so the path counts as
+    // live for masking and despawn ordering. Treating it as a retryable
+    // failure made the same paths consume the entire build budget every
+    // frame, starving real builds — colliders then lagged the display
+    // indefinitely (the floating-car livelock).
+    let mut entity_commands = commands.spawn((
+        Position(physics_pos),
+        // Rotation is identity since rotation is baked into the collider
+        // vertices.
+        Rotation::default(),
+        // Transform is needed for Avian's debug rendering (it reads
+        // GlobalTransform).
+        Transform::from_translation(physics_pos),
+        WorldPosition::from_dvec3(world_position),
+        TerrainCollider {
+            path: result.path,
+            octant_mask: result.mask,
+            sub_cut: result.sub_cut,
+        },
+        // Avian's debug renderer would draw every triangle of every
+        // terrain trimesh; suppress it permanently — the depth-filtered,
+        // distance-faded wireframes in `viz` draw these instead.
+        veldera_physics::DebugRender::none(),
+    ));
+    if let Some(collider) = result.collider {
+        entity_commands.insert((
+            RigidBody::Static,
+            collider,
+            CollisionLayers::new(
+                [GameLayer::Ground],
+                [GameLayer::Ground, GameLayer::Vehicle, GameLayer::Ragdoll],
+            ),
+        ));
+    } else {
+        tracing::debug!(
+            "Empty collider commit for node '{}' (mask {:#04x} drops all geometry)",
+            result.path,
+            result.mask,
+        );
+    }
+    let entity = entity_commands.id();
+
+    // Replace any previous entity for this path (mask rebuild) in the same
+    // frame, so the swap is atomic from physics's point of view.
+    if let Some(old) = lod_state.insert_live_collider(
+        result.path,
+        LiveCollider {
+            entity,
+            mask: result.mask,
+            adjacency: result.adjacency,
+            sub_cut: result.sub_cut,
+        },
+    ) {
+        commands.entity(old.entity).despawn();
+    }
+    tracing::debug!(
+        "Committed physics collider for node '{}' (depth {}, mask {:#04x})",
+        result.path,
+        result.path.depth(),
+        result.mask,
+    );
+    true
+}
 
 /// Look up (or compute and cache) a path's lateral-neighbour set and its
 /// adjacency fingerprint. An O(selection) scan per miss, so the reconcile

@@ -136,12 +136,24 @@ pub struct BuiltGeometry {
 /// build — e.g. the mask removed everything — which callers should treat as
 /// a successful empty commit, not a failure).
 ///
+/// `octant_mask` drops whole octants; `sub_cut` additionally drops cells
+/// one level finer — bit `octant * 8 + suboctant` carves that cell at tile
+/// depth + 2. Octant masking alone cannot remove a coarse tile's geometry
+/// over a finely-covered region unless the *whole* octant is covered, and
+/// any tile straddling the streaming range edge never is — its giant
+/// triangles then stack on top of the fine terrain under the player and
+/// feed the contact solver coincident layers. Carving needs every octant
+/// bit resolvable to an axis and sign (see [`resolve_carve_axes`]);
+/// unresolvable meshes keep their geometry (safe: over-coverage, never a
+/// hole).
+///
 /// `down` is the planet-centre direction in baked space; `neighbours` are
 /// the laterally adjacent tiles of the current selection (no ancestors or
 /// descendants of the build tile).
 pub fn build_tile_geometry(
     tile: &TileMeshes,
     octant_mask: u8,
+    sub_cut: u64,
     neighbours: &[TileMeshes],
     down: Vec3,
     settings: &BuildSettings,
@@ -152,6 +164,7 @@ pub fn build_tile_geometry(
         settings.min_triangle_height,
         settings.simplify_tolerance,
         octant_mask,
+        sub_cut,
         down,
         &mut stats,
     );
@@ -282,6 +295,7 @@ fn merge_meshes(
     min_triangle_height: f32,
     simplify_tolerance: f32,
     octant_mask: u8,
+    sub_cut: u64,
     down: Vec3,
     stats: &mut BuildStats,
 ) -> (Vec<Vec3>, Vec<[u32; 3]>, Vec<bool>) {
@@ -327,11 +341,18 @@ fn merge_meshes(
 
     for (mesh, (locals, tags, tris)) in tile.meshes.iter().zip(&prepared) {
         let base = vertices.len() as u32;
-        let apply_octant_mask = octant_mask != 0 && mesh.has_octant_data;
+        let apply_octant_mask = (octant_mask != 0 || sub_cut != 0) && mesh.has_octant_data;
         let axes = apply_octant_mask.then(|| derive_octant_axes(mesh));
         if axes.is_some_and(|axes| axes.has_tag_bits()) {
             stats.octant_axis_fallbacks += 1;
         }
+        // Carving needs every bit resolved to an axis and sign; an
+        // unresolvable mesh keeps its geometry (over-coverage, never a
+        // hole).
+        let carve = axes
+            .as_ref()
+            .filter(|_| sub_cut != 0)
+            .and_then(|axes| resolve_carve_axes(axes, mesh));
 
         vertices.extend(locals.iter().map(|&p| tile.to_baked(p)));
         border.extend(locals.iter().map(|&p| is_border_local(p)));
@@ -354,6 +375,10 @@ fn merge_meshes(
                 push_triangle(&mut vertices, &mut triangles, tri);
                 continue;
             };
+            if octant_mask == 0 && carve.is_none() {
+                push_triangle(&mut vertices, &mut triangles, tri);
+                continue;
+            }
 
             // Geometric classification where the bit-to-axis mapping is
             // confident (vertex tags are derived from index runs and can be
@@ -366,31 +391,55 @@ fn merge_meshes(
             if octants.iter().all(|&o| masked(o)) {
                 continue;
             }
-            if octants.iter().all(|&o| !masked(o)) {
+            // Whole-keep fast path: all three corners in the *same*
+            // unmasked, carve-free octant. (Corners merely all being
+            // unmasked is not enough — a coarse tile's giant triangle can
+            // pass straight through a masked octant between its corners.)
+            let same_octant = octants[0] == octants[1] && octants[1] == octants[2];
+            let octant_carved =
+                carve.is_some() && sub_cut >> (u32::from(octants[0]) * 8) & 0xff != 0;
+            if same_octant && !masked(octants[0]) && !octant_carved {
                 push_triangle(&mut vertices, &mut triangles, tri);
                 continue;
             }
             // A triangle whose corners disagree on a tag-classified bit
-            // can't be clipped geometrically; the render shader collapses
-            // it to an invisible sliver, so dropping it is WYSIWYG.
+            // can't be clipped geometrically. When none of its corner
+            // octants are masked or carved, keep it whole (the renderer
+            // draws it fully); otherwise drop it — the render shader
+            // collapses it to an invisible sliver, so that's WYSIWYG.
             if !axes.tag_bits_agree(corner_tags) {
+                let corner_carved = carve.is_some()
+                    && octants
+                        .iter()
+                        .any(|&o| sub_cut >> (u32::from(o) * 8) & 0xff != 0);
+                if octants.iter().all(|&o| !masked(o)) && !corner_carved {
+                    push_triangle(&mut vertices, &mut triangles, tri);
+                }
                 continue;
             }
-            // Boundary-crossing: clip at the octant midplanes and keep the
-            // pieces lying in unmasked octants.
+            // Clip at the octant midplanes (and the carve quarter-planes)
+            // and keep the pieces lying in unmasked, uncarved cells.
             let poly = [a, b, c].map(|i| locals[i as usize]);
-            clip_to_unmasked_octants(&poly, axes, octant_mask, corner_tags[0], &mut |piece| {
-                let start = vertices.len() as u32;
-                vertices.extend(piece.iter().map(|&p| tile.to_baked(p)));
-                border.extend(piece.iter().map(|&p| is_border_local(p)));
-                for i in 1..piece.len() as u32 - 1 {
-                    push_triangle(
-                        &mut vertices,
-                        &mut triangles,
-                        [start, start + i, start + i + 1],
-                    );
-                }
-            });
+            clip_to_kept_cells(
+                &poly,
+                axes,
+                carve.as_ref(),
+                octant_mask,
+                sub_cut,
+                corner_tags[0],
+                &mut |piece| {
+                    let start = vertices.len() as u32;
+                    vertices.extend(piece.iter().map(|&p| tile.to_baked(p)));
+                    border.extend(piece.iter().map(|&p| is_border_local(p)));
+                    for i in 1..piece.len() as u32 - 1 {
+                        push_triangle(
+                            &mut vertices,
+                            &mut triangles,
+                            [start, start + i, start + i + 1],
+                        );
+                    }
+                },
+            );
         }
     }
 
@@ -577,38 +626,153 @@ fn derive_octant_axes(mesh: &RocktreeMesh) -> OctantAxes {
     OctantAxes { bits }
 }
 
-/// Split a boundary-crossing triangle at the octant midplanes and emit each
-/// piece lying in an unmasked octant (as a convex polygon in mesh-local
-/// space, ready for fan triangulation). `tag` supplies the octant bits that
-/// lack a geometric mapping; the caller guarantees the triangle's corners
-/// agree on those bits.
-fn clip_to_unmasked_octants(
+/// Per-bit `(axis, set_is_upper)` mapping with *every* bit resolved,
+/// required for sub-octant carving (see [`resolve_carve_axes`]).
+type CarveAxes = [(usize, bool); 3];
+
+/// Sub-midplane of the lower octant half along an axis.
+const LOWER_QUARTER: f32 = OCTANT_MIDPOINT * 0.5;
+/// Sub-midplane of the upper octant half along an axis.
+const UPPER_QUARTER: f32 = OCTANT_MIDPOINT * 1.5;
+
+/// Resolve all three octant bits to `(axis, set_is_upper)` for carving.
+/// `Axis` bits resolve directly. A single `Constant` bit resolves by
+/// elimination (the one axis no other bit claimed), with the sign taken
+/// from which side of that axis's midplane the geometry sits — a constant
+/// bit means the geometry never crossed the tile midplane, so its side
+/// determines the convention. Returns `None` (carving disabled) for `Tag`
+/// bits, multiple constant bits, or geometry straddling the midplane.
+fn resolve_carve_axes(axes: &OctantAxes, mesh: &RocktreeMesh) -> Option<CarveAxes> {
+    let mut result: CarveAxes = [(usize::MAX, false); 3];
+    let mut used = [false; 3];
+    let mut constant: Option<(usize, bool)> = None;
+    for (b, bit) in axes.bits.iter().enumerate() {
+        match *bit {
+            OctantBit::Axis { axis, set_is_upper } => {
+                result[b] = (axis, set_is_upper);
+                used[axis] = true;
+            }
+            OctantBit::Constant(value) => {
+                if constant.replace((b, value)).is_some() {
+                    return None;
+                }
+            }
+            OctantBit::Tag => return None,
+        }
+    }
+    let Some((b, value)) = constant else {
+        return Some(result);
+    };
+    let axis = (0..3).find(|&a| !used[a])?;
+    let upper = mesh
+        .vertices
+        .iter()
+        .filter(|v| {
+            let p = [v.x, v.y, v.z][axis];
+            f32::from(p) > OCTANT_MIDPOINT
+        })
+        .count();
+    let total = mesh.vertices.len();
+    // Require a three-quarters majority on one side; a straddling
+    // population contradicts the bit being constant, so don't guess.
+    let side_upper = if upper * 4 >= total * 3 {
+        true
+    } else if (total - upper) * 4 >= total * 3 {
+        false
+    } else {
+        return None;
+    };
+    result[b] = (axis, side_upper == value);
+    Some(result)
+}
+
+/// The sub-octant cell index of a point within `octant`, under fully
+/// resolved carve axes: each bit selects the half of the octant's range on
+/// its axis, with the same set/unset convention as the octant bits.
+fn suboctant_of(p: Vec3, octant: u8, carve: &CarveAxes) -> u32 {
+    let mut sub = 0u32;
+    for (b, &(axis, set_is_upper)) in carve.iter().enumerate() {
+        let octant_upper = (octant >> b & 1 == 1) == set_is_upper;
+        let sub_midplane = if octant_upper {
+            UPPER_QUARTER
+        } else {
+            LOWER_QUARTER
+        };
+        if (p[axis] > sub_midplane) == set_is_upper {
+            sub |= 1 << b;
+        }
+    }
+    sub
+}
+
+/// Split a triangle at the octant midplanes (and, when carving, the
+/// quarter-planes) and emit each piece lying in an unmasked, uncarved cell
+/// (as a convex polygon in mesh-local space, ready for fan triangulation).
+/// `tag` supplies the octant bits that lack a geometric mapping; the caller
+/// guarantees the triangle's corners agree on those bits.
+fn clip_to_kept_cells(
     triangle: &[Vec3; 3],
     axes: &OctantAxes,
+    carve: Option<&CarveAxes>,
     octant_mask: u8,
+    sub_cut: u64,
     tag: u8,
     emit: &mut dyn FnMut(&[Vec3]),
 ) {
+    let mut planes: Vec<(usize, f32)> = Vec::new();
+    for (b, bit) in axes.bits.iter().enumerate() {
+        match *bit {
+            OctantBit::Axis { axis, .. } => {
+                planes.push((axis, OCTANT_MIDPOINT));
+                if carve.is_some() {
+                    planes.push((axis, LOWER_QUARTER));
+                    planes.push((axis, UPPER_QUARTER));
+                }
+            }
+            OctantBit::Constant(value) => {
+                // The constant bit pins the octant half; only the pinned
+                // half's quarter-plane can separate carve cells.
+                if let Some(carve) = carve {
+                    let (axis, set_is_upper) = carve[b];
+                    planes.push((
+                        axis,
+                        if value == set_is_upper {
+                            UPPER_QUARTER
+                        } else {
+                            LOWER_QUARTER
+                        },
+                    ));
+                }
+            }
+            OctantBit::Tag => {}
+        }
+    }
+
     let mut pieces: Vec<Vec<Vec3>> = vec![triangle.to_vec()];
-    for bit in axes.bits {
-        let OctantBit::Axis { axis, .. } = bit else {
-            continue;
-        };
+    for (axis, value) in planes {
         pieces = pieces
             .into_iter()
             .flat_map(|piece| {
-                let (below, above) = split_polygon(&piece, axis, OCTANT_MIDPOINT);
+                let (below, above) = split_polygon(&piece, axis, value);
                 [below, above]
             })
             .filter(|piece| piece.len() >= 3)
             .collect();
     }
     for piece in &pieces {
-        // Classify by centroid: each piece lies wholly in one octant.
+        // Classify by centroid: each piece lies wholly in one cell.
         let centroid = piece.iter().sum::<Vec3>() / piece.len() as f32;
-        if octant_mask & (1 << axes.octant_of(centroid, tag)) == 0 {
-            emit(piece);
+        let octant = axes.octant_of(centroid, tag);
+        if octant_mask & (1 << octant) != 0 {
+            continue;
         }
+        if let Some(carve) = carve {
+            let sub = suboctant_of(centroid, octant, carve);
+            if sub_cut >> (u32::from(octant) * 8 + sub) & 1 == 1 {
+                continue;
+            }
+        }
+        emit(piece);
     }
 }
 

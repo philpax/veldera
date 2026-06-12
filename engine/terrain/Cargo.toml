@@ -28,7 +28,6 @@ veldera_constants = { workspace = true }
 veldera_geo = { workspace = true }
 veldera_physics = { workspace = true }
 veldera_terrain_collider = { workspace = true }
-web-time = { workspace = true }
 
 [lints]
 workspace = true

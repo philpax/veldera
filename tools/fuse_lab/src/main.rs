@@ -120,6 +120,7 @@ fn main() -> Result<(), Box<dyn Error>> {
         build_tile_geometry(
             &tile_meshes,
             tile.octant_mask,
+            tile.sub_cut,
             &neighbours,
             tile.down(),
             &settings,

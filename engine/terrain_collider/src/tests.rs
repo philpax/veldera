@@ -75,7 +75,15 @@ fn flat_quad() -> RocktreeMesh {
 
 fn merge_raw(tile_meshes: &TileMeshes, octant_mask: u8) -> (Vec<Vec3>, Vec<[u32; 3]>, Vec<bool>) {
     let mut stats = BuildStats::default();
-    merge_meshes(tile_meshes, 0.0, 0.0, octant_mask, Vec3::NEG_Z, &mut stats)
+    merge_meshes(
+        tile_meshes,
+        0.0,
+        0.0,
+        octant_mask,
+        0,
+        Vec3::NEG_Z,
+        &mut stats,
+    )
 }
 
 // ============================================================================
@@ -108,7 +116,7 @@ fn merge_applies_rotation_scale_and_offset() {
     };
 
     let mut stats = BuildStats::default();
-    let (vertices, _, _) = merge_meshes(&t, 0.0, 0.0, 0, Vec3::NEG_Z, &mut stats);
+    let (vertices, _, _) = merge_meshes(&t, 0.0, 0.0, 0, 0, Vec3::NEG_Z, &mut stats);
     assert_eq!(vertices, vec![Vec3::new(12.0, 4.0, 6.0)]);
 }
 
@@ -119,8 +127,8 @@ fn build_covers_all_meshes() {
     let quad = [(0, 0, 0), (1, 0, 0), (0, 1, 0), (1, 1, 0)];
     let meshes = vec![test_mesh(&quad, vec![]), test_mesh(&quad, vec![0, 1, 2, 3])];
 
-    assert!(build_tile_geometry(&tile(&meshes), 0, &[], Vec3::NEG_Z, &RAW).is_some());
-    assert!(build_tile_geometry(&tile(&meshes[..1]), 0, &[], Vec3::NEG_Z, &RAW).is_none());
+    assert!(build_tile_geometry(&tile(&meshes), 0, 0, &[], Vec3::NEG_Z, &RAW).is_some());
+    assert!(build_tile_geometry(&tile(&meshes[..1]), 0, 0, &[], Vec3::NEG_Z, &RAW).is_none());
 }
 
 #[test]
@@ -140,8 +148,8 @@ fn build_is_deterministic() {
         fusion_range: 4.0,
         simplify_tolerance: 0.0,
     };
-    let a = build_tile_geometry(&tile(&meshes), 0, &neighbours, Vec3::NEG_Z, &settings).unwrap();
-    let b = build_tile_geometry(&tile(&meshes), 0, &neighbours, Vec3::NEG_Z, &settings).unwrap();
+    let a = build_tile_geometry(&tile(&meshes), 0, 0, &neighbours, Vec3::NEG_Z, &settings).unwrap();
+    let b = build_tile_geometry(&tile(&meshes), 0, 0, &neighbours, Vec3::NEG_Z, &settings).unwrap();
     assert_eq!(a.vertices, b.vertices);
     assert_eq!(a.triangles, b.triangles);
     assert_eq!(a.stats, b.stats);
@@ -200,7 +208,7 @@ fn octant_mask_fallback_drops_tagged_triangles() {
 
     let mut stats = BuildStats::default();
     let (vertices, triangles, _) =
-        merge_meshes(&tile(&meshes), 0.0, 0.0, 1 << 3, Vec3::NEG_Z, &mut stats);
+        merge_meshes(&tile(&meshes), 0.0, 0.0, 1 << 3, 0, Vec3::NEG_Z, &mut stats);
     assert_eq!(triangles, vec![[3, 5, 4]]);
     assert_eq!(stats.octant_axis_fallbacks, 1, "fallback must be counted");
     // Vertex positions are never deformed.
@@ -228,7 +236,7 @@ fn octant_mask_clips_boundary_triangles() {
 
     let mut stats = BuildStats::default();
     let (vertices, triangles, _) =
-        merge_meshes(&tile(&meshes), 0.0, 0.0, 1 << 1, Vec3::NEG_Z, &mut stats);
+        merge_meshes(&tile(&meshes), 0.0, 0.0, 1 << 1, 0, Vec3::NEG_Z, &mut stats);
     assert_eq!(stats.octant_axis_fallbacks, 0);
     assert!(!triangles.is_empty(), "the unmasked half must survive");
     let mut area = 0.0f32;
@@ -307,7 +315,7 @@ fn octant_mask_tag_bit_composes_with_geometric_clip() {
     // its full geometry (no spurious whole-mesh fallback).
     let mut stats = BuildStats::default();
     let (vertices, triangles, _) =
-        merge_meshes(&tile(&meshes), 0.0, 0.0, 1 << 2, Vec3::NEG_Z, &mut stats);
+        merge_meshes(&tile(&meshes), 0.0, 0.0, 1 << 2, 0, Vec3::NEG_Z, &mut stats);
     assert_eq!(
         stats.octant_axis_fallbacks, 1,
         "the tag bit must be counted"
@@ -351,6 +359,120 @@ fn octant_mask_ignored_without_octant_data() {
     assert_eq!(triangles.len(), 1);
 }
 
+#[test]
+fn sub_cut_carves_cells_from_an_unmasked_octant() {
+    // A full-tile quad in the z = 0 plane, tags mapping bit 0 ↔ x and
+    // bit 1 ↔ y; bit 2 is constant (all geometry in the lower-z half), so
+    // its axis resolves by elimination and its sign from the geometry
+    // side. Carving cell (octant 0, suboctant 0) removes exactly the
+    // lattice square [0, 63.75]² and nothing else, even with no octant
+    // masked at all.
+    let positions = [
+        (0, 0, 0, 0),
+        (255, 0, 0, 1),
+        (0, 255, 0, 2),
+        (255, 255, 0, 3),
+    ];
+    let meshes = vec![test_mesh_with_octants(&positions, vec![0, 1, 2, 3], true)];
+
+    let mut stats = BuildStats::default();
+    let (vertices, triangles, _) =
+        merge_meshes(&tile(&meshes), 0.0, 0.0, 0, 1, Vec3::NEG_Z, &mut stats);
+    let mut area = 0.0f32;
+    for &[a, b, c] in &triangles {
+        let (a, b, c) = (
+            vertices[a as usize],
+            vertices[b as usize],
+            vertices[c as usize],
+        );
+        let centroid = (a + b + c) / 3.0;
+        assert!(
+            !(centroid.x < 63.75 && centroid.y < 63.75),
+            "kept geometry must not lie in the carved cell, got centroid {centroid}"
+        );
+        area += (b - a).cross(c - a).length() * 0.5;
+    }
+    let expected = 255.0 * 255.0 - 63.75 * 63.75;
+    assert!(
+        (area - expected).abs() < expected * 0.01,
+        "carving should remove exactly one cell, got area {area} vs {expected}"
+    );
+}
+
+#[test]
+fn sub_cut_ignored_when_axes_unresolvable() {
+    // Only bit 0 varies (x); bits 1 and 2 are both constant, so the
+    // remaining two axes cannot be disambiguated and carving must disable
+    // itself, keeping the full geometry (over-coverage, never a hole).
+    let positions = [
+        (0, 0, 0, 0),
+        (255, 0, 0, 1),
+        (0, 200, 0, 0),
+        (255, 200, 0, 1),
+    ];
+    let meshes = vec![test_mesh_with_octants(&positions, vec![0, 1, 2, 3], true)];
+
+    let mut stats = BuildStats::default();
+    let (vertices, triangles, _) =
+        merge_meshes(&tile(&meshes), 0.0, 0.0, 0, 1, Vec3::NEG_Z, &mut stats);
+    let area: f32 = triangles
+        .iter()
+        .map(|&[a, b, c]| {
+            let (a, b, c) = (
+                vertices[a as usize],
+                vertices[b as usize],
+                vertices[c as usize],
+            );
+            (b - a).cross(c - a).length() * 0.5
+        })
+        .sum();
+    let expected = 255.0 * 200.0;
+    assert!(
+        (area - expected).abs() < expected * 0.01,
+        "unresolvable carve must keep everything, got area {area} vs {expected}"
+    );
+}
+
+#[test]
+fn octant_mask_clips_masked_octants_between_corners() {
+    // A giant triangle whose corners sit in octants 0, 1, and 3 but whose
+    // interior sweeps through octant 2. Masking octant 2 must remove that
+    // interior part — corners merely all being unmasked is not enough, or
+    // a coarse tile's giant triangles keep stacking geometry over the
+    // finer tiles that replaced the masked octant.
+    let positions = [(0, 0, 0, 0), (255, 40, 0, 1), (140, 255, 0, 3)];
+    let meshes = vec![test_mesh_with_octants(&positions, vec![0, 1, 2], true)];
+
+    let (vertices, triangles, _) = merge_raw(&tile(&meshes), 1 << 2);
+    assert!(!triangles.is_empty());
+    let mut area = 0.0f32;
+    for &[a, b, c] in &triangles {
+        let (a, b, c) = (
+            vertices[a as usize],
+            vertices[b as usize],
+            vertices[c as usize],
+        );
+        let centroid = (a + b + c) / 3.0;
+        assert!(
+            !(centroid.x < 127.5 && centroid.y > 127.5),
+            "kept geometry must not lie in the masked octant, got centroid {centroid}"
+        );
+        area += (b - a).cross(c - a).length() * 0.5;
+    }
+    let full = {
+        let (a, b, c) = (
+            Vec3::new(0.0, 0.0, 0.0),
+            Vec3::new(255.0, 40.0, 0.0),
+            Vec3::new(140.0, 255.0, 0.0),
+        );
+        (b - a).cross(c - a).length() * 0.5
+    };
+    assert!(
+        area < full * 0.99,
+        "the masked interior must actually be removed, got {area} of {full}"
+    );
+}
+
 // ============================================================================
 // Border fusion
 // ============================================================================
@@ -370,7 +492,7 @@ fn fuse_quads(offset: Vec3, fusion_range: f32) -> BuiltGeometry {
         fusion_range,
         ..RAW
     };
-    build_tile_geometry(&tile(&meshes), 0, &neighbours, Vec3::NEG_Z, &settings).unwrap()
+    build_tile_geometry(&tile(&meshes), 0, 0, &neighbours, Vec3::NEG_Z, &settings).unwrap()
 }
 
 #[test]
@@ -411,7 +533,7 @@ fn fusion_is_symmetric_across_the_border() {
         ..RAW
     };
     let built =
-        build_tile_geometry(&tile(&meshes), 0, &neighbours, Vec3::NEG_Z, &settings).unwrap();
+        build_tile_geometry(&tile(&meshes), 0, 0, &neighbours, Vec3::NEG_Z, &settings).unwrap();
     // B's shared rim is its x = 0 edge; in B's frame the midline is -1.
     for v in &built.vertices {
         if v.x.abs() < 1e-3 {
@@ -464,7 +586,7 @@ fn fusion_leaves_interior_vertices_alone() {
         ..RAW
     };
     let built =
-        build_tile_geometry(&tile(&meshes), 0, &neighbours, Vec3::NEG_Z, &settings).unwrap();
+        build_tile_geometry(&tile(&meshes), 0, 0, &neighbours, Vec3::NEG_Z, &settings).unwrap();
     let interior = built
         .vertices
         .iter()
@@ -594,7 +716,7 @@ fn merge_drops_slivers() {
     ];
 
     let mut stats = BuildStats::default();
-    let (_, triangles, _) = merge_meshes(&tile(&meshes), 0.01, 0.0, 0, Vec3::NEG_Z, &mut stats);
+    let (_, triangles, _) = merge_meshes(&tile(&meshes), 0.01, 0.0, 0, 0, Vec3::NEG_Z, &mut stats);
 
     // Only the healthy quad's two triangles survive.
     assert_eq!(triangles, vec![[0, 1, 2], [1, 3, 2]]);
@@ -643,7 +765,7 @@ proptest! {
         }];
         let settings = BuildSettings { fusion_range: 4.0, ..RAW };
         let built_b =
-            build_tile_geometry(&tile(&meshes), 0, &neighbours, Vec3::NEG_Z, &settings).unwrap();
+            build_tile_geometry(&tile(&meshes), 0, 0, &neighbours, Vec3::NEG_Z, &settings).unwrap();
         for v in &built_b.vertices {
             if v.x.abs() < 1e-3 {
                 prop_assert!((v.z + delta / 2.0).abs() < 1e-3);

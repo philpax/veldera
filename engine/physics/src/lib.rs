@@ -149,19 +149,11 @@ pub struct PhysicsStreamingConfig {
     /// while culling photogrammetry density collision doesn't need. Zero
     /// disables.
     pub collider_simplify_tolerance: f64,
-    /// Maximum trimesh collider builds per frame. Building a trimesh is the
-    /// expensive part of collider streaming; capping it bounds the frame
-    /// cost during fast flight when the band boundaries sweep the world.
-    /// Pending builds queue deepest-first, then nearest-first. Zero means
-    /// uncapped.
+    /// Maximum collider builds *dispatched* to background tasks per
+    /// reconcile pass, so a band sweep can't queue hundreds at once.
+    /// Pending builds queue near-first (in distance buckets), then
+    /// deepest-first. Zero means uncapped.
     pub max_collider_builds_per_frame: usize,
-    /// Per-frame wall-clock budget (ms) for trimesh collider builds. Build
-    /// cost varies wildly with mesh density and fusion neighbour count, so
-    /// a count cap alone can't bound the frame cost; once the budget is
-    /// spent, remaining builds wait for the next frame. At least one build
-    /// always runs when work is pending, so the budget never stalls
-    /// coverage. Zero disables (count cap only).
-    pub collider_build_budget_ms: f64,
     /// Camera speed (m/s) above which collider *refinement* rebuilds pause:
     /// rim re-conform after adjacency changes, octant-mask refinements, and
     /// progressive masking of stale colliders. First coverage of bare
