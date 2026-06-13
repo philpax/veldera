@@ -19,6 +19,7 @@ use veldera_game_camera::{
 };
 use veldera_game_input::InputPlugin;
 use veldera_game_player::{PlayerConfigPaths, PlayerPlugin};
+use veldera_game_roads::RoadsPlugin;
 use veldera_game_ui::DebugUiPlugin;
 use veldera_game_vehicle::VehiclePlugin;
 use veldera_geo::{
@@ -54,6 +55,7 @@ impl Plugin for AppPlugin {
             GeoPlugin,
             DebugUiPlugin,
             VehiclePlugin::new(config::paths::VEHICLE),
+            RoadsPlugin::new(config::paths::ROADS),
         ))
         // Terrain, physics, sky, atmosphere, clouds, and the celestial lights —
         // each at its default engine asset path.

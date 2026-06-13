@@ -431,6 +431,28 @@ impl LodState {
         self.octant_axis_fallbacks
     }
 
+    /// Snapshot the raw build inputs of every loaded terrain tile within
+    /// `radius` of `center` (ECEF), for off-thread road fitting. The fit must
+    /// sample this *raw* photogrammetry, never the road-modified colliders.
+    #[must_use]
+    pub fn loaded_terrain_snapshot(
+        &self,
+        center: DVec3,
+        radius: f64,
+    ) -> Vec<crate::roads::TerrainTileSnapshot> {
+        self.node_data
+            .iter()
+            .filter(|(_, data)| (data.world_position - center).length() <= radius)
+            .map(|(path, data)| crate::roads::TerrainTileSnapshot {
+                meshes: Arc::clone(&data.meshes),
+                rotation: data.transform.rotation,
+                scale: data.transform.scale,
+                world_position: data.world_position,
+                depth: path.depth(),
+            })
+            .collect()
+    }
+
     /// Capture the selected tiles within `radius` of `camera_pos` (plus
     /// any lateral neighbours they fuse against) as a serializable dump,
     /// for offline fusion experiments in `tools/fuse_lab`.

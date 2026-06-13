@@ -1,0 +1,38 @@
+# Live road-collider fitting: fetch OSM road centerlines near the camera, fit
+# them to grade-limited ribbons against the streamed photogrammetry, and fill
+# the engine's road overlay (which the collider builds carve and emit). The
+# engine-side carve/emit knobs live in engine/config/physics/streaming.toml.
+
+# Master switch for live road fitting.
+enabled = true
+
+# Half-extent (m) of the OSM fetch box and the terrain snapshot around the
+# camera. Roughly the physics collider range.
+fetch_radius_m = 1200.0
+
+# Camera lat/lon is quantized into a cell this many degrees on a side; entering
+# a new cell triggers a fresh OSM fetch (~0.01 deg ~= 1.1 km).
+region_cell_deg = 0.01
+
+# Minimum seconds between refits while parked in a region, so terrain that
+# streams in after the first fit is folded in without thrashing.
+refit_interval_secs = 8.0
+
+# Spacing (m) between terrain samples along a way.
+sample_spacing = 4.0
+
+# Sliding-window width (m) for the robust median that rejects photogrammetry
+# lumps before grade limiting.
+median_window = 15.0
+
+# Maximum road grade (rise over run).
+max_grade = 0.10
+
+# Wide vertical window (m) for the first terrain probe of a way (the OSM
+# centerline may sit far off the surface), then tight for reference-tracked
+# probes so the fit follows the road over bridges.
+first_probe_range = 1000.0
+track_probe_range = 12.0
+
+# A standard lane width (m); half-widths default to this times the lane count.
+lane_width = 3.5

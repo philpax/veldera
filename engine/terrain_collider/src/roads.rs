@@ -378,6 +378,46 @@ pub trait TerrainSampler {
     fn sample(&self, point: DVec3, reference: DVec3, range: f32) -> Option<DVec3>;
 }
 
+/// A [`TerrainSampler`] over a set of per-tile surface probes (raw
+/// photogrammetry), each paired with its tile origin (ECEF). Queries try the
+/// finest tile first, so a covered point reads the highest-resolution surface.
+/// Built by both the offline lab and the live game fit so they sample
+/// identically.
+pub struct TerrainProbeSet {
+    /// `(probe, origin, depth)` per tile, sorted by descending depth.
+    tiles: Vec<(SurfaceProbe, DVec3, usize)>,
+}
+
+impl TerrainProbeSet {
+    /// Build the set from per-tile `(probe, origin, depth)` triples; the probe
+    /// must be over the tile's surface in its own baked frame (origin
+    /// subtracted).
+    #[must_use]
+    pub fn new(mut tiles: Vec<(SurfaceProbe, DVec3, usize)>) -> Self {
+        tiles.sort_by_key(|(_, _, depth)| std::cmp::Reverse(*depth));
+        Self { tiles }
+    }
+}
+
+impl TerrainSampler for TerrainProbeSet {
+    fn sample(&self, point: DVec3, reference: DVec3, range: f32) -> Option<DVec3> {
+        for (probe, origin, _) in &self.tiles {
+            // Baked space is ECEF translated by the tile origin; up is the
+            // radial. Query at `point`'s horizontal position but the
+            // reference's height, so the sheet-aware probe keys off the road.
+            let up = origin.normalize().as_vec3();
+            let query = (point - *origin).as_vec3();
+            let reference_height = ((reference - *origin).as_vec3()).dot(up);
+            let synthetic = query + up * (reference_height - query.dot(up));
+            if let Some(height) = probe.sample_near(synthetic, range) {
+                let surface = synthetic + up * (height - reference_height);
+                return Some(*origin + surface.as_dvec3());
+            }
+        }
+        None
+    }
+}
+
 /// One road centerline to fit: an ECEF polyline with per-vertex OSM node ids
 /// (parallel to `points`, for junction unification), a half-width, and whether
 /// it is a bridge.
@@ -387,12 +427,17 @@ pub struct FitWay {
     pub node_ids: Vec<i64>,
     pub half_width: f32,
     pub bridge: bool,
+    /// An opaque caller tag (e.g. a road class) carried through to the fitted
+    /// ribbon; the crate never interprets it.
+    pub tag: u32,
 }
 
 /// A fitted road ribbon in ECEF.
 #[derive(Clone, Debug, Default)]
 pub struct FittedRibbon {
     pub stations: Vec<FittedStation>,
+    /// The originating [`FitWay::tag`].
+    pub tag: u32,
 }
 
 /// One centerline station of a [`FittedRibbon`].
@@ -506,16 +551,15 @@ fn fit_one_way(
             half_width: way.half_width,
         })
         .collect();
-    Some(FittedRibbon { stations })
+    Some(FittedRibbon {
+        stations,
+        tag: way.tag,
+    })
 }
 
 /// Resample a polyline every `spacing` m by arc length, carrying the original
 /// node id onto each vertex it lands on (interpolated points get `None`).
-fn resample(
-    points: &[DVec3],
-    node_ids: &[i64],
-    spacing: f64,
-) -> (Vec<DVec3>, Vec<Option<i64>>) {
+fn resample(points: &[DVec3], node_ids: &[i64], spacing: f64) -> (Vec<DVec3>, Vec<Option<i64>>) {
     let mut out_points = vec![points[0]];
     let mut out_ids = vec![node_ids.first().copied()];
     for i in 1..points.len() {

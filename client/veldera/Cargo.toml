@@ -62,6 +62,7 @@ veldera_game_camera = { workspace = true }
 veldera_game_camera_state = { workspace = true }
 veldera_game_input = { workspace = true }
 veldera_game_player = { workspace = true }
+veldera_game_roads = { workspace = true }
 veldera_game_teleport = { workspace = true }
 veldera_game_vehicle = { workspace = true }
 veldera_game_ui = { workspace = true }

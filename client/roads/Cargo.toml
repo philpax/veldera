@@ -1,0 +1,26 @@
+[package]
+name = "veldera_game_roads"
+version = "0.1.0"
+edition.workspace = true
+repository.workspace = true
+license.workspace = true
+description = "Live road-collider fitting for the Veldera client: fetch OSM near the camera, fit grade-limited ribbons against the streamed terrain, and fill the engine's road overlay"
+
+[dependencies]
+async-channel = { workspace = true }
+bevy = { workspace = true, features = ["bevy_asset"] }
+glam = { workspace = true }
+serde = { workspace = true, features = ["derive"] }
+tracing = { workspace = true }
+rocktree = { workspace = true }
+veldera_async = { workspace = true }
+veldera_config = { workspace = true }
+veldera_constants = { workspace = true }
+veldera_geo = { workspace = true }
+veldera_physics = { workspace = true }
+veldera_roads = { workspace = true }
+veldera_terrain = { workspace = true }
+veldera_terrain_collider = { workspace = true }
+
+[lints]
+workspace = true

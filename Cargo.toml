@@ -31,6 +31,7 @@ veldera_game_camera = { path = "client/camera" }
 veldera_game_camera_state = { path = "client/camera_state" }
 veldera_game_input = { path = "client/input" }
 veldera_game_player = { path = "client/player" }
+veldera_game_roads = { path = "client/roads" }
 veldera_game_teleport = { path = "client/teleport" }
 veldera_game_ui = { path = "client/ui" }
 veldera_game_vehicle = { path = "client/vehicle" }

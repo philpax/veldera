@@ -7086,6 +7086,7 @@ dependencies = [
  "veldera_game_camera_state",
  "veldera_game_input",
  "veldera_game_player",
+ "veldera_game_roads",
  "veldera_game_teleport",
  "veldera_game_ui",
  "veldera_game_vehicle",
@@ -7231,6 +7232,26 @@ dependencies = [
  "veldera_game_input",
  "veldera_geo",
  "veldera_physics",
+]
+
+[[package]]
+name = "veldera_game_roads"
+version = "0.1.0"
+dependencies = [
+ "async-channel",
+ "bevy",
+ "glam",
+ "rocktree",
+ "serde",
+ "tracing",
+ "veldera_async",
+ "veldera_config",
+ "veldera_constants",
+ "veldera_geo",
+ "veldera_physics",
+ "veldera_roads",
+ "veldera_terrain",
+ "veldera_terrain_collider",
 ]
 
 [[package]]

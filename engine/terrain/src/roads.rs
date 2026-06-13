@@ -8,8 +8,11 @@
 //! corridor and emits the ribbons that intersect it (see
 //! [`veldera_terrain_collider::roads`]).
 
+use std::sync::Arc;
+
 use bevy::prelude::*;
 use glam::DVec3;
+use rocktree::Mesh as RocktreeMesh;
 
 use veldera_terrain_collider::roads::{RibbonStation, RoadRibbon};
 
@@ -63,6 +66,19 @@ impl EcefRibbon {
         }
         nearest.is_finite().then_some((nearest, max_half))
     }
+}
+
+/// A snapshot of one loaded terrain tile's raw build inputs, for off-thread
+/// road fitting. The host samples these (the *raw* photogrammetry) to fit road
+/// heights — never the road-modified colliders, which would feed the fit back
+/// on its own output. The mesh data is `Arc`'d, so snapshotting is cheap.
+#[derive(Clone)]
+pub struct TerrainTileSnapshot {
+    pub meshes: Arc<Vec<RocktreeMesh>>,
+    pub rotation: Quat,
+    pub scale: Vec3,
+    pub world_position: DVec3,
+    pub depth: usize,
 }
 
 /// The host-filled set of fitted road ribbons in ECEF.

@@ -93,8 +93,7 @@ pub fn run(
 
     // Build each tile twice: the plain base (the "before" surface) and the
     // production carve-and-emit (the "after").
-    let tiles: HashMap<&str, &DumpTile> =
-        dump.tiles.iter().map(|t| (t.path.as_str(), t)).collect();
+    let tiles: HashMap<&str, &DumpTile> = dump.tiles.iter().map(|t| (t.path.as_str(), t)).collect();
     let mut results: HashMap<&str, TileResult> = HashMap::new();
     for tile in &dump.tiles {
         let Some(base) = build_base(tile, &tiles, meshes, base_settings, &[]) else {
@@ -128,8 +127,14 @@ pub fn run(
     if let Some(dir) = obj_dir {
         std::fs::create_dir_all(dir)?;
         for (path, result) in &results {
-            write_obj(&Path::new(dir).join(format!("{path}.orig.obj")), &result.base)?;
-            write_obj(&Path::new(dir).join(format!("{path}.road.obj")), &result.road)?;
+            write_obj(
+                &Path::new(dir).join(format!("{path}.orig.obj")),
+                &result.base,
+            )?;
+            write_obj(
+                &Path::new(dir).join(format!("{path}.road.obj")),
+                &result.road,
+            )?;
         }
         println!("roads: wrote .orig.obj / .road.obj per tile to {dir}/");
     }
@@ -219,6 +224,7 @@ fn parse_ways(doc: &OsmDoc, planet_radius: f64) -> Vec<FitWay> {
             points,
             half_width: half_width_for(class, &element.tags),
             bridge: element.tags.get("bridge").is_some_and(|b| b == "yes"),
+            tag: 0,
         });
     }
     ways
@@ -357,10 +363,9 @@ fn build_base(
 /// sphere; the per-tile ownership probe and the corridor gate precisely).
 fn intersects(ribbon: &FittedRibbon, origin: DVec3, scale: Vec3) -> bool {
     let tile_radius = f64::from(scale.max_element()) * 255.0 * 3.0;
-    ribbon
-        .stations
-        .iter()
-        .any(|s| (s.position - origin).length() <= tile_radius + f64::from(s.half_width + CARVE.margin))
+    ribbon.stations.iter().any(|s| {
+        (s.position - origin).length() <= tile_radius + f64::from(s.half_width + CARVE.margin)
+    })
 }
 
 /// Convert a fitted ECEF ribbon into a tile's baked frame.

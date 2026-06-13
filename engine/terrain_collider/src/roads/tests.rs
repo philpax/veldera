@@ -27,6 +27,7 @@ fn fit_ways_places_ribbon_on_the_sampled_surface() {
         points,
         half_width: 3.5,
         bridge: false,
+        tag: 0,
     }];
     let params = FitParams {
         fit: FitSettings {

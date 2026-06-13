@@ -25,6 +25,9 @@ pub const EFFECTS: &str = "game/config/player/effects.toml";
 // Teleport / location services.
 pub const GEO: &str = "game/config/world/geo.toml";
 
+// Live road-collider fitting (OSM fetch + grade-limited ribbon fit).
+pub const ROADS: &str = "game/config/world/roads.toml";
+
 // Vehicle (global behaviour; per-vehicle physics lives in .scn.ron files).
 pub const VEHICLE: &str = "game/config/vehicle/vehicle.toml";
 
