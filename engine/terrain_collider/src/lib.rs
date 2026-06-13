@@ -861,14 +861,14 @@ fn fuse_borders(
 
 /// An orthonormal frame splitting baked space into a horizontal plane and a
 /// height along `up = -down`.
-struct HorizontalFrame {
-    up: Vec3,
+pub(crate) struct HorizontalFrame {
+    pub(crate) up: Vec3,
     e1: Vec3,
     e2: Vec3,
 }
 
 impl HorizontalFrame {
-    fn new(down: Vec3) -> Self {
+    pub(crate) fn new(down: Vec3) -> Self {
         let up = -down.normalize_or_zero();
         let reference = if up.x.abs() < 0.9 { Vec3::X } else { Vec3::Y };
         let e1 = up.cross(reference).normalize();
@@ -876,11 +876,11 @@ impl HorizontalFrame {
         Self { up, e1, e2 }
     }
 
-    fn height(&self, p: Vec3) -> f32 {
+    pub(crate) fn height(&self, p: Vec3) -> f32 {
         p.dot(self.up)
     }
 
-    fn horizontal(&self, p: Vec3) -> Vec2 {
+    pub(crate) fn horizontal(&self, p: Vec3) -> Vec2 {
         Vec2::new(p.dot(self.e1), p.dot(self.e2))
     }
 }
@@ -1171,3 +1171,4 @@ fn strip_to_triangles(strip: &[u16]) -> Vec<[u32; 3]> {
 mod tests;
 
 pub mod dump;
+pub mod roads;
