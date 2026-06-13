@@ -70,14 +70,21 @@ game-side live fitting**:
   fingerprint mirroring `sub_cut`, version-driven generation bump, stale-build
   revalidation on commit. Config knobs in `streaming.toml`. Debug gizmos
   (`draw_road_overlay`). Dump capture (`DumpTile.roads`).
-- **Remaining (needs in-game iteration).** The game-side pipeline that
-  populates `RoadOverlay`: proximity-triggered Overpass fetch + the fit
-  (resample / terrain-probe / grade-fit / junction-unify, ported from
-  fuse-lab) filling the overlay. **Design note:** the fit must sample the raw
-  photogrammetry (expose a probe over `LodState::node_data`), not raycast the
-  road-modified colliders, or it feeds back on its own output. Ribbon-disappear
-  is currently treated as a speed-gated refinement, not coverage-critical
-  (revisit if a vanishing ribbon leaves a visible trench at speed).
+- **Game pipeline (implemented, runtime-unvalidated).** `client/roads`
+  (`veldera_game_roads`) does the proximity-triggered Overpass fetch and an
+  off-thread fit that samples the raw photogrammetry
+  (`LodState::loaded_terrain_snapshot` → `TerrainProbeSet`, never the
+  road-modified colliders) via the shared `fit_ways`, then fills `RoadOverlay`.
+  Hot-reloadable config at `game/config/world/roads.toml`. The fit math and
+  engine carve/emit are unit-tested and lab-validated (flat roads RMS 0.05 m),
+  but the live loop (fetch cadence, refit-on-stream, convergence, frame cost)
+  has not been exercised in the running game — that needs in-game iteration.
+- **Known follow-ups.** Bridge/elevated decks over no-terrain (Phase 2:
+  RMS ~0.78 m in the lab). Ribbon-disappear is a speed-gated refinement, not
+  coverage-critical (revisit if a vanishing ribbon leaves a trench at speed).
+  The fit is currently whole-region (not the per-way incremental refit the
+  plan envisions). No UI toggle yet for the road gizmos (they draw with
+  physics debug rendering).
 
 ## Phase 2 (later, separate discussion)
 
