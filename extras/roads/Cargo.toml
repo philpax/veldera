@@ -1,0 +1,28 @@
+[package]
+name = "veldera_roads"
+version = "0.1.0"
+edition.workspace = true
+repository.workspace = true
+license.workspace = true
+description = "OpenStreetMap road centerline fetching for Veldera, backed by the Overpass API"
+
+[dependencies]
+serde = { workspace = true, features = ["derive"] }
+serde_json = { workspace = true }
+# Async runtime primitives: the in-flight request guard and the backoff timer.
+tokio = { workspace = true, features = ["sync", "time"] }
+# For URL encoding the Overpass query body.
+urlencoding = { workspace = true }
+
+# Overpass HTTP requests (native).
+[target.'cfg(not(target_family = "wasm"))'.dependencies]
+reqwest = { workspace = true, features = ["json"] }
+# For resolving the OS cache directory (disk cache).
+dirs = { workspace = true }
+
+# Overpass HTTP requests (WASM).
+[target.'cfg(target_family = "wasm")'.dependencies]
+reqwest = { workspace = true, features = ["json"] }
+
+[lints]
+workspace = true

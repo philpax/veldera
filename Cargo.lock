@@ -3099,7 +3099,9 @@ version = "0.1.0"
 dependencies = [
  "glam",
  "rocktree",
+ "serde",
  "serde_json",
+ "veldera_geo",
  "veldera_terrain_collider",
 ]
 
@@ -7361,6 +7363,18 @@ dependencies = [
  "veldera_physics",
  "veldera_sky",
  "veldera_terrain",
+]
+
+[[package]]
+name = "veldera_roads"
+version = "0.1.0"
+dependencies = [
+ "dirs",
+ "reqwest",
+ "serde",
+ "serde_json",
+ "tokio",
+ "urlencoding",
 ]
 
 [[package]]

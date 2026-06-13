@@ -25,6 +25,7 @@ veldera_sky = { path = "engine/sky" }
 veldera_terrain = { path = "engine/terrain" }
 # Extras.
 veldera_places = { path = "extras/places" }
+veldera_roads = { path = "extras/roads" }
 # Gameplay crates (client/).
 veldera_game_camera = { path = "client/camera" }
 veldera_game_camera_state = { path = "client/camera_state" }
