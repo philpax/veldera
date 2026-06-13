@@ -165,6 +165,20 @@ pub struct PhysicsStreamingConfig {
     /// while culling photogrammetry density collision doesn't need. Zero
     /// disables.
     pub collider_simplify_tolerance: f64,
+    /// Road colliders: when enabled, each collider build carves the
+    /// photogrammetry corridor around the host-supplied road ribbons
+    /// (`RoadOverlay`) and emits the smooth ribbon surface where the tile owns
+    /// it. Disabled leaves the raw photogrammetry. The ribbons themselves are
+    /// fitted by the host (fetch → fit → overlay); the engine only carves and
+    /// emits.
+    pub road_colliders: bool,
+    /// Extra horizontal reach (m) carved beyond each side's half-width, so the
+    /// ribbon edge does not abut leftover photogrammetry spikes.
+    pub road_carve_margin: f64,
+    /// Vertical half-gate (m) for road carving: only photogrammetry within
+    /// this distance of the fitted road height is carved, leaving overpasses
+    /// and the ground beneath a bridge intact.
+    pub road_vertical_gate: f64,
     /// Maximum collider builds *dispatched* to background tasks per
     /// reconcile pass, so a band sweep can't queue hundreds at once.
     /// Pending builds queue near-first (in distance buckets), then

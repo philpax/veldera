@@ -41,6 +41,7 @@
 
 use std::{
     collections::{HashMap, HashSet},
+    hash::Hasher,
     sync::Arc,
 };
 
@@ -58,6 +59,7 @@ use crate::{
     mesh::{
         RocktreeMeshMarker, convert_mesh, convert_texture, matrix_to_world_position_and_transform,
     },
+    roads::RoadOverlay,
     terrain_material::{TerrainMaterial, TerrainMaterialExtension},
     viz::{
         ColliderVizFilter, LodVizGizmos, LodVizSettings, RenderMeshVizFilter,
@@ -75,7 +77,7 @@ use veldera_geo::floating_origin::{FloatingOriginCamera, WorldPosition};
 use veldera_physics::{
     GameLayer, MotionTracker, PHYSICS_FINEST_DEPTH, PhysicsState, PhysicsStreamingConfig,
     TerrainCollider, desired_physics_depth,
-    terrain::{TileMeshes, create_terrain_collider},
+    terrain::{CarveSettings, RoadRibbon, TileMeshes, create_terrain_collider},
 };
 
 /// Hot-reloadable LoD streaming parameters, loaded from
@@ -151,6 +153,7 @@ impl Plugin for LodPlugin {
     fn build(&self, app: &mut App) {
         app.init_resource::<LodState>()
             .init_resource::<LodChannels>()
+            .init_resource::<RoadOverlay>()
             .init_resource::<ColliderBuildChannel>()
             .init_resource::<LodSnapshot>()
             .init_resource::<LodSnapshotRequest>()
@@ -391,6 +394,10 @@ pub struct LodState {
     /// entirely while this (plus camera position) is unchanged, so a
     /// converged scene costs nothing per frame.
     collider_inputs_generation: u64,
+    /// The [`RoadOverlay::version`] last folded into
+    /// [`Self::collider_inputs_generation`]; a change means the host re-fitted
+    /// the ribbons, so the reconcile must re-examine every tile.
+    last_road_version: u64,
 }
 
 impl LodState {
@@ -784,6 +791,11 @@ struct LiveCollider {
     /// colliders despawned) is a coverage-critical rebuild; one that grows
     /// is refinement.
     sub_cut: u64,
+    /// Fingerprint of the road ribbons (and their fitted heights) carved and
+    /// emitted into this collider. When the host re-fits a ribbon crossing
+    /// this tile the fingerprint changes and the collider rebuilds — a
+    /// refinement (speed-gated). `0` means no ribbon intersects the tile.
+    roads: u64,
 }
 
 /// A finished off-thread collider build, awaiting validation and commit on
@@ -796,6 +808,8 @@ struct ColliderBuildResult {
     adjacency: u64,
     /// Sub-octant carve cells the geometry was built with.
     sub_cut: u64,
+    /// Fingerprint of the road ribbons carved and emitted into the geometry.
+    roads: u64,
     /// `None` is a successful *empty* build (the mask dropped everything).
     collider: Option<avian3d::prelude::Collider>,
     stats: veldera_physics::terrain::BuildStats,
@@ -2136,6 +2150,7 @@ fn update_physics_colliders(
     motion: Res<MotionTracker>,
     camera_query: Query<&FloatingOriginCamera>,
     channel: Res<ColliderBuildChannel>,
+    road_overlay: Res<RoadOverlay>,
     spawner: TaskSpawner,
     mut reconcile: Local<ColliderReconcileState>,
 ) {
@@ -2158,6 +2173,12 @@ fn update_physics_colliders(
     // their follow-up work flows through the normal reconcile. A *discarded*
     // result (stale parameters) bumps nothing, so it forces a reconcile
     // directly to get the path re-dispatched.
+    let roads_enabled = streaming.road_colliders;
+    let road_carve = CarveSettings {
+        margin: streaming.road_carve_margin as f32,
+        vertical_gate: streaming.road_vertical_gate as f32,
+    };
+
     let mut discarded_any = false;
     while let Ok(result) = channel.rx.try_recv() {
         discarded_any |= !commit_collider_result(
@@ -2165,8 +2186,18 @@ fn update_physics_colliders(
             &mut lod_state,
             camera_pos,
             streaming.collider_carve,
+            &road_overlay,
+            roads_enabled,
+            road_carve.margin,
             result,
         );
+    }
+
+    // A re-fit of the road overlay re-examines every tile; fold its version
+    // into the reconcile generation so the early-out below cannot skip it.
+    if road_overlay.version != lod_state.last_road_version {
+        lod_state.last_road_version = road_overlay.version;
+        lod_state.collider_inputs_generation += 1;
     }
 
     // Camera speed for the refinement gate, from the same smoothed tracker
@@ -2219,6 +2250,10 @@ fn update_physics_colliders(
     // tile; the filter and the build loop both need them).
     let selected_coverage = lod_state.selected_coverage();
     let mut sub_cut_cache: HashMap<OctreePath, u64> = HashMap::new();
+    // Frame-local cache of the road ribbons intersecting each tile (baked) and
+    // their fingerprint; the filter needs the fingerprint and the build loop
+    // the ribbons.
+    let mut roads_cache: HashMap<OctreePath, (Vec<RoadRibbon>, u64)> = HashMap::new();
 
     // Track when each path entered the target set; the timestamp resets the
     // moment a path drops out, so re-selections start a fresh wait.
@@ -2246,6 +2281,8 @@ fn update_physics_colliders(
             continue;
         };
         let distance = (node_data.world_position - camera_pos).length();
+        let world_position = node_data.world_position;
+        let scale = node_data.transform.scale;
         let wanted = match lod_state.physics_colliders.get(path) {
             None => true,
             Some(live) => {
@@ -2256,6 +2293,18 @@ fn update_physics_colliders(
                         0
                     }
                 });
+                let roads = roads_cache
+                    .entry(*path)
+                    .or_insert_with(|| {
+                        tile_road_ribbons(
+                            &road_overlay,
+                            roads_enabled,
+                            world_position,
+                            scale,
+                            road_carve.margin,
+                        )
+                    })
+                    .1;
                 // A live build whose mask drops octants the selection now
                 // wants from it, or whose carve removed cells no longer
                 // covered, is coverage-critical (the finer coverage that
@@ -2269,6 +2318,7 @@ fn update_physics_colliders(
                 } else {
                     live.mask != *mask
                         || live.sub_cut != sub_cut
+                        || live.roads != roads
                         || (fusion_enabled && distance <= streaming.wysiwyg_radius && {
                             let (_, fingerprint) =
                                 cached_adjacency(&mut adjacency_cache, &lod_state, *path);
@@ -2428,15 +2478,31 @@ fn update_physics_colliders(
                 0
             }
         });
+        let (road_ribbons, roads) = {
+            let entry = roads_cache.entry(path).or_insert_with(|| {
+                tile_road_ribbons(
+                    &road_overlay,
+                    roads_enabled,
+                    node_data.world_position,
+                    node_data.transform.scale,
+                    road_carve.margin,
+                )
+            });
+            (entry.0.clone(), entry.1)
+        };
 
         let params = BuildParams {
             mask,
             adjacency,
             sub_cut,
+            roads,
         };
         match lod_state.physics_colliders.get(&path) {
             Some(live)
-                if live.mask == mask && live.adjacency == adjacency && live.sub_cut == sub_cut =>
+                if live.mask == mask
+                    && live.adjacency == adjacency
+                    && live.sub_cut == sub_cut
+                    && live.roads == roads =>
             {
                 continue;
             }
@@ -2494,14 +2560,23 @@ fn update_physics_colliders(
                 .iter()
                 .map(OwnedTileMeshes::as_tile_meshes)
                 .collect();
-            let (collider, stats) =
-                create_terrain_collider(&tile, mask, sub_cut, &neighbour_meshes, down, &settings);
+            let (collider, stats) = create_terrain_collider(
+                &tile,
+                mask,
+                sub_cut,
+                &neighbour_meshes,
+                down,
+                &settings,
+                &road_ribbons,
+                &road_carve,
+            );
             let _ = tx
                 .send(ColliderBuildResult {
                     path,
                     mask,
                     adjacency,
                     sub_cut,
+                    roads,
                     collider,
                     stats,
                 })
@@ -2590,6 +2665,60 @@ struct BuildParams {
     mask: u8,
     adjacency: u64,
     sub_cut: u64,
+    roads: u64,
+}
+
+/// The road ribbons (in the tile's baked frame) intersecting the tile at
+/// `world_position`/`scale`, with a fingerprint of their fitted geometry.
+///
+/// Returns `(vec![], 0)` when roads are disabled or none intersect, so an
+/// untouched tile carries the sentinel `0` and never rebuilds for roads. The
+/// fingerprint is content-based (quantized station positions and half-widths),
+/// so a tile rebuilds only when a ribbon crossing *it* actually changes, not
+/// on every overlay version bump.
+fn tile_road_ribbons(
+    overlay: &RoadOverlay,
+    enabled: bool,
+    world_position: DVec3,
+    scale: Vec3,
+    margin: f32,
+) -> (Vec<RoadRibbon>, u64) {
+    if !enabled || overlay.ribbons.is_empty() {
+        return (Vec::new(), 0);
+    }
+    // Generous bounding sphere: the tile's lattice box reaches ~255·scale from
+    // its origin, so over-inclusion is harmless (ownership and the corridor
+    // gate precisely) while a miss would silently drop a road.
+    let tile_radius = f64::from(scale.max_element()) * 255.0 * 1.8;
+    let mut ribbons = Vec::new();
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    for ribbon in &overlay.ribbons {
+        let Some((nearest, max_half)) = ribbon.nearest_to(world_position) else {
+            continue;
+        };
+        if nearest > tile_radius + f64::from(max_half + margin) {
+            continue;
+        }
+        let baked = ribbon.to_baked(world_position);
+        for station in &baked.stations {
+            for value in [
+                station.position.x,
+                station.position.y,
+                station.position.z,
+                station.half_width,
+            ] {
+                hasher.write_i32((value * 1000.0) as i32);
+            }
+        }
+        hasher.write_u8(0xff);
+        ribbons.push(baked);
+    }
+    let roads = if ribbons.is_empty() {
+        0
+    } else {
+        hasher.finish()
+    };
+    (ribbons, roads)
 }
 
 /// Owned snapshot of one tile's build inputs, shareable with a background
@@ -2618,11 +2747,15 @@ impl OwnedTileMeshes {
 /// selection and coverage would request, and committing anyway could mask
 /// or carve regions whose covering colliders have since despawned (a
 /// hole). A discarded path simply re-pends in the next reconcile.
+#[allow(clippy::too_many_arguments)]
 fn commit_collider_result(
     commands: &mut Commands,
     lod_state: &mut LodState,
     camera_pos: DVec3,
     carve_enabled: bool,
+    road_overlay: &RoadOverlay,
+    roads_enabled: bool,
+    road_margin: f32,
     result: ColliderBuildResult,
 ) -> bool {
     lod_state.collider_builds_in_flight.remove(&result.path);
@@ -2639,6 +2772,7 @@ fn commit_collider_result(
         return false;
     };
     let world_position = node_data.world_position;
+    let scale = node_data.transform.scale;
     // Masking or carving beyond what current coverage supports would open
     // a hole; less than currently possible is just over-coverage that the
     // next refinement pass tightens.
@@ -2652,6 +2786,15 @@ fn commit_collider_result(
         0
     };
     if result.sub_cut & !current_cut != 0 {
+        return false;
+    }
+    // The road overlay may have re-fitted while this build was off-thread;
+    // committing a stale ribbon set would carve or surface a corridor the
+    // overlay no longer describes. Re-derive the fingerprint and discard on a
+    // mismatch (the path re-pends with the current ribbons).
+    let (_, current_roads) =
+        tile_road_ribbons(road_overlay, roads_enabled, world_position, scale, road_margin);
+    if result.roads != current_roads {
         return false;
     }
 
@@ -2717,6 +2860,7 @@ fn commit_collider_result(
             mask: result.mask,
             adjacency: result.adjacency,
             sub_cut: result.sub_cut,
+            roads: result.roads,
         },
     ) {
         commands.entity(old.entity).despawn();

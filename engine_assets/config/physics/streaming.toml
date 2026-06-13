@@ -61,6 +61,16 @@ fusion_defer_secs = 0.25
 # half this while culling density collision doesn't need. Zero disables.
 collider_simplify_tolerance = 0.25
 
+# Road colliders: carve the photogrammetry corridor around the host-supplied
+# road ribbons and emit the smooth ribbon surface where each tile owns it.
+# The ribbons are fitted by the game (OSM fetch -> fit -> overlay); the engine
+# only carves and emits. The margin is the extra horizontal reach carved
+# beyond each half-width; the vertical gate keeps overpasses and the ground
+# beneath a bridge intact.
+road_colliders = true
+road_carve_margin = 1.0
+road_vertical_gate = 2.0
+
 # Max collider builds dispatched to background tasks per reconcile pass, so
 # a band sweep can't queue hundreds at once. Builds run off-thread and
 # commit when ready; pending work queues near-first. Zero = uncapped.

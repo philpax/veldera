@@ -15,6 +15,7 @@ use avian3d::prelude::*;
 use bevy::prelude::*;
 
 pub use veldera_terrain_collider::{BuildSettings, BuildStats, BuiltGeometry, TileMeshes};
+pub use veldera_terrain_collider::roads::{CarveSettings, RoadRibbon};
 
 /// Marker component for terrain colliders.
 ///
@@ -38,12 +39,16 @@ pub struct TerrainCollider {
 }
 
 /// Build one tile's terrain collider: the pure geometry pipeline
-/// ([`veldera_terrain_collider::build_tile_geometry`]) followed by parry
-/// trimesh construction.
+/// ([`veldera_terrain_collider::build_tile_geometry_with_roads`]) followed by
+/// parry trimesh construction.
 ///
-/// Returns the collider (or `None` for an empty build — a mask that removed
-/// all geometry, which callers should record as a live empty commit) along
-/// with the build statistics either way.
+/// `roads` are the fitted ribbons intersecting this tile, in its baked frame;
+/// their corridor is carved out of the photogrammetry and the ribbon surface
+/// emitted where this tile owns it (empty `roads` is the plain build). Returns
+/// the collider (or `None` for an empty build — a mask that removed all
+/// geometry, which callers should record as a live empty commit) along with
+/// the build statistics either way.
+#[allow(clippy::too_many_arguments)]
 pub fn create_terrain_collider(
     tile: &TileMeshes,
     octant_mask: u8,
@@ -51,14 +56,18 @@ pub fn create_terrain_collider(
     neighbours: &[TileMeshes],
     down: Vec3,
     settings: &BuildSettings,
+    roads: &[RoadRibbon],
+    carve: &CarveSettings,
 ) -> (Option<Collider>, BuildStats) {
-    let Some(built) = veldera_terrain_collider::build_tile_geometry(
+    let Some(built) = veldera_terrain_collider::roads::build_tile_geometry_with_roads(
         tile,
         octant_mask,
         sub_cut,
         neighbours,
         down,
         settings,
+        roads,
+        carve,
     ) else {
         return (None, BuildStats::default());
     };
