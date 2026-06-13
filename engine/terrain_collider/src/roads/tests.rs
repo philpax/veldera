@@ -151,6 +151,36 @@ fn clip_horizontally_trims_to_box() {
 }
 
 #[test]
+fn owned_pieces_split_at_surface_footprint() {
+    // A flat surface covering world x in [0, 10], y in [-5, 5] at z = 0.
+    let surface_v = vec![
+        Vec3::new(0.0, -5.0, 0.0),
+        Vec3::new(10.0, -5.0, 0.0),
+        Vec3::new(10.0, 5.0, 0.0),
+        Vec3::new(0.0, 5.0, 0.0),
+    ];
+    let surface_t = vec![[0u32, 1, 2], [0, 2, 3]];
+    let ownership = SurfaceProbe::new(&surface_v, &surface_t, DOWN);
+
+    // A ribbon crossing in and out of the footprint: stations at x =
+    // -5, -2, 1, 4, 7, 10, 13. Only 1..10 sit over the surface; the run
+    // extends one station each way so owned pieces meet their neighbours.
+    let ribbon = RoadRibbon {
+        stations: [-5.0, -2.0, 1.0, 4.0, 7.0, 10.0, 13.0]
+            .into_iter()
+            .map(|x| RibbonStation {
+                position: Vec3::new(x, 0.0, 0.0),
+                half_width: 3.0,
+            })
+            .collect(),
+    };
+    let pieces = super::owned_pieces(&ribbon, &ownership);
+    assert_eq!(pieces.len(), 1);
+    let xs: Vec<f32> = pieces[0].stations.iter().map(|s| s.position.x).collect();
+    assert_eq!(xs, vec![-2.0, 1.0, 4.0, 7.0, 10.0, 13.0]);
+}
+
+#[test]
 fn clip_horizontally_drops_ribbon_outside_box() {
     let ribbon = straight_ribbon(Vec3::new(0.0, 20.0, 0.0), Vec3::new(0.0, 40.0, 0.0), 4, 3.0);
     let pieces = ribbon.clip_horizontally(DOWN, Vec2::new(-5.0, -5.0), Vec2::new(5.0, 5.0));

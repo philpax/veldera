@@ -23,7 +23,13 @@
 
 use glam::{Vec2, Vec3};
 
-use crate::HorizontalFrame;
+use crate::{BuildSettings, BuiltGeometry, HorizontalFrame, SurfaceProbe, TileMeshes, build_tile_geometry};
+
+/// Vertical window (m) for the ribbon-ownership probe: a presence test, so it
+/// is wide enough to find the tile's surface beneath a raised ribbon (e.g. a
+/// bridge deck over lower ground); the probe's horizontal slack does the real
+/// footprint gating.
+const OWNERSHIP_RANGE: f32 = 10_000.0;
 
 /// One centerline station of a fitted ribbon, in the build tile's baked space.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -199,6 +205,86 @@ impl RoadRibbon {
         flush_piece(&mut pieces, &mut current);
         pieces
     }
+}
+
+/// Build one tile's collider and overlay the road ribbons that intersect it:
+/// the base geometry ([`build_tile_geometry`]) with its corridor carved and
+/// each ribbon's surface emitted where this tile owns it.
+///
+/// Ownership is decided by probing the tile's *own* surface (mask and sub-cut
+/// already applied, before corridor carving): a tile emits a ribbon only where
+/// it actually has a surface, so the selection's partition emits each ribbon
+/// exactly once — a coarse tile carved out under finer coverage stops owning
+/// the ribbon there, and the finer tile picks it up. `ribbons` are in this
+/// tile's baked frame; carving uses them whole, while emission is split into
+/// the owned runs.
+///
+/// Returns `None` for an empty base build (a mask that dropped everything),
+/// even if a ribbon passes through — that region is surfaced (and its ribbon
+/// emitted) by whichever tile is not masked there.
+#[must_use]
+#[allow(clippy::too_many_arguments)]
+pub fn build_tile_geometry_with_roads(
+    tile: &TileMeshes,
+    octant_mask: u8,
+    sub_cut: u64,
+    neighbours: &[TileMeshes],
+    down: Vec3,
+    settings: &BuildSettings,
+    ribbons: &[RoadRibbon],
+    carve: &CarveSettings,
+) -> Option<BuiltGeometry> {
+    let mut built =
+        build_tile_geometry(tile, octant_mask, sub_cut, neighbours, down, settings)?;
+    if ribbons.is_empty() {
+        return Some(built);
+    }
+
+    // Ownership probe over the tile's actual surface, taken before corridor
+    // carving so a tile that surfaces a region owns the ribbon there.
+    let ownership = SurfaceProbe::new(&built.vertices, &built.triangles, down);
+    carve_corridor(&built.vertices, &mut built.triangles, ribbons, down, carve);
+    for ribbon in ribbons {
+        for piece in owned_pieces(ribbon, &ownership) {
+            emit_ribbon(&mut built.vertices, &mut built.triangles, &piece, down);
+        }
+    }
+
+    // The base build sized these to its own surface; emission appended ribbon
+    // vertices (never on the outer border, never fused).
+    built.border.resize(built.vertices.len(), false);
+    built.fusion_samples.resize(built.vertices.len(), 0);
+    Some(built)
+}
+
+/// Split a ribbon into the contiguous runs of stations the `ownership` probe
+/// finds a surface under, extending each run by one station into its
+/// neighbours so owned pieces meet without a gap.
+fn owned_pieces(ribbon: &RoadRibbon, ownership: &SurfaceProbe) -> Vec<RoadRibbon> {
+    let owned: Vec<bool> = ribbon
+        .stations
+        .iter()
+        .map(|s| ownership.sample_near(s.position, OWNERSHIP_RANGE).is_some())
+        .collect();
+    let mut pieces = Vec::new();
+    let mut i = 0;
+    while i < owned.len() {
+        if !owned[i] {
+            i += 1;
+            continue;
+        }
+        let start = i.saturating_sub(1);
+        let mut end = i;
+        while end + 1 < owned.len() && owned[end + 1] {
+            end += 1;
+        }
+        let stop = (end + 1).min(owned.len() - 1);
+        pieces.push(RoadRibbon {
+            stations: ribbon.stations[start..=stop].to_vec(),
+        });
+        i = end + 1;
+    }
+    pieces
 }
 
 // ============================================================================

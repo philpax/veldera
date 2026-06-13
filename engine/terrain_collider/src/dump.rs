@@ -12,6 +12,7 @@ use rocktree::Mesh as RocktreeMesh;
 use rocktree_decode::{UvTransform, Vertex};
 use serde::{Deserialize, Serialize};
 
+use crate::roads::{RibbonStation, RoadRibbon};
 use crate::{BuildSettings, TileMeshes};
 
 /// One mesh's collider-relevant data (geometry and octant tags only — no
@@ -84,7 +85,59 @@ pub struct DumpTile {
     pub sub_cut: u64,
     /// Paths of the lateral selected neighbours its rim fuses against.
     pub laterals: Vec<String>,
+    /// The fitted road ribbons this tile carved and emitted, in its baked
+    /// frame, so an offline build reproduces the production result. Empty (and
+    /// defaulted for older dumps) when no road overlay was active.
+    #[serde(default)]
+    pub roads: Vec<DumpRibbon>,
     pub meshes: Vec<DumpMesh>,
+}
+
+/// One fitted road ribbon captured in a tile's baked frame.
+#[derive(Clone, Serialize, Deserialize)]
+pub struct DumpRibbon {
+    pub stations: Vec<DumpRibbonStation>,
+}
+
+/// One centerline station of a [`DumpRibbon`].
+#[derive(Clone, Copy, Serialize, Deserialize)]
+pub struct DumpRibbonStation {
+    /// Centerline position in the tile's baked frame.
+    pub position: [f32; 3],
+    /// Half the road width here, in metres.
+    pub half_width: f32,
+}
+
+impl DumpRibbon {
+    /// Capture a baked-frame ribbon.
+    #[must_use]
+    pub fn from_ribbon(ribbon: &RoadRibbon) -> Self {
+        Self {
+            stations: ribbon
+                .stations
+                .iter()
+                .map(|s| DumpRibbonStation {
+                    position: s.position.to_array(),
+                    half_width: s.half_width,
+                })
+                .collect(),
+        }
+    }
+
+    /// Rebuild the baked-frame ribbon for an offline build.
+    #[must_use]
+    pub fn to_ribbon(&self) -> RoadRibbon {
+        RoadRibbon {
+            stations: self
+                .stations
+                .iter()
+                .map(|s| RibbonStation {
+                    position: Vec3::from_array(s.position),
+                    half_width: s.half_width,
+                })
+                .collect(),
+        }
+    }
 }
 
 impl DumpTile {

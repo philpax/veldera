@@ -62,9 +62,9 @@ use crate::{
     roads::RoadOverlay,
     terrain_material::{TerrainMaterial, TerrainMaterialExtension},
     viz::{
-        ColliderVizFilter, LodVizGizmos, LodVizSettings, RenderMeshVizFilter,
+        ColliderVizFilter, LodVizGizmos, LodVizSettings, RenderMeshVizFilter, RoadVizSettings,
         configure_lod_viz_gizmos, draw_collider_wireframes, draw_lod_viz,
-        draw_render_mesh_wireframes,
+        draw_render_mesh_wireframes, draw_road_overlay,
     },
 };
 
@@ -175,6 +175,7 @@ impl Plugin for LodPlugin {
             .init_resource::<ColliderVizFilter>()
             .init_resource::<LodVizSettings>()
             .init_resource::<RenderMeshVizFilter>()
+            .init_resource::<RoadVizSettings>()
             .init_resource::<TileDumpRequest>()
             .init_gizmo_group::<LodVizGizmos>()
             .add_systems(Startup, configure_lod_viz_gizmos)
@@ -184,6 +185,7 @@ impl Plugin for LodPlugin {
                     draw_collider_wireframes,
                     draw_lod_viz,
                     draw_render_mesh_wireframes,
+                    draw_road_overlay,
                 )
                     .after(update_physics_colliders),
             );
@@ -436,10 +438,13 @@ impl LodState {
     pub fn capture_tile_dump(
         &self,
         streaming: &PhysicsStreamingConfig,
+        road_overlay: &RoadOverlay,
         camera_pos: DVec3,
         radius: f64,
     ) -> veldera_terrain_collider::dump::TileSetDump {
-        use veldera_terrain_collider::dump::{DumpMesh, DumpSettings, DumpTile, TileSetDump};
+        use veldera_terrain_collider::dump::{
+            DumpMesh, DumpRibbon, DumpSettings, DumpTile, TileSetDump,
+        };
 
         let coverage = self.selected_coverage();
         let capture = |path: OctreePath, mask: u8| -> Option<DumpTile> {
@@ -461,6 +466,17 @@ impl LodState {
                     .iter()
                     .map(OctreePath::to_string)
                     .collect(),
+                roads: tile_road_ribbons(
+                    road_overlay,
+                    streaming.road_colliders,
+                    node_data.world_position,
+                    node_data.transform.scale,
+                    streaming.road_carve_margin as f32,
+                )
+                .0
+                .iter()
+                .map(DumpRibbon::from_ribbon)
+                .collect(),
                 meshes: node_data.meshes.iter().map(DumpMesh::from_mesh).collect(),
             })
         };
@@ -2927,6 +2943,7 @@ fn process_tile_dump_requests(
     mut request: ResMut<TileDumpRequest>,
     lod_state: Res<LodState>,
     streaming: Res<PhysicsStreamingConfig>,
+    road_overlay: Res<RoadOverlay>,
     viz_filter: Res<crate::viz::ColliderVizFilter>,
     camera_query: Query<&FloatingOriginCamera>,
 ) {
@@ -2941,7 +2958,7 @@ fn process_tile_dump_requests(
     // Capture what the user is inspecting: the collider-wireframe radius,
     // with a floor so a tight wireframe view still grabs the neighbourhood.
     let radius = f64::from(viz_filter.radius_m).max(50.0);
-    let dump = lod_state.capture_tile_dump(&streaming, camera.position, radius);
+    let dump = lod_state.capture_tile_dump(&streaming, &road_overlay, camera.position, radius);
 
     let path = format!(
         "dumps/tiles-{}.json",
