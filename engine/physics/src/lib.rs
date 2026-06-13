@@ -105,6 +105,22 @@ pub struct PhysicsStreamingConfig {
     /// the displayed composite by construction. Beyond this radius the
     /// distance bands take over.
     pub wysiwyg_radius: f64,
+    /// Depth offset below the rendered LoD for the WYSIWYG mirror: 0
+    /// collides exactly the displayed meshes; 1 collides Google's own
+    /// one-coarser reconstruction (roughly a quarter of the triangles),
+    /// at a measured ~0.2 m mean / ~0.6 m p95 collider-vs-display
+    /// divergence per level on flat terrain (fuse-lab
+    /// `--depth-divergence`). Falls back to the displayed mesh per node
+    /// wherever the coarser data isn't loaded.
+    pub wysiwyg_depth_offset: usize,
+    /// Sub-octant carving: builds drop cells (tile depth + 2) covered by
+    /// live selected colliders, removing coarse band tiles' giant
+    /// triangles over the finely-covered region around the player even
+    /// when no whole octant is covered. Disabling it removes carve-driven
+    /// rebuild churn but lets range-straddling coarse tiles stack
+    /// interpenetrating layers over the near field (the beach
+    /// contact-solver meltdown).
+    pub collider_carve: bool,
     /// Distance bands mapping effective camera distance (beyond
     /// `wysiwyg_radius`) to a target collider depth, each
     /// `(max_distance_m, depth_below_finest)`. Sorted ascending; the first

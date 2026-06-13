@@ -10,6 +10,20 @@ range = 1000.0
 # Beyond this radius the distance bands below take over.
 wysiwyg_radius = 150.0
 
+# Depth offset below the rendered LoD for the WYSIWYG mirror. 0 collides
+# exactly the displayed meshes; 1 collides Google's own one-coarser
+# reconstruction (~1/4 the triangles), at a measured ~0.2 m mean / ~0.6 m
+# p95 collider-vs-display divergence per level on flat terrain. Falls back
+# to the displayed mesh per node wherever the coarser data isn't loaded.
+wysiwyg_depth_offset = 1
+
+# Sub-octant carving: remove coarse band tiles' giant triangles over the
+# finely-covered region around the player even when no whole octant is
+# covered. Disabling removes carve-driven rebuild churn but lets
+# range-straddling coarse tiles stack interpenetrating layers over the
+# near field (the beach contact-solver meltdown).
+collider_carve = true
+
 # Collider triangles thinner than this across their longest edge (m) are
 # dropped as photogrammetry slivers (contact artifacts). Zero disables.
 # Within the WYSIWYG radius, colliders follow the exact displayed meshes
@@ -31,8 +45,11 @@ collider_skirt_slope = 2.0
 # Edge fusion: snap a freshly built collider's outer border vertices to the
 # mean of the adjacent selected tiles' source-mesh surfaces within this
 # vertical range (m), closing the step between adjacent tiles outright.
-# Zero disables.
-edge_fusion_range = 4.0
+# Zero disables — which also skips the lateral-neighbour scans, the
+# adjacency re-conform rebuilds, and the neighbour-data build deferral
+# (rims no longer depend on neighbours), leaving the skirts/aprons below
+# as the only border treatment.
+edge_fusion_range = 0.0
 
 # Max time (s) a collider build waits for a lateral neighbour's source data
 # to stream in before building without it (it re-conforms when the data

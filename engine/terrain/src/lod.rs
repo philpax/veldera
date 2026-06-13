@@ -444,7 +444,11 @@ impl LodState {
                 rotation: node_data.transform.rotation.to_array(),
                 scale: node_data.transform.scale.to_array(),
                 octant_mask: mask,
-                sub_cut: self.sub_cut_cells(&coverage, path),
+                sub_cut: if streaming.collider_carve {
+                    self.sub_cut_cells(&coverage, path)
+                } else {
+                    0
+                },
                 laterals: self
                     .lateral_neighbour_paths(path)
                     .iter()
@@ -1333,6 +1337,10 @@ fn unified_walk(
 /// collider, with its octant mask derived from its *selected* children —
 /// exactly the way the render shader masks the drawn meshes. Near-field
 /// collision is therefore the displayed composite by construction.
+/// A non-zero `depth_offset` coarsens the whole mirror by that many levels
+/// (collide Google's own coarser reconstruction instead of the displayed
+/// one), trading measured display divergence — ~0.2 m mean, ~0.6 m p95 per
+/// level on flat terrain — for proportionally fewer, larger triangles.
 ///
 /// Masking only by in-mirror children (rather than all loaded children)
 /// matters at the radius edge: a loaded child beyond the radius is the
@@ -1344,6 +1352,7 @@ fn compute_physics_targets(
     camera_pos: DVec3,
     lead: DVec3,
     wysiwyg_radius: f64,
+    depth_offset: usize,
 ) -> HashMap<OctreePath, u8> {
     let mut targets: HashMap<OctreePath, u8> = HashMap::new();
     for path in &lod_state.loaded_nodes {
@@ -1356,7 +1365,23 @@ fn compute_physics_targets(
         if effective_distance(obb, camera_pos, lead) > wysiwyg_radius {
             continue;
         }
-        targets.entry(*path).or_insert(0);
+        // With a depth offset, collide Google's own coarser reconstruction:
+        // map each loaded node to its ancestor `depth_offset` levels up.
+        // Because the loaded set contains the whole chain, the mapped set
+        // recomposites one level coarser through the same mask pass below.
+        // A missing ancestor falls back to the node itself, so coverage
+        // never waits on a load.
+        let mut selected = *path;
+        for _ in 0..depth_offset {
+            let Some(parent) = selected.parent() else {
+                break;
+            };
+            if !lod_state.node_data.contains_key(&parent) {
+                break;
+            }
+            selected = parent;
+        }
+        targets.entry(selected).or_insert(0);
     }
     let paths: Vec<OctreePath> = targets.keys().copied().collect();
     for path in &paths {
@@ -1649,6 +1674,7 @@ fn update_lod_requests(
         lod_metrics.camera_position,
         motion.lead(),
         streaming.wysiwyg_radius,
+        streaming.wysiwyg_depth_offset,
     );
     collider_targets.extend(
         scratch
@@ -2134,7 +2160,13 @@ fn update_physics_colliders(
     // directly to get the path re-dispatched.
     let mut discarded_any = false;
     while let Ok(result) = channel.rx.try_recv() {
-        discarded_any |= !commit_collider_result(&mut commands, &mut lod_state, camera_pos, result);
+        discarded_any |= !commit_collider_result(
+            &mut commands,
+            &mut lod_state,
+            camera_pos,
+            streaming.collider_carve,
+            result,
+        );
     }
 
     // Camera speed for the refinement gate, from the same smoothed tracker
@@ -2170,6 +2202,11 @@ fn update_physics_colliders(
     // the config field docs.
     let refine_allowed =
         streaming.collider_refine_max_speed <= 0.0 || speed <= streaming.collider_refine_max_speed;
+    // With fusion disabled, rims don't depend on neighbours: skip the
+    // lateral scans, the adjacency-rebuild churn, and the neighbour-data
+    // deferral entirely.
+    let fusion_enabled = streaming.edge_fusion_range > 0.0;
+    let carve_enabled = streaming.collider_carve;
 
     let target_paths = lod_state.physics_target_paths.clone();
 
@@ -2212,9 +2249,13 @@ fn update_physics_colliders(
         let wanted = match lod_state.physics_colliders.get(path) {
             None => true,
             Some(live) => {
-                let sub_cut = *sub_cut_cache
-                    .entry(*path)
-                    .or_insert_with(|| lod_state.sub_cut_cells(&selected_coverage, *path));
+                let sub_cut = *sub_cut_cache.entry(*path).or_insert_with(|| {
+                    if carve_enabled {
+                        lod_state.sub_cut_cells(&selected_coverage, *path)
+                    } else {
+                        0
+                    }
+                });
                 // A live build whose mask drops octants the selection now
                 // wants from it, or whose carve removed cells no longer
                 // covered, is coverage-critical (the finer coverage that
@@ -2228,7 +2269,7 @@ fn update_physics_colliders(
                 } else {
                     live.mask != *mask
                         || live.sub_cut != sub_cut
-                        || (distance <= streaming.wysiwyg_radius && {
+                        || (fusion_enabled && distance <= streaming.wysiwyg_radius && {
                             let (_, fingerprint) =
                                 cached_adjacency(&mut adjacency_cache, &lod_state, *path);
                             live.adjacency != fingerprint
@@ -2339,8 +2380,13 @@ fn update_physics_colliders(
         // The lateral neighbours of the current selection: the rim fuses
         // against their *source meshes*, so the fused border is a pure
         // function of immutable data plus the selection — both sides of a
-        // border compute the same curve in any build order.
-        let (laterals, adjacency) = cached_adjacency(&mut adjacency_cache, &lod_state, path);
+        // border compute the same curve in any build order. With fusion
+        // off, rims are independent and the build needs no neighbours.
+        let (laterals, adjacency) = if fusion_enabled {
+            cached_adjacency(&mut adjacency_cache, &lod_state, path)
+        } else {
+            (Vec::new(), 0)
+        };
 
         // Deferral: a selected lateral whose data is still streaming will
         // change this rim's fusion when it lands, so give it a moment
@@ -2375,9 +2421,13 @@ fn update_physics_colliders(
         // coarse tile's giant triangles over the fine terrain around the
         // player even when no whole octant is covered.
         let mask = requested_mask & lod_state.covered_octant_bits(path);
-        let sub_cut = *sub_cut_cache
-            .entry(path)
-            .or_insert_with(|| lod_state.sub_cut_cells(&selected_coverage, path));
+        let sub_cut = *sub_cut_cache.entry(path).or_insert_with(|| {
+            if carve_enabled {
+                lod_state.sub_cut_cells(&selected_coverage, path)
+            } else {
+                0
+            }
+        });
 
         let params = BuildParams {
             mask,
@@ -2572,6 +2622,7 @@ fn commit_collider_result(
     commands: &mut Commands,
     lod_state: &mut LodState,
     camera_pos: DVec3,
+    carve_enabled: bool,
     result: ColliderBuildResult,
 ) -> bool {
     lod_state.collider_builds_in_flight.remove(&result.path);
@@ -2594,8 +2645,13 @@ fn commit_collider_result(
     if result.mask & !(requested & lod_state.covered_octant_bits(result.path)) != 0 {
         return false;
     }
-    let coverage = lod_state.selected_coverage();
-    if result.sub_cut & !lod_state.sub_cut_cells(&coverage, result.path) != 0 {
+    let current_cut = if carve_enabled {
+        let coverage = lod_state.selected_coverage();
+        lod_state.sub_cut_cells(&coverage, result.path)
+    } else {
+        0
+    };
+    if result.sub_cut & !current_cut != 0 {
         return false;
     }
 
