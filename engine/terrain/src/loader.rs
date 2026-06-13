@@ -10,9 +10,32 @@
 use std::sync::Arc;
 
 use bevy::prelude::*;
-use rocktree::{BulkMetadata, BulkRequest, Client, MemoryCache, Planetoid};
+use rocktree::{BulkMetadata, BulkRequest, Client, Planetoid};
 
 use veldera_async::TaskSpawner;
+
+/// The tile cache backing the rocktree client: a persistent on-disk cache on
+/// native, an in-memory cache in the browser (which has no filesystem and
+/// keeps its own HTTP cache anyway).
+#[cfg(not(target_family = "wasm"))]
+pub type TileCache = rocktree::FilesystemCache;
+#[cfg(target_family = "wasm")]
+pub type TileCache = rocktree::MemoryCache;
+
+/// Construct the default tile cache. Native builds persist under the shared
+/// `<OS cache dir>/veldera/rocktree` root, falling back to the OS temp
+/// directory if the cache directory cannot be resolved.
+#[cfg(not(target_family = "wasm"))]
+fn default_cache() -> TileCache {
+    rocktree::FilesystemCache::veldera().unwrap_or_else(|| {
+        rocktree::FilesystemCache::new(std::env::temp_dir().join("veldera").join("rocktree"))
+    })
+}
+
+#[cfg(target_family = "wasm")]
+fn default_cache() -> TileCache {
+    rocktree::MemoryCache::new()
+}
 
 /// Plugin for loading Google Earth data.
 pub struct DataLoaderPlugin;
@@ -30,7 +53,7 @@ impl Plugin for DataLoaderPlugin {
 #[derive(Resource)]
 pub struct LoaderState {
     /// The HTTP client for fetching data.
-    pub client: Arc<Client<MemoryCache>>,
+    pub client: Arc<Client<TileCache>>,
     /// Planetoid metadata (once loaded).
     pub planetoid: Option<Planetoid>,
     /// Root bulk metadata (once loaded).
@@ -40,7 +63,7 @@ pub struct LoaderState {
 impl Default for LoaderState {
     fn default() -> Self {
         Self {
-            client: Arc::new(Client::with_cache(MemoryCache::new())),
+            client: Arc::new(Client::with_cache(default_cache())),
             planetoid: None,
             root_bulk: None,
         }

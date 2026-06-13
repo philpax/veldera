@@ -9,6 +9,8 @@
 //! - [`FilesystemCache`]: Disk-based cache (native only)
 //! - [`NoCache`]: Passthrough implementation that caches nothing
 
+#[cfg(not(target_family = "wasm"))]
+use crate::error::Error;
 use crate::error::Result;
 use std::{
     collections::HashMap,
@@ -223,6 +225,180 @@ impl Cache for MemoryCache {
     }
 }
 
+/// A disk-backed cache storing one file per URL (native only).
+///
+/// Each entry is `[u32 LE url length][url bytes][data bytes]`, so a hash
+/// collision on the filename degrades to a cache miss (the stored URL is
+/// verified on read) rather than serving the wrong tile. Writes are atomic
+/// (temp file + rename), so a crash mid-write never leaves a torn entry.
+///
+/// No TTL: rocktree data is epoch-versioned and the epoch is part of the URL,
+/// so a superseded entry is simply never requested again. The cache shares the
+/// `<cache dir>/veldera` root with the rest of the project (see
+/// [`FilesystemCache::veldera`]) but keeps its own `rocktree` subdirectory and
+/// its own type — nothing is shared with other caches but the root path.
+///
+/// I/O is synchronous (small reads/writes wrapped in ready futures, like
+/// [`MemoryCache`]), keeping the crate runtime-agnostic.
+#[cfg(not(target_family = "wasm"))]
+#[derive(Debug, Clone)]
+pub struct FilesystemCache {
+    dir: std::path::PathBuf,
+}
+
+#[cfg(not(target_family = "wasm"))]
+impl FilesystemCache {
+    /// Create a cache storing its files directly in `dir`.
+    #[must_use]
+    pub fn new(dir: impl Into<std::path::PathBuf>) -> Self {
+        Self { dir: dir.into() }
+    }
+
+    /// Create a cache under the shared project cache root,
+    /// `<OS cache dir>/veldera/rocktree`. Returns `None` when the OS cache
+    /// directory cannot be resolved.
+    #[must_use]
+    pub fn veldera() -> Option<Self> {
+        Some(Self::new(dirs::cache_dir()?.join("veldera").join("rocktree")))
+    }
+
+    /// The on-disk path for a URL's entry.
+    fn path_for(&self, url: &str) -> std::path::PathBuf {
+        self.dir.join(format!("{:016x}", fnv1a(url)))
+    }
+
+    /// Read the entry at `path`, returning its data only if the stored URL
+    /// matches `url` (guarding against the rare filename-hash collision).
+    fn read_verified(path: &std::path::Path, url: &str) -> Result<Option<Vec<u8>>> {
+        let bytes = match std::fs::read(path) {
+            Ok(bytes) => bytes,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+            Err(e) => {
+                return Err(Error::Cache {
+                    operation: "read",
+                    message: e.to_string(),
+                });
+            }
+        };
+        let Some((stored_url, data)) = split_entry(&bytes) else {
+            // Truncated or foreign file: treat as a miss.
+            return Ok(None);
+        };
+        if stored_url == url.as_bytes() {
+            Ok(Some(data.to_vec()))
+        } else {
+            Ok(None)
+        }
+    }
+}
+
+#[cfg(not(target_family = "wasm"))]
+impl Cache for FilesystemCache {
+    fn get(&self, url: &str) -> GetFuture<'_> {
+        let result = Self::read_verified(&self.path_for(url), url);
+        Box::pin(async move { result })
+    }
+
+    fn put(&self, url: &str, data: Vec<u8>) -> CacheFuture<'_> {
+        let path = self.path_for(url);
+        let result = write_entry(&self.dir, &path, url, &data);
+        Box::pin(async move { result })
+    }
+
+    fn contains(&self, url: &str) -> ContainsFuture<'_> {
+        let result = Self::read_verified(&self.path_for(url), url).map(|d| d.is_some());
+        Box::pin(async move { result })
+    }
+
+    fn remove(&self, url: &str) -> CacheFuture<'_> {
+        let result = match std::fs::remove_file(self.path_for(url)) {
+            Ok(()) => Ok(()),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
+            Err(e) => Err(Error::Cache {
+                operation: "remove",
+                message: e.to_string(),
+            }),
+        };
+        Box::pin(async move { result })
+    }
+
+    fn clear(&self) -> CacheFuture<'_> {
+        let result = match std::fs::remove_dir_all(&self.dir) {
+            Ok(()) => Ok(()),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
+            Err(e) => Err(Error::Cache {
+                operation: "clear",
+                message: e.to_string(),
+            }),
+        };
+        Box::pin(async move { result })
+    }
+}
+
+/// Split a stored entry into its URL and data halves, or `None` if the buffer
+/// is too short or its declared URL length overruns it.
+#[cfg(not(target_family = "wasm"))]
+fn split_entry(bytes: &[u8]) -> Option<(&[u8], &[u8])> {
+    let (len_bytes, rest) = bytes.split_first_chunk::<4>()?;
+    let url_len = u32::from_le_bytes(*len_bytes) as usize;
+    if rest.len() < url_len {
+        return None;
+    }
+    Some(rest.split_at(url_len))
+}
+
+/// Write a URL/data entry to `path` atomically (temp file + rename), creating
+/// `dir` if needed.
+#[cfg(not(target_family = "wasm"))]
+fn write_entry(
+    dir: &std::path::Path,
+    path: &std::path::Path,
+    url: &str,
+    data: &[u8],
+) -> Result<()> {
+    use std::io::Write;
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static NONCE: AtomicU64 = AtomicU64::new(0);
+
+    std::fs::create_dir_all(dir).map_err(|e| Error::Cache {
+        operation: "create dir",
+        message: e.to_string(),
+    })?;
+
+    let tmp = path.with_extension(format!(
+        "tmp.{}.{}",
+        std::process::id(),
+        NONCE.fetch_add(1, Ordering::Relaxed)
+    ));
+    let write = || -> std::io::Result<()> {
+        let mut file = std::fs::File::create(&tmp)?;
+        file.write_all(&(url.len() as u32).to_le_bytes())?;
+        file.write_all(url.as_bytes())?;
+        file.write_all(data)?;
+        file.sync_all()?;
+        std::fs::rename(&tmp, path)
+    };
+    write().map_err(|e| {
+        let _ = std::fs::remove_file(&tmp);
+        Error::Cache {
+            operation: "write",
+            message: e.to_string(),
+        }
+    })
+}
+
+/// FNV-1a 64-bit hash, used to derive a filesystem-safe filename from a URL.
+/// Stable across runs (collisions are caught by the stored-URL check).
+#[cfg(not(target_family = "wasm"))]
+fn fnv1a(s: &str) -> u64 {
+    let mut hash = 0xcbf2_9ce4_8422_2325u64;
+    for byte in s.bytes() {
+        hash ^= u64::from(byte);
+        hash = hash.wrapping_mul(0x0000_0100_0000_01b3);
+    }
+    hash
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -245,14 +421,11 @@ mod tests {
         let mut cx = Context::from_waker(&waker);
         let mut f = std::pin::pin!(f);
 
-        loop {
-            match f.as_mut().poll(&mut cx) {
-                Poll::Ready(result) => return result,
-                Poll::Pending => {
-                    // For these simple futures, they should always be ready.
-                    panic!("Future unexpectedly pending");
-                }
-            }
+        // These caches do their work synchronously, so the future is ready
+        // on the first poll.
+        match f.as_mut().poll(&mut cx) {
+            Poll::Ready(result) => result,
+            Poll::Pending => panic!("Future unexpectedly pending"),
         }
     }
 
@@ -333,6 +506,42 @@ mod tests {
         block_on(cache.clear()).unwrap();
         assert!(cache.is_empty());
         assert_eq!(cache.size(), 0);
+    }
+
+    #[cfg(not(target_family = "wasm"))]
+    #[test]
+    fn test_filesystem_cache_roundtrip_and_collision_guard() {
+        use std::sync::atomic::{AtomicU64, Ordering};
+        static COUNTER: AtomicU64 = AtomicU64::new(0);
+        let dir = std::env::temp_dir().join(format!(
+            "veldera_fscache_test_{}_{}",
+            std::process::id(),
+            COUNTER.fetch_add(1, Ordering::Relaxed)
+        ));
+        let cache = FilesystemCache::new(&dir);
+
+        // Miss, store, hit.
+        assert_eq!(block_on(cache.get("https://x/a")).unwrap(), None);
+        block_on(cache.put("https://x/a", vec![1, 2, 3])).unwrap();
+        assert_eq!(block_on(cache.get("https://x/a")).unwrap(), Some(vec![1, 2, 3]));
+        assert!(block_on(cache.contains("https://x/a")).unwrap());
+
+        // A different URL that lands on the same file would be caught by the
+        // stored-URL check; directly, distinct URLs simply don't collide here.
+        block_on(cache.put("https://x/b", vec![9])).unwrap();
+        assert_eq!(block_on(cache.get("https://x/b")).unwrap(), Some(vec![9]));
+        assert_eq!(block_on(cache.get("https://x/a")).unwrap(), Some(vec![1, 2, 3]));
+
+        // Forged collision: write an entry under a's filename but b's URL, and
+        // confirm a read for a treats it as a miss rather than returning b.
+        let path = cache.path_for("https://x/a");
+        super::write_entry(&dir, &path, "https://x/b", &[7, 7]).unwrap();
+        assert_eq!(block_on(cache.get("https://x/a")).unwrap(), None);
+
+        block_on(cache.remove("https://x/b")).unwrap();
+        assert!(!block_on(cache.contains("https://x/b")).unwrap());
+        block_on(cache.clear()).unwrap();
+        assert!(!dir.exists());
     }
 
     #[test]

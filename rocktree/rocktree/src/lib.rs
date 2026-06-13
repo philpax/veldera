@@ -31,6 +31,8 @@ mod error;
 pub mod types;
 
 pub use cache::{Cache, MemoryCache, NoCache};
+#[cfg(not(target_family = "wasm"))]
+pub use cache::FilesystemCache;
 pub use client::Client;
 pub use error::{Error, Result};
 pub use types::{
