@@ -9,7 +9,9 @@ description = "Offline workbench for terrain-collider border fusion: load an in-
 [dependencies]
 glam = { workspace = true }
 rocktree = { workspace = true }
+serde = { workspace = true, features = ["derive"] }
 serde_json = { workspace = true }
+veldera_geo = { workspace = true }
 veldera_terrain_collider = { workspace = true }
 
 [lints]

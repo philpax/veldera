@@ -8,8 +8,13 @@
 //! flagged — those are the seams fusion is *choosing* not to close.
 //!
 //! ```text
-//! fuse-lab <dump.json> [--fusion-range <m>] [--obj <dir>]
+//! fuse-lab <dump.json> [--fusion-range <m>] [--obj <dir>] [--roads <osm.json>]
 //! ```
+//!
+//! `--roads <osm.json>` synthesizes drivable road colliders from OSM
+//! centerlines over the dump (carving the photogrammetry corridor and emitting
+//! a grade-limited ribbon) and reports the centerline roughness before and
+//! after; with `--obj` it writes `<path>.orig.obj`/`<path>.road.obj` per tile.
 //!
 //! `--fusion-range` overrides the captured setting, for experimenting with
 //! the threshold against a real discrepancy. `--obj` exports each tile's
@@ -37,6 +42,8 @@ use veldera_terrain_collider::{
     dump::{DumpTile, TileSetDump},
 };
 
+mod roads;
+
 /// Two rim vertices closer than this horizontally are considered the same
 /// border station in the `--border` detail view (m).
 const STATION_MATCH_RADIUS: f32 = 2.0;
@@ -53,6 +60,7 @@ fn main() -> Result<(), Box<dyn Error>> {
     let mut obj_dir: Option<String> = None;
     let mut border_pair: Option<(String, String)> = None;
     let mut depth_divergence = false;
+    let mut osm_path: Option<String> = None;
     let mut i = 1;
     while i < args.len() {
         match args[i].as_str() {
@@ -78,6 +86,10 @@ fn main() -> Result<(), Box<dyn Error>> {
             "--depth-divergence" => {
                 depth_divergence = true;
                 i += 1;
+            }
+            "--roads" => {
+                osm_path = Some(args.get(i + 1).ok_or("--roads needs an osm.json path")?.clone());
+                i += 2;
             }
             other if dump_path.is_none() => {
                 dump_path = Some(other.to_string());
@@ -206,7 +218,15 @@ fn main() -> Result<(), Box<dyn Error>> {
         }
     }
 
-    if let Some(dir) = obj_dir {
+    if let Some(osm) = &osm_path {
+        roads::run(&dump, &meshes, &settings, osm, obj_dir.as_deref())?;
+    }
+
+    // The road mode owns OBJ export when active (it writes before/after pairs);
+    // otherwise export the fused tiles for border inspection.
+    if osm_path.is_none()
+        && let Some(dir) = obj_dir
+    {
         std::fs::create_dir_all(&dir)?;
         for (path, (fused, _)) in &built {
             write_obj(&Path::new(&dir).join(format!("{path}.obj")), fused)?;
