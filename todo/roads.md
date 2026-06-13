@@ -40,6 +40,45 @@ Only start once phase 0's numbers and OBJs look right.
 - **Config.** Hot-reloadable TOML per the house pattern (`assets/engine/config/physics/streaming.toml` or a new `roads.toml`): enable flag, classes included, carve margin, vertical gate, default widths, sample spacing, max grade. Document init-only fields if any (there should be none).
 - **Debug viz.** Gizmo polylines for fitted centerlines plus ribbon outlines, toggle in the Physics or Rendering debug tab, colored by class; this is the first thing the user will ask for when a road misbehaves.
 
+## Status (branch `roads`, 2026-06-13)
+
+Phase 0 is **complete and validated**, and Phase 1 is **done except the
+game-side live fitting**:
+
+- **Phase 0.** Geometry lives in `veldera_terrain_collider::roads` (pure,
+  unit-tested): `fit_grade_limited`, `carve_corridor`, `emit_ribbon`,
+  `RoadRibbon::clip_horizontally`, `build_tile_geometry_with_roads` (carve +
+  per-tile-ownership emit via a `SurfaceProbe` over the tile's own surface).
+  fuse-lab `--roads <osm.json>` orchestrates it over a dump. On
+  `tiles-1781315303`: original centerline RMS 1.82 m / max 9.96 m → final
+  0.001 m / max 0.031 m, zero holes over 8397 samples. OSM committed at
+  `dumps/osm-1781315303.json`.
+- **Frame correction (important).** The plan's "use the ellipsoid, not a
+  spherical approximation" was wrong for this frame: rocktree's globe is
+  **spherical** and veldera places lat/lon with the spherical
+  `lat_lon_to_ecef` at the planetoid radius. A WGS84 conversion lands ~21 km
+  off (geodetic-vs-geocentric latitude). OSM is placed spherically. The WGS84
+  helpers added to `veldera_geo::coords` are correct but unused here.
+- **Caching.** rocktree gained a `FilesystemCache` (native, persists tiles
+  across runs) under `<cache dir>/veldera/rocktree`; `veldera_roads`'
+  `RoadCache` shares the `veldera` root with its own type and `roads`
+  subfolder.
+- **Phase 1 done.** `extras/roads` (`veldera_roads`: `RoadSource` +
+  `OverpassRoadSource` + region cache). Engine inversion: `RoadOverlay`
+  resource (host-filled, ECEF ribbons + version). Build path:
+  `create_terrain_collider` carves + emits. Reconcile: per-tile `roads:u64`
+  fingerprint mirroring `sub_cut`, version-driven generation bump, stale-build
+  revalidation on commit. Config knobs in `streaming.toml`. Debug gizmos
+  (`draw_road_overlay`). Dump capture (`DumpTile.roads`).
+- **Remaining (needs in-game iteration).** The game-side pipeline that
+  populates `RoadOverlay`: proximity-triggered Overpass fetch + the fit
+  (resample / terrain-probe / grade-fit / junction-unify, ported from
+  fuse-lab) filling the overlay. **Design note:** the fit must sample the raw
+  photogrammetry (expose a probe over `LodState::node_data`), not raycast the
+  road-modified colliders, or it feeds back on its own output. Ribbon-disappear
+  is currently treated as a speed-gated refinement, not coverage-critical
+  (revisit if a vanishing ribbon leaves a visible trench at speed).
+
 ## Phase 2 (later, separate discussion)
 
 Render the ribbon (clean asphalt strip over the photogrammetry); junction blend patches; bridge deck handling beyond endpoint interpolation; using the user's local OSM dump as a `RoadSource`; extending carving to clear parked-car lumps on road *shoulders*.
