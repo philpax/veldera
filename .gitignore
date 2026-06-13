@@ -28,4 +28,7 @@ telemetry.csv
 
 # On-disk source assets that are too large to commit into Git.
 source_assets/ETOPO*.tif
-dumps/
+# Tile dumps are large and untracked, but the small committed OSM responses
+# beside them keep the roads prototype deterministic and service-free.
+dumps/*
+!dumps/osm-*.json
