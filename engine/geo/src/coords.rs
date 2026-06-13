@@ -79,6 +79,64 @@ pub fn lat_lon_to_ecef(lat_deg: f64, lon_deg: f64, radius: f64) -> DVec3 {
     )
 }
 
+/// WGS84 semi-major axis (equatorial radius), in metres.
+pub const WGS84_SEMI_MAJOR: f64 = 6_378_137.0;
+/// WGS84 flattening.
+pub const WGS84_FLATTENING: f64 = 1.0 / 298.257_223_563;
+/// WGS84 first eccentricity squared, `f * (2 - f)`.
+pub const WGS84_ECCENTRICITY_SQ: f64 = WGS84_FLATTENING * (2.0 - WGS84_FLATTENING);
+
+/// Convert geodetic latitude, longitude (degrees), and ellipsoidal height
+/// (metres) to ECEF coordinates on the WGS84 ellipsoid.
+///
+/// Unlike [`lat_lon_to_ecef`], this models the ellipsoid's flattening, so the
+/// vertical is the true geodetic normal rather than the radial — required when
+/// the height matters (the difference reaches ~21 km at mid-latitudes).
+pub fn geodetic_to_ecef(lat_deg: f64, lon_deg: f64, height: f64) -> DVec3 {
+    let lat = lat_deg.to_radians();
+    let lon = lon_deg.to_radians();
+    let (sin_lat, cos_lat) = lat.sin_cos();
+    let (sin_lon, cos_lon) = lon.sin_cos();
+    // Prime vertical radius of curvature.
+    let n = WGS84_SEMI_MAJOR / (1.0 - WGS84_ECCENTRICITY_SQ * sin_lat * sin_lat).sqrt();
+    DVec3::new(
+        (n + height) * cos_lat * cos_lon,
+        (n + height) * cos_lat * sin_lon,
+        (n * (1.0 - WGS84_ECCENTRICITY_SQ) + height) * sin_lat,
+    )
+}
+
+/// Convert ECEF coordinates to geodetic latitude, longitude (degrees), and
+/// ellipsoidal height (metres) on the WGS84 ellipsoid.
+///
+/// Uses Bowring's closed-form approximation, accurate to well under a
+/// millimetre for terrestrial heights. Returns `(lat_deg, lon_deg, height)`.
+pub fn ecef_to_geodetic(position: DVec3) -> (f64, f64, f64) {
+    let DVec3 { x, y, z } = position;
+    let a = WGS84_SEMI_MAJOR;
+    let e2 = WGS84_ECCENTRICITY_SQ;
+    let b = a * (1.0 - WGS84_FLATTENING);
+    // Second eccentricity squared.
+    let ep2 = (a * a - b * b) / (b * b);
+
+    let lon = y.atan2(x);
+    let p = (x * x + y * y).sqrt();
+    // Bowring's auxiliary angle.
+    let theta = (z * a).atan2(p * b);
+    let (sin_theta, cos_theta) = theta.sin_cos();
+    let lat = (z + ep2 * b * sin_theta.powi(3)).atan2(p - e2 * a * cos_theta.powi(3));
+    let (sin_lat, cos_lat) = lat.sin_cos();
+    let n = a / (1.0 - e2 * sin_lat * sin_lat).sqrt();
+    // Guard the cos(lat) division near the poles by falling back to the
+    // vertical-axis expression for the height there.
+    let height = if cos_lat.abs() > 1e-9 {
+        p / cos_lat - n
+    } else {
+        z.abs() - n * (1.0 - e2)
+    };
+    (lat.to_degrees(), lon.to_degrees(), height)
+}
+
 /// Initial camera look direction and local up at an ECEF `position`, for a
 /// compass `heading` and `pitch` in degrees.
 ///
@@ -133,4 +191,47 @@ pub fn slerp_dvec3(a: DVec3, b: DVec3, t: f64) -> DVec3 {
     let b_weight = (t * theta).sin() / sin_theta;
 
     (a * a_weight + b * b_weight).normalize()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn geodetic_to_ecef_reference_points() {
+        // Equator on the prime meridian sits at the semi-major axis on X.
+        let equator = geodetic_to_ecef(0.0, 0.0, 0.0);
+        assert!((equator.x - WGS84_SEMI_MAJOR).abs() < 1e-3);
+        assert!(equator.y.abs() < 1e-6 && equator.z.abs() < 1e-6);
+
+        // The pole sits at the semi-minor axis on Z.
+        let semi_minor = WGS84_SEMI_MAJOR * (1.0 - WGS84_FLATTENING);
+        let pole = geodetic_to_ecef(90.0, 0.0, 0.0);
+        assert!((pole.z - semi_minor).abs() < 1e-3);
+        assert!(pole.x.abs() < 1e-3 && pole.y.abs() < 1e-3);
+    }
+
+    #[test]
+    fn geodetic_round_trip() {
+        // The Jersey City prototype site.
+        let (lat, lon, height) = (40.712_39, -74.054_34, 17.5);
+        let ecef = geodetic_to_ecef(lat, lon, height);
+        let (lat2, lon2, height2) = ecef_to_geodetic(ecef);
+        assert!((lat - lat2).abs() < 1e-9, "lat {lat} vs {lat2}");
+        assert!((lon - lon2).abs() < 1e-9, "lon {lon} vs {lon2}");
+        assert!((height - height2).abs() < 1e-6, "height {height} vs {height2}");
+    }
+
+    #[test]
+    fn ellipsoid_vertical_differs_from_spherical() {
+        // At a mid-latitude the geodetic normal departs from the radial, so the
+        // ellipsoid placement must not match the spherical approximation.
+        let lat = 45.0;
+        let ellipsoid = geodetic_to_ecef(lat, 10.0, 0.0);
+        let spherical = lat_lon_to_ecef(lat, 10.0, WGS84_SEMI_MAJOR);
+        assert!(
+            (ellipsoid - spherical).length() > 1_000.0,
+            "ellipsoid and spherical should diverge by kilometres at 45°"
+        );
+    }
 }
