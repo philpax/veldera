@@ -21,7 +21,7 @@
 //! or async. The orchestration — sampling terrain along ways, junction
 //! unification, and the ECEF↔baked frame conversions — lives in the caller.
 
-use glam::{Vec2, Vec3};
+use glam::{DVec3, Vec2, Vec3};
 
 use crate::{
     BuildSettings, BuiltGeometry, HorizontalFrame, SurfaceProbe, TileMeshes, build_tile_geometry,
@@ -361,6 +361,225 @@ fn clamp_grade(arcs: &[f32], mut heights: Vec<f32>, max_grade: f32) -> Vec<f32> 
         }
     }
     heights
+}
+
+// ============================================================================
+// ECEF way fitting
+// ============================================================================
+
+/// A terrain height source in ECEF, queried while fitting a road. It must
+/// sample the *raw* photogrammetry surface, never the road-modified collider,
+/// or the fit feeds back on its own output.
+pub trait TerrainSampler {
+    /// The surface point (ECEF) at `point`'s horizontal position, restricted
+    /// to surfaces within `range` (m) of `reference`'s height, or `None` where
+    /// no terrain covers it. `reference` lets the caller track a road across a
+    /// bridge instead of dropping to the ground beneath.
+    fn sample(&self, point: DVec3, reference: DVec3, range: f32) -> Option<DVec3>;
+}
+
+/// One road centerline to fit: an ECEF polyline with per-vertex OSM node ids
+/// (parallel to `points`, for junction unification), a half-width, and whether
+/// it is a bridge.
+#[derive(Clone, Debug)]
+pub struct FitWay {
+    pub points: Vec<DVec3>,
+    pub node_ids: Vec<i64>,
+    pub half_width: f32,
+    pub bridge: bool,
+}
+
+/// A fitted road ribbon in ECEF.
+#[derive(Clone, Debug, Default)]
+pub struct FittedRibbon {
+    pub stations: Vec<FittedStation>,
+}
+
+/// One centerline station of a [`FittedRibbon`].
+#[derive(Clone, Copy, Debug)]
+pub struct FittedStation {
+    /// Centerline position at the fitted height, in ECEF.
+    pub position: DVec3,
+    /// The OSM node id when this station coincides with one (for junction
+    /// unification), else `None`.
+    pub node_id: Option<i64>,
+    /// Half the road width here, in metres.
+    pub half_width: f32,
+}
+
+/// Parameters for [`fit_ways`].
+#[derive(Clone, Copy, Debug)]
+pub struct FitParams {
+    /// Longitudinal height-fit knobs (median window, max grade).
+    pub fit: FitSettings,
+    /// Spacing (m) between resampled terrain probes along a way.
+    pub sample_spacing: f64,
+    /// Vertical window (m) for the *first* probe of a way: wide, because the
+    /// OSM centerline may sit tens of metres off the terrain surface, so the
+    /// first sample takes whatever surface covers it.
+    pub first_probe_range: f32,
+    /// Vertical window (m) for subsequent probes, keyed off the previous
+    /// sample: tight, so the query tracks the road and rejects the ground or
+    /// water beneath a bridge deck.
+    pub track_probe_range: f32,
+}
+
+/// Fit a set of ECEF ways into grade-limited ribbons, sampling terrain heights
+/// from `sampler`, then unify shared junction nodes to a common height. Ways
+/// with fewer than two covered samples are dropped. Heights are fitted as the
+/// radial distance from the planet centre (≈ vertical over a local area), so a
+/// station's lat/lon is preserved as its radius is adjusted.
+#[must_use]
+pub fn fit_ways(
+    ways: &[FitWay],
+    sampler: &dyn TerrainSampler,
+    params: &FitParams,
+) -> Vec<FittedRibbon> {
+    let mut ribbons: Vec<FittedRibbon> = ways
+        .iter()
+        .filter_map(|way| fit_one_way(way, sampler, params))
+        .collect();
+    unify_junctions(&mut ribbons, &params.fit);
+    ribbons
+}
+
+/// Resample, terrain-probe, and grade-fit one way into a fitted ribbon, or
+/// `None` if fewer than two samples find terrain.
+fn fit_one_way(
+    way: &FitWay,
+    sampler: &dyn TerrainSampler,
+    params: &FitParams,
+) -> Option<FittedRibbon> {
+    let (samples, node_ids) = resample(&way.points, &way.node_ids, params.sample_spacing);
+
+    // Probe a terrain height per sample, tracking the previous accepted
+    // surface as the reference so bridges do not snap to the ground beneath.
+    let mut probed: Vec<(f64, DVec3, Option<i64>)> = Vec::new();
+    let mut reference: Option<DVec3> = None;
+    let mut arc = 0.0;
+    for (i, &point) in samples.iter().enumerate() {
+        if i > 0 {
+            arc += (point - samples[i - 1]).length();
+        }
+        let range = if reference.is_none() {
+            params.first_probe_range
+        } else {
+            params.track_probe_range
+        };
+        let reference_point = reference.unwrap_or(point);
+        if let Some(surface) = sampler.sample(point, reference_point, range) {
+            reference = Some(surface);
+            probed.push((arc, surface, node_ids[i]));
+        }
+    }
+    if probed.len() < 2 {
+        return None;
+    }
+
+    let mut radii: Vec<(f32, f32)> = probed
+        .iter()
+        .map(|(arc, surface, _)| (*arc as f32, surface.length() as f32))
+        .collect();
+    if way.bridge {
+        // Mid-span photogrammetry under a bridge is the river or road below,
+        // not the deck; interpolate the deck height end-to-end instead.
+        let first_arc = radii.first().unwrap().0;
+        let span = radii.last().unwrap().0 - first_arc;
+        let (first, last) = (radii.first().unwrap().1, radii.last().unwrap().1);
+        for sample in &mut radii {
+            let t = if span > 0.0 {
+                (sample.0 - first_arc) / span
+            } else {
+                0.0
+            };
+            sample.1 = first + (last - first) * t;
+        }
+    }
+    let fitted = fit_grade_limited(&radii, &params.fit);
+
+    let stations = probed
+        .iter()
+        .zip(&fitted)
+        .map(|((_, surface, node_id), &radius)| FittedStation {
+            position: surface.normalize() * f64::from(radius),
+            node_id: *node_id,
+            half_width: way.half_width,
+        })
+        .collect();
+    Some(FittedRibbon { stations })
+}
+
+/// Resample a polyline every `spacing` m by arc length, carrying the original
+/// node id onto each vertex it lands on (interpolated points get `None`).
+fn resample(
+    points: &[DVec3],
+    node_ids: &[i64],
+    spacing: f64,
+) -> (Vec<DVec3>, Vec<Option<i64>>) {
+    let mut out_points = vec![points[0]];
+    let mut out_ids = vec![node_ids.first().copied()];
+    for i in 1..points.len() {
+        let (a, b) = (points[i - 1], points[i]);
+        let segment = (b - a).length();
+        if segment <= 0.0 {
+            continue;
+        }
+        let steps = (segment / spacing).floor() as usize;
+        for step in 1..=steps {
+            let t = step as f64 * spacing / segment;
+            if t < 1.0 {
+                out_points.push(a.lerp(b, t));
+                out_ids.push(None);
+            }
+        }
+        out_points.push(b);
+        out_ids.push(node_ids.get(i).copied());
+    }
+    (out_points, out_ids)
+}
+
+/// Unify shared junction nodes: average each shared node's fitted radius
+/// across the ways meeting there, pin those stations, and re-clamp each
+/// ribbon's grade so the small correction stays feasible.
+fn unify_junctions(ribbons: &mut [FittedRibbon], fit: &FitSettings) {
+    use std::collections::HashMap;
+    let mut totals: HashMap<i64, (f64, u32)> = HashMap::new();
+    for ribbon in ribbons.iter() {
+        for station in &ribbon.stations {
+            if let Some(id) = station.node_id {
+                let entry = totals.entry(id).or_default();
+                entry.0 += station.position.length();
+                entry.1 += 1;
+            }
+        }
+    }
+    let junctions: HashMap<i64, f64> = totals
+        .into_iter()
+        .filter(|(_, (_, count))| *count >= 2)
+        .map(|(id, (sum, count))| (id, sum / f64::from(count)))
+        .collect();
+    if junctions.is_empty() {
+        return;
+    }
+
+    for ribbon in ribbons.iter_mut() {
+        let mut arcs = Vec::with_capacity(ribbon.stations.len());
+        let mut radii = Vec::with_capacity(ribbon.stations.len());
+        let mut arc = 0.0;
+        for (i, station) in ribbon.stations.iter().enumerate() {
+            if i > 0 {
+                arc += (station.position - ribbon.stations[i - 1].position).length();
+            }
+            arcs.push(arc as f32);
+            let pinned = station.node_id.and_then(|id| junctions.get(&id)).copied();
+            radii.push(pinned.unwrap_or_else(|| station.position.length()) as f32);
+        }
+        let samples: Vec<(f32, f32)> = arcs.iter().copied().zip(radii).collect();
+        let fitted = fit_grade_limited(&samples, fit);
+        for (station, &radius) in ribbon.stations.iter_mut().zip(&fitted) {
+            station.position = station.position.normalize() * f64::from(radius);
+        }
+    }
 }
 
 // ============================================================================

@@ -1,7 +1,54 @@
-use glam::{Vec2, Vec3};
+use glam::{DVec3, Vec2, Vec3};
 
 use super::*;
 use crate::SurfaceProbe;
+
+/// A spherical terrain at a fixed radius: every query returns the point
+/// projected to that radius, so a fitted way should sit at that radius.
+struct FlatSampler {
+    radius: f64,
+}
+
+impl TerrainSampler for FlatSampler {
+    fn sample(&self, point: DVec3, _reference: DVec3, _range: f32) -> Option<DVec3> {
+        Some(point.normalize() * self.radius)
+    }
+}
+
+#[test]
+fn fit_ways_places_ribbon_on_the_sampled_surface() {
+    let radius = 6_371_000.0;
+    // A short way near the surface, its points a few metres off radius.
+    let base = DVec3::new(1.0, 0.2, 0.3).normalize() * (radius + 5.0);
+    let east = base.cross(DVec3::Z).normalize();
+    let points: Vec<DVec3> = (0..6).map(|i| base + east * (i as f64 * 8.0)).collect();
+    let ways = vec![FitWay {
+        node_ids: (0..points.len() as i64).collect(),
+        points,
+        half_width: 3.5,
+        bridge: false,
+    }];
+    let params = FitParams {
+        fit: FitSettings {
+            median_window: 15.0,
+            max_grade: 0.10,
+        },
+        sample_spacing: 4.0,
+        first_probe_range: 1000.0,
+        track_probe_range: 12.0,
+    };
+    let ribbons = fit_ways(&ways, &FlatSampler { radius }, &params);
+    assert_eq!(ribbons.len(), 1);
+    assert!(ribbons[0].stations.len() >= 2);
+    for station in &ribbons[0].stations {
+        assert!(
+            (station.position.length() - radius).abs() < 0.5,
+            "station radius {} vs {radius}",
+            station.position.length()
+        );
+        assert!((station.half_width - 3.5).abs() < 1e-6);
+    }
+}
 
 /// `down` for all tests: planet centre at -Z, so up = +Z and the horizontal
 /// plane is world XY.
