@@ -2808,8 +2808,13 @@ fn commit_collider_result(
     // committing a stale ribbon set would carve or surface a corridor the
     // overlay no longer describes. Re-derive the fingerprint and discard on a
     // mismatch (the path re-pends with the current ribbons).
-    let (_, current_roads) =
-        tile_road_ribbons(road_overlay, roads_enabled, world_position, scale, road_margin);
+    let (_, current_roads) = tile_road_ribbons(
+        road_overlay,
+        roads_enabled,
+        world_position,
+        scale,
+        road_margin,
+    );
     if result.roads != current_roads {
         return false;
     }

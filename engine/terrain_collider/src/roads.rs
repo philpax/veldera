@@ -23,7 +23,9 @@
 
 use glam::{Vec2, Vec3};
 
-use crate::{BuildSettings, BuiltGeometry, HorizontalFrame, SurfaceProbe, TileMeshes, build_tile_geometry};
+use crate::{
+    BuildSettings, BuiltGeometry, HorizontalFrame, SurfaceProbe, TileMeshes, build_tile_geometry,
+};
 
 /// Vertical window (m) for the ribbon-ownership probe: a presence test, so it
 /// is wide enough to find the tile's surface beneath a raised ribbon (e.g. a
@@ -104,8 +106,7 @@ pub fn carve_corridor(
         return;
     }
     triangles.retain(|&[a, b, c]| {
-        let centroid =
-            (vertices[a as usize] + vertices[b as usize] + vertices[c as usize]) / 3.0;
+        let centroid = (vertices[a as usize] + vertices[b as usize] + vertices[c as usize]) / 3.0;
         let Some(hit) = segments.nearest(frame.horizontal(centroid)) else {
             return true;
         };
@@ -234,8 +235,7 @@ pub fn build_tile_geometry_with_roads(
     ribbons: &[RoadRibbon],
     carve: &CarveSettings,
 ) -> Option<BuiltGeometry> {
-    let mut built =
-        build_tile_geometry(tile, octant_mask, sub_cut, neighbours, down, settings)?;
+    let mut built = build_tile_geometry(tile, octant_mask, sub_cut, neighbours, down, settings)?;
     if ribbons.is_empty() {
         return Some(built);
     }

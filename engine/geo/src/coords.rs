@@ -219,7 +219,10 @@ mod tests {
         let (lat2, lon2, height2) = ecef_to_geodetic(ecef);
         assert!((lat - lat2).abs() < 1e-9, "lat {lat} vs {lat2}");
         assert!((lon - lon2).abs() < 1e-9, "lon {lon} vs {lon2}");
-        assert!((height - height2).abs() < 1e-6, "height {height} vs {height2}");
+        assert!(
+            (height - height2).abs() < 1e-6,
+            "height {height} vs {height2}"
+        );
     }
 
     #[test]

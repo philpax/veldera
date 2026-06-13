@@ -506,8 +506,16 @@ pub(crate) fn draw_road_overlay(
             let half = DVec3::splat(f64::from((a.half_width + b.half_width) * 0.5)) * side;
             let (ra, rb) = (render(a.position), render(b.position));
             gizmos.line(ra, rb, color);
-            gizmos.line(render(a.position + half), render(b.position + half), color.with_alpha(0.6));
-            gizmos.line(render(a.position - half), render(b.position - half), color.with_alpha(0.6));
+            gizmos.line(
+                render(a.position + half),
+                render(b.position + half),
+                color.with_alpha(0.6),
+            );
+            gizmos.line(
+                render(a.position - half),
+                render(b.position - half),
+                color.with_alpha(0.6),
+            );
         }
     }
 }

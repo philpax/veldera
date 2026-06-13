@@ -14,8 +14,10 @@
 use avian3d::prelude::*;
 use bevy::prelude::*;
 
-pub use veldera_terrain_collider::{BuildSettings, BuildStats, BuiltGeometry, TileMeshes};
-pub use veldera_terrain_collider::roads::{CarveSettings, RoadRibbon};
+pub use veldera_terrain_collider::{
+    BuildSettings, BuildStats, BuiltGeometry, TileMeshes,
+    roads::{CarveSettings, RoadRibbon},
+};
 
 /// Marker component for terrain colliders.
 ///

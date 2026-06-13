@@ -12,8 +12,10 @@ use rocktree::Mesh as RocktreeMesh;
 use rocktree_decode::{UvTransform, Vertex};
 use serde::{Deserialize, Serialize};
 
-use crate::roads::{RibbonStation, RoadRibbon};
-use crate::{BuildSettings, TileMeshes};
+use crate::{
+    BuildSettings, TileMeshes,
+    roads::{RibbonStation, RoadRibbon},
+};
 
 /// One mesh's collider-relevant data (geometry and octant tags only — no
 /// textures, normals, or UVs).

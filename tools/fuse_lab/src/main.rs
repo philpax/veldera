@@ -88,7 +88,11 @@ fn main() -> Result<(), Box<dyn Error>> {
                 i += 1;
             }
             "--roads" => {
-                osm_path = Some(args.get(i + 1).ok_or("--roads needs an osm.json path")?.clone());
+                osm_path = Some(
+                    args.get(i + 1)
+                        .ok_or("--roads needs an osm.json path")?
+                        .clone(),
+                );
                 i += 2;
             }
             other if dump_path.is_none() => {

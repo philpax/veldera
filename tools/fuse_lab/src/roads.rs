@@ -18,10 +18,7 @@
 //!    sample the collider surface along each centerline and report the
 //!    roughness before and after — the metric that decides the prototype.
 
-use std::collections::HashMap;
-use std::error::Error;
-use std::io::Write;
-use std::path::Path;
+use std::{collections::HashMap, error::Error, io::Write, path::Path};
 
 use glam::DVec3;
 use rocktree::Mesh as RocktreeMesh;
@@ -109,8 +106,7 @@ pub fn run(
     );
 
     // Build each tile's base collider, then a carved+emitted copy.
-    let tiles: HashMap<&str, &DumpTile> =
-        dump.tiles.iter().map(|t| (t.path.as_str(), t)).collect();
+    let tiles: HashMap<&str, &DumpTile> = dump.tiles.iter().map(|t| (t.path.as_str(), t)).collect();
     let mut results: HashMap<&str, TileResult> = HashMap::new();
     for tile in &dump.tiles {
         let Some(base) = build_base(tile, &tiles, meshes, base_settings) else {
@@ -128,7 +124,13 @@ pub fn run(
             .filter(|r| r.stations.len() >= 2)
             .collect();
         let mut road = base.clone();
-        carve_corridor(&road.vertices, &mut road.triangles, &all_baked, down, &carve);
+        carve_corridor(
+            &road.vertices,
+            &mut road.triangles,
+            &all_baked,
+            down,
+            &carve,
+        );
         for ribbon in &ribbons {
             for piece in ribbon.owned_pieces(tile.path.as_str(), origin) {
                 emit_ribbon(&mut road.vertices, &mut road.triangles, &piece, down);
@@ -151,8 +153,14 @@ pub fn run(
     if let Some(dir) = obj_dir {
         std::fs::create_dir_all(dir)?;
         for (path, result) in &results {
-            write_obj(&Path::new(dir).join(format!("{path}.orig.obj")), &result.base)?;
-            write_obj(&Path::new(dir).join(format!("{path}.road.obj")), &result.road)?;
+            write_obj(
+                &Path::new(dir).join(format!("{path}.orig.obj")),
+                &result.base,
+            )?;
+            write_obj(
+                &Path::new(dir).join(format!("{path}.road.obj")),
+                &result.road,
+            )?;
         }
         println!("roads: wrote .orig.obj / .road.obj per tile to {dir}/");
     }
@@ -417,7 +425,11 @@ fn fit_way(way: &Way, terrain: &TerrainProbes, fit: &FitSettings) -> Option<Glob
         let span = radii.last().unwrap().0 - first_arc;
         let (first, last) = (radii.first().unwrap().1, radii.last().unwrap().1);
         for sample in &mut radii {
-            let t = if span > 0.0 { (sample.0 - first_arc) / span } else { 0.0 };
+            let t = if span > 0.0 {
+                (sample.0 - first_arc) / span
+            } else {
+                0.0
+            };
             sample.1 = first + (last - first) * t;
         }
     }
@@ -509,10 +521,7 @@ fn unify_junctions(ribbons: &mut [GlobalRibbon], fit: &FitSettings) {
                 arc += (station.position - ribbon.stations[i - 1].position).length();
             }
             arcs.push(arc as f32);
-            let pinned = station
-                .node_id
-                .and_then(|id| junctions.get(&id))
-                .copied();
+            let pinned = station.node_id.and_then(|id| junctions.get(&id)).copied();
             radii.push(pinned.unwrap_or_else(|| station.position.length()) as f32);
         }
         let samples: Vec<(f32, f32)> = arcs.iter().copied().zip(radii).collect();
@@ -665,9 +674,7 @@ fn report_roughness(ribbons: &[GlobalRibbon], results: &HashMap<&str, TileResult
         rms(final_sq, final_n),
         final_max
     );
-    println!(
-        "  centerline samples {centerline_samples}, holes (no final surface) {holes}",
-    );
+    println!("  centerline samples {centerline_samples}, holes (no final surface) {holes}",);
 }
 
 /// Write a built geometry as a Wavefront OBJ.

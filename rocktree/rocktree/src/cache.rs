@@ -259,7 +259,9 @@ impl FilesystemCache {
     /// directory cannot be resolved.
     #[must_use]
     pub fn veldera() -> Option<Self> {
-        Some(Self::new(dirs::cache_dir()?.join("veldera").join("rocktree")))
+        Some(Self::new(
+            dirs::cache_dir()?.join("veldera").join("rocktree"),
+        ))
     }
 
     /// The on-disk path for a URL's entry.
@@ -356,8 +358,10 @@ fn write_entry(
     url: &str,
     data: &[u8],
 ) -> Result<()> {
-    use std::io::Write;
-    use std::sync::atomic::{AtomicU64, Ordering};
+    use std::{
+        io::Write,
+        sync::atomic::{AtomicU64, Ordering},
+    };
     static NONCE: AtomicU64 = AtomicU64::new(0);
 
     std::fs::create_dir_all(dir).map_err(|e| Error::Cache {
@@ -523,14 +527,20 @@ mod tests {
         // Miss, store, hit.
         assert_eq!(block_on(cache.get("https://x/a")).unwrap(), None);
         block_on(cache.put("https://x/a", vec![1, 2, 3])).unwrap();
-        assert_eq!(block_on(cache.get("https://x/a")).unwrap(), Some(vec![1, 2, 3]));
+        assert_eq!(
+            block_on(cache.get("https://x/a")).unwrap(),
+            Some(vec![1, 2, 3])
+        );
         assert!(block_on(cache.contains("https://x/a")).unwrap());
 
         // A different URL that lands on the same file would be caught by the
         // stored-URL check; directly, distinct URLs simply don't collide here.
         block_on(cache.put("https://x/b", vec![9])).unwrap();
         assert_eq!(block_on(cache.get("https://x/b")).unwrap(), Some(vec![9]));
-        assert_eq!(block_on(cache.get("https://x/a")).unwrap(), Some(vec![1, 2, 3]));
+        assert_eq!(
+            block_on(cache.get("https://x/a")).unwrap(),
+            Some(vec![1, 2, 3])
+        );
 
         // Forged collision: write an entry under a's filename but b's URL, and
         // confirm a read for a treats it as a miss rather than returning b.
