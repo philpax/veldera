@@ -50,6 +50,7 @@ chrono = { version = "0.4", default-features = false }
 clap = { version = "4", features = ["derive"] }
 console_error_panic_hook = "0.1"
 dirs = "6"
+fast-surface-nets = "0.2"
 egui_dock = "0.18"
 egui_extras = { version = "0.33.3", features = ["datepicker"] }
 egui_plot = "0.34.0"

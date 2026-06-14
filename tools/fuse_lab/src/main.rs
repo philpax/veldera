@@ -43,6 +43,7 @@ use veldera_terrain_collider::{
 };
 
 mod roads;
+mod wrap;
 
 /// Two rim vertices closer than this horizontally are considered the same
 /// border station in the `--border` detail view (m).
@@ -62,6 +63,7 @@ fn main() -> Result<(), Box<dyn Error>> {
     let mut depth_divergence = false;
     let mut osm_path: Option<String> = None;
     let mut captured_roads = false;
+    let mut wrap_voxel: Option<f32> = None;
     let mut i = 1;
     while i < args.len() {
         match args[i].as_str() {
@@ -99,6 +101,14 @@ fn main() -> Result<(), Box<dyn Error>> {
             "--captured-roads" => {
                 captured_roads = true;
                 i += 1;
+            }
+            "--wrap" => {
+                wrap_voxel = Some(
+                    args.get(i + 1)
+                        .ok_or("--wrap needs a voxel size (m)")?
+                        .parse()?,
+                );
+                i += 2;
             }
             other if dump_path.is_none() => {
                 dump_path = Some(other.to_string());
@@ -233,11 +243,15 @@ fn main() -> Result<(), Box<dyn Error>> {
     if captured_roads {
         roads::run_captured(&dump, &meshes, &settings, obj_dir.as_deref())?;
     }
+    if let Some(voxel) = wrap_voxel {
+        wrap::run(&dump, &meshes, &settings, voxel, obj_dir.as_deref())?;
+    }
 
     // The road modes own OBJ export when active (they write before/after pairs);
     // otherwise export the fused tiles for border inspection.
     if osm_path.is_none()
         && !captured_roads
+        && wrap_voxel.is_none()
         && let Some(dir) = obj_dir
     {
         std::fs::create_dir_all(&dir)?;

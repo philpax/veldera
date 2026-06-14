@@ -204,6 +204,50 @@ overhang preservation, triangle count, and build time against the current
 trimesh. Eyeball the OBJs. Only then integrate behind a config flag in
 `create_terrain_collider`, and finally fold the road ribbon into the SDF.
 
+## Prototype results (2026-06-14, `fuse_lab --wrap <voxel>`)
+
+A first prototype: per-tile, voxelize the base soup into a signed field, extract
+with `fast-surface-nets`, compare against the raw trimesh. The grid is aligned
+to the radial up; the SDF sign comes from a flood fill of the exterior seeded
+**only from the sky face** (so everything below the top surface is solid earth
+and under-bridge air is reached laterally); magnitude is the clamped distance to
+the nearest triangle, with a small seal band to close holes.
+
+Numbers (release, off-thread-equivalent), on the Jersey City flat dump
+(`tiles-1781315303`, 203 tiles) and the bridge dump (`tiles-1781451749`, 99):
+
+- **Fast and unbiased.** ~3–7 ms/tile; signed-mean divergence −0.06 to −0.08 m —
+  with a small seal the wrap sits *on* the terrain (a fat seal biased it
+  outward by ~its radius, the first lesson).
+- **But rough and heavy.** Surface-divergence **RMS ~1.0 m** at 0.5 m voxels
+  (≈2 voxels), ~10 % of samples unmatched (holes), and triangle count **~13–21×
+  the (decimated) trimesh** (≈13–31 k tris/tile). Coarser voxels cut triangles
+  but worsen fidelity; finer voxels the reverse.
+- **The tell:** ~30 % of wrapped triangles are downward-facing even on *flat*
+  terrain. That isn't overhangs — the top-only flood can't reach pockets sealed
+  by photogrammetry noise, so the crude sign leaves spurious interior bubbles
+  everywhere. That single fact explains the roughness, the holes, and most of
+  the excess triangles.
+
+**Verdict.** The voxel→Surface-Nets *core* is exactly as cheap and robust as
+hoped (watertight, full-3D, ~ms/tile, unbiased), and `fast-surface-nets` is a
+clean fit. But **naive flood-fill signing of open photogrammetry shells is not
+good enough** — it can't tell a real interior from a noise-sealed pocket, which
+is precisely the risk flagged above. To make this ship-quality needs the two
+pieces the survey called for, now quantified as load-bearing rather than
+optional:
+
+1. **Robust signing via the generalized/fast winding number** (true inside vs.
+   outside on open, self-intersecting soups) instead of the flood+seal hack.
+   This removes the spurious bubbles, the holes, and most of the excess
+   triangles. It is the main implementation cost (port or bind; thin Rust
+   story).
+2. **Decimation** of the extracted mesh (greedy quads, or quadric/`meshopt`
+   simplify) to land within a few× the current trimesh.
+
+The prototype lives behind `fuse_lab --wrap <voxel> [--obj <dir>]` for
+iterating on (1) and (2) before any engine work; OBJs export for eyeballing.
+
 ## Sources
 
 - parry voxelization & VHACD: <https://deepwiki.com/dimforge/parry/7.1-voxelization-and-vhacd>, <https://docs.rs/parry3d/latest/parry3d/transformation/index.html>
