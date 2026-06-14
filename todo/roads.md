@@ -79,12 +79,29 @@ game-side live fitting**:
   engine carve/emit are unit-tested and lab-validated (flat roads RMS 0.05 m),
   but the live loop (fetch cadence, refit-on-stream, convergence, frame cost)
   has not been exercised in the running game — that needs in-game iteration.
-- **Known follow-ups.** Bridge/elevated decks over no-terrain (Phase 2:
-  RMS ~0.78 m in the lab). Ribbon-disappear is a speed-gated refinement, not
-  coverage-critical (revisit if a vanishing ribbon leaves a trench at speed).
-  The fit is currently whole-region (not the per-way incremental refit the
-  plan envisions). No UI toggle yet for the road gizmos (they draw with
-  physics debug rendering).
+- **First in-game pass (2026-06-14).** Ribbons track roads well at altitude.
+  Three issues found and the first two fixed:
+  - **Perf:** `update_physics_colliders` spiked to ~19 ms/frame while moving —
+    the per-tile roads fingerprint re-walked every ribbon's stations each
+    frame. Fixed with `RoadIndex` (per-ribbon bounding sphere + content sig
+    built once; per-tile test is now a sphere check + small hash; bake only at
+    dispatch). The content sig also limits re-fit rebuilds to tiles whose
+    crossing ribbons actually changed.
+  - **Edge stepping:** the ribbon ended in a bare cliff at its edge (and over
+    the carve moat). Fixed by aproning the rails (down + outward by the build's
+    skirt depth/slope) — a transect went from a +7 m edge cliff to a smooth
+    ramp. `tools/fuse_lab --captured-roads` rebuilds a dump's tiles from their
+    captured ribbons and prints transects for debugging.
+- **Known follow-ups.** Bridge/elevated decks over no-terrain and proper
+  multi-deck stacking (Phase 2; the carve's vertical gate keeps the layers
+  apart but the decks aren't reconstructed). Overall photogrammetry density /
+  apparent mess in the collider wireframe is largely inherent (and possibly
+  LOD-overlap during transitions — worth checking whether overlapping LOD tiles
+  double-emit a ribbon). Ribbon-disappear is a speed-gated refinement, not
+  coverage-critical. The fit is whole-region, not the per-way incremental refit
+  the plan envisions. No UI toggle yet for the road gizmos. The live knobs
+  (`road_carve_margin`, `road_vertical_gate`, skirt depth/slope) hot-reload, so
+  feel can be tuned without a rebuild.
 
 ## Phase 2 (later, separate discussion)
 
