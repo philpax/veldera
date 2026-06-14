@@ -19,6 +19,7 @@ use fast_surface_nets::{
     surface_nets,
 };
 use glam::Vec3;
+use meshopt::{SimplifyOptions, VertexDataAdapter, simplify};
 use rocktree::Mesh as RocktreeMesh;
 use std::collections::HashMap;
 use veldera_terrain_collider::{
@@ -29,6 +30,9 @@ use veldera_terrain_collider::{
 /// Largest grid dimension (nodes) along any axis; the voxel size is coarsened
 /// for big tiles so the grid never exceeds this.
 const MAX_DIM: u32 = 160;
+/// Decimation error bound, relative to a tile's extent (so coarse, larger tiles
+/// tolerate proportionally more — LOD-appropriate). ~1 % ≈ 0.3 m on a 30 m tile.
+const DECIMATE_ERROR: f32 = 0.01;
 /// Seal band, in voxels: grid nodes within this distance of a triangle block
 /// the exterior flood, closing holes up to roughly this radius.
 const SEAL_VOXELS: f32 = 0.5;
@@ -44,6 +48,7 @@ pub fn run(
     let tiles: HashMap<&str, &DumpTile> = dump.tiles.iter().map(|t| (t.path.as_str(), t)).collect();
 
     let mut orig_tris = 0usize;
+    let mut raw_wrap_tris = 0usize;
     let mut wrap_tris = 0usize;
     let mut wrap_secs = 0.0f64;
     let mut wrapped_tiles = 0usize;
@@ -75,13 +80,14 @@ pub fn run(
         };
 
         let start = Instant::now();
-        let (wv, wt) = wrap_soup(&base.vertices, &base.triangles, tile.down(), voxel_size);
+        let (wv, wt, raw) = wrap_soup(&base.vertices, &base.triangles, tile.down(), voxel_size);
         wrap_secs += start.elapsed().as_secs_f64();
         if wt.is_empty() {
             continue;
         }
         wrapped_tiles += 1;
         orig_tris += base.triangles.len();
+        raw_wrap_tris += raw;
         wrap_tris += wt.len();
         overhang_tris += downward_faces(&wv, &wt, tile.down());
 
@@ -104,7 +110,7 @@ pub fn run(
 
     println!("\nwrap: voxel {voxel_size} m, {wrapped_tiles} tiles wrapped");
     println!(
-        "  triangles: orig {orig_tris} -> wrapped {wrap_tris} ({:.0}%)",
+        "  triangles: orig {orig_tris} -> surface-nets {raw_wrap_tris} -> decimated {wrap_tris} ({:.0}% of orig)",
         if orig_tris > 0 {
             100.0 * wrap_tris as f64 / orig_tris as f64
         } else {
@@ -149,9 +155,9 @@ fn wrap_soup(
     triangles: &[[u32; 3]],
     down: Vec3,
     voxel: f32,
-) -> (Vec<Vec3>, Vec<[u32; 3]>) {
+) -> (Vec<Vec3>, Vec<[u32; 3]>, usize) {
     if triangles.is_empty() {
-        return (Vec::new(), Vec::new());
+        return (Vec::new(), Vec::new(), 0);
     }
     // Up-aligned orthonormal frame: x = e1, y = e2, z = up.
     let up = -down.normalize_or_zero();
@@ -281,17 +287,38 @@ fn wrap_soup(
         &mut buffer,
     );
 
+    let raw_tris = buffer.indices.len() / 3;
+
+    // Decimate: Surface Nets is uniform-density (one quad per surface cell), so
+    // a flat road costs thousands of triangles. Quadric edge-collapse
+    // (meshopt) adaptively collapses the flat regions while keeping detail
+    // within `DECIMATE_ERROR` of the mesh extent — which lowering the grid
+    // resolution cannot do (it would coarsen the road surface uniformly).
+    let indices = if buffer.positions.len() >= 4 && buffer.indices.len() >= 6 {
+        let adapter = VertexDataAdapter::new(bytemuck::cast_slice(&buffer.positions), 12, 0)
+            .expect("vertex adapter");
+        simplify(
+            &buffer.indices,
+            &adapter,
+            0,
+            DECIMATE_ERROR,
+            SimplifyOptions::empty(),
+            None,
+        )
+    } else {
+        buffer.indices.clone()
+    };
+
     let out_vertices = buffer
         .positions
         .iter()
         .map(|&[x, y, z]| to_world(origin + Vec3::new(x, y, z) * voxel))
         .collect();
-    let out_triangles = buffer
-        .indices
+    let out_triangles = indices
         .chunks_exact(3)
         .map(|c| [c[0], c[1], c[2]])
         .collect();
-    (out_vertices, out_triangles)
+    (out_vertices, out_triangles, raw_tris)
 }
 
 /// Count wrapped triangles whose face normal points downward (against up) —

@@ -229,6 +229,31 @@ Numbers (release, off-thread-equivalent), on the Jersey City flat dump
   everywhere. That single fact explains the roughness, the holes, and most of
   the excess triangles.
 
+**Update (2026-06-14, decimation added).** Quadric edge-collapse (`meshopt`)
+makes the triangle overage a non-issue — and resolves the "just lower the grid
+resolution?" question: Surface Nets is uniform-density, so coarsening the grid
+loses road fidelity uniformly, whereas decimation collapses the flat regions
+adaptively. At 0.25 m voxels the flat dump goes Surface-Nets 14.3 M →
+**decimated 96 k–1.0 M triangles** depending on the error bound, i.e. **0.33×
+to 3.5× the current trimesh**, on a clean tris-vs-fidelity curve (the bound is
+relative to tile extent, so it's LOD-appropriate):
+
+| decimate error | tris vs trimesh | divergence RMS |
+| --- | --- | --- |
+| 2 % (~0.6 m) | 0.33× | 1.5 m |
+| 1 % (~0.3 m) | 1.1× | 1.3 m |
+| 0.5 % (~0.15 m) | 3.5× | 1.0 m |
+
+So **triangles are controllable below the current trimesh**; the real ceiling is
+**fidelity ~RMS 1.0 m at 0.25 m voxels** (decimation only adds to it). The
+divergence is unbiased (signed-mean ~−0.1 m) but ~10 % of samples are unmatched
+(holes), both traceable to the flood-sign roughness on open shells — still the
+frontier. Note the RMS likely overstates *road* roughness: the metric pairs the
+nearest surface sheet within 5 m, so on noisy multi-sheet photogrammetry
+(buildings, melted cars beside the road) it mispairs and inflates; the road
+surface itself needs an eyeball (`--obj`) to judge. `fuse_lab --wrap` now reports
+`orig → surface-nets → decimated` and runs decimation by default.
+
 **Verdict.** The voxel→Surface-Nets *core* is exactly as cheap and robust as
 hoped (watertight, full-3D, ~ms/tile, unbiased), and `fast-surface-nets` is a
 clean fit. But **naive flood-fill signing of open photogrammetry shells is not
