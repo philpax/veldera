@@ -141,6 +141,119 @@ pub fn run(
     Ok(())
 }
 
+/// A perpendicular transect across a road: the tile depth, then `(offset_m,
+/// height_relative_to_centerline)` samples.
+type Transect = (usize, Vec<(i32, Option<f32>)>);
+
+/// Rebuild the dump's tiles from the road ribbons captured in them (the exact
+/// production carve-and-emit, no OSM or refit), export before/after OBJs, and
+/// print a perpendicular transect across a few roads so the moat/step profile
+/// at the carve boundary is visible.
+pub fn run_captured(
+    dump: &TileSetDump,
+    meshes: &HashMap<&str, Vec<RocktreeMesh>>,
+    base_settings: &BuildSettings,
+    obj_dir: Option<&str>,
+) -> Result<(), Box<dyn Error>> {
+    let tiles: HashMap<&str, &DumpTile> = dump.tiles.iter().map(|t| (t.path.as_str(), t)).collect();
+    let mut total_base = 0usize;
+    let mut total_road = 0usize;
+    let mut changed = 0usize;
+    let mut transects: Vec<Transect> = Vec::new();
+
+    for tile in &dump.tiles {
+        let captured: Vec<RoadRibbon> = tile.roads.iter().map(|r| r.to_ribbon()).collect();
+        let Some(base) = build_base(tile, &tiles, meshes, base_settings, &[]) else {
+            continue;
+        };
+        let Some(road) = build_base(tile, &tiles, meshes, base_settings, &captured) else {
+            continue;
+        };
+        total_base += base.triangles.len();
+        total_road += road.triangles.len();
+        if base.triangles.len() != road.triangles.len() {
+            changed += 1;
+        }
+
+        // A transect across the widest captured ribbon in a handful of tiles:
+        // sample the final surface perpendicular to the centerline, relative to
+        // the centerline height, revealing the ribbon, the carve moat, and the
+        // surrounding photogrammetry.
+        if transects.len() < 4
+            && let Some(ribbon) = captured.iter().max_by_key(|r| r.stations.len())
+            && ribbon.stations.len() >= 2
+        {
+            let down = tile.down();
+            let up = -down;
+            let probe = SurfaceProbe::new(&road.vertices, &road.triangles, down);
+            let mid = ribbon.stations.len() / 2;
+            let (a, b) = (
+                ribbon.stations[mid - 1].position,
+                ribbon.stations[mid].position,
+            );
+            let center = (a + b) * 0.5;
+            let half_width = ribbon.stations[mid].half_width;
+            let tangent = {
+                let d = b - a;
+                (d - up * d.dot(up)).normalize_or_zero()
+            };
+            let perp = up.cross(tangent).normalize_or_zero();
+            let reach = half_width as i32 + 6;
+            let profile = (-reach..=reach)
+                .map(|k| {
+                    let p = center + perp * k as f32;
+                    (
+                        k,
+                        probe
+                            .sample_near(p, 20.0)
+                            .map(|h| h - probe.height_of(center)),
+                    )
+                })
+                .collect();
+            transects.push((tile.depth, profile));
+        }
+
+        if let Some(dir) = obj_dir {
+            std::fs::create_dir_all(dir)?;
+            write_obj(
+                &Path::new(dir).join(format!("{}.orig.obj", tile.path)),
+                &base,
+            )?;
+            write_obj(
+                &Path::new(dir).join(format!("{}.road.obj", tile.path)),
+                &road,
+            )?;
+        }
+    }
+
+    println!(
+        "\nroads (captured): {} tiles, {} changed; base {} tris -> road {} tris",
+        dump.tiles.len(),
+        changed,
+        total_base,
+        total_road
+    );
+    println!(
+        "transects (offset m from centerline -> height m relative to centerline; '.' = no surface):"
+    );
+    for (depth, profile) in &transects {
+        let cells: String = profile
+            .iter()
+            .map(|(_, h)| match h {
+                Some(h) => format!("{h:+.1} "),
+                None => " .   ".to_string(),
+            })
+            .collect();
+        let offsets: String = profile.iter().map(|(k, _)| format!("{k:>5}")).collect();
+        println!("  d{depth} offset:{offsets}");
+        println!("       height: {cells}");
+    }
+    if obj_dir.is_some() {
+        println!("roads (captured): wrote .orig.obj / .road.obj per tile");
+    }
+    Ok(())
+}
+
 // ============================================================================
 // OSM parsing
 // ============================================================================

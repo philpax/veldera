@@ -61,6 +61,7 @@ fn main() -> Result<(), Box<dyn Error>> {
     let mut border_pair: Option<(String, String)> = None;
     let mut depth_divergence = false;
     let mut osm_path: Option<String> = None;
+    let mut captured_roads = false;
     let mut i = 1;
     while i < args.len() {
         match args[i].as_str() {
@@ -94,6 +95,10 @@ fn main() -> Result<(), Box<dyn Error>> {
                         .clone(),
                 );
                 i += 2;
+            }
+            "--captured-roads" => {
+                captured_roads = true;
+                i += 1;
             }
             other if dump_path.is_none() => {
                 dump_path = Some(other.to_string());
@@ -225,10 +230,14 @@ fn main() -> Result<(), Box<dyn Error>> {
     if let Some(osm) = &osm_path {
         roads::run(&dump, &meshes, &settings, osm, obj_dir.as_deref())?;
     }
+    if captured_roads {
+        roads::run_captured(&dump, &meshes, &settings, obj_dir.as_deref())?;
+    }
 
-    // The road mode owns OBJ export when active (it writes before/after pairs);
+    // The road modes own OBJ export when active (they write before/after pairs);
     // otherwise export the fused tiles for border inspection.
     if osm_path.is_none()
+        && !captured_roads
         && let Some(dir) = obj_dir
     {
         std::fs::create_dir_all(&dir)?;
