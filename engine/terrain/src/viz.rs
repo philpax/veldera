@@ -448,37 +448,31 @@ pub(crate) fn draw_render_mesh_wireframes(
 }
 
 /// Settings for the road-overlay gizmos.
-#[derive(Resource, Clone, Copy)]
+#[derive(Resource, Clone, Copy, Default)]
 pub struct RoadVizSettings {
-    /// Draw the fitted road ribbons (centerline plus edges), coloured by
-    /// class, while physics debug rendering is on.
+    /// Draw every fitted road ribbon (centerline, edges, and a vertical tick
+    /// per station), coloured by class, at any distance. Independent of the
+    /// physics wireframe toggle and off by default — flip it on to check
+    /// whether the overlay is populated and where its ribbons sit.
     pub enabled: bool,
-    /// Ribbons whose nearest station is farther than this from the camera are
-    /// skipped (m).
-    pub max_distance_m: f64,
 }
 
-impl Default for RoadVizSettings {
-    fn default() -> Self {
-        Self {
-            enabled: true,
-            max_distance_m: 2000.0,
-        }
-    }
-}
+/// Height (m) of the per-station vertical tick, so ribbons read as a ladder
+/// standing above the terrain instead of vanishing into the wireframe.
+const ROAD_TICK_M: f32 = 3.0;
 
-/// Draw the fitted [`RoadOverlay`] ribbons — centerline and both edges,
-/// coloured by class — while physics debug rendering is enabled. This is the
-/// first thing to reach for when a road misbehaves: it shows exactly what the
-/// collider builds carve and emit against.
+/// Draw the fitted [`RoadOverlay`] ribbons — centerline, both edges, and a
+/// vertical tick per station — coloured by class, whenever [`RoadVizSettings`]
+/// is enabled (regardless of distance or the physics wireframe toggle). The
+/// first thing to reach for when a road misbehaves, or to confirm the overlay
+/// is populated at all.
 pub(crate) fn draw_road_overlay(
     settings: Res<RoadVizSettings>,
-    config_store: Res<GizmoConfigStore>,
     overlay: Res<RoadOverlay>,
     camera: Query<&FloatingOriginCamera>,
     mut gizmos: Gizmos<LodVizGizmos>,
 ) {
-    if !settings.enabled || !is_physics_debug_enabled(&config_store) {
+    if !settings.enabled {
         return;
     }
     let Ok(camera) = camera.single() else {
@@ -491,21 +485,22 @@ pub(crate) fn draw_road_overlay(
 
     for ribbon in &overlay.ribbons {
         let color = road_class_color(ribbon.class);
+        for station in &ribbon.stations {
+            // A vertical tick along the radial so the ribbon stands above the
+            // photogrammetry wireframe.
+            let up = station.position.normalize().as_vec3();
+            let base = render(station.position);
+            gizmos.line(base, base + up * ROAD_TICK_M, color);
+        }
         for pair in ribbon.stations.windows(2) {
             let (a, b) = (pair[0], pair[1]);
-            if (a.position - camera_pos).length() > settings.max_distance_m
-                && (b.position - camera_pos).length() > settings.max_distance_m
-            {
-                continue;
-            }
             // The radial up and the segment tangent give the cross-road
             // direction for the edge rails.
             let up = a.position.normalize();
             let tangent = b.position - a.position;
             let side = up.cross(tangent).normalize_or_zero();
             let half = DVec3::splat(f64::from((a.half_width + b.half_width) * 0.5)) * side;
-            let (ra, rb) = (render(a.position), render(b.position));
-            gizmos.line(ra, rb, color);
+            gizmos.line(render(a.position), render(b.position), color);
             gizmos.line(
                 render(a.position + half),
                 render(b.position + half),

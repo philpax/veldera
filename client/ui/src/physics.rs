@@ -11,7 +11,8 @@ use rocktree_decode::OctreePath;
 use veldera_physics::{is_physics_debug_enabled, terrain::TerrainCollider, toggle_physics_debug};
 use veldera_terrain::{
     lod::{LodState, TileDumpRequest},
-    viz::ColliderVizFilter,
+    roads::RoadOverlay,
+    viz::{ColliderVizFilter, RoadVizSettings},
 };
 
 /// Radius (m) for the nearby-collider diagnostics table.
@@ -23,6 +24,8 @@ pub(super) struct PhysicsParams<'w, 's> {
     pub lod_state: Res<'w, LodState>,
     pub config_store: ResMut<'w, GizmoConfigStore>,
     pub viz_filter: ResMut<'w, ColliderVizFilter>,
+    pub road_overlay: Res<'w, RoadOverlay>,
+    pub road_viz: ResMut<'w, RoadVizSettings>,
     pub colliders: Query<
         'w,
         's,
@@ -101,6 +104,30 @@ pub(super) fn render_physics_tab(ui: &mut egui::Ui, params: &mut PhysicsParams) 
     if nearby.len() > 12 {
         ui.label(format!("… and {} more", nearby.len() - 12));
     }
+
+    ui.separator();
+
+    // Road overlay: how many fitted ribbons the host has published, and a
+    // toggle to draw them all (at any distance, independent of the wireframe).
+    // If this reads zero, the game's fetch/fit pipeline isn't populating the
+    // overlay and roads are doing nothing.
+    ui.horizontal(|ui| {
+        ui.label(format!(
+            "Road ribbons: {} (overlay v{})",
+            params.road_overlay.ribbons.len(),
+            params.road_overlay.version
+        ))
+        .on_hover_text(
+            "Fitted road ribbons currently published to the engine's \
+             RoadOverlay by the game's fetch/fit pipeline. Zero means no \
+             roads are active.",
+        );
+        ui.checkbox(&mut params.road_viz.enabled, "Show ribbons")
+            .on_hover_text(
+                "Draw every fitted ribbon (centerline, edges, and a vertical \
+                 tick per station), coloured by class, at any distance.",
+            );
+    });
 
     ui.separator();
 

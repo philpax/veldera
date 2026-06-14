@@ -144,8 +144,8 @@ impl RoadFittingConfig {
 #[derive(Resource)]
 struct RoadsState {
     source: Arc<OverpassRoadSource>,
-    fetch_tx: async_channel::Sender<Vec<RoadWay>>,
-    fetch_rx: async_channel::Receiver<Vec<RoadWay>>,
+    fetch_tx: async_channel::Sender<Result<Vec<RoadWay>, String>>,
+    fetch_rx: async_channel::Receiver<Result<Vec<RoadWay>, String>>,
     fit_tx: async_channel::Sender<Vec<EcefRibbon>>,
     fit_rx: async_channel::Receiver<Vec<EcefRibbon>>,
     /// The region cell currently fetched (or being fetched).
@@ -226,30 +226,34 @@ fn request_roads(
         lon + lon_span,
     );
 
+    tracing::info!("fetching roads for ({lat:.4}, {lon:.4}) cell {cell:?}");
     state.region = Some(cell);
     state.fetch_in_flight = true;
     let source = Arc::clone(&state.source);
     let tx = state.fetch_tx.clone();
     spawner.spawn(async move {
-        match source.fetch(bbox).await {
-            Ok(ways) => {
-                let _ = tx.send(ways).await;
-            }
-            Err(error) => {
-                tracing::warn!("road fetch failed: {error}");
-                let _ = tx.send(Vec::new()).await;
-            }
-        }
+        let result = source.fetch(bbox).await.map_err(|e| e.to_string());
+        let _ = tx.send(result).await;
     });
 }
 
-/// Receive fetched ways and mark a fit wanted.
+/// Receive fetched ways and mark a fit wanted. A failed fetch clears the
+/// region so the next frame retries it, rather than leaving that cell roadless
+/// until the camera wanders into a different one.
 fn poll_fetched_roads(mut state: ResMut<RoadsState>) {
-    while let Ok(ways) = state.fetch_rx.try_recv() {
+    while let Ok(result) = state.fetch_rx.try_recv() {
         state.fetch_in_flight = false;
-        tracing::info!("fetched {} road ways", ways.len());
-        state.ways = ways;
-        state.needs_fit = true;
+        match result {
+            Ok(ways) => {
+                tracing::info!("fetched {} road ways", ways.len());
+                state.ways = ways;
+                state.needs_fit = true;
+            }
+            Err(error) => {
+                tracing::warn!("road fetch failed, will retry: {error}");
+                state.region = None;
+            }
+        }
     }
 }
 
