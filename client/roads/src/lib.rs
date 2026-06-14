@@ -66,6 +66,7 @@ impl Plugin for RoadsPlugin {
     fn build(&self, app: &mut App) {
         app.add_plugins(ConfigPlugin::<RoadFittingConfig>::new(self.config_path))
             .init_resource::<RoadsState>()
+            .init_resource::<RoadsDiagnostics>()
             .add_systems(
                 Update,
                 (
@@ -76,6 +77,22 @@ impl Plugin for RoadsPlugin {
                 ),
             );
     }
+}
+
+/// Live status of the fetch-and-fit pipeline, for the Physics debug tab — so a
+/// zero road overlay can be traced to the stage that produced it.
+#[derive(Resource, Default, Clone)]
+pub struct RoadsDiagnostics {
+    /// Drivable OSM ways fetched for the current region.
+    pub fetched_ways: usize,
+    /// Loaded terrain tiles the last fit sampled against.
+    pub terrain_tiles: usize,
+    /// Ways handed to the fitter (after dropping tunnels and sunk layers).
+    pub fit_ways: usize,
+    /// Ribbons the last fit produced.
+    pub fitted_ribbons: usize,
+    /// The most recent pipeline event or blocker.
+    pub status: String,
 }
 
 /// Hot-reloadable road-fitting tuning, loaded from
@@ -146,8 +163,8 @@ struct RoadsState {
     source: Arc<OverpassRoadSource>,
     fetch_tx: async_channel::Sender<Result<Vec<RoadWay>, String>>,
     fetch_rx: async_channel::Receiver<Result<Vec<RoadWay>, String>>,
-    fit_tx: async_channel::Sender<Vec<EcefRibbon>>,
-    fit_rx: async_channel::Receiver<Vec<EcefRibbon>>,
+    fit_tx: async_channel::Sender<FitOutput>,
+    fit_rx: async_channel::Receiver<FitOutput>,
     /// The region cell currently fetched (or being fetched).
     region: Option<(i64, i64)>,
     fetch_in_flight: bool,
@@ -240,17 +257,20 @@ fn request_roads(
 /// Receive fetched ways and mark a fit wanted. A failed fetch clears the
 /// region so the next frame retries it, rather than leaving that cell roadless
 /// until the camera wanders into a different one.
-fn poll_fetched_roads(mut state: ResMut<RoadsState>) {
+fn poll_fetched_roads(mut state: ResMut<RoadsState>, mut diag: ResMut<RoadsDiagnostics>) {
     while let Ok(result) = state.fetch_rx.try_recv() {
         state.fetch_in_flight = false;
         match result {
             Ok(ways) => {
                 tracing::info!("fetched {} road ways", ways.len());
+                diag.fetched_ways = ways.len();
+                diag.status = format!("fetched {} ways", ways.len());
                 state.ways = ways;
                 state.needs_fit = true;
             }
             Err(error) => {
                 tracing::warn!("road fetch failed, will retry: {error}");
+                diag.status = format!("fetch failed: {error}");
                 state.region = None;
             }
         }
@@ -265,11 +285,21 @@ fn fit_roads(
     camera: Query<&FloatingOriginCamera>,
     time: Res<Time>,
     spawner: TaskSpawner,
+    mut diag: ResMut<RoadsDiagnostics>,
 ) {
     let Some(config) = config.get() else {
+        diag.status = "waiting for config".to_string();
         return;
     };
-    if !config.enabled || state.fit_in_flight || state.ways.is_empty() {
+    if !config.enabled {
+        diag.status = "disabled".to_string();
+        return;
+    }
+    if state.fit_in_flight {
+        return;
+    }
+    if state.ways.is_empty() {
+        diag.status = "no ways yet (waiting on fetch)".to_string();
         return;
     }
     let now = time.elapsed_secs_f64();
@@ -283,31 +313,59 @@ fn fit_roads(
     // Snapshot the raw photogrammetry a little beyond the fetch box so a way
     // near the edge still finds terrain.
     let snapshot = lod_state.loaded_terrain_snapshot(camera.position, config.fetch_radius_m * 1.3);
+    diag.terrain_tiles = snapshot.len();
     if snapshot.is_empty() {
+        diag.status = "waiting for terrain to stream in".to_string();
         return;
     }
 
     state.needs_fit = false;
     state.fit_in_flight = true;
     state.last_fit_secs = now;
+    diag.status = format!(
+        "fitting {} ways against {} tiles…",
+        state.ways.len(),
+        snapshot.len()
+    );
     let ways = state.ways.clone();
     let params = config.fit_params();
     let lane_width = config.lane_width;
     let tx = state.fit_tx.clone();
     spawner.spawn(async move {
-        let ribbons = fit_ribbons(&ways, &snapshot, &params, lane_width);
-        let _ = tx.send(ribbons).await;
+        let (ribbons, fit_ways) = fit_ribbons(&ways, &snapshot, &params, lane_width);
+        let _ = tx.send(FitOutput { ribbons, fit_ways }).await;
     });
 }
 
 /// Receive fitted ribbons and publish them to the overlay.
-fn apply_fitted_roads(mut state: ResMut<RoadsState>, mut overlay: ResMut<RoadOverlay>) {
-    while let Ok(ribbons) = state.fit_rx.try_recv() {
+fn apply_fitted_roads(
+    mut state: ResMut<RoadsState>,
+    mut overlay: ResMut<RoadOverlay>,
+    mut diag: ResMut<RoadsDiagnostics>,
+) {
+    while let Ok(output) = state.fit_rx.try_recv() {
         state.fit_in_flight = false;
-        tracing::info!("fitted {} road ribbons", ribbons.len());
-        overlay.ribbons = ribbons;
+        tracing::info!(
+            "fitted {} road ribbons from {} ways",
+            output.ribbons.len(),
+            output.fit_ways
+        );
+        diag.fit_ways = output.fit_ways;
+        diag.fitted_ribbons = output.ribbons.len();
+        diag.status = format!(
+            "{} ribbons from {} ways",
+            output.ribbons.len(),
+            output.fit_ways
+        );
+        overlay.ribbons = output.ribbons;
         overlay.version = overlay.version.wrapping_add(1);
     }
+}
+
+/// The off-thread fit's result, with the input way count for diagnostics.
+struct FitOutput {
+    ribbons: Vec<EcefRibbon>,
+    fit_ways: usize,
 }
 
 /// Build the terrain sampler from the snapshot, place the ways on the
@@ -317,7 +375,7 @@ fn fit_ribbons(
     snapshot: &[TerrainTileSnapshot],
     params: &FitParams,
     lane_width: f32,
-) -> Vec<EcefRibbon> {
+) -> (Vec<EcefRibbon>, usize) {
     let probes: Vec<(SurfaceProbe, DVec3, usize)> = snapshot
         .iter()
         .filter_map(|tile| {
@@ -336,6 +394,7 @@ fn fit_ribbons(
             ))
         })
         .collect();
+    let probe_count = probes.len();
     let sampler = TerrainProbeSet::new(probes);
 
     // rocktree's globe is spherical, so place lat/lon with the spherical
@@ -357,10 +416,16 @@ fn fit_ribbons(
         })
         .collect();
 
-    fit_ways(&fit_ways_input, &sampler, params)
+    let fit_ways_count = fit_ways_input.len();
+    tracing::info!(
+        "road fit: {probe_count} probes / {} tiles, {fit_ways_count} fit-ways",
+        snapshot.len(),
+    );
+    let ribbons = fit_ways(&fit_ways_input, &sampler, params)
         .into_iter()
         .map(to_overlay_ribbon)
-        .collect()
+        .collect();
+    (ribbons, fit_ways_count)
 }
 
 /// Convert a fitted ECEF ribbon into an overlay ribbon.

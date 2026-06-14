@@ -7362,6 +7362,7 @@ dependencies = [
  "veldera_game_camera_state",
  "veldera_game_input",
  "veldera_game_player",
+ "veldera_game_roads",
  "veldera_game_teleport",
  "veldera_game_vehicle",
  "veldera_geo",

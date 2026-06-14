@@ -8,6 +8,7 @@ use bevy::{ecs::system::SystemParam, gizmos::config::GizmoConfigStore, prelude::
 use bevy_egui::egui;
 
 use rocktree_decode::OctreePath;
+use veldera_game_roads::RoadsDiagnostics;
 use veldera_physics::{is_physics_debug_enabled, terrain::TerrainCollider, toggle_physics_debug};
 use veldera_terrain::{
     lod::{LodState, TileDumpRequest},
@@ -26,6 +27,7 @@ pub(super) struct PhysicsParams<'w, 's> {
     pub viz_filter: ResMut<'w, ColliderVizFilter>,
     pub road_overlay: Res<'w, RoadOverlay>,
     pub road_viz: ResMut<'w, RoadVizSettings>,
+    pub roads_diag: Res<'w, RoadsDiagnostics>,
     pub colliders: Query<
         'w,
         's,
@@ -128,6 +130,21 @@ pub(super) fn render_physics_tab(ui: &mut egui::Ui, params: &mut PhysicsParams) 
                  tick per station), coloured by class, at any distance.",
             );
     });
+    // Pipeline trace: which stage zeroes out when the overlay is empty.
+    let d = &params.roads_diag;
+    ui.monospace(format!(
+        "  fetch {} ways → {} terrain tiles → {} fit-ways → {} ribbons",
+        d.fetched_ways, d.terrain_tiles, d.fit_ways, d.fitted_ribbons
+    ))
+    .on_hover_text(
+        "The road fetch→fit pipeline stage counts. The first one that reads \
+         zero is where roads are dropping out: 0 ways = Overpass fetch, \
+         0 tiles = terrain not streamed, 0 fit-ways = all tunnels/sunk, \
+         0 ribbons = the fit found no terrain under the ways.",
+    );
+    if !d.status.is_empty() {
+        ui.monospace(format!("  roads: {}", d.status));
+    }
 
     ui.separator();
 
