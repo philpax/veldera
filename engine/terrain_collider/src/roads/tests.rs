@@ -186,7 +186,7 @@ fn emit_produces_flat_drivable_strip() {
     );
     let mut vertices = Vec::new();
     let mut triangles = Vec::new();
-    emit_ribbon(&mut vertices, &mut triangles, &ribbon, DOWN);
+    emit_ribbon(&mut vertices, &mut triangles, &ribbon, DOWN, 0.0, 0.0);
     assert!(!triangles.is_empty());
 
     let probe = SurfaceProbe::new(&vertices, &triangles, DOWN);
@@ -206,6 +206,28 @@ fn emit_produces_flat_drivable_strip() {
     }
     // Well beyond the half-width there is no ribbon.
     assert!(probe.sample_near(Vec3::new(0.0, 8.0, 5.0), 50.0).is_none());
+}
+
+#[test]
+fn emit_ribbon_aprons_ramp_the_edges() {
+    let ribbon = straight_ribbon(
+        Vec3::new(-20.0, 0.0, 5.0),
+        Vec3::new(20.0, 0.0, 5.0),
+        11,
+        3.5,
+    );
+    let mut vertices = Vec::new();
+    let mut triangles = Vec::new();
+    emit_ribbon(&mut vertices, &mut triangles, &ribbon, DOWN, 4.0, 2.0);
+    let probe = SurfaceProbe::new(&vertices, &triangles, DOWN);
+    // Just beyond the half-width the apron provides a surface, ramped below the
+    // road, instead of a bare cliff edge.
+    let h = probe.sample_near(Vec3::new(0.0, 6.0, 5.0), 50.0);
+    assert!(h.is_some(), "no apron surface beyond the half-width");
+    assert!(
+        h.unwrap() < 5.0,
+        "apron should ramp below the road, got {h:?}"
+    );
 }
 
 #[test]

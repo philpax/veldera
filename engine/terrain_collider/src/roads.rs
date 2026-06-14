@@ -120,11 +120,19 @@ pub fn carve_corridor(
 /// stations, each extended `half_width` to either side of the centerline in
 /// the horizontal plane. Stations with a near-zero-length tangent (a
 /// degenerate repeat) are skipped.
+///
+/// With a positive `apron_depth`, each long edge also grows an apron — extruded
+/// `apron_depth` down and `apron_depth * apron_slope` outward — so the road
+/// edge ramps into the carved-away photogrammetry instead of ending in a bare
+/// cliff (the same trick [`add_skirts`](crate::add_skirts) plays for tile
+/// borders, and what bridges the carve margin's moat).
 pub fn emit_ribbon(
     vertices: &mut Vec<Vec3>,
     triangles: &mut Vec<[u32; 3]>,
     ribbon: &RoadRibbon,
     down: Vec3,
+    apron_depth: f32,
+    apron_slope: f32,
 ) {
     if ribbon.stations.len() < 2 {
         return;
@@ -132,9 +140,10 @@ pub fn emit_ribbon(
     let frame = HorizontalFrame::new(down);
     let up = frame.up;
 
-    // Left/right rail vertex indices per station; `None` where the tangent is
-    // degenerate so we can bridge across the gap.
-    let mut rails: Vec<Option<(u32, u32)>> = Vec::with_capacity(ribbon.stations.len());
+    // Per station: the left and right rail vertex indices and the cross-road
+    // `side` direction; `None` where the tangent is degenerate so we can bridge
+    // across the gap.
+    let mut rails: Vec<Option<(u32, u32, Vec3)>> = Vec::with_capacity(ribbon.stations.len());
     for (i, station) in ribbon.stations.iter().enumerate() {
         let tangent = station_tangent(&ribbon.stations, i, up);
         let Some(tangent) = tangent else {
@@ -150,16 +159,38 @@ pub fn emit_ribbon(
         vertices.push(station.position + side * station.half_width);
         let right = vertices.len() as u32;
         vertices.push(station.position - side * station.half_width);
-        rails.push(Some((left, right)));
+        rails.push(Some((left, right, side)));
     }
 
+    let apron = down * apron_depth;
+    let add_apron = |vertices: &mut Vec<Vec3>,
+                     triangles: &mut Vec<[u32; 3]>,
+                     edge0: u32,
+                     edge1: u32,
+                     outward: Vec3| {
+        if apron_depth <= 0.0 {
+            return;
+        }
+        let offset = apron + outward * (apron_depth * apron_slope);
+        let low0 = vertices.len() as u32;
+        vertices.push(vertices[edge0 as usize] + offset);
+        let low1 = vertices.len() as u32;
+        vertices.push(vertices[edge1 as usize] + offset);
+        triangles.push([edge0, edge1, low1]);
+        triangles.push([edge0, low1, low0]);
+    };
+
     for pair in rails.windows(2) {
-        let (Some((l0, r0)), Some((l1, r1))) = (pair[0], pair[1]) else {
+        let (Some((l0, r0, side0)), Some((l1, r1, _side1))) = (pair[0], pair[1]) else {
             continue;
         };
         // Two triangles per quad, wound so the face normal follows `up`.
         triangles.push([l0, r0, r1]);
         triangles.push([l0, r1, l1]);
+        // Aprons ramp each rail down and outward (left edge outward = +side,
+        // right edge outward = -side).
+        add_apron(vertices, triangles, l0, l1, side0);
+        add_apron(vertices, triangles, r1, r0, -side0);
     }
 }
 
@@ -246,7 +277,14 @@ pub fn build_tile_geometry_with_roads(
     carve_corridor(&built.vertices, &mut built.triangles, ribbons, down, carve);
     for ribbon in ribbons {
         for piece in owned_pieces(ribbon, &ownership) {
-            emit_ribbon(&mut built.vertices, &mut built.triangles, &piece, down);
+            emit_ribbon(
+                &mut built.vertices,
+                &mut built.triangles,
+                &piece,
+                down,
+                settings.skirt_depth,
+                settings.skirt_slope,
+            );
         }
     }
 
