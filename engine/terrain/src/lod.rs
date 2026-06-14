@@ -41,7 +41,6 @@
 
 use std::{
     collections::{HashMap, HashSet},
-    hash::Hasher,
     sync::Arc,
 };
 
@@ -59,7 +58,7 @@ use crate::{
     mesh::{
         RocktreeMeshMarker, convert_mesh, convert_texture, matrix_to_world_position_and_transform,
     },
-    roads::RoadOverlay,
+    roads::{RoadIndex, RoadOverlay, tile_bounding_radius},
     terrain_material::{TerrainMaterial, TerrainMaterialExtension},
     viz::{
         ColliderVizFilter, LodVizGizmos, LodVizSettings, RenderMeshVizFilter, RoadVizSettings,
@@ -77,7 +76,7 @@ use veldera_geo::floating_origin::{FloatingOriginCamera, WorldPosition};
 use veldera_physics::{
     GameLayer, MotionTracker, PHYSICS_FINEST_DEPTH, PhysicsState, PhysicsStreamingConfig,
     TerrainCollider, desired_physics_depth,
-    terrain::{CarveSettings, RoadRibbon, TileMeshes, create_terrain_collider},
+    terrain::{CarveSettings, TileMeshes, create_terrain_collider},
 };
 
 /// Hot-reloadable LoD streaming parameters, loaded from
@@ -469,8 +468,11 @@ impl LodState {
         };
 
         let coverage = self.selected_coverage();
+        let road_index = RoadIndex::build(road_overlay, streaming.road_colliders);
+        let road_margin = streaming.road_carve_margin as f32;
         let capture = |path: OctreePath, mask: u8| -> Option<DumpTile> {
             let node_data = self.node_data.get(&path)?;
+            let tile_radius = tile_bounding_radius(node_data.transform.scale);
             Some(DumpTile {
                 path: path.to_string(),
                 depth: path.depth(),
@@ -488,17 +490,16 @@ impl LodState {
                     .iter()
                     .map(OctreePath::to_string)
                     .collect(),
-                roads: tile_road_ribbons(
-                    road_overlay,
-                    streaming.road_colliders,
-                    node_data.world_position,
-                    node_data.transform.scale,
-                    streaming.road_carve_margin as f32,
-                )
-                .0
-                .iter()
-                .map(DumpRibbon::from_ribbon)
-                .collect(),
+                roads: road_index
+                    .baked(
+                        road_overlay,
+                        node_data.world_position,
+                        tile_radius,
+                        road_margin,
+                    )
+                    .iter()
+                    .map(DumpRibbon::from_ribbon)
+                    .collect(),
                 meshes: node_data.meshes.iter().map(DumpMesh::from_mesh).collect(),
             })
         };
@@ -2216,6 +2217,9 @@ fn update_physics_colliders(
         margin: streaming.road_carve_margin as f32,
         vertical_gate: streaming.road_vertical_gate as f32,
     };
+    // Bounds and content signatures for every ribbon, built once; the per-tile
+    // intersection test is then a cheap sphere check, not a station walk.
+    let road_index = RoadIndex::build(&road_overlay, roads_enabled);
 
     let mut discarded_any = false;
     while let Ok(result) = channel.rx.try_recv() {
@@ -2224,8 +2228,7 @@ fn update_physics_colliders(
             &mut lod_state,
             camera_pos,
             streaming.collider_carve,
-            &road_overlay,
-            roads_enabled,
+            &road_index,
             road_carve.margin,
             result,
         );
@@ -2288,10 +2291,9 @@ fn update_physics_colliders(
     // tile; the filter and the build loop both need them).
     let selected_coverage = lod_state.selected_coverage();
     let mut sub_cut_cache: HashMap<OctreePath, u64> = HashMap::new();
-    // Frame-local cache of the road ribbons intersecting each tile (baked) and
-    // their fingerprint; the filter needs the fingerprint and the build loop
-    // the ribbons.
-    let mut roads_cache: HashMap<OctreePath, (Vec<RoadRibbon>, u64)> = HashMap::new();
+    // Frame-local cache of each tile's road fingerprint (the filter and the
+    // build loop both need it; the baked ribbons are built only at dispatch).
+    let mut roads_cache: HashMap<OctreePath, u64> = HashMap::new();
 
     // Track when each path entered the target set; the timestamp resets the
     // moment a path drops out, so re-selections start a fresh wait.
@@ -2331,18 +2333,13 @@ fn update_physics_colliders(
                         0
                     }
                 });
-                let roads = roads_cache
-                    .entry(*path)
-                    .or_insert_with(|| {
-                        tile_road_ribbons(
-                            &road_overlay,
-                            roads_enabled,
-                            world_position,
-                            scale,
-                            road_carve.margin,
-                        )
-                    })
-                    .1;
+                let roads = *roads_cache.entry(*path).or_insert_with(|| {
+                    road_index.fingerprint(
+                        world_position,
+                        tile_bounding_radius(scale),
+                        road_carve.margin,
+                    )
+                });
                 // A live build whose mask drops octants the selection now
                 // wants from it, or whose carve removed cells no longer
                 // covered, is coverage-critical (the finer coverage that
@@ -2516,18 +2513,16 @@ fn update_physics_colliders(
                 0
             }
         });
-        let (road_ribbons, roads) = {
-            let entry = roads_cache.entry(path).or_insert_with(|| {
-                tile_road_ribbons(
-                    &road_overlay,
-                    roads_enabled,
-                    node_data.world_position,
-                    node_data.transform.scale,
-                    road_carve.margin,
-                )
-            });
-            (entry.0.clone(), entry.1)
-        };
+        let tile_radius = tile_bounding_radius(node_data.transform.scale);
+        let roads = *roads_cache.entry(path).or_insert_with(|| {
+            road_index.fingerprint(node_data.world_position, tile_radius, road_carve.margin)
+        });
+        let road_ribbons = road_index.baked(
+            &road_overlay,
+            node_data.world_position,
+            tile_radius,
+            road_carve.margin,
+        );
 
         let params = BuildParams {
             mask,
@@ -2706,59 +2701,6 @@ struct BuildParams {
     roads: u64,
 }
 
-/// The road ribbons (in the tile's baked frame) intersecting the tile at
-/// `world_position`/`scale`, with a fingerprint of their fitted geometry.
-///
-/// Returns `(vec![], 0)` when roads are disabled or none intersect, so an
-/// untouched tile carries the sentinel `0` and never rebuilds for roads. The
-/// fingerprint is content-based (quantized station positions and half-widths),
-/// so a tile rebuilds only when a ribbon crossing *it* actually changes, not
-/// on every overlay version bump.
-fn tile_road_ribbons(
-    overlay: &RoadOverlay,
-    enabled: bool,
-    world_position: DVec3,
-    scale: Vec3,
-    margin: f32,
-) -> (Vec<RoadRibbon>, u64) {
-    if !enabled || overlay.ribbons.is_empty() {
-        return (Vec::new(), 0);
-    }
-    // Generous bounding sphere: the tile's lattice box reaches ~255·scale from
-    // its origin, so over-inclusion is harmless (ownership and the corridor
-    // gate precisely) while a miss would silently drop a road.
-    let tile_radius = f64::from(scale.max_element()) * 255.0 * 1.8;
-    let mut ribbons = Vec::new();
-    let mut hasher = std::collections::hash_map::DefaultHasher::new();
-    for ribbon in &overlay.ribbons {
-        let Some((nearest, max_half)) = ribbon.nearest_to(world_position) else {
-            continue;
-        };
-        if nearest > tile_radius + f64::from(max_half + margin) {
-            continue;
-        }
-        let baked = ribbon.to_baked(world_position);
-        for station in &baked.stations {
-            for value in [
-                station.position.x,
-                station.position.y,
-                station.position.z,
-                station.half_width,
-            ] {
-                hasher.write_i32((value * 1000.0) as i32);
-            }
-        }
-        hasher.write_u8(0xff);
-        ribbons.push(baked);
-    }
-    let roads = if ribbons.is_empty() {
-        0
-    } else {
-        hasher.finish()
-    };
-    (ribbons, roads)
-}
-
 /// Owned snapshot of one tile's build inputs, shareable with a background
 /// task (the mesh data is `Arc`'d, so dispatch never copies it).
 struct OwnedTileMeshes {
@@ -2791,8 +2733,7 @@ fn commit_collider_result(
     lod_state: &mut LodState,
     camera_pos: DVec3,
     carve_enabled: bool,
-    road_overlay: &RoadOverlay,
-    roads_enabled: bool,
+    road_index: &RoadIndex,
     road_margin: f32,
     result: ColliderBuildResult,
 ) -> bool {
@@ -2830,13 +2771,8 @@ fn commit_collider_result(
     // committing a stale ribbon set would carve or surface a corridor the
     // overlay no longer describes. Re-derive the fingerprint and discard on a
     // mismatch (the path re-pends with the current ribbons).
-    let (_, current_roads) = tile_road_ribbons(
-        road_overlay,
-        roads_enabled,
-        world_position,
-        scale,
-        road_margin,
-    );
+    let current_roads =
+        road_index.fingerprint(world_position, tile_bounding_radius(scale), road_margin);
     if result.roads != current_roads {
         return false;
     }
