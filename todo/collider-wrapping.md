@@ -273,6 +273,61 @@ optional:
 The prototype lives behind `fuse_lab --wrap <voxel> [--obj <dir>]` for
 iterating on (1) and (2) before any engine work; OBJs export for eyeballing.
 
+## RTIN heightmesh prototype + the real bottleneck (2026-06-14)
+
+`fuse_lab --rtin <max_error>` builds a top-surface heightmap in the up-frame
+(max-Z per cell, hole-filled) and triangulates it adaptively with RTIN/MARTINI
+(`martini_rtin`). It delivers what was hoped on the *mechanical* axes — fast
+(~2.5 ms/tile), no holes (a heightmap can't have them), and dynamically-sized
+triangles out of the box: on the flat dump `max_error` 0.3 → 1.0 → 3.0 gives
+**313 % → 182 % → 87 %** of the trimesh, i.e. it drops *below* the current
+collider with no separate decimation pass.
+
+But the fidelity plateaus at the **same ~1 m** as the voxel wrap — and the sweep
+shows why it is *not* the mesher: p50 divergence is ~1.0–1.2 m at every
+`max_error`, with a p90 ~5 m tail. The cause is **surface selection**, not
+extraction: max-Z lifts the drivable surface onto tree canopy, wires, and
+building eaves over the ground (the ~1 m p50), and caps buildings as mesas you
+could drive onto (the p90/max tail). A heightmap is single-valued, so there is
+no per-cell reduction that is simultaneously right for road, tree (want ground),
+building (want a wall, not a roof or a pass-through), and bridge (want to drive
+under).
+
+**The load-bearing conclusion from this whole investigation:** the meshing /
+extraction step (Surface Nets, Dual Contouring, RTIN) is the easy, fast part;
+both the voxel wrap and the heightmesh plateau at ~1 m because the hard problem
+is *semantic* — deciding which of the multiple stacked photogrammetry surfaces
+is "the drivable one" — and no purely geometric wrap can know that. The
+**OSM road-ribbon overlay already in the engine is exactly the missing semantic
+prior**: it knows where roads are and fits the drivable surface there. So for
+the surfaces that actually matter, the ribbon overlay is better-targeted than
+any whole-tile wrap, and the off-road photogrammetry can stay raw per the
+feel-contract. A whole-tile wrap is worth it only as a *cleanliness* pass (kill
+the rats-nest/interior junk that has no visual), not as a fidelity win.
+
+## Future direction: unsigned-distance contouring (when a clean full-3D collider is wanted)
+
+If a clean full-3D collider (overhangs/bridges included) becomes worth it, the
+right tool is **contouring an *unsigned* distance field** — which is what our
+open photogrammetry shells naturally produce (no inside/outside to fake, which
+is exactly the signing problem that defeated the voxel wrap). Two SIGGRAPH 2026
+papers from the Batty/Stein/Sellán group are the state of the art:
+
+- **SpUDD: Superpower Contouring of Unsigned Distance Data** (Wang, Carrera,
+  Batty, Stein, Sellán; arXiv:2604.19568) — meshes an *unsigned* distance field,
+  explicitly handling open, non-orientable, non-manifold surfaces. Directly our
+  case; would delete the signing/holes problem at its root.
+- **Dual Contouring of Signed Distance Data** (Carrera, Wang, Batty, Stein,
+  Sellán; arXiv:2604.00157) — sharp-feature extraction from plain SDF samples,
+  no gradients/Hermite needed; the best *extractor* if a sign is available.
+
+Both are uniform-grid (pair with an octree or decimation for adaptivity) and
+neither has released code yet (watch for it; otherwise port). Note even these
+do not solve the surface-*selection* problem above — they would give a clean
+*watertight wrap of all the geometry*, bridges included, but still wrap the
+canopy/clutter; they are a cleanliness/overhang tool, not a substitute for the
+semantic road prior.
+
 ## Sources
 
 - parry voxelization & VHACD: <https://deepwiki.com/dimforge/parry/7.1-voxelization-and-vhacd>, <https://docs.rs/parry3d/latest/parry3d/transformation/index.html>

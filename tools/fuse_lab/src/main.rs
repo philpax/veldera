@@ -43,6 +43,7 @@ use veldera_terrain_collider::{
 };
 
 mod roads;
+mod rtin;
 mod wrap;
 
 /// Two rim vertices closer than this horizontally are considered the same
@@ -64,6 +65,7 @@ fn main() -> Result<(), Box<dyn Error>> {
     let mut osm_path: Option<String> = None;
     let mut captured_roads = false;
     let mut wrap_voxel: Option<f32> = None;
+    let mut rtin_error: Option<f32> = None;
     let mut i = 1;
     while i < args.len() {
         match args[i].as_str() {
@@ -106,6 +108,14 @@ fn main() -> Result<(), Box<dyn Error>> {
                 wrap_voxel = Some(
                     args.get(i + 1)
                         .ok_or("--wrap needs a voxel size (m)")?
+                        .parse()?,
+                );
+                i += 2;
+            }
+            "--rtin" => {
+                rtin_error = Some(
+                    args.get(i + 1)
+                        .ok_or("--rtin needs a max-error (m)")?
                         .parse()?,
                 );
                 i += 2;
@@ -246,12 +256,16 @@ fn main() -> Result<(), Box<dyn Error>> {
     if let Some(voxel) = wrap_voxel {
         wrap::run(&dump, &meshes, &settings, voxel, obj_dir.as_deref())?;
     }
+    if let Some(error) = rtin_error {
+        rtin::run(&dump, &meshes, &settings, error, obj_dir.as_deref())?;
+    }
 
     // The road modes own OBJ export when active (they write before/after pairs);
     // otherwise export the fused tiles for border inspection.
     if osm_path.is_none()
         && !captured_roads
         && wrap_voxel.is_none()
+        && rtin_error.is_none()
         && let Some(dir) = obj_dir
     {
         std::fs::create_dir_all(&dir)?;
