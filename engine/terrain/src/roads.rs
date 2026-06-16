@@ -64,10 +64,11 @@ impl ColliderPipeline {
     }
 }
 
-/// The live collider pipeline. Currently [`Legacy`](ColliderPipeline::Legacy)
-/// (the v2 pipeline is parked; v3 is under construction on the `collider-v3`
-/// branch).
-pub const COLLIDER_PIPELINE: ColliderPipeline = ColliderPipeline::Legacy;
+/// The live collider pipeline. [`V3Voxel`](ColliderPipeline::V3Voxel) on the
+/// `collider-v3` branch — the lean voxel-rebuild baseline. Set to
+/// [`Legacy`](ColliderPipeline::Legacy) for the pre-branch behaviour, or
+/// [`V2WithRoads`](ColliderPipeline::V2WithRoads) for the parked v2 pipeline.
+pub const COLLIDER_PIPELINE: ColliderPipeline = ColliderPipeline::V3Voxel;
 
 /// One fitted road ribbon in ECEF, supplied by the host.
 #[derive(Clone, Debug)]

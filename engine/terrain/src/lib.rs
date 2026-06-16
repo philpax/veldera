@@ -14,6 +14,7 @@
 //! nothing about players, vehicles, or camera modes.
 
 pub mod collider_v2;
+pub mod collider_v3;
 pub mod loader;
 pub mod lod;
 pub mod mesh;

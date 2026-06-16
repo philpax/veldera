@@ -53,7 +53,7 @@ use rocktree_decode::{OctreePath, OrientedBoundingBox};
 use serde::Deserialize;
 
 use crate::{
-    collider_v2,
+    collider_v2, collider_v3,
     loader::LoaderState,
     mesh::{
         RocktreeMeshMarker, convert_mesh, convert_texture, matrix_to_world_position_and_transform,
@@ -190,6 +190,8 @@ impl Plugin for LodPlugin {
             .init_resource::<collider_v2::TileDumpRequest>();
         if COLLIDER_PIPELINE.is_v2() {
             collider_v2::register(app);
+        } else if COLLIDER_PIPELINE.is_v3() {
+            collider_v3::register(app);
         } else {
             app.add_systems(
                 Update,
@@ -456,7 +458,7 @@ impl LodState {
 
     /// Bitmask of `path`'s octants that have at least one live collider
     /// entity strictly below them.
-    fn live_descendant_bits(&self, path: OctreePath) -> u8 {
+    pub(crate) fn live_descendant_bits(&self, path: OctreePath) -> u8 {
         let mut bits = 0u8;
         for key in self.physics_colliders.keys() {
             if key.depth() > path.depth()
@@ -473,7 +475,7 @@ impl LodState {
     /// strict ancestor (which always covers the whole region), or live
     /// descendants in all eight octants. Used by the spawn-persistence
     /// gate — only already-covered regions may wait the gate out.
-    fn collider_region_covered(&self, path: OctreePath) -> bool {
+    pub(crate) fn collider_region_covered(&self, path: OctreePath) -> bool {
         let mut ancestor = path.parent();
         while let Some(p) = ancestor {
             if self.physics_colliders.contains_key(&p) {

@@ -224,27 +224,34 @@ Done so far:
 - **`terrain_v3` builder** (`veldera_physics::terrain_v3`): octant-clip → wrap →
   `try_trimesh`, returning `WrapBuildStats`. Per-tile independent for now.
 
-Remaining:
-- **`collider_v3` reconcile.** v2's reconcile (`collider_v2.rs`, ~1500 lines:
-  off-thread dispatch, in-flight dedup, commit-with-revalidation, generation
-  early-out, prefix-refcount coverage, spawn-persistence/speed gates) is the
-  plumbing to reuse. v3 is *simpler* — no roads, no fusion adjacency, no carving —
-  so the rebuild key is just `(octant_mask, sub_cut)`. Two options: (a) extract the
-  shared orchestration from `collider_v2` and parameterise the per-tile build, or
-  (b) a lean `collider_v3` modelled on v2 minus roads/fusion/carve. `compute_physics_targets`
-  (the WYSIWYG mirror) is already shared — `lod.rs` calls it on
-  `uses_streaming_selection()`.
-- **Wire the V3 build registration** in `lod.rs` (`LodPlugin::build`, currently
-  `if is_v2()` → else legacy; add the v3 arm).
-- **Viz + in-game verify**: a `viz_v3` (or reuse the wireframe path) and stand/drive
-  on it.
+- **`collider_v3` reconcile — done (lean baseline, option b).** Models the
+  trusted legacy reconcile shape (deepest-first spawn, coverage-masked octants,
+  replacement-gated despawn) with v2's off-thread dispatch/commit mechanics, but
+  drops everything v2 layered on (fusion, carving, roads, the rebuild
+  fingerprints, prefix-refcount coverage, generation early-out). The live set is
+  the shared `LodState::physics_colliders`; only in-flight builds are tracked. The
+  per-tile build is the voxel wrap (`terrain_v3`). Reuses the trusted
+  `LodState::live_descendant_bits`/`collider_region_covered` (lifted to
+  `pub(crate)`) and the shared `reconcile_collider_wireframes` viz. v2's
+  optimisations get pulled back in once the baseline is verified standing.
+- **Registration wired** in `lod.rs` (`is_v2` → `is_v3` → legacy), and
+  `COLLIDER_PIPELINE` is now `V3Voxel` on this branch.
 
-Gate status at this checkpoint: every crate touched (`veldera_terrain_collider`,
-`veldera_terrain`, `veldera_physics`, `veldera_roads`, `fuse-lab`) passes
-`clippy --all-targets -D warnings`; the pure crate compiles for `wasm32`. The
-workspace-wide `--all-features` clippy has 6 *pre-existing* errors in
-`rocktree-decode` (present on the base commit `15692ed`; clippy 1.95 lint debt,
-not from this work) — left untouched as out of scope.
+Remaining:
+- **In-game verification** (needs a human at the controls): stand/drive on the
+  v3 colliders, confirm no fall-through, no invisible walls, near-field hugs the
+  rendered ground. The wrap is per-tile independent for now, so expect possible
+  hairline seams at tile borders (global-lattice + halo is the deferred Phase 5).
+- Then pull v2's good parts back in (generation early-out, progressive
+  stale-masking) and revisit border consistency, the canopy lift, and overhangs.
+
+Gate status: every crate touched (`veldera_terrain_collider`, `veldera_terrain`,
+`veldera_physics`, `veldera_roads`, `fuse-lab`) passes `clippy --all-targets
+-D warnings` (default and `--no-default-features`); `veldera_terrain` compiles for
+`wasm32` with v3 active (meshopt gated out through the whole chain); pure-crate and
+terrain tests pass. The workspace-wide `--all-features` clippy has 6 *pre-existing*
+errors in `rocktree-decode` (present on the base commit `15692ed`; clippy 1.95 lint
+debt, not from this work) — left untouched as out of scope.
 
 ## Pluggable-extractor evaluation (deferred decision, phase 1/4)
 
