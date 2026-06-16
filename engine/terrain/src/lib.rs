@@ -13,12 +13,14 @@
 //! [`veldera_geo`] and produces colliders via [`veldera_physics`], but knows
 //! nothing about players, vehicles, or camera modes.
 
+pub mod collider_v2;
 pub mod loader;
 pub mod lod;
 pub mod mesh;
 pub mod roads;
 pub mod terrain_material;
 pub mod viz;
+pub mod viz_v2;
 
 use bevy::app::{PluginGroup, PluginGroupBuilder};
 

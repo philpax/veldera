@@ -1,55 +1,23 @@
-- verify in-game that near-field colliders hug the rendered terrain with no
-  invisible walls after the WYSIWYG-mirror rework + the any-masked-triangle
-  drop: within `streaming.wysiwyg_radius` the collider selection mirrors the
-  loaded render set, and masked-octant triangles are dropped outright
-  (collapsing them like the shader created invisible sliver walls; keeping
-  them whole created floating shelves). Any remaining float/sink/wall means
-  the mirror masks diverge from the shader (`compute_physics_targets` vs
-  `cull_meshes` / `terrain_material.wgsl`) — diff those first.
-- the banded annulus (beyond the WYSIWYG radius) still uses full-mask
-  ancestor fallbacks while data streams in, which can briefly double-layer
-  distant terrain. Sub-octant carving removes the worst case (a coarse
-  tile's giant triangles stacking over the fine terrain around the player —
-  the beach contact-solver meltdown); residual double-layering sits beyond
-  the carve resolution (tile depth + 2 cells), far from the player.
-- collider mesh simplification beyond vertex clustering (quadric edge
-  collapse with a metre error bound) is now affordable since builds run
-  off-thread. The motivating "malformed geometry" turned out to be the
-  carving gap above, not density — re-evaluate against a dense urban dump
-  before building it. Note the colliders were never simplified by Avian:
-  early builds were just locked to a coarser LoD depth than the render
-  (59b7aa3), which WYSIWYG deliberately traded away.
-- node load failures are only logged and retried forever (bulks have
-  `failed_bulks`, nodes have no equivalent); consider failure tracking with
-  backoff if load spam ever shows up in the logs.
-- edge fusion (aff552a, veldera_terrain_collider) fuses rims to the mean of
-  adjacent selected tiles' *source-mesh* surfaces: symmetric, deterministic,
-  order-independent, with adjacency-fingerprint re-conform rebuilds.
-  Remaining known gaps: chord error between the two sides' sample stations
-  (sealed by skirts; fix = insert the union of border stations on both
-  sides), and fusion is physics-only (render still shows hairline cracks;
-  unifying the fused border into the render meshes is the eventual endgame).
-- fusion can *worsen* a border when the two sides' lateral sets differ at a
-  cross-depth corner: each rim averages over different neighbour surfaces
-  and they pull apart (dumps/tiles-1781225692.json measured 2/91 borders
-  regressing, worst 0.04 m → 1.21 m at a d17/d18 corner). Fix sketch: both
-  sides restrict their average to the laterals they *share*, which is
-  computable blind from the selection.
-- the source photogrammetry itself contains terrace steps that run exactly
-  along tile borders, identical in both tiles (the dumped playa border has
-  a 0.46 m sheet pair at the same horizontal position in *both* tiles).
-  These are not seams — fusion correctly no-ops on them (the sampler's
-  own-height tie-break), the render shows them, and the collider matches
-  the render. Climbing them is a *controller* problem: the FPS controller
-  has no step-up handling, so any honest ledge over ~0.3 m blocks walking.
-- tag noise on sparse meshes bounds the octant clip's fidelity: run-derived
-  vertex tags disagree with the geometric octant for ~20 % of vertices on
-  big-triangle d17/d18 meshes, so a heavily masked sparse mesh keeps fewer
-  triangles than the renderer shows (the renderer masks by tag, physics
-  clips by position; position matches how sibling tiles actually cover
-  space). Revisit only if a visible-but-unwalkable patch turns up in-game.
-- if telemetry keeps showing all-four-wheel simultaneous load spikes while
-  the Physics tab reads all-ok, the remaining culprit is temporal: a
-  collider rebuild swapping the floor height under the car. Mitigation
-  would be deferring swaps that intersect a dynamic body's footprint by a
-  few frames, or fading suspension to the new surface.
+The terrain colliders ship in their pre-`roads`-branch form: a synchronous per-tile build (octant-masked trimesh plus boundary skirts), distance-banded selection, and a simple spawn/despawn reconcile. Within the innermost band the selection descends to the displayed mesh (`within_innermost_band` + `any_children_displayed`), so near-field collision matches what is drawn. This is the default and what runs in-game today.
+
+The "v2" collider pipeline — the WYSIWYG-mirror selection, off-thread builds, mesh-space border fusion, vertex-clustering simplification, sub-octant carving, and OSM road carve-and-emit — is parked behind `ENABLE_V2_COLLIDERS_WITH_ROADS` (`engine/terrain/src/roads.rs`, currently `false`). Its code lives in `engine/terrain/src/collider_v2.rs` and `viz_v2.rs` plus `engine/physics/src/terrain_v2.rs`; the shared streaming and selection files (`lod.rs`, `loader.rs`, `viz.rs`) stay at the legacy shape plus a few `if ENABLE_V2_COLLIDERS_WITH_ROADS { … }` dispatch lines, and `engine/physics/src/terrain.rs` is the legacy builder verbatim. It was parked because the WYSIWYG mirror at `wysiwyg_depth_offset = 1` collides one LoD level coarser than the display, floating the collider above the drawn ground (you stand on geometry that isn't there), the road layer on top was incomplete (coverage didn't follow the camera, and fitted heights were unreliable over water, parking lots, and rail), and the masking/carving produced sliver and rats-nest collision artifacts. Flip the constant to `true` to bring the whole pipeline back.
+
+## Active path (legacy colliders)
+
+- the source photogrammetry itself contains terrace steps that run exactly along tile borders, identical in both tiles (the dumped playa border has a 0.46 m sheet pair at the same horizontal position in *both* tiles). These are not seams — the render shows them and the collider matches the render. Climbing them is a *controller* problem: the FPS controller has no step-up handling, so any honest ledge over ~0.3 m blocks walking.
+- the legacy reconcile retries a tile whose mask drops all of its geometry every frame: a flat tile fully inside masked octants yields no triangles, so `create_terrain_collider` returns `None`, the path never becomes "live", and it is re-attempted indefinitely. Wasteful but harmless (it is the pre-branch behaviour the constant restores). The v2 reconcile fixed this with explicit live-empty commits, so this resolves itself if v2 is ever re-enabled.
+- node load failures are only logged and retried forever (bulks have `failed_bulks`, nodes have no equivalent); consider failure tracking with backoff if load spam ever shows up in the logs.
+- if telemetry keeps showing all-four-wheel simultaneous load spikes while the Physics tab reads all-ok, the remaining culprit is temporal: a collider rebuild swapping the floor height under the car. Mitigation would be deferring swaps that intersect a dynamic body's footprint by a few frames, or fading suspension to the new surface.
+
+## v2 pipeline (parked behind `ENABLE_V2_COLLIDERS_WITH_ROADS`)
+
+These only matter if and when the constant is flipped back on.
+
+- re-enabling is runtime-unverified since the legacy/v2 split. The v2 reconcile used to bump a shared "inputs changed" generation from the streaming code so a converged scene cost nothing per frame; that code is now the legacy shape and no longer bumps it, so `collider_v2` derives its generation locally (node completion version + a target-paths snapshot + the road version + live-set changes). It is idempotent, so the *colliders* are identical, but sanity-check the per-frame cost and convergence on the first re-enable.
+- the WYSIWYG mirror floats the collider above the ground at `wysiwyg_depth_offset = 1`. Set it to `0` to collide the displayed mesh exactly (the config notes ~0.2 m mean / ~0.6 m p95 divergence per level on flat terrain as the cost of the coarser offset). Then re-verify near-field colliders hug the rendered terrain with no invisible walls: the mirror masks must match the shader (`compute_physics_targets` vs `cull_meshes` / `terrain_material.wgsl`) — diff those first if a float/sink/wall remains.
+- the banded annulus (beyond the WYSIWYG radius) still uses full-mask ancestor fallbacks while data streams in, which can briefly double-layer distant terrain. Sub-octant carving removes the worst case (a coarse tile's giant triangles stacking over the fine terrain around the player — the beach contact-solver meltdown); residual double-layering sits beyond the carve resolution (tile depth + 2 cells), far from the player.
+- collider mesh simplification beyond vertex clustering (quadric edge collapse with a metre error bound) is affordable since builds run off-thread. The motivating "malformed geometry" turned out to be the carving gap above, not density — re-evaluate against a dense urban dump before building it. Note the colliders were never simplified by Avian: early builds were just locked to a coarser LoD depth than the render (59b7aa3), which WYSIWYG deliberately traded away.
+- edge fusion (aff552a, `veldera_terrain_collider`) fuses rims to the mean of adjacent selected tiles' *source-mesh* surfaces: symmetric, deterministic, order-independent, with adjacency-fingerprint re-conform rebuilds. Remaining known gaps: chord error between the two sides' sample stations (sealed by skirts; fix = insert the union of border stations on both sides), and fusion is physics-only (render still shows hairline cracks; unifying the fused border into the render meshes is the eventual endgame).
+- fusion can *worsen* a border when the two sides' lateral sets differ at a cross-depth corner: each rim averages over different neighbour surfaces and they pull apart (dumps/tiles-1781225692.json measured 2/91 borders regressing, worst 0.04 m → 1.21 m at a d17/d18 corner). Fix sketch: both sides restrict their average to the laterals they *share*, which is computable blind from the selection.
+- tag noise on sparse meshes bounds the octant clip's fidelity: run-derived vertex tags disagree with the geometric octant for ~20 % of vertices on big-triangle d17/d18 meshes, so a heavily masked sparse mesh keeps fewer triangles than the renderer shows (the renderer masks by tag, physics clips by position; position matches how sibling tiles actually cover space). Revisit only if a visible-but-unwalkable patch turns up in-game.
+- OSM road colliders have their own plan and open items in `todo/roads.md` (coverage following the camera, fitted-height reliability over water, parking lots, and rail).

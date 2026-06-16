@@ -28,6 +28,7 @@
 mod gravity;
 mod layers;
 pub mod terrain;
+pub mod terrain_v2;
 
 pub use avian3d::debug_render::DebugRender;
 use avian3d::{
@@ -230,6 +231,17 @@ pub fn desired_physics_depth(bands: &[(f64, usize)], effective_distance_m: f64) 
         .iter()
         .find(|(max_d, _)| effective_distance_m <= *max_d)
         .map(|&(_, offset)| PHYSICS_FINEST_DEPTH.saturating_sub(offset))
+}
+
+/// Whether `effective_distance_m` falls within the innermost (finest) distance
+/// band. Within it, the LoD walk upgrades colliders to the exact meshes the
+/// renderer displays (the pre-`roads`-branch WYSIWYG rule, used by the legacy
+/// collider selection in `veldera_terrain` when the v2 collider pipeline is
+/// switched off).
+pub fn within_innermost_band(bands: &[(f64, usize)], effective_distance_m: f64) -> bool {
+    bands
+        .first()
+        .is_some_and(|(max_d, _)| effective_distance_m <= *max_d)
 }
 
 /// Plugin for physics integration with the rocktree LOD system.
