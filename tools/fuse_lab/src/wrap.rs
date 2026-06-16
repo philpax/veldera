@@ -25,7 +25,11 @@ use std::collections::HashMap;
 use veldera_terrain_collider::{
     BuildSettings, BuiltGeometry, SurfaceProbe, build_tile_geometry,
     dump::{DumpTile, TileSetDump},
+    health::MeshHealth,
 };
+
+/// Triangle altitude below which a wrapped triangle counts as a sliver (m).
+const SLIVER_ALTITUDE: f32 = 0.02;
 
 /// Largest grid dimension (nodes) along any axis; the voxel size is coarsened
 /// for big tiles so the grid never exceeds this.
@@ -54,6 +58,7 @@ pub fn run(
     let mut wrapped_tiles = 0usize;
     let mut overhang_tris = 0usize;
     let mut div = Divergence::default();
+    let mut health = HealthTotals::default();
 
     for tile in &dump.tiles {
         // The base collider soup (mask, sub-cut, no fusion/skirts: we want the
@@ -92,6 +97,7 @@ pub fn run(
         overhang_tris += downward_faces(&wv, &wt, tile.down());
 
         div.accumulate(&base, &wv, &wt, tile.down());
+        health.accumulate(&wv, &wt);
 
         if let Some(dir) = obj_dir {
             std::fs::create_dir_all(dir)?;
@@ -135,6 +141,7 @@ pub fn run(
         }
     );
     div.report();
+    health.report();
     if obj_dir.is_some() {
         println!("  wrote .orig.obj / .wrap.obj per tile");
     }
@@ -427,6 +434,56 @@ impl Divergence {
         println!(
             "  surface divergence (wrapped vs orig, m): RMS {rms:.3}  signed-mean {mean:+.3}  max {:.3}  over {} samples, {} unmatched",
             self.max, self.n, self.misses
+        );
+    }
+}
+
+/// Aggregates well-formedness ([`MeshHealth`]) across all wrapped tiles, so the
+/// scoreboard reads as totals and a count of perfectly closed-manifold tiles
+/// rather than a per-tile dump.
+#[derive(Default)]
+struct HealthTotals {
+    tiles: usize,
+    closed_manifold: usize,
+    degenerate: usize,
+    slivers: usize,
+    boundary_edges: usize,
+    nonmanifold_edges: usize,
+    components: usize,
+    worst_aspect: f32,
+}
+
+impl HealthTotals {
+    fn accumulate(&mut self, vertices: &[Vec3], triangles: &[[u32; 3]]) {
+        let h = MeshHealth::measure(vertices, triangles, SLIVER_ALTITUDE);
+        self.tiles += 1;
+        self.closed_manifold += usize::from(h.is_closed_manifold());
+        self.degenerate += h.degenerate;
+        self.slivers += h.slivers;
+        self.boundary_edges += h.boundary_edges;
+        self.nonmanifold_edges += h.nonmanifold_edges;
+        self.components += h.components;
+        self.worst_aspect = self.worst_aspect.max(h.worst_aspect);
+    }
+
+    fn report(&self) {
+        if self.tiles == 0 {
+            return;
+        }
+        println!(
+            "  health: {}/{} tiles closed-manifold; {} degenerate, {} slivers, {} boundary edges, {} non-manifold edges",
+            self.closed_manifold,
+            self.tiles,
+            self.degenerate,
+            self.slivers,
+            self.boundary_edges,
+            self.nonmanifold_edges,
+        );
+        println!(
+            "  components: {} total ({:.1}/tile — >1 means isolated islands/bubbles); worst aspect {:.0}",
+            self.components,
+            self.components as f64 / self.tiles as f64,
+            self.worst_aspect,
         );
     }
 }
