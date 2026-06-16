@@ -94,6 +94,31 @@ collider_spawn_persistence_secs = 1.0
 # field. Zero builds at every depth.
 collider_min_depth = 10
 
+# v3 voxel wrap: each tile's collider is rebuilt from a voxel field into a
+# clean watertight surface instead of reusing the photogrammetry soup.
+# Smaller voxels keep man-made edges sharper (they round over fewer cells) but
+# cost more per tile; the grid is coarsened past wrap_voxel_size wherever a
+# tile would exceed wrap_max_grid_dim, so raise the cap to let small voxels
+# take effect on larger tiles (cubic cost).
+wrap_voxel_size = 0.15
+wrap_max_grid_dim = 160
+# Seal band (voxels) closing holes the flood would leak through.
+wrap_seal_voxels = 0.5
+# Solidify each column below its top surface so ground is a thick half-space
+# (the validated baseline; off makes flat ground blobby and erodable).
+wrap_solidify_below_top = true
+# Morphological open radius and sign-smoothing passes (both 0 in the baseline;
+# solidify makes them unnecessary).
+wrap_open_radius = 0
+wrap_sign_smooth_passes = 0
+# Drop solid voxel components / extracted mesh islands below these fractions of
+# the largest, removing floaters and isolated slabs.
+wrap_solid_component_fraction = 0.02
+wrap_mesh_component_fraction = 0.05
+# Quadric decimation error bound, relative to tile extent (native only). Zero
+# disables decimation (dense Surface Nets output).
+wrap_decimate_error = 0.01
+
 # Lead vector: load colliders ahead of the player before they arrive.
 lead_time = 1.0          # lookahead time (s)
 max_lead = 200.0         # cap on lead distance (m) so fast runs don't starve nearby

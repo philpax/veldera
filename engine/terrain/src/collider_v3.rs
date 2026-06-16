@@ -34,7 +34,7 @@ use veldera_async::TaskSpawner;
 use veldera_geo::floating_origin::{FloatingOriginCamera, WorldPosition};
 use veldera_physics::{
     GameLayer, PhysicsState, PhysicsStreamingConfig, TerrainCollider,
-    terrain_v3::{TileMeshes, WrapSettings, create_terrain_collider},
+    terrain_v3::{TileMeshes, create_terrain_collider},
 };
 
 use crate::{
@@ -224,7 +224,7 @@ fn update_physics_colliders_v3(
             rotation: node_data.transform.rotation,
             scale: node_data.transform.scale,
         };
-        let wrap = WrapSettings::default();
+        let wrap = streaming.wrap_settings();
         let tx = channel.tx.clone();
         spawner.spawn(async move {
             let tile = build_tile.as_tile_meshes();

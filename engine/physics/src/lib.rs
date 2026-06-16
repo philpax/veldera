@@ -206,6 +206,35 @@ pub struct PhysicsStreamingConfig {
     /// depth get none) for a cleaner near field free of coarse over-coverage.
     /// Zero builds at every depth. Used by the v3 pipeline.
     pub collider_min_depth: usize,
+    /// v3 voxel-wrap target voxel size (m). Smaller is sharper (man-made edges
+    /// round over fewer cells) but costs more per tile; the grid is coarsened
+    /// past this where a tile would exceed [`Self::wrap_max_grid_dim`].
+    pub wrap_voxel_size: f32,
+    /// v3 voxel-wrap grid cap (nodes along the largest axis). Raising it lets
+    /// `wrap_voxel_size` take effect on larger tiles, at a cubic cost.
+    pub wrap_max_grid_dim: u32,
+    /// v3 voxel-wrap seal band (voxels): grid nodes within this distance of a
+    /// triangle block the exterior flood, closing holes up to ~this radius.
+    pub wrap_seal_voxels: f32,
+    /// v3 voxel-wrap: solidify each column below its topmost surface so the
+    /// ground is a thick half-space rather than a thin two-sided slab. Off
+    /// makes flat ground blobby and erodable; on is the validated baseline.
+    pub wrap_solidify_below_top: bool,
+    /// v3 voxel-wrap morphological-open radius (voxels, 0 disables): dissolves
+    /// solid features thinner than ~2× this. Off in the baseline.
+    pub wrap_open_radius: u32,
+    /// v3 voxel-wrap majority-filter passes over the sign field (0 disables):
+    /// erase single-voxel sign flips. Unnecessary with solidify on.
+    pub wrap_sign_smooth_passes: u32,
+    /// v3 voxel-wrap: solid voxel components smaller than this fraction of the
+    /// largest are dropped as floaters.
+    pub wrap_solid_component_fraction: f32,
+    /// v3 voxel-wrap: extracted-mesh components smaller than this fraction of
+    /// the largest (by triangle count) are dropped as isolated islands.
+    pub wrap_mesh_component_fraction: f32,
+    /// v3 voxel-wrap quadric decimation error bound, relative to the tile's
+    /// extent (native only; ignored on wasm). Zero disables decimation.
+    pub wrap_decimate_error: f32,
     /// Lookahead time for the lead vector (s); colliders ahead of the player
     /// load at the next-finer band before the player arrives.
     pub lead_time: f64,
@@ -218,6 +247,23 @@ pub struct PhysicsStreamingConfig {
     /// EWMA smoothing factor for the motion tracker (~4-frame half-life at
     /// 60 Hz at 0.25).
     pub velocity_smoothing: f64,
+}
+
+impl PhysicsStreamingConfig {
+    /// Assemble the v3 voxel-wrap settings from the configured `wrap_*` knobs.
+    pub fn wrap_settings(&self) -> veldera_terrain_collider::wrap::WrapSettings {
+        veldera_terrain_collider::wrap::WrapSettings {
+            voxel_size: self.wrap_voxel_size,
+            max_grid_dim: self.wrap_max_grid_dim,
+            seal_voxels: self.wrap_seal_voxels,
+            solidify_below_top: self.wrap_solidify_below_top,
+            open_radius: self.wrap_open_radius,
+            sign_smooth_passes: self.wrap_sign_smooth_passes,
+            solid_component_fraction: self.wrap_solid_component_fraction,
+            mesh_component_fraction: self.wrap_mesh_component_fraction,
+            decimate_error: self.wrap_decimate_error,
+        }
+    }
 }
 
 /// Hot-reloadable global physics tuning, loaded from
