@@ -1,8 +1,8 @@
 //! The v2 terrain collider build: the thin Avian layer over
 //! [`veldera_terrain_collider`]'s pure geometry pipeline.
 //!
-//! Used only when the v2 collider pipeline is enabled (see
-//! `veldera_terrain`'s `ENABLE_V2_COLLIDERS_WITH_ROADS`). All geometry
+//! Used only when the v2 collider pipeline is selected (see
+//! `veldera_terrain`'s `COLLIDER_PIPELINE`). All geometry
 //! processing — octant-mask clipping, mesh-space border fusion, vertex
 //! simplification, boundary skirts/aprons, and road carve-and-emit — lives in
 //! the pure crate; this module only wraps the resulting soup into a parry

@@ -16,32 +16,58 @@ use rocktree::Mesh as RocktreeMesh;
 
 use veldera_terrain_collider::roads::{RibbonStation, RoadRibbon};
 
-/// Master switch for the whole "v2" terrain-collider pipeline developed on the
-/// `roads` branch — and, with it, the OSM road feature layered on top.
+/// Which terrain-collider pipeline is live. An enum rather than a pair of bools
+/// so the pipelines are mutually exclusive by construction — there is no state in
+/// which two are on at once.
 ///
-/// When `true` the collider reconcile is
-/// [`update_physics_colliders`](crate::lod), with mesh-space border fusion,
-/// vertex-clustering simplification, sub-octant carving, off-thread builds, and
-/// road carve-and-emit; the game's fetch/fit plugin
-/// ([`veldera_game_roads`](https://docs.rs/veldera_game_roads)) feeds the
-/// [`RoadOverlay`].
-///
-/// When `false` the reconcile is instead
-/// [`update_physics_colliders_legacy`](crate::lod) — main's pre-branch
-/// synchronous build (plain octant-masked trimesh plus boundary skirts, no
-/// fusion, simplification, carving, or roads) — the road overlay is never read
-/// (every tile's road fingerprint is `0`), and the fetch/fit plugin registers
-/// none of its systems. The result is the on-the-ground collision behaviour
-/// exactly as it was before the branch.
-///
-/// It is currently `false` because the v2 pipeline is producing broken collision
-/// geometry (sliver/rats-nest artifacts from the masking and carving) and the
-/// road feature on top of it is incomplete: the live fetch → fit pipeline does
-/// not reliably keep up as the camera moves, and fitted ribbon heights are
-/// unreliable over water, parking lots, and rail (see `todo/roads.md`). It is a
-/// compile-time constant rather than config so the disabled path costs nothing —
+/// A compile-time constant rather than config so the inactive paths cost nothing:
 /// no off-thread build machinery, no Overpass traffic, no fits.
-pub const ENABLE_V2_COLLIDERS_WITH_ROADS: bool = false;
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ColliderPipeline {
+    /// main's pre-branch synchronous build: a plain octant-masked trimesh plus
+    /// boundary skirts, no fusion, simplification, carving, or roads. The
+    /// reconcile is [`update_physics_colliders_legacy`](crate::lod) and the
+    /// on-the-ground collision behaviour is exactly as it was before the
+    /// `roads` branch.
+    Legacy,
+    /// The parked `roads`-branch pipeline: WYSIWYG-mirror selection, off-thread
+    /// builds, mesh-space border fusion, vertex-clustering simplification,
+    /// sub-octant carving, and OSM road carve-and-emit (the reconcile is
+    /// [`update_physics_colliders`](crate::lod), and the game's fetch/fit plugin
+    /// feeds the [`RoadOverlay`]). Parked: it produces broken geometry
+    /// (sliver/rats-nest artifacts) and the road layer on top is incomplete (see
+    /// `todo/roads.md`).
+    V2WithRoads,
+    /// The v3 voxel rebuild: the WYSIWYG-mirror selection and off-thread build
+    /// plumbing of v2, but each tile's collider is rebuilt from a mid-resolution
+    /// voxel field into a clean watertight surface
+    /// ([`veldera_terrain_collider::wrap`]) rather than reusing the source soup.
+    /// No road layer (deferred). See `todo/collider-v3.md`.
+    V3Voxel,
+}
+
+impl ColliderPipeline {
+    /// The v2 fusion/carving/roads pipeline.
+    pub const fn is_v2(self) -> bool {
+        matches!(self, Self::V2WithRoads)
+    }
+
+    /// The v3 voxel rebuild.
+    pub const fn is_v3(self) -> bool {
+        matches!(self, Self::V3Voxel)
+    }
+
+    /// v2 and v3 share the WYSIWYG-mirror selection and the off-thread build
+    /// plumbing; only legacy uses the synchronous banded reconcile.
+    pub const fn uses_streaming_selection(self) -> bool {
+        !matches!(self, Self::Legacy)
+    }
+}
+
+/// The live collider pipeline. Currently [`Legacy`](ColliderPipeline::Legacy)
+/// (the v2 pipeline is parked; v3 is under construction on the `collider-v3`
+/// branch).
+pub const COLLIDER_PIPELINE: ColliderPipeline = ColliderPipeline::Legacy;
 
 /// One fitted road ribbon in ECEF, supplied by the host.
 #[derive(Clone, Debug)]

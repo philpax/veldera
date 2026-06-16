@@ -1,7 +1,7 @@
 //! v2 terrain-collider and road visualisation overlays.
 //!
-//! Used only when the v2 collider pipeline is enabled (see
-//! `crate::roads::ENABLE_V2_COLLIDERS_WITH_ROADS`). Where main attaches a
+//! Used only when the v2 collider pipeline is selected (see
+//! `crate::roads::COLLIDER_PIPELINE`). Where main attaches a
 //! per-entity [`DebugRender`](veldera_physics::DebugRender) override to each
 //! collider (see [`crate::viz::reconcile_collider_wireframes`]), the v2 path
 //! suppresses Avian's renderer permanently and draws the wireframes itself

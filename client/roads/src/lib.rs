@@ -29,9 +29,7 @@ use veldera_geo::{
 use veldera_roads::{GeoBbox, OverpassRoadSource, RoadClass, RoadSource, RoadWay};
 use veldera_terrain::{
     lod::LodState,
-    roads::{
-        ENABLE_V2_COLLIDERS_WITH_ROADS, EcefRibbon, EcefStation, RoadOverlay, TerrainTileSnapshot,
-    },
+    roads::{COLLIDER_PIPELINE, EcefRibbon, EcefStation, RoadOverlay, TerrainTileSnapshot},
 };
 use veldera_terrain_collider::{
     BuildSettings, SurfaceProbe, TileMeshes, build_tile_geometry,
@@ -66,13 +64,13 @@ impl RoadsPlugin {
 
 impl Plugin for RoadsPlugin {
     fn build(&self, app: &mut App) {
-        // The feature is disabled at compile time on this branch (see
-        // `ENABLE_V2_COLLIDERS_WITH_ROADS`): register nothing so no Overpass
+        // The road feature only runs on the v2 pipeline (see
+        // `COLLIDER_PIPELINE`): otherwise register nothing so no Overpass
         // traffic or off-thread fits ever run. The diagnostics resource still
         // exists (the UI reads it unconditionally) and says so.
-        if !ENABLE_V2_COLLIDERS_WITH_ROADS {
+        if !COLLIDER_PIPELINE.is_v2() {
             app.insert_resource(RoadsDiagnostics {
-                status: "disabled (ENABLE_V2_COLLIDERS_WITH_ROADS = false)".to_string(),
+                status: "disabled (COLLIDER_PIPELINE is not V2WithRoads)".to_string(),
                 ..default()
             });
             return;

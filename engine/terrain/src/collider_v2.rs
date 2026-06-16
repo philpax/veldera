@@ -1,9 +1,9 @@
 //! The v2 terrain-collider reconcile: WYSIWYG mirror selection, off-thread
 //! fusion/simplification builds, sub-octant carving, and OSM road carve-and-emit.
 //!
-//! Used only when the v2 collider pipeline is enabled (see
-//! [`crate::roads::ENABLE_V2_COLLIDERS_WITH_ROADS`]); the pre-branch
-//! synchronous reconcile that runs when the pipeline is off lives in
+//! Used only when the v2 collider pipeline is selected (see
+//! [`crate::roads::COLLIDER_PIPELINE`]); the pre-branch synchronous reconcile
+//! that runs on the legacy path lives in
 //! [`crate::lod::update_physics_colliders`].
 //!
 //! The selection itself is computed in [`crate::lod`]: the banded octree walk
@@ -42,16 +42,13 @@ use veldera_physics::{
 
 use crate::{
     lod::{ColliderReconcile, LoadedNodeData, LodState, poll_lod_node_tasks},
-    roads::{
-        ENABLE_V2_COLLIDERS_WITH_ROADS, RoadIndex, RoadOverlay, TerrainTileSnapshot,
-        tile_bounding_radius,
-    },
+    roads::{COLLIDER_PIPELINE, RoadIndex, RoadOverlay, TerrainTileSnapshot, tile_bounding_radius},
     viz_v2::{draw_collider_wireframes, draw_render_mesh_wireframes, draw_road_overlay},
 };
 
 /// Register the v2 collider reconcile, its state and channels, and the v2
 /// in-world overlays. Called from [`crate::lod::LodPlugin::build`] when
-/// [`ENABLE_V2_COLLIDERS_WITH_ROADS`] is set; the shared plugin build already
+/// [`COLLIDER_PIPELINE`] selects v2; the shared plugin build already
 /// initialises the resources the diagnostics UI reads on both paths
 /// ([`RoadOverlay`], [`RenderMeshVizFilter`], [`RoadVizSettings`],
 /// [`TileDumpRequest`]).
@@ -594,7 +591,7 @@ fn update_physics_colliders(
     // their follow-up work flows through the normal reconcile. A *discarded*
     // result (stale parameters) bumps nothing, so it forces a reconcile
     // directly to get the path re-dispatched.
-    let roads_enabled = ENABLE_V2_COLLIDERS_WITH_ROADS && streaming.road_colliders;
+    let roads_enabled = COLLIDER_PIPELINE.is_v2() && streaming.road_colliders;
     let road_carve = CarveSettings {
         margin: streaming.road_carve_margin as f32,
         vertical_gate: streaming.road_vertical_gate as f32,
@@ -1327,7 +1324,7 @@ fn capture_tile_dump(
     let coverage = v2.selected_coverage(lod_state);
     let road_index = RoadIndex::build(
         road_overlay,
-        ENABLE_V2_COLLIDERS_WITH_ROADS && streaming.road_colliders,
+        COLLIDER_PIPELINE.is_v2() && streaming.road_colliders,
     );
     let road_margin = streaming.road_carve_margin as f32;
     let capture = |path: OctreePath, mask: u8| -> Option<DumpTile> {

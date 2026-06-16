@@ -58,7 +58,7 @@ use crate::{
     mesh::{
         RocktreeMeshMarker, convert_mesh, convert_texture, matrix_to_world_position_and_transform,
     },
-    roads::{ENABLE_V2_COLLIDERS_WITH_ROADS, RoadOverlay},
+    roads::{COLLIDER_PIPELINE, RoadOverlay},
     terrain_material::{TerrainMaterial, TerrainMaterialExtension},
     viz::{
         ColliderVizFilter, LodVizGizmos, LodVizSettings, configure_lod_viz_gizmos, draw_lod_viz,
@@ -180,16 +180,15 @@ impl Plugin for LodPlugin {
             .add_systems(Update, draw_lod_viz.after(ColliderReconcile));
 
         // The v2 reconcile (off-thread fusion/carve/road pipeline plus its
-        // own overlays) when the feature is on, or main's pre-branch
-        // synchronous build and wireframe reconcile when off (see
-        // `ENABLE_V2_COLLIDERS_WITH_ROADS`). The road/render-mesh overlay
-        // resources are initialised unconditionally so the diagnostics UI
-        // reads them on both paths.
+        // own overlays) for v2, or main's pre-branch synchronous build and
+        // wireframe reconcile otherwise (see `COLLIDER_PIPELINE`). The
+        // road/render-mesh overlay resources are initialised unconditionally so
+        // the diagnostics UI reads them on every path.
         app.init_resource::<RoadOverlay>()
             .init_resource::<RenderMeshVizFilter>()
             .init_resource::<RoadVizSettings>()
             .init_resource::<collider_v2::TileDumpRequest>();
-        if ENABLE_V2_COLLIDERS_WITH_ROADS {
+        if COLLIDER_PIPELINE.is_v2() {
             collider_v2::register(app);
         } else {
             app.add_systems(
@@ -209,7 +208,7 @@ impl Plugin for LodPlugin {
 /// Anchor set for whichever collider reconcile is active — the v2
 /// [`collider_v2::update_physics_colliders`] or the legacy
 /// [`update_physics_colliders`] — so the in-world overlays order after it
-/// regardless of which one [`ENABLE_V2_COLLIDERS_WITH_ROADS`] registered.
+/// regardless of which one [`COLLIDER_PIPELINE`] registered.
 #[derive(SystemSet, Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub(crate) struct ColliderReconcile;
 
@@ -693,9 +692,9 @@ struct UnifiedWalkCtx<'a> {
     lead: DVec3,
 }
 
-/// The legacy physics distance bands (m → target depth), used when the v2
-/// collider pipeline is off (see [`ENABLE_V2_COLLIDERS_WITH_ROADS`]). On the
-/// v2 path the bands come from the streaming config instead, and the WYSIWYG
+/// The legacy physics distance bands (m → target depth), used by the legacy
+/// pipeline (see [`COLLIDER_PIPELINE`]). On the streaming-selection paths (v2
+/// and v3) the bands come from the streaming config instead, and the WYSIWYG
 /// mirror handles the near field.
 const LEGACY_PHYSICS_BANDS: &[(f64, usize)] = &[(50.0, 0), (150.0, 1), (400.0, 2), (1000.0, 3)];
 
@@ -874,11 +873,12 @@ fn unified_walk(
         // "beyond the outermost band" — covered by someone else, nothing to
         // do here. On the legacy path `wysiwyg_radius` is `0.0`, so the walk
         // covers the whole near field itself.
-        let phys_target = if ENABLE_V2_COLLIDERS_WITH_ROADS && phys_dist <= ctx.wysiwyg_radius {
-            None
-        } else {
-            desired_physics_depth(ctx.physics_bands, phys_dist)
-        };
+        let phys_target =
+            if COLLIDER_PIPELINE.uses_streaming_selection() && phys_dist <= ctx.wysiwyg_radius {
+                None
+            } else {
+                desired_physics_depth(ctx.physics_bands, phys_dist)
+            };
         let physics_in_range = phys_target.is_some();
         let physics_at_or_past_target =
             physics_in_range && phys_target.is_some_and(|t| child_path.depth() >= t);
@@ -953,9 +953,9 @@ fn unified_walk(
         // the commit down so collision matches the displayed meshes. The
         // recursion's coverage mask lets this node's own (post-recursion)
         // commit cover exactly the octants the children don't, mirroring the
-        // render compositing in every partial-load state. A no-op when v2 is
-        // on — the WYSIWYG mirror handles the near field there.
-        let wysiwyg_descend = !ENABLE_V2_COLLIDERS_WITH_ROADS
+        // render compositing in every partial-load state. A no-op on the
+        // streaming-selection paths — the WYSIWYG mirror handles the near field.
+        let wysiwyg_descend = !COLLIDER_PIPELINE.uses_streaming_selection()
             && physics_in_range
             && physics_at_or_past_target
             && !octant_handled
@@ -1281,12 +1281,12 @@ fn update_lod_requests(
     // the legacy path uses main's hardcoded bands and no mirror, so the
     // banded walk covers the near field too (colliding the displayed mesh via
     // the innermost-band descent rather than the coarser mirror).
-    let (physics_bands, wysiwyg_radius): (&[(f64, usize)], f64) = if ENABLE_V2_COLLIDERS_WITH_ROADS
-    {
-        (&streaming.bands, streaming.wysiwyg_radius)
-    } else {
-        (LEGACY_PHYSICS_BANDS, 0.0)
-    };
+    let (physics_bands, wysiwyg_radius): (&[(f64, usize)], f64) =
+        if COLLIDER_PIPELINE.uses_streaming_selection() {
+            (&streaming.bands, streaming.wysiwyg_radius)
+        } else {
+            (LEGACY_PHYSICS_BANDS, 0.0)
+        };
 
     if !can_skip_bfs {
         // Single walk that evaluates render's screen-space-error
@@ -1309,12 +1309,13 @@ fn update_lod_requests(
     }
 
     // Near-field collider targets mirror the loaded render set (WYSIWYG) on
-    // the v2 path; the banded walk covers everything beyond the radius, and
-    // the two are disjoint by construction (the walk treats every region whose
-    // near distance is inside the radius as covered). On the legacy path the
-    // banded walk above selects the whole near field, so there is no separate
-    // mirror set and `collider_targets` is just the walk result.
-    let mut collider_targets = if ENABLE_V2_COLLIDERS_WITH_ROADS {
+    // the streaming-selection paths (v2 and v3); the banded walk covers
+    // everything beyond the radius, and the two are disjoint by construction
+    // (the walk treats every region whose near distance is inside the radius as
+    // covered). On the legacy path the banded walk above selects the whole near
+    // field, so there is no separate mirror set and `collider_targets` is just
+    // the walk result.
+    let mut collider_targets = if COLLIDER_PIPELINE.uses_streaming_selection() {
         collider_v2::compute_physics_targets(
             &lod_state,
             lod_metrics.camera_position,
