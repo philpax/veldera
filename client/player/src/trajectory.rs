@@ -17,6 +17,8 @@
 //! ignores air-control input (it cannot know which way you will steer
 //! mid-flight), so it shows the path of an un-steered leap.
 
+use std::time::Duration;
+
 use avian3d::prelude::*;
 use bevy::{
     asset::RenderAssetUsages,
@@ -120,6 +122,10 @@ pub struct LeapArcConfig {
     /// Glyph colour at or above [`far_distance_m`](Self::far_distance_m),
     /// `[r, g, b, a]`.
     pub far_color: [f32; 4],
+    /// Colour of the landing marker when the leap ends against a surface too
+    /// steep to stand on — a wall or obstacle the body slams into rather than
+    /// lands on, often invisible collision geometry. `[r, g, b, a]`.
+    pub collision_color: [f32; 4],
     /// Leap distance (m, horizontal) at/below which the arc is fully
     /// [`near_color`](Self::near_color).
     pub near_distance_m: f32,
@@ -233,11 +239,17 @@ fn update_leap_arc(
     physics_config: Res<PhysicsConfig>,
     yeet_state: Res<YeetState>,
     time: Res<Time>,
-    spatial: SpatialQuery,
+    move_and_slide: MoveAndSlide,
     viz: Res<LeapArcViz>,
     camera_query: Query<&FloatingOriginCamera>,
     player_query: Query<
-        (Entity, &FpsController, &WorldPosition, &LinearVelocity),
+        (
+            Entity,
+            &FpsController,
+            &WorldPosition,
+            &LinearVelocity,
+            &Collider,
+        ),
         With<LogicalPlayer>,
     >,
     mut meshes: ResMut<Assets<Mesh>>,
@@ -251,7 +263,7 @@ fn update_leap_arc(
 
     let charge_seconds = yeet_state.charge_seconds();
     let charging = config.enabled && charge_seconds > 0.0;
-    let (Some((player_entity, controller, world_pos, velocity)), Ok(camera)) =
+    let (Some((player_entity, controller, world_pos, velocity, collider)), Ok(camera)) =
         (player_query.single().ok(), camera_query.single())
     else {
         *visibility = Visibility::Hidden;
@@ -277,13 +289,48 @@ fn update_leap_arc(
         max_samples: ((config.max_flight_time_s / step_dt).ceil() as usize).clamp(2, 4096),
         max_range_m: config.max_range_m,
     };
+
+    // The collide-and-slide step: Avian's `MoveAndSlide`, the same primitive and
+    // contact classification `fps_controller_slide` uses, so the predicted path
+    // resolves collisions exactly like the real leap (slides off walls and all),
+    // restricted to the same ground/vehicle layers and excluding the player.
+    let filter = SpatialQueryFilter::from_excluded_entities([player_entity])
+        .with_mask([GameLayer::Ground, GameLayer::Vehicle]);
+    let slide_config = MoveAndSlideConfig::default();
+    let traction_cutoff = fps_config.traction_normal_cutoff;
+    let step = |position: Vec3, velocity: Vec3, dt: Duration, up: Vec3| {
+        let mut ground_hit = false;
+        let mut wall_normal = None;
+        let output = move_and_slide.move_and_slide(
+            collider,
+            position,
+            Quat::IDENTITY,
+            velocity,
+            dt,
+            &slide_config,
+            &filter,
+            |hit| {
+                if hit.normal.dot(up) > traction_cutoff {
+                    ground_hit = true;
+                } else if wall_normal.is_none() {
+                    wall_normal = Some(Vec3::from(*hit.normal));
+                }
+                MoveAndSlideHitResponse::Accept
+            },
+        );
+        SlideStep {
+            position: output.position,
+            velocity: output.projected_velocity,
+            ground_hit,
+            wall_normal,
+        }
+    };
     let path = simulate_leap(
         world_pos.position,
         velocity.0 + impulse,
         &params,
-        &spatial,
         camera.position,
-        player_entity,
+        step,
     );
 
     if path.points.len() < 2 {
@@ -305,6 +352,7 @@ fn update_leap_arc(
             &path.points,
             &config,
             distance_color,
+            &path.bounces,
             *flow_offset,
             camera.position,
         );
@@ -318,10 +366,11 @@ fn update_leap_arc(
     if *log_timer <= 0.0 {
         *log_timer = 0.5;
         tracing::debug!(
-            "leap arc: charge {:.2}s, {} points, landed {}, {:.0} m out",
+            "leap arc: charge {:.2}s, {} points, landed {}, {} bounce(s), {:.0} m out",
             charge_seconds,
             path.points.len(),
             path.landed,
+            path.bounces.len(),
             path.horizontal_distance_m,
         );
     }
@@ -341,39 +390,69 @@ struct LeapSimParams {
     max_range_m: f32,
 }
 
-/// The simulated flight path: a polyline of ECEF points from the launch point
-/// to the landing (or the last simulated point if none was found), plus the
-/// horizontal travel distance used to colour the arc.
+/// One collide-and-slide step's outcome — the shared shape of a `MoveAndSlide`
+/// move, classified into a walkable landing or a wall to slide off.
+struct SlideStep {
+    /// Physics-space position after sliding along any contacts.
+    position: Vec3,
+    /// Velocity with the into-surface components removed.
+    velocity: Vec3,
+    /// A contact was walkable (`normal·up` above the traction cutoff).
+    ground_hit: bool,
+    /// A non-walkable contact normal, when the move grazed a wall without also
+    /// finding ground — used to mark bank-shot slides.
+    wall_normal: Option<Vec3>,
+}
+
+/// A point where the leap glances off a surface too steep to stand on and slides
+/// along it, rather than landing — what makes bank-shot trick leaps readable.
+struct Bounce {
+    /// Contact position (ECEF).
+    pos: DVec3,
+    /// Direction the slide carries on in afterwards.
+    tangent: Vec3,
+}
+
+/// The simulated flight path: a polyline of ECEF points from launch to the
+/// landing (or the last simulated point), the wall slides along the way, the
+/// horizontal travel distance for colouring, and whether it ended on walkable
+/// ground.
 struct LeapPath {
     points: Vec<DVec3>,
     horizontal_distance_m: f32,
-    /// Whether a ground hit truncated the path (vs. running out of time/range).
     landed: bool,
+    bounces: Vec<Bounce>,
 }
 
-/// Forward-integrate the leap with [`airborne_velocity_step`], segment-casting
-/// against the ground layer between consecutive points; the first hit is the
-/// landing and truncates the path there. Recomputes local up each step so the
-/// arc curves around the globe (radial gravity), which matters for long leaps.
+/// Forward-integrate the leap, integrating velocity each step with the shared
+/// [`airborne_velocity_step`] (the controller's own gravity-plus-drag) and
+/// resolving motion with `step` — a closure wrapping Avian's `MoveAndSlide`, the
+/// same collide-and-slide primitive `fps_controller_slide` drives. Sharing both
+/// halves keeps the preview faithful to the real leap: it slides off walls and
+/// banks around corners exactly as the player will, ending on the first walkable
+/// contact. Local up is recomputed each step so the arc curves around the globe
+/// (radial gravity).
+///
+/// The one thing it can't know is future air-control input, so it previews the
+/// un-steered leap.
 fn simulate_leap(
     start: DVec3,
     initial_velocity: Vec3,
     params: &LeapSimParams,
-    spatial: &SpatialQuery,
     camera_ecef: DVec3,
-    exclude: Entity,
+    mut step: impl FnMut(Vec3, Vec3, Duration, Vec3) -> SlideStep,
 ) -> LeapPath {
-    // Exclude the player's own capsule: it is a member of `GameLayer::Ground`,
-    // so without this every cast starts inside it and reports an instant hit.
-    let filter =
-        SpatialQueryFilter::from_excluded_entities([exclude]).with_mask([GameLayer::Ground]);
-    let dt = params.step_dt_s;
+    let dt = Duration::from_secs_f32(params.step_dt_s);
     let start_up = start.normalize_or_zero().as_vec3();
 
     let mut pos = start;
     let mut vel = initial_velocity;
     let mut points = vec![pos];
+    let mut bounces: Vec<Bounce> = Vec::new();
     let mut landed = false;
+    // The last slide surface, so a sustained slide along one wall logs a single
+    // marker rather than one per step.
+    let mut last_normal: Option<Vec3> = None;
 
     for _ in 0..params.max_samples {
         let up = pos.normalize_or_zero().as_vec3();
@@ -383,24 +462,31 @@ fn simulate_leap(
             params.gravity,
             params.drag_quadratic,
             params.drag_linear,
-            dt,
+            params.step_dt_s,
         );
-        let delta = (vel * dt).as_dvec3();
-        let seg_len = delta.length();
-        if seg_len > 1e-5
-            && let Ok(dir) = Dir3::new((delta / seg_len).as_vec3())
-        {
-            let origin = (pos - camera_ecef).as_vec3();
-            if let Some(hit) = spatial.cast_ray(origin, dir, seg_len as f32, true, &filter) {
-                let landing = pos + (delta / seg_len) * f64::from(hit.distance);
-                points.push(landing);
-                pos = landing;
-                landed = true;
-                break;
-            }
-        }
-        pos += delta;
+
+        let outcome = step((pos - camera_ecef).as_vec3(), vel, dt, up);
+        pos = camera_ecef + outcome.position.as_dvec3();
+        vel = outcome.velocity;
         points.push(pos);
+
+        if outcome.ground_hit {
+            landed = true;
+            break;
+        }
+        match outcome.wall_normal {
+            Some(normal) => {
+                if last_normal.is_none_or(|prev| prev.dot(normal) < 0.98) && bounces.len() < 32 {
+                    bounces.push(Bounce {
+                        pos,
+                        tangent: vel.normalize_or_zero(),
+                    });
+                }
+                last_normal = Some(normal);
+            }
+            None => last_normal = None,
+        }
+
         if (pos - start).length() as f32 > params.max_range_m {
             break;
         }
@@ -412,6 +498,7 @@ fn simulate_leap(
         points,
         horizontal_distance_m: horizontal.length(),
         landed,
+        bounces,
     }
 }
 
@@ -437,6 +524,7 @@ fn build_chevron_mesh(
     points: &[DVec3],
     config: &LeapArcConfig,
     distance_color: [f32; 4],
+    bounces: &[Bounce],
     flow_offset: f32,
     camera_ecef: DVec3,
 ) {
@@ -481,6 +569,22 @@ fn build_chevron_mesh(
             color: scaled_color(distance_color, brightness, alpha),
         });
         s += spacing;
+    }
+
+    // Bank-shot markers: a larger collision-coloured chevron at each wall the
+    // leap slides off, pointing the way the slide carries on.
+    for bounce in bounces {
+        data.push_chevron(ChevronGlyph {
+            pos_ecef: bounce.pos,
+            center_rel: (bounce.pos - anchor).as_vec3(),
+            tangent: bounce.tangent,
+            camera_ecef,
+            ground_offset_m: config.ground_offset_m,
+            length_m: config.chevron_length_m * scale,
+            width_m: config.chevron_width_m * scale,
+            notch_m: config.chevron_notch_m * scale,
+            color: scaled_color(config.collision_color, 1.0, 1.0),
+        });
     }
 
     // Landing arrowhead: a larger, full-bright chevron at the end, so the target
