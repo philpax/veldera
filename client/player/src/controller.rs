@@ -772,20 +772,19 @@ fn fps_controller_prepare(
         };
         wish_speed = f32::min(wish_speed, max_speed);
 
-        // Apply gravity.
-        let gravity_dir = -local_up;
-        velocity.0 += gravity_dir * physics_config.gravity * dt;
-
         let is_grounded = controller.ground_tick >= 1;
         let is_ragdolling = controller.ragdoll_state == RagdollState::Ragdolling;
 
-        // Passive resistance: ground friction when grounded, air drag when
-        // airborne. Both apply always — including during ragdoll — so a
+        // Gravity plus passive resistance: ground friction when grounded, air
+        // drag when airborne. Both branches integrate radial gravity first, then
+        // their resistance. Both apply always — including during ragdoll — so a
         // high-speed launch is arrested whether it ends in a slide or a tumble;
         // gating either behind the ragdoll `continue` below would freeze the
         // capsule's speed the instant it ragdolls (e.g. a fast flycam hand-off
         // ragdolls after `airborne_threshold_s` and would then coast forever).
         if is_grounded {
+            velocity.0 += -local_up * physics_config.gravity * dt;
+
             // Ground friction. While ragdolling we use a much stronger
             // coefficient so a high-speed rooftop landing arrests almost on
             // contact rather than skidding off the edge, and so the grounded
@@ -809,22 +808,19 @@ fn fps_controller_prepare(
                 velocity.0 = vertical_component;
             }
         } else {
-            // Air drag: a resistance of `quadratic * speed² + linear * speed`
-            // applied opposite the full velocity. The quadratic term bites hard
-            // at high speed (taming a fast hand-off or launch with no hard cap);
-            // the linear term doesn't vanish as you slow, so it cleans up the
-            // low-speed tail into a crisp stop. Acting on the whole vector
-            // preserves the travel direction — a lateral-only drag would leave
-            // the vertical component intact and tilt the trajectory — and lets
-            // it double as a terminal-velocity cap for long falls. The
-            // `max(0.0)` guards against an overshoot reversing direction.
-            let speed = velocity.0.length();
-            if speed > f32::EPSILON {
-                let decel = controller.air_drag_quadratic * speed * speed
-                    + controller.air_drag_linear * speed;
-                let new_speed = (speed - decel * dt).max(0.0);
-                velocity.0 *= new_speed / speed;
-            }
+            // Radial gravity then air drag, as one airborne integration step.
+            // `airborne_velocity_step` is the single source of truth shared with
+            // the predicted-leap arc, so the preview matches the real flight;
+            // see its docs for the drag model and why it acts on the full
+            // velocity.
+            velocity.0 = crate::trajectory::airborne_velocity_step(
+                velocity.0,
+                local_up,
+                physics_config.gravity,
+                controller.air_drag_quadratic,
+                controller.air_drag_linear,
+                dt,
+            );
         }
 
         // The rest of the controller logic — input-driven acceleration, jump,

@@ -51,6 +51,7 @@ impl Plugin for AppPlugin {
                 ragdoll: config::paths::RAGDOLL,
                 yeet: config::paths::YEET,
                 effects: config::paths::EFFECTS,
+                leap_arc: config::paths::LEAP_ARC,
             }),
             GeoPlugin,
             DebugUiPlugin,

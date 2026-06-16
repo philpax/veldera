@@ -1,0 +1,44 @@
+# Predicted-leap arc: the flat in-world ribbon drawn while charging a leap,
+# tracing the simulated flight path to where you'll land. The simulation reuses
+# the controller's own launch and air-drag math (see `trajectory.rs`), so the
+# arc matches the real leap; it can't know how you'll steer mid-air, so it shows
+# the un-steered path.
+
+# Master switch. Set to false to turn the arc off entirely.
+enabled = true
+
+# Ribbon width (m).
+width_m = 0.4
+# Lift (m) applied along local up so the arc floats just clear of the terrain it
+# grazes instead of z-fighting it.
+ground_offset_m = 0.35
+
+# Colour at short range, [r, g, b, a]: a calm green for a gentle hop.
+near_color = [0.25, 0.9, 0.55, 0.7]
+# Colour at long range, [r, g, b, a]: a hot orange-red for a big committed leap.
+far_color = [1.0, 0.35, 0.15, 0.85]
+# Horizontal leap distance (m) at/below which the arc is fully near_color.
+near_distance_m = 8.0
+# Horizontal leap distance (m) at/above which the arc is fully far_color.
+far_distance_m = 220.0
+
+# Integration step (s) of the trajectory simulation. Larger = cheaper (fewer
+# ground raycasts) but coarser; it need not match the physics tick.
+step_dt_s = 0.05
+# Maximum simulated flight time (s); bounds the work per frame.
+max_flight_time_s = 8.0
+# Maximum range (m) from launch before the simulation gives up (e.g. a leap
+# clear off the edge of loaded terrain).
+max_range_m = 1000.0
+
+# Arrowhead half-width (m) at the landing point.
+arrow_half_width_m = 0.7
+# Arrowhead length (m) past the landing point.
+arrow_length_m = 7.0
+
+# Brightness pulse scrolling toward the landing: pulses per second.
+scroll_speed = 1.2
+# Number of bright bands along the ribbon length.
+pulse_bands = 7.0
+# Brightness floor between bands, 0..1.
+pulse_min_brightness = 0.4

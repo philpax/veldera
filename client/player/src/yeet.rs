@@ -306,6 +306,12 @@ impl YeetState {
     pub(super) fn take_queued_jump(&mut self) -> bool {
         std::mem::take(&mut self.jump_queued)
     }
+
+    /// Charge accumulated so far (s), zero while not charging. Read by the
+    /// predicted-leap arc to gate and scale its preview.
+    pub(crate) fn charge_seconds(&self) -> f32 {
+        self.charge_seconds
+    }
 }
 
 /// Charge-mechanic audio: the shared rumble-synth state (written each frame) and
@@ -511,11 +517,6 @@ pub(super) fn handle_yeet(
     }
 
     let charge_ratio = (state.charge_seconds / config.max_charge_duration_s).clamp(0.0, 1.0);
-    let speed = lerp(
-        config.min_yeet_speed_m_s,
-        config.max_yeet_speed_m_s,
-        charge_ratio,
-    );
 
     let frame = RadialFrame::from_ecef_position(world_pos.position);
     let look_dir = frame.look(controller.yaw, controller.pitch);
@@ -526,22 +527,15 @@ pub(super) fn handle_yeet(
     // feels unphysical. The FPS controller's quadratic air drag
     // bounds chained accumulation: each launch adds speed, but the
     // faster you go the harder the drag pulls back, so stacked yeets
-    // converge rather than growing without limit.
+    // converge rather than growing without limit. The impulse itself
+    // (speed curve + the steeply-down detach nudge) is computed by
+    // `trajectory::leap_launch_impulse`, the same function the
+    // predicted-leap arc seeds its simulation with.
     //
-    // For non-steeply-down launches add a small upward nudge so
-    // the FPS controller's next slide doesn't re-detect ground
-    // contact (which would re-apply friction and immediately eat
-    // most of the lateral velocity, leaving only the vertical
-    // kick the player feels as "jump height, no momentum").
-    let detach_up = if look_dir.dot(frame.up) > config.downward_detach_threshold {
-        frame.up * config.ground_detach_m_s
-    } else {
-        Vec3::ZERO
-    };
     // Captured before the airborne override below, for the takeoff effects
     // (a mid-air launch gets no ground shockwave).
     let was_grounded = controller.ground_tick >= 1;
-    velocity.0 += look_dir * speed + detach_up;
+    velocity.0 += crate::trajectory::leap_launch_impulse(&config, charge_ratio, look_dir, frame.up);
     // Force "airborne" classification for next prepare tick so
     // friction is skipped even before the slide gets a chance to
     // observe the lifted player.
@@ -575,6 +569,10 @@ pub(super) fn handle_yeet(
     tracing::info!(
         "Yeet! charge_ratio {:.2}, speed {:.1} m/s",
         charge_ratio,
-        speed,
+        lerp(
+            config.min_yeet_speed_m_s,
+            config.max_yeet_speed_m_s,
+            charge_ratio
+        ),
     );
 }

@@ -13,11 +13,14 @@
 //! - [`effects`] — takeoff/landing impact effects (a procedural thump and a
 //!   ground dust burst); world-space only, so a future VR camera stays
 //!   untouched.
+//! - [`trajectory`] — the shared leap flight math (used by the controller and
+//!   yeet) and the in-world arc previewing where a charged leap will land.
 
 pub mod controller;
 
 mod body;
 mod effects;
+mod trajectory;
 mod yeet;
 
 use bevy::prelude::*;
@@ -43,6 +46,8 @@ pub struct PlayerConfigPaths {
     pub yeet: &'static str,
     /// Takeoff/landing effects tuning (`EffectsConfig`).
     pub effects: &'static str,
+    /// Predicted-leap-arc tuning (`LeapArcConfig`).
+    pub leap_arc: &'static str,
 }
 
 /// Bundles the first-person controller, the body avatar, the yeet mechanic,
@@ -71,6 +76,9 @@ impl Plugin for PlayerPlugin {
             },
             effects::EffectsPlugin {
                 path: self.paths.effects,
+            },
+            trajectory::LeapArcPlugin {
+                path: self.paths.leap_arc,
             },
         ));
     }
