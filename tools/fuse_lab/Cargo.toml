@@ -10,6 +10,7 @@ description = "Offline workbench for terrain-collider border fusion: load an in-
 bytemuck = { workspace = true }
 fast-surface-nets = { workspace = true }
 glam = { workspace = true }
+image = { workspace = true, features = ["png"] }
 martini_rtin = { workspace = true }
 meshopt = { workspace = true }
 rocktree = { workspace = true }

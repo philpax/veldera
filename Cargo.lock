@@ -3119,6 +3119,7 @@ dependencies = [
  "bytemuck",
  "fast-surface-nets",
  "glam 0.30.10",
+ "image",
  "martini_rtin",
  "meshopt",
  "rocktree",

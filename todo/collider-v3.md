@@ -161,10 +161,59 @@ thin-tile erosion — the prior research's semantic wall stands. Winding-number
 signing remains available to push fidelity further, but is no longer required for
 basic well-formedness.
 
-**Decision pending user input:** whether to (a) proceed to engine integration with
-this cheap pipeline, accepting multi-component colliders and smoothing for now;
-(b) invest in winding-number signing and/or per-tile resolution first; or
-(c) reconsider scope. See the session summary.
+### Phase 2 (cont.) — the eyeball overturned the metrics; column-solidify is the fix (2026-06-16)
+
+Added a software renderer (`fuse_lab --render <voxel> <out.png>`: oblique
+orthographic, z-buffered Lambert, downward faces tinted red) and looked at the
+actual surface. The metrics were misleading:
+
+- **2-pass majority filter (best on paper):** the render showed the *ground eaten
+  away*, leaving floating building blocks. The "75/182 closed-manifold" was an
+  artefact of destroying geometry. The flood **leaks under the ground through
+  photogrammetry holes**, so the ground is a thin two-sided slab (air above *and*
+  below), which smoothing then erodes.
+- **0-pass:** ground present but plastered with red — the slab's spurious
+  underside (the 27 % downward faces).
+
+**Fix: `SOLIDIFY_BELOW_TOP`** — after the flood, re-solidify each column below its
+topmost surface voxel, making the ground a thick solid half-space instead of the
+leaked thin slab. On the flat dump (0.25 m, no smoothing):
+
+| metric | baseline | +solidify |
+| --- | --- | --- |
+| downward faces | 27.3 % | **0.4 %** |
+| components | 1.9/tile | **1.3/tile** |
+| non-manifold edges (final) | 141 134 | **333** |
+| tiles wrapped | 203 | **203** (no erosion) |
+
+The render confirms it: the wrap is a clean, continuous ground — *cleaner* than the
+source soup — with buildings preserved as solid blocks and bubbles gone. **Thin-tile
+erosion is resolved as a side effect** (it was the majority filter; solidify makes
+smoothing unnecessary, so it is off).
+
+Validated pipeline: voxelize → flood → **solidify-below-top** → (optional light
+cleanup) → Surface Nets → decimate. CPU-only, ~29 ms/tile.
+
+Known, documented limitations (not blockers):
+- **2.5D:** solidify fills under overhangs/bridges. Deferred with roads; the
+  winding-number path or a per-column multi-span fill restores overhangs later.
+- **Canopy lift (~+0.6 m signed mean):** topmost-surface selection stands on tree
+  canopy/eaves over ground — the semantic surface-selection issue, deferred.
+- **Open bottom:** the solid is unsealed at the grid floor (underground), so
+  `is_closed_manifold` reads false by design; the real signal is the
+  non-manifold-edge count, which is excellent. (A future `MeshHealth` refinement
+  could distinguish the bottom rim from genuine holes.)
+
+**No blocker remains; proceeding to thin-tile handling (done) and engine
+integration.**
+
+## Engine integration (Phase 6, in progress)
+
+Promote the validated wrap pipeline from `fuse_lab` into the pure
+`veldera_terrain_collider` crate (engine-agnostic core), then add a `terrain_v3`
+builder and a `collider_v3` module reusing v2's off-thread / cancellation /
+revalidation / WYSIWYG-selection plumbing, behind a new `ENABLE_V3_COLLIDERS`
+const. Finally viz + in-game verification.
 
 ## Pluggable-extractor evaluation (deferred decision, phase 1/4)
 

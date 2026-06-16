@@ -42,6 +42,7 @@ use veldera_terrain_collider::{
     dump::{DumpTile, TileSetDump},
 };
 
+mod render;
 mod roads;
 mod rtin;
 mod wrap;
@@ -66,6 +67,7 @@ fn main() -> Result<(), Box<dyn Error>> {
     let mut captured_roads = false;
     let mut wrap_voxel: Option<f32> = None;
     let mut rtin_error: Option<f32> = None;
+    let mut render: Option<(f32, String)> = None;
     let mut i = 1;
     while i < args.len() {
         match args[i].as_str() {
@@ -119,6 +121,16 @@ fn main() -> Result<(), Box<dyn Error>> {
                         .parse()?,
                 );
                 i += 2;
+            }
+            "--render" => {
+                let voxel = args
+                    .get(i + 1)
+                    .ok_or("--render needs <voxel_m> <out.png>")?;
+                let out = args
+                    .get(i + 2)
+                    .ok_or("--render needs <voxel_m> <out.png>")?;
+                render = Some((voxel.parse()?, out.clone()));
+                i += 3;
             }
             other if dump_path.is_none() => {
                 dump_path = Some(other.to_string());
@@ -258,6 +270,9 @@ fn main() -> Result<(), Box<dyn Error>> {
     }
     if let Some(error) = rtin_error {
         rtin::run(&dump, &meshes, &settings, error, obj_dir.as_deref())?;
+    }
+    if let Some((voxel, out)) = &render {
+        render::run(&dump, &meshes, &settings, *voxel, out)?;
     }
 
     // The road modes own OBJ export when active (they write before/after pairs);

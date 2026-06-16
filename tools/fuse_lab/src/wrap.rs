@@ -50,7 +50,11 @@ const SOLID_COMPONENT_FRACTION: f32 = 0.02;
 /// voxel takes the majority vote of its 26-neighbourhood, erasing the
 /// single-voxel sign flips that make the flood crust jagged (and Surface Nets
 /// non-manifold). 0 disables.
-const SIGN_SMOOTH_PASSES: u32 = 2;
+const SIGN_SMOOTH_PASSES: u32 = 0;
+/// Solidify each column below its topmost surface voxel after the flood, so the
+/// ground is a thick solid half-space rather than the thin two-sided slab the
+/// flood's sub-surface leak produces. 2.5D (fills under overhangs).
+const SOLIDIFY_BELOW_TOP: bool = true;
 /// Extracted-mesh connected components smaller than this fraction of the largest
 /// (by triangle count) are dropped — the isolated islands and floating slabs the
 /// sign smoothing fragments off the main surface.
@@ -173,7 +177,7 @@ pub fn run(
 /// sides) is exterior, and a bridge deck survives as its own slab. Photogrammetry
 /// tiles are open shells, not solids; seeding the underground face too would let
 /// the exterior leak under the shell and collapse it to a doubled thin slab.
-fn wrap_soup(
+pub(crate) fn wrap_soup(
     vertices: &[Vec3],
     triangles: &[[u32; 3]],
     down: Vec3,
@@ -298,6 +302,33 @@ fn wrap_soup(
         }
     }
 
+    // The flood leaks under the ground through the holes photogrammetry always
+    // has, leaving the ground a thin two-sided slab (air above *and* below)
+    // rather than a solid half-space — which wraps with spurious downward
+    // undersides and erodes under any smoothing. Re-solidify each column below
+    // its topmost surface voxel so everything beneath the top surface is solid
+    // earth. This is 2.5D (it fills under overhangs/bridges, deferred for now),
+    // but it is exactly what makes flat ground a clean, thick, stable solid.
+    if SOLIDIFY_BELOW_TOP {
+        let barrier = SEAL_VOXELS * voxel;
+        for y in 0..dims[1] {
+            for x in 0..dims[0] {
+                let mut top = None;
+                for z in (0..dims[2]).rev() {
+                    if dist[shape.linearize([x, y, z]) as usize] <= barrier {
+                        top = Some(z);
+                        break;
+                    }
+                }
+                if let Some(top) = top {
+                    for z in 0..top {
+                        exterior[shape.linearize([x, y, z]) as usize] = false;
+                    }
+                }
+            }
+        }
+    }
+
     // Morphological cleanup of the inside (solid) region, on the voxel grid,
     // before extraction (the cleanup-first signing strategy). An *open*
     // (erode then dilate) dissolves thin solid features — the doubled
@@ -308,9 +339,7 @@ fn wrap_soup(
     let mut inside: Vec<bool> = exterior.iter().map(|&e| !e).collect();
     // A radius of 0 makes the open a no-op (the erode/dilate loops do not run).
     morphological_open(&mut inside, &shape, dims, OPEN_RADIUS);
-    for _ in 0..SIGN_SMOOTH_PASSES {
-        majority_filter(&mut inside, &shape, dims);
-    }
+    smooth_sign(&mut inside, &shape, dims, SIGN_SMOOTH_PASSES);
     cull_small_solid_components(&mut inside, &shape, dims, SOLID_COMPONENT_FRACTION);
     for i in 0..size {
         exterior[i] = !inside[i];
@@ -479,6 +508,13 @@ fn cull_mesh_components(indices: &[u32], fraction: f32) -> Vec<u32> {
         }
     }
     out
+}
+
+/// Apply `passes` majority-filter passes to smooth the inside/outside field.
+fn smooth_sign(inside: &mut [bool], shape: &RuntimeShape<u32, 3>, dims: [u32; 3], passes: u32) {
+    for _ in 0..passes {
+        majority_filter(inside, shape, dims);
+    }
 }
 
 /// Majority filter over the 26-neighbourhood (plus self): each voxel becomes
