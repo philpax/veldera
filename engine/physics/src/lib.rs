@@ -229,6 +229,12 @@ pub struct PhysicsStreamingConfig {
     /// v3 voxel-wrap: solid voxel components smaller than this fraction of the
     /// largest are dropped as floaters.
     pub wrap_solid_component_fraction: f32,
+    /// v3 voxel-wrap pre-solidify floater cull: disconnected solid shells below
+    /// this fraction of the largest are dropped before the column solidify, so
+    /// floating photogrammetry fragments never become full-height curtains.
+    /// Higher drops bigger floaters but risks dropping a mask-split surface; 0
+    /// disables.
+    pub wrap_floater_fraction: f32,
     /// v3 voxel-wrap: extracted-mesh components smaller than this fraction of
     /// the largest (by triangle count) are dropped as isolated islands.
     pub wrap_mesh_component_fraction: f32,
@@ -260,6 +266,7 @@ impl PhysicsStreamingConfig {
             open_radius: self.wrap_open_radius,
             sign_smooth_passes: self.wrap_sign_smooth_passes,
             solid_component_fraction: self.wrap_solid_component_fraction,
+            floater_fraction: self.wrap_floater_fraction,
             mesh_component_fraction: self.wrap_mesh_component_fraction,
             decimate_error: self.wrap_decimate_error,
         }

@@ -115,6 +115,12 @@ wrap_sign_smooth_passes = 0
 # the largest, removing floaters and isolated slabs.
 wrap_solid_component_fraction = 0.02
 wrap_mesh_component_fraction = 0.05
+# Pre-solidify floater cull: drop disconnected solid shells below this fraction
+# of the largest before the column solidify, so floating photogrammetry
+# fragments don't become full-height curtain walls. Raise toward ~0.2-0.4 to
+# catch bigger floaters (risks dropping a surface split into pieces by the
+# octant mask); 0 disables.
+wrap_floater_fraction = 0.1
 # Quadric decimation error bound, relative to tile extent (native only). Zero
 # disables decimation (dense Surface Nets output).
 wrap_decimate_error = 0.01

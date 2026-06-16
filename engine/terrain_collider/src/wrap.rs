@@ -59,6 +59,14 @@ pub struct WrapSettings {
     /// Solid voxel components smaller than this fraction of the largest are
     /// dropped as floaters.
     pub solid_component_fraction: f32,
+    /// Pre-solidify connected-component cull: disconnected solid shells smaller
+    /// than this fraction of the largest are dropped *before* the column
+    /// solidify runs, so floating photogrammetry fragments never become
+    /// full-height "curtains" (after solidify every column joins the main solid
+    /// at the grid floor and can no longer be separated). Higher drops larger
+    /// floaters but risks dropping a genuinely disconnected surface (e.g. a tile
+    /// split into pieces by the octant mask); 0 disables.
+    pub floater_fraction: f32,
     /// Extracted-mesh components smaller than this fraction of the largest (by
     /// triangle count) are dropped as isolated islands.
     pub mesh_component_fraction: f32,
@@ -77,6 +85,7 @@ impl Default for WrapSettings {
             open_radius: 0,
             sign_smooth_passes: 0,
             solid_component_fraction: 0.02,
+            floater_fraction: 0.0,
             mesh_component_fraction: 0.05,
             decimate_error: 0.01,
         }
@@ -165,8 +174,22 @@ pub fn wrap_soup(
 
     let barrier = settings.seal_voxels * voxel;
     let mut exterior = flood_exterior(&dist, barrier, &shape, dims);
+
+    // Drop floating photogrammetry fragments *before* solidify: a floater is a
+    // small shell disconnected from the main surface, but once solidify fills
+    // every column down to the grid floor the floater's curtain joins the main
+    // solid there and can no longer be separated. Cull it now; solidify then
+    // fills only under what survives (it scans the inside/outside field, not the
+    // raw distance, so a culled floater leaves no curtain).
+    if settings.floater_fraction > 0.0 {
+        let mut inside: Vec<bool> = exterior.iter().map(|&e| !e).collect();
+        cull_small_solid_components(&mut inside, &shape, dims, settings.floater_fraction);
+        for i in 0..size {
+            exterior[i] = !inside[i];
+        }
+    }
     if settings.solidify_below_top {
-        solidify_below_top(&mut exterior, &dist, barrier, &shape, dims);
+        solidify_below_top(&mut exterior, &shape, dims);
     }
 
     // Morphological cleanup of the solid (inside) region before signing.
@@ -254,20 +277,16 @@ fn flood_exterior(
     exterior
 }
 
-/// Mark every node below each column's topmost surface voxel as interior, so the
-/// ground is a solid half-space rather than the flood's leaked thin slab.
-fn solidify_below_top(
-    exterior: &mut [bool],
-    dist: &[f32],
-    barrier: f32,
-    shape: &RuntimeShape<u32, 3>,
-    dims: [u32; 3],
-) {
+/// Mark every node below each column's topmost interior voxel as interior, so
+/// the ground is a solid half-space rather than the flood's leaked thin slab.
+/// Scans the interior/exterior field (not the raw distance) so any surface
+/// removed by the pre-solidify floater cull leaves no column to fill under.
+fn solidify_below_top(exterior: &mut [bool], shape: &RuntimeShape<u32, 3>, dims: [u32; 3]) {
     for y in 0..dims[1] {
         for x in 0..dims[0] {
             let mut top = None;
             for z in (0..dims[2]).rev() {
-                if dist[shape.linearize([x, y, z]) as usize] <= barrier {
+                if !exterior[shape.linearize([x, y, z]) as usize] {
                     top = Some(z);
                     break;
                 }
