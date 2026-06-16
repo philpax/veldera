@@ -142,6 +142,30 @@ pub(super) fn render_physics_tab(ui: &mut egui::Ui, params: &mut PhysicsParams) 
          0 tiles = terrain not streamed, 0 fit-ways = all tunnels/sunk, \
          0 ribbons = the fit found no terrain under the ways.",
     );
+    if d.fitted_ribbons > 0 {
+        ui.monospace(format!("  nearest station: {:.0} m", d.nearest_station_m))
+            .on_hover_text(
+                "Distance from the camera to the closest fitted station. If \
+                 this is large while you stand on a road, you have driven off \
+                 the last-fitted patch — coverage is a moving window, not a \
+                 growing trail.",
+            );
+    }
+    let region = d
+        .region
+        .map_or_else(|| "none".to_string(), |(la, lo)| format!("{la},{lo}"));
+    ui.monospace(format!(
+        "  region {region} · fetch {} · fit {} · {} fits",
+        if d.fetch_in_flight { "busy" } else { "idle" },
+        if d.fit_in_flight { "busy" } else { "idle" },
+        d.fits,
+    ))
+    .on_hover_text(
+        "Live pipeline state. Drive on the ground and watch: the region cell \
+         should change as you cross ~1 km boundaries and the fit count should \
+         climb. A flag stuck on 'busy' while moving means the pipeline has \
+         latched and stopped loading new roads.",
+    );
     if !d.status.is_empty() {
         ui.monospace(format!("  roads: {}", d.status));
     }

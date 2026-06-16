@@ -74,6 +74,7 @@ impl Plugin for RoadsPlugin {
                     poll_fetched_roads,
                     fit_roads,
                     apply_fitted_roads,
+                    mirror_diagnostics,
                 ),
             );
     }
@@ -91,6 +92,19 @@ pub struct RoadsDiagnostics {
     pub fit_ways: usize,
     /// Ribbons the last fit produced.
     pub fitted_ribbons: usize,
+    /// Distance (m) from the camera to the nearest fitted station — if this is
+    /// large while the camera sits on a road, the ribbons are placed in the
+    /// wrong ECEF spot rather than occluded.
+    pub nearest_station_m: f64,
+    /// The OSM region cell currently fetched, as `(lat_cell, lon_cell)`.
+    pub region: Option<(i64, i64)>,
+    /// A fetch is in flight (a latched `true` while moving means the fetch path
+    /// is stuck and no new region will ever load).
+    pub fetch_in_flight: bool,
+    /// A fit is in flight (latched `true` means the same for fitting).
+    pub fit_in_flight: bool,
+    /// Total fits applied to the overlay — should climb as you drive.
+    pub fits: u64,
     /// The most recent pipeline event or blocker.
     pub status: String,
 }
@@ -342,6 +356,7 @@ fn apply_fitted_roads(
     mut state: ResMut<RoadsState>,
     mut overlay: ResMut<RoadOverlay>,
     mut diag: ResMut<RoadsDiagnostics>,
+    camera: Query<&FloatingOriginCamera>,
 ) {
     while let Ok(output) = state.fit_rx.try_recv() {
         state.fit_in_flight = false;
@@ -350,8 +365,20 @@ fn apply_fitted_roads(
             output.ribbons.len(),
             output.fit_ways
         );
+        // The camera-relative distance to the nearest station distinguishes a
+        // misplacement (far) from an occlusion (near) when the overlay draws
+        // nothing visible.
+        if let Ok(camera) = camera.single() {
+            diag.nearest_station_m = output
+                .ribbons
+                .iter()
+                .flat_map(|r| &r.stations)
+                .map(|s| s.position.distance(camera.position))
+                .fold(f64::INFINITY, f64::min);
+        }
         diag.fit_ways = output.fit_ways;
         diag.fitted_ribbons = output.ribbons.len();
+        diag.fits += 1;
         diag.status = format!(
             "{} ribbons from {} ways",
             output.ribbons.len(),
@@ -360,6 +387,16 @@ fn apply_fitted_roads(
         overlay.ribbons = output.ribbons;
         overlay.version = overlay.version.wrapping_add(1);
     }
+}
+
+/// Mirror the cross-frame fetch/fit state into the diagnostics resource, so the
+/// Physics tab can show the live region and in-flight flags (a latched flag
+/// while driving localizes a stuck pipeline; a frozen region while moving means
+/// re-fetch never fires).
+fn mirror_diagnostics(state: Res<RoadsState>, mut diag: ResMut<RoadsDiagnostics>) {
+    diag.region = state.region;
+    diag.fetch_in_flight = state.fetch_in_flight;
+    diag.fit_in_flight = state.fit_in_flight;
 }
 
 /// The off-thread fit's result, with the input way count for diagnostics.
