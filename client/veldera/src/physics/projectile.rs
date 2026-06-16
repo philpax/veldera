@@ -31,6 +31,8 @@ pub struct FireSoundHandle(Handle<AudioSource>);
 #[derive(Default, Asset, Resource, TypePath, Clone, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct ProjectileConfig {
+    /// Master switch. `false` disables firing projectiles entirely.
+    pub enabled: bool,
     /// Base projectile radius (m), multiplied by a random scale per shot.
     pub radius_base: f32,
     /// Minimum random radius scale factor.
@@ -93,6 +95,11 @@ pub fn click_to_fire_system(
 ) {
     // Advance the debounce timer.
     fire_state.tick(time.delta_secs());
+
+    // Honour the master switch.
+    if !config.enabled {
+        return;
+    }
 
     // Only fire in FPS mode.
     if !mode_state.is_fps_controller() {

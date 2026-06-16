@@ -1,5 +1,8 @@
 # Projectiles fired from the camera in FPS mode.
 
+# Master switch; set to false to disable firing projectiles entirely.
+enabled = false
+
 # Base radius (m), multiplied by a random scale in [min_scale, max_scale] per shot.
 radius_base = 1.0
 radius_min_scale = 0.5
