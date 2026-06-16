@@ -3116,12 +3116,9 @@ dependencies = [
 name = "fuse-lab"
 version = "0.1.0"
 dependencies = [
- "bytemuck",
- "fast-surface-nets",
  "glam 0.30.10",
  "image",
  "martini_rtin",
- "meshopt",
  "rocktree",
  "serde",
  "serde_json",
@@ -7507,7 +7504,10 @@ dependencies = [
 name = "veldera_terrain_collider"
 version = "0.1.0"
 dependencies = [
+ "bytemuck",
+ "fast-surface-nets",
  "glam 0.30.10",
+ "meshopt",
  "proptest",
  "rocktree",
  "rocktree-decode",

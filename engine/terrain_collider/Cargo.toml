@@ -7,10 +7,18 @@ license.workspace = true
 description = "Pure terrain-collider geometry: octant-mask clipping, mesh-space border fusion, and boundary skirts over rocktree tile meshes"
 
 [dependencies]
+fast-surface-nets = { workspace = true }
 glam = { workspace = true }
 rocktree = { workspace = true }
 rocktree-decode = { workspace = true }
 serde = { workspace = true, features = ["derive"] }
+
+# Quadric-edge-collapse decimation of the extracted wrap. meshopt is a C
+# binding whose wasm32 build is unverified, so it is native-only; on web the
+# wrap currently ships undecimated (see TODO in src/wrap.rs and todo/collider-v3.md).
+[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+bytemuck = { workspace = true }
+meshopt = { workspace = true }
 
 [dev-dependencies]
 proptest = { workspace = true }

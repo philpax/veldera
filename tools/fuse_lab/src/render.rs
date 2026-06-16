@@ -10,9 +10,13 @@ use std::{collections::HashMap, error::Error};
 use glam::Vec3;
 use image::{Rgb, RgbImage};
 use rocktree::Mesh as RocktreeMesh;
-use veldera_terrain_collider::{BuildSettings, build_tile_geometry, dump::TileSetDump};
+use veldera_terrain_collider::{
+    BuildSettings,
+    dump::TileSetDump,
+    wrap::{WrapSettings, wrap_soup},
+};
 
-use crate::wrap::wrap_soup;
+use crate::wrap::base_soup;
 
 /// Width and height of one panel, in pixels.
 const PANEL: (u32, u32) = (900, 760);
@@ -26,7 +30,6 @@ pub fn run(
     voxel_size: f32,
     out_path: &str,
 ) -> Result<(), Box<dyn Error>> {
-    let tiles: HashMap<&str, _> = dump.tiles.iter().map(|t| (t.path.as_str(), t)).collect();
     // Scene origin: the captured camera position, so the meshes land near zero.
     let origin = Vec3::new(
         dump.camera_position[0] as f32,
@@ -34,29 +37,16 @@ pub fn run(
         dump.camera_position[2] as f32,
     );
     let up = origin.normalize_or_zero();
+    let wrap = WrapSettings {
+        voxel_size,
+        ..WrapSettings::default()
+    };
 
     let mut orig = Scene::default();
     let mut wrapped = Scene::default();
 
     for tile in &dump.tiles {
-        let mut settings = *base_settings;
-        settings.fusion_range = 0.0;
-        settings.skirt_depth = 0.0;
-        let tile_meshes = tile.tile_meshes(&meshes[tile.path.as_str()], tile.world_position);
-        let neighbours: Vec<_> = tile
-            .laterals
-            .iter()
-            .filter_map(|l| tiles.get(l.as_str()))
-            .map(|n| n.tile_meshes(&meshes[n.path.as_str()], tile.world_position))
-            .collect();
-        let Some(base) = build_tile_geometry(
-            &tile_meshes,
-            tile.octant_mask,
-            tile.sub_cut,
-            &neighbours,
-            tile.down(),
-            &settings,
-        ) else {
+        let Some(base) = base_soup(tile, meshes, dump, base_settings) else {
             continue;
         };
         // Both geometries are in the tile's own frame; shift into the scene
@@ -67,8 +57,8 @@ pub fn run(
             (tile.world_position[2] - dump.camera_position[2]) as f32,
         );
         orig.add(&base.vertices, &base.triangles, shift);
-        let (wv, wt, _, _) = wrap_soup(&base.vertices, &base.triangles, tile.down(), voxel_size);
-        wrapped.add(&wv, &wt, shift);
+        let w = wrap_soup(&base.vertices, &base.triangles, tile.down(), &wrap);
+        wrapped.add(&w.vertices, &w.triangles, shift);
     }
 
     // A shared camera framing the union of both scenes keeps them comparable.

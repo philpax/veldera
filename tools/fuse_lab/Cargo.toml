@@ -7,12 +7,9 @@ license.workspace = true
 description = "Offline workbench for terrain-collider border fusion: load an in-game tile dump, rebuild the colliders, and report per-border discrepancies"
 
 [dependencies]
-bytemuck = { workspace = true }
-fast-surface-nets = { workspace = true }
 glam = { workspace = true }
 image = { workspace = true, features = ["png"] }
 martini_rtin = { workspace = true }
-meshopt = { workspace = true }
 rocktree = { workspace = true }
 serde = { workspace = true, features = ["derive"] }
 serde_json = { workspace = true }
