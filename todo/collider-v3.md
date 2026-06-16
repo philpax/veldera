@@ -120,12 +120,51 @@ solid cull to the wrap, per the cleanup-first decision.
   cells everywhere → Surface Nets emits non-manifold vertices everywhere. Voxel
   cleanup of the solid mask cannot smooth that crust.
 
-**Conclusion: cleanup-first has reached its limit for the well-formedness goal,
-and the root cause is sign-field noise — the pre-authorized trigger to escalate
-to robust signing.** Next: a smooth, robust signed field (signed-distance
-re-derivation and/or the fast/generalized winding number) so the zero-crossing is
-clean and Surface Nets extracts a manifold surface. Re-measure the same dumps;
-only then revisit decimation (Phase 4) and the MDC A/B.
+### Phase 2 — sign-field majority filter mostly solves well-formedness (2026-06-16)
+
+Rather than the full winding-number port, the cheaper hypothesis: the non-manifold
+vertices come from *single-voxel sign flips* in the flood crust, so a majority
+filter over the inside/outside field (each voxel takes its 26-neighbourhood vote)
+should erase them. It does, decisively. With 2 passes (`SIGN_SMOOTH_PASSES`) plus
+a mesh-component cull, on the flat dump at 0.25 m:
+
+| metric | baseline | +majority filter |
+| --- | --- | --- |
+| non-manifold edges (final) | 141 134 | **713** |
+| non-manifold edges (raw SN) | 416 218 | **1 470** |
+| closed-manifold tiles | 1/203 | **75/182** |
+| slivers | 178 | 29 |
+| worst aspect | 1.3e7 | 3 657 |
+
+So the **well-formedness goal — manifold, watertight, sliver-free — is largely
+reachable cheaply**, without the winding-number port the prior wrap doc assumed
+was load-bearing. (1 pass is *worse* than 2: a half-smoothed crust has more
+ambiguous cells, not fewer.)
+
+**The residual frontier is the same semantic wall, not topology:**
+- **Fragmentation:** ~6 mesh components/tile remain, and the relative-size cull
+  barely dents it — they are *not* small floaters but many similarly-sized pieces
+  (ground + separate building blocks). Distinguishing "building to keep" from
+  "fragment to drop" is the surface-selection problem no geometric pass solves.
+- **Thin-tile erosion:** the majority filter eats ~20/203 thin tiles to nothing
+  (203→182 wrapped). Gentler handling (finer voxels for thin/coarse tiles, or a
+  smoothing strength tied to shell thickness) needed.
+- **Divergence (RMS ~1.8 m, ~80 % "unmatched"):** largely an artefact — the
+  metric compares against the raw soup *including* the clutter the wrap correctly
+  removes, so clutter removal reads as divergence. Needs an eyeball (`--obj`) and
+  a clutter-aware metric, not a literal reading.
+
+**Net conclusion.** The cheap pipeline (voxelize → flood sign → majority-filter →
+Surface Nets → mesh cull) yields well-formed, watertight, manifold ground
+colliders at ~25–40 ms/tile. It does *not* solve clutter/fragmentation or
+thin-tile erosion — the prior research's semantic wall stands. Winding-number
+signing remains available to push fidelity further, but is no longer required for
+basic well-formedness.
+
+**Decision pending user input:** whether to (a) proceed to engine integration with
+this cheap pipeline, accepting multi-component colliders and smoothing for now;
+(b) invest in winding-number signing and/or per-tile resolution first; or
+(c) reconsider scope. See the session summary.
 
 ## Pluggable-extractor evaluation (deferred decision, phase 1/4)
 

@@ -46,6 +46,15 @@ const OPEN_RADIUS: u32 = 0;
 /// Solid connected components smaller than this fraction of the largest are
 /// dropped as floaters/noise after the open.
 const SOLID_COMPONENT_FRACTION: f32 = 0.02;
+/// Majority-filter passes over the inside/outside field before extraction: each
+/// voxel takes the majority vote of its 26-neighbourhood, erasing the
+/// single-voxel sign flips that make the flood crust jagged (and Surface Nets
+/// non-manifold). 0 disables.
+const SIGN_SMOOTH_PASSES: u32 = 2;
+/// Extracted-mesh connected components smaller than this fraction of the largest
+/// (by triangle count) are dropped — the isolated islands and floating slabs the
+/// sign smoothing fragments off the main surface.
+const MESH_COMPONENT_FRACTION: f32 = 0.05;
 
 /// Run the wrap prototype over a loaded dump.
 pub fn run(
@@ -299,6 +308,9 @@ fn wrap_soup(
     let mut inside: Vec<bool> = exterior.iter().map(|&e| !e).collect();
     // A radius of 0 makes the open a no-op (the erode/dilate loops do not run).
     morphological_open(&mut inside, &shape, dims, OPEN_RADIUS);
+    for _ in 0..SIGN_SMOOTH_PASSES {
+        majority_filter(&mut inside, &shape, dims);
+    }
     cull_small_solid_components(&mut inside, &shape, dims, SOLID_COMPONENT_FRACTION);
     for i in 0..size {
         exterior[i] = !inside[i];
@@ -320,6 +332,10 @@ fn wrap_soup(
         [dims[0] - 1, dims[1] - 1, dims[2] - 1],
         &mut buffer,
     );
+
+    // Drop isolated mesh islands the sign smoothing fragmented off the main
+    // surface (floating slabs, clutter caps) before measuring or decimating.
+    buffer.indices = cull_mesh_components(&buffer.indices, MESH_COMPONENT_FRACTION);
 
     let raw_tris = buffer.indices.len() / 3;
 
@@ -412,6 +428,92 @@ fn morphology_step(inside: &mut [bool], shape: &RuntimeShape<u32, 3>, dims: [u32
                     // Become solid if solid or any in-grid neighbour is solid.
                     inside[i] = src[i] || neighbours.iter().flatten().any(|&n| src[n]);
                 }
+            }
+        }
+    }
+}
+
+/// Keep only triangles in connected components (by shared vertex index) whose
+/// triangle count is at least `fraction` of the largest component's. Returns
+/// the filtered index list; unreferenced vertices are left in place (harmless).
+fn cull_mesh_components(indices: &[u32], fraction: f32) -> Vec<u32> {
+    let tris: Vec<[u32; 3]> = indices
+        .chunks_exact(3)
+        .map(|c| [c[0], c[1], c[2]])
+        .collect();
+    if tris.is_empty() {
+        return indices.to_vec();
+    }
+    let max_vertex = indices.iter().copied().max().unwrap_or(0) as usize;
+    let mut parent: Vec<u32> = (0..=max_vertex as u32).collect();
+    fn find(parent: &mut [u32], mut x: u32) -> u32 {
+        while parent[x as usize] != x {
+            parent[x as usize] = parent[parent[x as usize] as usize];
+            x = parent[x as usize];
+        }
+        x
+    }
+    for &[a, b, c] in &tris {
+        let ra = find(&mut parent, a);
+        let rb = find(&mut parent, b);
+        parent[ra as usize] = rb;
+        let rbc = find(&mut parent, b);
+        let rc = find(&mut parent, c);
+        parent[rbc as usize] = rc;
+    }
+    let mut counts: HashMap<u32, usize> = HashMap::new();
+    let roots: Vec<u32> = tris
+        .iter()
+        .map(|&[a, _, _]| {
+            let r = find(&mut parent, a);
+            *counts.entry(r).or_insert(0) += 1;
+            r
+        })
+        .collect();
+    let largest = counts.values().copied().max().unwrap_or(0);
+    let threshold = ((largest as f32 * fraction).ceil() as usize).max(1);
+    let mut out = Vec::with_capacity(indices.len());
+    for (tri, root) in tris.iter().zip(roots) {
+        if counts[&root] >= threshold {
+            out.extend_from_slice(tri);
+        }
+    }
+    out
+}
+
+/// Majority filter over the 26-neighbourhood (plus self): each voxel becomes
+/// solid iff the majority of its in-grid neighbours are solid. One pass erases
+/// isolated single-voxel sign flips — the jagged-crust noise that makes Surface
+/// Nets non-manifold — while leaving flat interfaces unmoved. Out-of-grid
+/// neighbours abstain (counted in neither the votes nor the total).
+fn majority_filter(inside: &mut [bool], shape: &RuntimeShape<u32, 3>, dims: [u32; 3]) {
+    let src = inside.to_vec();
+    for z in 0..dims[2] {
+        for y in 0..dims[1] {
+            for x in 0..dims[0] {
+                let mut votes = 0i32;
+                let mut total = 0i32;
+                for dz in -1i32..=1 {
+                    for dy in -1i32..=1 {
+                        for dx in -1i32..=1 {
+                            let (nx, ny, nz) = (x as i32 + dx, y as i32 + dy, z as i32 + dz);
+                            if nx < 0
+                                || ny < 0
+                                || nz < 0
+                                || nx >= dims[0] as i32
+                                || ny >= dims[1] as i32
+                                || nz >= dims[2] as i32
+                            {
+                                continue;
+                            }
+                            let n = shape.linearize([nx as u32, ny as u32, nz as u32]) as usize;
+                            total += 1;
+                            votes += i32::from(src[n]);
+                        }
+                    }
+                }
+                let i = shape.linearize([x, y, z]) as usize;
+                inside[i] = 2 * votes > total;
             }
         }
     }
