@@ -338,41 +338,41 @@ impl ColliderV2State {
         }
         cut
     }
+}
 
-    /// The laterally adjacent selected tiles of `path`: selection entries
-    /// whose bounding spheres touch `path`'s, excluding `path` itself,
-    /// anything on its own ancestor chain, and tiles more than a few LoD
-    /// depths away (the camera's coarse chain siblings have planet-scale
-    /// bounding spheres that would otherwise count as neighbours of
-    /// everything). These are the tiles a collider build fuses its rim
-    /// against.
-    fn lateral_neighbour_paths(&self, lod_state: &LodState, path: OctreePath) -> Vec<OctreePath> {
-        /// Maximum LoD depth difference for a fusable neighbour.
-        const MAX_DEPTH_DIFFERENCE: usize = 3;
+/// The laterally adjacent selected tiles of `path`: selection entries
+/// whose bounding spheres touch `path`'s, excluding `path` itself,
+/// anything on its own ancestor chain, and tiles more than a few LoD
+/// depths away (the camera's coarse chain siblings have planet-scale
+/// bounding spheres that would otherwise count as neighbours of
+/// everything). These are the tiles a collider build fuses its rim
+/// against.
+pub(crate) fn lateral_neighbour_paths(lod_state: &LodState, path: OctreePath) -> Vec<OctreePath> {
+    /// Maximum LoD depth difference for a fusable neighbour.
+    const MAX_DEPTH_DIFFERENCE: usize = 3;
 
-        let Some(obb) = lod_state.node_obbs.get(&path) else {
-            return Vec::new();
-        };
-        let radius = obb.extents.length();
-        let mut laterals: Vec<OctreePath> = lod_state
-            .physics_target_paths
-            .keys()
-            .filter(|n| {
-                **n != path
-                    && n.depth().abs_diff(path.depth()) <= MAX_DEPTH_DIFFERENCE
-                    && !n.starts_with(path)
-                    && !path.starts_with(**n)
+    let Some(obb) = lod_state.node_obbs.get(&path) else {
+        return Vec::new();
+    };
+    let radius = obb.extents.length();
+    let mut laterals: Vec<OctreePath> = lod_state
+        .physics_target_paths
+        .keys()
+        .filter(|n| {
+            **n != path
+                && n.depth().abs_diff(path.depth()) <= MAX_DEPTH_DIFFERENCE
+                && !n.starts_with(path)
+                && !path.starts_with(**n)
+        })
+        .filter(|n| {
+            lod_state.node_obbs.get(*n).is_some_and(|nobb| {
+                nobb.center.distance(obb.center) <= radius + nobb.extents.length()
             })
-            .filter(|n| {
-                lod_state.node_obbs.get(*n).is_some_and(|nobb| {
-                    nobb.center.distance(obb.center) <= radius + nobb.extents.length()
-                })
-            })
-            .copied()
-            .collect();
-        laterals.sort_unstable();
-        laterals
-    }
+        })
+        .copied()
+        .collect();
+    laterals.sort_unstable();
+    laterals
 }
 
 /// Mirror the loaded render set into the near-field collider selection:
@@ -736,7 +736,7 @@ fn update_physics_colliders(
                         || live.roads != roads
                         || (fusion_enabled && distance <= streaming.wysiwyg_radius && {
                             let (_, fingerprint) =
-                                cached_adjacency(&mut adjacency_cache, &v2, &lod_state, *path);
+                                cached_adjacency(&mut adjacency_cache, &lod_state, *path);
                             live.adjacency != fingerprint
                         })
                 }
@@ -847,7 +847,7 @@ fn update_physics_colliders(
         // border compute the same curve in any build order. With fusion
         // off, rims are independent and the build needs no neighbours.
         let (laterals, adjacency) = if fusion_enabled {
-            cached_adjacency(&mut adjacency_cache, &v2, &lod_state, path)
+            cached_adjacency(&mut adjacency_cache, &lod_state, path)
         } else {
             (Vec::new(), 0)
         };
@@ -1238,12 +1238,11 @@ fn commit_collider_result(
 /// borrow state mutably.
 fn cached_adjacency(
     cache: &mut HashMap<OctreePath, (Vec<OctreePath>, u64)>,
-    v2: &ColliderV2State,
     lod_state: &LodState,
     path: OctreePath,
 ) -> (Vec<OctreePath>, u64) {
     let (laterals, fingerprint) = cache.entry(path).or_insert_with(|| {
-        let laterals = v2.lateral_neighbour_paths(lod_state, path);
+        let laterals = lateral_neighbour_paths(lod_state, path);
         let fingerprint = adjacency_fingerprint(&laterals, &lod_state.node_data);
         (laterals, fingerprint)
     });
@@ -1309,9 +1308,9 @@ pub struct TileDumpRequest {
 /// the filesystem-backed dump writer.
 #[cfg(not(target_arch = "wasm32"))]
 #[must_use]
-fn capture_tile_dump(
+pub(crate) fn capture_tile_dump(
     lod_state: &LodState,
-    v2: &ColliderV2State,
+    v2: Option<&ColliderV2State>,
     streaming: &PhysicsStreamingConfig,
     road_overlay: &RoadOverlay,
     camera_pos: DVec3,
@@ -1321,7 +1320,8 @@ fn capture_tile_dump(
         DumpMesh, DumpRibbon, DumpSettings, DumpTile, TileSetDump,
     };
 
-    let coverage = v2.selected_coverage(lod_state);
+    // Sub-octant carve cells are a v2-only concept; v3 wraps each tile whole.
+    let coverage = v2.map(|v2| v2.selected_coverage(lod_state));
     let road_index = RoadIndex::build(
         road_overlay,
         COLLIDER_PIPELINE.is_v2() && streaming.road_colliders,
@@ -1337,13 +1337,13 @@ fn capture_tile_dump(
             rotation: node_data.transform.rotation.to_array(),
             scale: node_data.transform.scale.to_array(),
             octant_mask: mask,
-            sub_cut: if streaming.collider_carve {
-                v2.sub_cut_cells(&coverage, path)
-            } else {
-                0
+            sub_cut: match (v2, coverage.as_ref()) {
+                (Some(v2), Some(coverage)) if streaming.collider_carve => {
+                    v2.sub_cut_cells(coverage, path)
+                }
+                _ => 0,
             },
-            laterals: v2
-                .lateral_neighbour_paths(lod_state, path)
+            laterals: lateral_neighbour_paths(lod_state, path)
                 .iter()
                 .map(OctreePath::to_string)
                 .collect(),
@@ -1445,13 +1445,20 @@ fn process_tile_dump_requests(
     let radius = f64::from(viz_filter.radius_m).max(50.0);
     let dump = capture_tile_dump(
         &lod_state,
-        &v2,
+        Some(&v2),
         &streaming,
         &road_overlay,
         camera.position,
         radius,
     );
 
+    write_tile_dump(&dump, radius);
+}
+
+/// Write a captured tile dump to `dumps/tiles-<unix>.json`, logging the result.
+/// Shared by the v2 and v3 dump systems.
+#[cfg(not(target_arch = "wasm32"))]
+pub(crate) fn write_tile_dump(dump: &veldera_terrain_collider::dump::TileSetDump, radius: f64) {
     let path = format!(
         "dumps/tiles-{}.json",
         std::time::SystemTime::now()
@@ -1461,7 +1468,7 @@ fn process_tile_dump_requests(
     let write = || -> std::io::Result<()> {
         std::fs::create_dir_all("dumps")?;
         let file = std::fs::File::create(&path)?;
-        serde_json::to_writer(std::io::BufWriter::new(file), &dump).map_err(std::io::Error::other)
+        serde_json::to_writer(std::io::BufWriter::new(file), dump).map_err(std::io::Error::other)
     };
     match write() {
         Ok(()) => tracing::info!(

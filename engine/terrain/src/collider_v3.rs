@@ -59,6 +59,46 @@ pub(crate) fn register(app: &mut App) {
             Update,
             reconcile_collider_wireframes.after(ColliderReconcile),
         );
+
+    // The dump writer needs filesystem access; the request resource is shared
+    // (initialised in LodPlugin::build), so the "Dump nearby tiles" button works
+    // on the v3 path too. No-op on the web.
+    #[cfg(not(target_arch = "wasm32"))]
+    app.add_systems(Update, process_tile_dump_requests);
+}
+
+/// Capture and write a tile dump when requested (the shared "Dump nearby tiles"
+/// button). v3 carries no v2 carve/road state, so the capture passes `None` —
+/// `sub_cut` is zero and roads are empty, which is exactly what a v3 wrap uses.
+#[cfg(not(target_arch = "wasm32"))]
+fn process_tile_dump_requests(
+    mut request: ResMut<crate::collider_v2::TileDumpRequest>,
+    lod_state: Res<LodState>,
+    streaming: Res<PhysicsStreamingConfig>,
+    road_overlay: Res<crate::roads::RoadOverlay>,
+    viz_filter: Res<crate::viz::ColliderVizFilter>,
+    camera_query: Query<&FloatingOriginCamera>,
+) {
+    if !request.wanted {
+        return;
+    }
+    request.wanted = false;
+    let Ok(camera) = camera_query.single() else {
+        return;
+    };
+
+    // Capture what the user is inspecting: the collider-wireframe radius, with a
+    // floor so a tight wireframe view still grabs the neighbourhood.
+    let radius = f64::from(viz_filter.radius_m).max(50.0);
+    let dump = crate::collider_v2::capture_tile_dump(
+        &lod_state,
+        None,
+        &streaming,
+        &road_overlay,
+        camera.position,
+        radius,
+    );
+    crate::collider_v2::write_tile_dump(&dump, radius);
 }
 
 /// v3 reconcile bookkeeping: the builds currently running on background tasks,
