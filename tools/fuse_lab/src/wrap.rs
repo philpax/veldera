@@ -40,6 +40,12 @@ const DECIMATE_ERROR: f32 = 0.01;
 /// Seal band, in voxels: grid nodes within this distance of a triangle block
 /// the exterior flood, closing holes up to roughly this radius.
 const SEAL_VOXELS: f32 = 0.5;
+/// Morphological-open radius, in voxels: solid features thinner than ~2× this
+/// are dissolved before extraction. 0 disables the open.
+const OPEN_RADIUS: u32 = 0;
+/// Solid connected components smaller than this fraction of the largest are
+/// dropped as floaters/noise after the open.
+const SOLID_COMPONENT_FRACTION: f32 = 0.02;
 
 /// Run the wrap prototype over a loaded dump.
 pub fn run(
@@ -85,7 +91,8 @@ pub fn run(
         };
 
         let start = Instant::now();
-        let (wv, wt, raw) = wrap_soup(&base.vertices, &base.triangles, tile.down(), voxel_size);
+        let (wv, wt, raw, raw_health) =
+            wrap_soup(&base.vertices, &base.triangles, tile.down(), voxel_size);
         wrap_secs += start.elapsed().as_secs_f64();
         if wt.is_empty() {
             continue;
@@ -97,7 +104,7 @@ pub fn run(
         overhang_tris += downward_faces(&wv, &wt, tile.down());
 
         div.accumulate(&base, &wv, &wt, tile.down());
-        health.accumulate(&wv, &wt);
+        health.accumulate(&wv, &wt, raw_health);
 
         if let Some(dir) = obj_dir {
             std::fs::create_dir_all(dir)?;
@@ -162,9 +169,14 @@ fn wrap_soup(
     triangles: &[[u32; 3]],
     down: Vec3,
     voxel: f32,
-) -> (Vec<Vec3>, Vec<[u32; 3]>, usize) {
+) -> (Vec<Vec3>, Vec<[u32; 3]>, usize, MeshHealth) {
     if triangles.is_empty() {
-        return (Vec::new(), Vec::new(), 0);
+        return (
+            Vec::new(),
+            Vec::new(),
+            0,
+            MeshHealth::measure(&[], &[], SLIVER_ALTITUDE),
+        );
     }
     // Up-aligned orthonormal frame: x = e1, y = e2, z = up.
     let up = -down.normalize_or_zero();
@@ -277,6 +289,21 @@ fn wrap_soup(
         }
     }
 
+    // Morphological cleanup of the inside (solid) region, on the voxel grid,
+    // before extraction (the cleanup-first signing strategy). An *open*
+    // (erode then dilate) dissolves thin solid features — the doubled
+    // photogrammetry sheets and noise spikes the crude flood leaves — without
+    // shrinking the bulk; a connected-component cull then drops isolated solid
+    // blobs (floaters) that survive the open. Both operate on `inside`, and we
+    // fold the result back into `exterior` so the SDF below is unchanged.
+    let mut inside: Vec<bool> = exterior.iter().map(|&e| !e).collect();
+    // A radius of 0 makes the open a no-op (the erode/dilate loops do not run).
+    morphological_open(&mut inside, &shape, dims, OPEN_RADIUS);
+    cull_small_solid_components(&mut inside, &shape, dims, SOLID_COMPONENT_FRACTION);
+    for i in 0..size {
+        exterior[i] = !inside[i];
+    }
+
     // Signed field: + outside, - inside, magnitude clamped to the band so the
     // values saturate away from the surface.
     let mut sdf = vec![0.0f32; size];
@@ -295,6 +322,21 @@ fn wrap_soup(
     );
 
     let raw_tris = buffer.indices.len() / 3;
+
+    // Health of the *raw* Surface Nets output, before decimation — to separate
+    // non-manifoldness the extractor introduces from non-manifoldness the
+    // topology-blind decimation introduces.
+    let raw_positions: Vec<Vec3> = buffer
+        .positions
+        .iter()
+        .map(|&[x, y, z]| Vec3::new(x, y, z))
+        .collect();
+    let raw_triangles: Vec<[u32; 3]> = buffer
+        .indices
+        .chunks_exact(3)
+        .map(|c| [c[0], c[1], c[2]])
+        .collect();
+    let raw_health = MeshHealth::measure(&raw_positions, &raw_triangles, SLIVER_ALTITUDE);
 
     // Decimate: Surface Nets is uniform-density (one quad per surface cell), so
     // a flat road costs thousands of triangles. Quadric edge-collapse
@@ -325,7 +367,111 @@ fn wrap_soup(
         .chunks_exact(3)
         .map(|c| [c[0], c[1], c[2]])
         .collect();
-    (out_vertices, out_triangles, raw_tris)
+    (out_vertices, out_triangles, raw_tris, raw_health)
+}
+
+/// Morphological open (erode then dilate, `radius` steps each) of the solid
+/// region on a 6-connected grid: dissolves solid features thinner than ~2×
+/// `radius` voxels while leaving the bulk's outer surface unmoved. Out-of-grid
+/// neighbours count as solid for erosion (so the bottom-anchored earth is not
+/// eaten at the boundary) and as air for dilation (so the bulk does not grow
+/// past the grid).
+fn morphological_open(
+    inside: &mut [bool],
+    shape: &RuntimeShape<u32, 3>,
+    dims: [u32; 3],
+    radius: u32,
+) {
+    for _ in 0..radius {
+        morphology_step(inside, shape, dims, true);
+    }
+    for _ in 0..radius {
+        morphology_step(inside, shape, dims, false);
+    }
+}
+
+/// One erosion (`erode = true`) or dilation pass over the 6-neighbourhood.
+fn morphology_step(inside: &mut [bool], shape: &RuntimeShape<u32, 3>, dims: [u32; 3], erode: bool) {
+    let src = inside.to_vec();
+    for z in 0..dims[2] {
+        for y in 0..dims[1] {
+            for x in 0..dims[0] {
+                let i = shape.linearize([x, y, z]) as usize;
+                let neighbours = [
+                    (x > 0).then(|| shape.linearize([x - 1, y, z]) as usize),
+                    (x + 1 < dims[0]).then(|| shape.linearize([x + 1, y, z]) as usize),
+                    (y > 0).then(|| shape.linearize([x, y - 1, z]) as usize),
+                    (y + 1 < dims[1]).then(|| shape.linearize([x, y + 1, z]) as usize),
+                    (z > 0).then(|| shape.linearize([x, y, z - 1]) as usize),
+                    (z + 1 < dims[2]).then(|| shape.linearize([x, y, z + 1]) as usize),
+                ];
+                if erode {
+                    // Stay solid only if solid and no in-grid neighbour is air.
+                    inside[i] = src[i] && neighbours.iter().flatten().all(|&n| src[n]);
+                } else {
+                    // Become solid if solid or any in-grid neighbour is solid.
+                    inside[i] = src[i] || neighbours.iter().flatten().any(|&n| src[n]);
+                }
+            }
+        }
+    }
+}
+
+/// Drop solid connected components (6-connected) smaller than `fraction` of the
+/// largest, in place — removes the isolated floaters and noise specks left by
+/// the crude flood sign.
+fn cull_small_solid_components(
+    inside: &mut [bool],
+    shape: &RuntimeShape<u32, 3>,
+    dims: [u32; 3],
+    fraction: f32,
+) {
+    let size = inside.len();
+    let mut label = vec![u32::MAX; size];
+    let mut sizes: Vec<usize> = Vec::new();
+    let mut queue: VecDeque<[u32; 3]> = VecDeque::new();
+    for z in 0..dims[2] {
+        for y in 0..dims[1] {
+            for x in 0..dims[0] {
+                let start = shape.linearize([x, y, z]) as usize;
+                if !inside[start] || label[start] != u32::MAX {
+                    continue;
+                }
+                let id = sizes.len() as u32;
+                let mut count = 0usize;
+                label[start] = id;
+                queue.push_back([x, y, z]);
+                while let Some([cx, cy, cz]) = queue.pop_front() {
+                    count += 1;
+                    let neighbours = [
+                        (cx > 0).then(|| [cx - 1, cy, cz]),
+                        (cx + 1 < dims[0]).then(|| [cx + 1, cy, cz]),
+                        (cy > 0).then(|| [cx, cy - 1, cz]),
+                        (cy + 1 < dims[1]).then(|| [cx, cy + 1, cz]),
+                        (cz > 0).then(|| [cx, cy, cz - 1]),
+                        (cz + 1 < dims[2]).then(|| [cx, cy, cz + 1]),
+                    ];
+                    for n in neighbours.into_iter().flatten() {
+                        let ni = shape.linearize(n) as usize;
+                        if inside[ni] && label[ni] == u32::MAX {
+                            label[ni] = id;
+                            queue.push_back(n);
+                        }
+                    }
+                }
+                sizes.push(count);
+            }
+        }
+    }
+    let Some(&largest) = sizes.iter().max() else {
+        return;
+    };
+    let threshold = (largest as f32 * fraction).ceil() as usize;
+    for i in 0..size {
+        if inside[i] && (sizes[label[i] as usize] < threshold) {
+            inside[i] = false;
+        }
+    }
 }
 
 /// Count wrapped triangles whose face normal points downward (against up) —
@@ -444,8 +590,14 @@ impl Divergence {
 #[derive(Default)]
 struct HealthTotals {
     tiles: usize,
+    final_health: HealthAccum,
+    raw_health: HealthAccum,
+}
+
+/// Running totals of [`MeshHealth`] across tiles, for one mesh stage.
+#[derive(Default)]
+struct HealthAccum {
     closed_manifold: usize,
-    degenerate: usize,
     slivers: usize,
     boundary_edges: usize,
     nonmanifold_edges: usize,
@@ -453,12 +605,9 @@ struct HealthTotals {
     worst_aspect: f32,
 }
 
-impl HealthTotals {
-    fn accumulate(&mut self, vertices: &[Vec3], triangles: &[[u32; 3]]) {
-        let h = MeshHealth::measure(vertices, triangles, SLIVER_ALTITUDE);
-        self.tiles += 1;
+impl HealthAccum {
+    fn add(&mut self, h: &MeshHealth) {
         self.closed_manifold += usize::from(h.is_closed_manifold());
-        self.degenerate += h.degenerate;
         self.slivers += h.slivers;
         self.boundary_edges += h.boundary_edges;
         self.nonmanifold_edges += h.nonmanifold_edges;
@@ -466,25 +615,35 @@ impl HealthTotals {
         self.worst_aspect = self.worst_aspect.max(h.worst_aspect);
     }
 
+    fn report(&self, label: &str, tiles: usize) {
+        println!(
+            "  health ({label}): {}/{} closed-manifold; {} slivers, {} boundary edges, {} non-manifold edges, {} components ({:.1}/tile); worst aspect {:.0}",
+            self.closed_manifold,
+            tiles,
+            self.slivers,
+            self.boundary_edges,
+            self.nonmanifold_edges,
+            self.components,
+            self.components as f64 / tiles.max(1) as f64,
+            self.worst_aspect,
+        );
+    }
+}
+
+impl HealthTotals {
+    fn accumulate(&mut self, vertices: &[Vec3], triangles: &[[u32; 3]], raw: MeshHealth) {
+        self.tiles += 1;
+        self.final_health
+            .add(&MeshHealth::measure(vertices, triangles, SLIVER_ALTITUDE));
+        self.raw_health.add(&raw);
+    }
+
     fn report(&self) {
         if self.tiles == 0 {
             return;
         }
-        println!(
-            "  health: {}/{} tiles closed-manifold; {} degenerate, {} slivers, {} boundary edges, {} non-manifold edges",
-            self.closed_manifold,
-            self.tiles,
-            self.degenerate,
-            self.slivers,
-            self.boundary_edges,
-            self.nonmanifold_edges,
-        );
-        println!(
-            "  components: {} total ({:.1}/tile — >1 means isolated islands/bubbles); worst aspect {:.0}",
-            self.components,
-            self.components as f64 / self.tiles as f64,
-            self.worst_aspect,
-        );
+        self.raw_health.report("raw surface-nets", self.tiles);
+        self.final_health.report("final/decimated", self.tiles);
     }
 }
 

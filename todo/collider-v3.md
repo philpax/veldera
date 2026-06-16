@@ -91,6 +91,42 @@ rather than stacking on them.
 7. **In-game debug viz + verify.** Extend the viz and dump tooling; confirm
    standing/driving on it with no invisible walls and no rats-nest.
 
+## Findings
+
+### Phase 1 — scoreboard (2026-06-16)
+
+`MeshHealth` added to the pure crate and wired into `fuse_lab --wrap`. Baseline
+(flat dump `tiles-1781315303`, 0.25 m voxels, flood sign + meshopt decimate):
+1/203 tiles closed-manifold, 141k non-manifold edges, 1.9 components/tile, RMS
+1.28 m, 27 % downward faces. The scoreboard reports raw-Surface-Nets and
+final/decimated health separately.
+
+### Phase 2/3 — cleanup-first signing hit its ceiling (2026-06-16)
+
+Added voxel-space morphological **open** (erode→dilate) and a connected-component
+solid cull to the wrap, per the cleanup-first decision.
+
+- **The open is the wrong tool here.** Photogrammetry is a ~1–2-voxel-thick
+  shell; opening the solid at radius 1 (0.5 m) erodes the visible surface inward,
+  dissolves thin tiles entirely (203→171 wrapped), and *fragments* the surface
+  (components 1.9→7.2/tile, unmatched samples 3k→24k). Disabled by default
+  (`OPEN_RADIUS = 0`); the machinery stays for targeted use.
+- **The CCL cull helps only marginally** (components 1.9→1.5/tile) because the
+  damage is not isolated floaters.
+- **Decisive diagnostic:** the *raw* Surface Nets output (pre-decimation) is
+  already **416k non-manifold edges, 1/203 closed-manifold**. So the
+  non-manifoldness is the **extractor on a noisy sign field**, not the decimation
+  pass. The flood produces a jagged 1-voxel interior/exterior crust → ambiguous
+  cells everywhere → Surface Nets emits non-manifold vertices everywhere. Voxel
+  cleanup of the solid mask cannot smooth that crust.
+
+**Conclusion: cleanup-first has reached its limit for the well-formedness goal,
+and the root cause is sign-field noise — the pre-authorized trigger to escalate
+to robust signing.** Next: a smooth, robust signed field (signed-distance
+re-derivation and/or the fast/generalized winding number) so the zero-crossing is
+clean and Surface Nets extracts a manifold surface. Re-measure the same dumps;
+only then revisit decimation (Phase 4) and the MDC A/B.
+
 ## Pluggable-extractor evaluation (deferred decision, phase 1/4)
 
 A/B Surface Nets vs Manifold Dual Contouring on the committed dumps and measure:
