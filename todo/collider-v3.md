@@ -209,11 +209,42 @@ integration.**
 
 ## Engine integration (Phase 6, in progress)
 
-Promote the validated wrap pipeline from `fuse_lab` into the pure
-`veldera_terrain_collider` crate (engine-agnostic core), then add a `terrain_v3`
-builder and a `collider_v3` module reusing v2's off-thread / cancellation /
-revalidation / WYSIWYG-selection plumbing, behind a new `ENABLE_V3_COLLIDERS`
-const. Finally viz + in-game verification.
+Done so far:
+- **Pure-crate core.** The wrap pipeline lives in `veldera_terrain_collider::wrap`
+  (`WrapSettings`, `wrap_soup`, `WrappedMesh`), tested, shared by `fuse_lab` and the
+  engine. Decimation (`meshopt`, a C binding) is native-only behind a `cfg`; on
+  wasm the wrap ships undecimated (verified to compile for `wasm32`). **TODO:
+  web decimation** — verify `meshopt` builds for wasm32 or swap in a pure-Rust
+  simplifier before v3 ships on web (also noted in `src/wrap.rs`).
+- **Pipeline selection is an enum, not a bool.** `ColliderPipeline { Legacy,
+  V2WithRoads, V3Voxel }` + `COLLIDER_PIPELINE` const replaced
+  `ENABLE_V2_COLLIDERS_WITH_ROADS`, so the pipelines are mutually exclusive by
+  construction. Shared selection sites gate on `uses_streaming_selection()` (v2 or
+  v3); v2-only sites on `is_v2()`. Still `Legacy`.
+- **`terrain_v3` builder** (`veldera_physics::terrain_v3`): octant-clip → wrap →
+  `try_trimesh`, returning `WrapBuildStats`. Per-tile independent for now.
+
+Remaining:
+- **`collider_v3` reconcile.** v2's reconcile (`collider_v2.rs`, ~1500 lines:
+  off-thread dispatch, in-flight dedup, commit-with-revalidation, generation
+  early-out, prefix-refcount coverage, spawn-persistence/speed gates) is the
+  plumbing to reuse. v3 is *simpler* — no roads, no fusion adjacency, no carving —
+  so the rebuild key is just `(octant_mask, sub_cut)`. Two options: (a) extract the
+  shared orchestration from `collider_v2` and parameterise the per-tile build, or
+  (b) a lean `collider_v3` modelled on v2 minus roads/fusion/carve. `compute_physics_targets`
+  (the WYSIWYG mirror) is already shared — `lod.rs` calls it on
+  `uses_streaming_selection()`.
+- **Wire the V3 build registration** in `lod.rs` (`LodPlugin::build`, currently
+  `if is_v2()` → else legacy; add the v3 arm).
+- **Viz + in-game verify**: a `viz_v3` (or reuse the wireframe path) and stand/drive
+  on it.
+
+Gate status at this checkpoint: every crate touched (`veldera_terrain_collider`,
+`veldera_terrain`, `veldera_physics`, `veldera_roads`, `fuse-lab`) passes
+`clippy --all-targets -D warnings`; the pure crate compiles for `wasm32`. The
+workspace-wide `--all-features` clippy has 6 *pre-existing* errors in
+`rocktree-decode` (present on the base commit `15692ed`; clippy 1.95 lint debt,
+not from this work) — left untouched as out of scope.
 
 ## Pluggable-extractor evaluation (deferred decision, phase 1/4)
 
