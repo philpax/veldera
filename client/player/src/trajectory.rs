@@ -2,10 +2,11 @@
 //! arc that previews where a charged leap will land.
 //!
 //! The charged leap is hard to aim by feel, so while charging this module draws
-//! a flat ribbon that traces the predicted flight path and caps it with an
-//! arrowhead at the landing point, its colour shifting from
+//! a stream of flat chevron glyphs along the predicted flight path, flowing
+//! toward a larger arrowhead at the landing point. The colour shifts from
 //! [`LeapArcConfig::near_color`] to [`LeapArcConfig::far_color`] with the leap
-//! distance and a bright pulse scrolling along it toward the target.
+//! distance. The chevrons are spaced with gaps (and skipped right at the player
+//! end) so the arc points the way without curtaining the crosshair.
 //!
 //! Crucially, the preview *is* the controller: the two functions that decide a
 //! leap's path — [`leap_launch_impulse`] (the velocity kick on release) and
@@ -110,15 +111,13 @@ pub(crate) fn airborne_velocity_step(
 pub struct LeapArcConfig {
     /// Master switch. `false` hides the arc entirely.
     pub enabled: bool,
-    /// Ribbon width (m).
-    pub width_m: f32,
-    /// Lift (m) along local up applied to every vertex, so the arc floats just
+    /// Lift (m) along local up applied to every glyph, so the arc floats just
     /// clear of the terrain it grazes rather than z-fighting it.
     pub ground_offset_m: f32,
-    /// Ribbon colour at or below [`near_distance_m`](Self::near_distance_m),
+    /// Glyph colour at or below [`near_distance_m`](Self::near_distance_m),
     /// `[r, g, b, a]`.
     pub near_color: [f32; 4],
-    /// Ribbon colour at or above [`far_distance_m`](Self::far_distance_m),
+    /// Glyph colour at or above [`far_distance_m`](Self::far_distance_m),
     /// `[r, g, b, a]`.
     pub far_color: [f32; 4],
     /// Leap distance (m, horizontal) at/below which the arc is fully
@@ -135,17 +134,30 @@ pub struct LeapArcConfig {
     /// Maximum range (m) from the launch point before the simulation gives up
     /// (e.g. a leap clear off the edge of loaded terrain).
     pub max_range_m: f32,
-    /// Arrowhead half-width (m) at the landing point.
-    pub arrow_half_width_m: f32,
-    /// Arrowhead length (m) past the landing point.
-    pub arrow_length_m: f32,
-    /// Scroll speed of the brightness pulse (pulses per second toward the
-    /// landing).
-    pub scroll_speed: f32,
-    /// Number of pulse bands along the ribbon length.
-    pub pulse_bands: f32,
-    /// Brightness floor of the pulse, `0..1` (the dim between bright bands).
-    pub pulse_min_brightness: f32,
+    /// Chevron length (m) tip-to-back along the path.
+    pub chevron_length_m: f32,
+    /// Chevron full width (m) across the path.
+    pub chevron_width_m: f32,
+    /// Depth (m) of the V-notch cut into a chevron's back; `0` makes it a plain
+    /// triangle, larger values a sharper `>`.
+    pub chevron_notch_m: f32,
+    /// Spacing (m) between consecutive chevrons along the path. The gaps are
+    /// what keep the player's aim visible through the arc.
+    pub chevron_spacing_m: f32,
+    /// Arc length (m) skipped at the player end, so no chevron sits glued to the
+    /// camera over the crosshair.
+    pub start_offset_m: f32,
+    /// Distance (m) over which a chevron fades in just past
+    /// [`start_offset_m`](Self::start_offset_m), so they stream in smoothly
+    /// rather than popping.
+    pub fade_in_m: f32,
+    /// Flow speed (m/s) the chevron stream travels toward the landing.
+    pub flow_speed_m_s: f32,
+    /// Brightness of the chevrons at the player end, easing to full at the
+    /// landing, `0..1`.
+    pub min_brightness: f32,
+    /// Size multiplier for the larger arrowhead marking the landing point.
+    pub landing_scale: f32,
 }
 
 // ============================================================================
@@ -230,7 +242,7 @@ fn update_leap_arc(
     >,
     mut meshes: ResMut<Assets<Mesh>>,
     mut viz_query: Query<(&mut Visibility, &mut WorldPosition), Without<LogicalPlayer>>,
-    mut scroll_phase: Local<f32>,
+    mut flow_offset: Local<f32>,
     mut log_timer: Local<f32>,
 ) {
     let Ok((mut visibility, mut anchor)) = viz_query.get_mut(viz.entity) else {
@@ -279,7 +291,8 @@ fn update_leap_arc(
         return;
     }
 
-    *scroll_phase = (*scroll_phase + config.scroll_speed * time.delta_secs()).rem_euclid(1.0);
+    let spacing = config.chevron_spacing_m.max(0.5);
+    *flow_offset = (*flow_offset + config.flow_speed_m_s * time.delta_secs()).rem_euclid(spacing);
 
     let distance_t = ((path.horizontal_distance_m - config.near_distance_m)
         / (config.far_distance_m - config.near_distance_m).max(1e-3))
@@ -287,12 +300,12 @@ fn update_leap_arc(
     let distance_color = lerp_color(config.near_color, config.far_color, distance_t);
 
     if let Some(mesh) = meshes.get_mut(&viz.mesh) {
-        build_arc_mesh(
+        build_chevron_mesh(
             mesh,
             &path.points,
             &config,
             distance_color,
-            *scroll_phase,
+            *flow_offset,
             camera.position,
         );
     }
@@ -406,109 +419,184 @@ fn simulate_leap(
 // Mesh construction
 // ============================================================================
 
-/// Rebuild the ribbon-plus-arrowhead mesh for `points` (ECEF), in place.
+/// Rebuild the chevron-stream mesh for `points` (ECEF), in place.
+///
+/// Rather than a continuous band — which curtains the player's aim — the arc is
+/// a row of flat chevron glyphs spaced along the path with gaps between them,
+/// capped by a larger arrowhead at the landing. The stream is shifted by
+/// `flow_offset` so the chevrons appear to travel toward the target; glyphs near
+/// the player are skipped ([`LeapArcConfig::start_offset_m`]) and faded in
+/// ([`LeapArcConfig::fade_in_m`]) so nothing sits over the crosshair.
 ///
 /// Vertices are emitted relative to `points[0]` (the entity's
-/// [`WorldPosition`] anchor); the floating origin then places the whole arc.
-/// Colour is the distance hue modulated per-vertex by the scrolling pulse, so
-/// the animation needs no custom shader — it rides the vertex colours an unlit
-/// [`StandardMaterial`] already multiplies in.
-///
-/// The ribbon width faces `camera_ecef`: the whole arc lies in the vertical
-/// plane of the player's aim, so a width laid horizontally would be edge-on (and
-/// invisible) exactly where the player is looking. Billboarding the width toward
-/// the camera keeps the flat ribbon readable from launch to landing.
-fn build_arc_mesh(
+/// [`WorldPosition`] anchor); each glyph's width billboards toward `camera_ecef`
+/// so the flat shapes never go edge-on. Colour rides the vertex colours an unlit
+/// [`StandardMaterial`] multiplies in, so no custom shader is needed.
+fn build_chevron_mesh(
     mesh: &mut Mesh,
     points: &[DVec3],
     config: &LeapArcConfig,
     distance_color: [f32; 4],
-    phase: f32,
+    flow_offset: f32,
     camera_ecef: DVec3,
 ) {
     let anchor = points[0];
-    let half_width = config.width_m * 0.5;
     let n = points.len();
 
-    // Cumulative arc length, for the length-wise UV/pulse coordinate.
     let mut cumulative = vec![0.0f32; n];
     for i in 1..n {
         cumulative[i] = cumulative[i - 1] + (points[i] - points[i - 1]).length() as f32;
     }
-    let total = cumulative[n - 1].max(1e-3);
+    let total = cumulative[n - 1];
 
-    let mut positions: Vec<[f32; 3]> = Vec::with_capacity(n * 2 + 3);
-    let mut uvs: Vec<[f32; 2]> = Vec::with_capacity(n * 2 + 3);
-    let mut colors: Vec<[f32; 4]> = Vec::with_capacity(n * 2 + 3);
-    let mut normals: Vec<[f32; 3]> = Vec::with_capacity(n * 2 + 3);
-    let mut indices: Vec<u32> = Vec::with_capacity((n - 1) * 6 + 3);
+    let mut data = MeshData::default();
+    let spacing = config.chevron_spacing_m.max(0.5);
+    let fade_in = config.fade_in_m.max(1e-3);
+    let scale = config.landing_scale.max(1.0);
+    // Stop the stream short of the landing so it doesn't overlap the arrowhead.
+    let last_chevron = total - config.chevron_length_m * scale;
 
-    let mut last_center = Vec3::ZERO;
-    let mut last_side = Vec3::ZERO;
-    let mut last_tangent = Vec3::ZERO;
-    let mut last_up = Vec3::ZERO;
+    let mut s = config.start_offset_m + flow_offset;
+    let mut guard = 0;
+    while s <= last_chevron && guard < 1024 {
+        guard += 1;
+        let (pos, tangent) = sample_path(points, &cumulative, s);
+        // Dim at the player end, brightening toward the target, and fading in
+        // just past the start offset so chevrons stream in instead of popping.
+        let brightness = lerp(
+            config.min_brightness,
+            1.0,
+            (s / total.max(1e-3)).clamp(0.0, 1.0),
+        );
+        let alpha = ((s - config.start_offset_m) / fade_in).clamp(0.0, 1.0);
+        data.push_chevron(ChevronGlyph {
+            pos_ecef: pos,
+            center_rel: (pos - anchor).as_vec3(),
+            tangent,
+            camera_ecef,
+            ground_offset_m: config.ground_offset_m,
+            length_m: config.chevron_length_m,
+            width_m: config.chevron_width_m,
+            notch_m: config.chevron_notch_m,
+            color: scaled_color(distance_color, brightness, alpha),
+        });
+        s += spacing;
+    }
 
-    for (i, &p) in points.iter().enumerate() {
-        let up = p.normalize_or_zero().as_vec3();
-        let tangent = if i + 1 < n {
-            (points[i + 1] - p).as_vec3()
-        } else {
-            (p - points[i - 1]).as_vec3()
-        }
-        .normalize_or_zero();
-        // Width perpendicular to both the path and the view ray, so the flat
-        // ribbon faces the camera instead of going edge-on; fall back to a
-        // horizontal width if the camera looks straight down the path.
-        let view_dir = (p - camera_ecef).as_vec3().normalize_or_zero();
-        let mut side = tangent.cross(view_dir).normalize_or_zero();
+    // Landing arrowhead: a larger, full-bright chevron at the end, so the target
+    // is always marked even when the near stream is skipped on a short leap.
+    let (pos, tangent) = sample_path(points, &cumulative, total);
+    data.push_chevron(ChevronGlyph {
+        pos_ecef: pos,
+        center_rel: (pos - anchor).as_vec3(),
+        tangent,
+        camera_ecef,
+        ground_offset_m: config.ground_offset_m,
+        length_m: config.chevron_length_m * scale,
+        width_m: config.chevron_width_m * scale,
+        notch_m: config.chevron_notch_m * scale,
+        color: scaled_color(distance_color, 1.0, 1.0),
+    });
+
+    data.apply(mesh);
+}
+
+/// One chevron glyph's placement and appearance, passed to
+/// [`MeshData::push_chevron`].
+struct ChevronGlyph {
+    /// Glyph centre in ECEF, for the local up and view ray.
+    pos_ecef: DVec3,
+    /// Glyph centre relative to the mesh anchor (`points[0]`).
+    center_rel: Vec3,
+    /// Unit path tangent the chevron points along.
+    tangent: Vec3,
+    camera_ecef: DVec3,
+    ground_offset_m: f32,
+    length_m: f32,
+    width_m: f32,
+    notch_m: f32,
+    color: [f32; 4],
+}
+
+/// Accumulates the chevron-stream geometry before it is written to the mesh.
+#[derive(Default)]
+struct MeshData {
+    positions: Vec<[f32; 3]>,
+    uvs: Vec<[f32; 2]>,
+    colors: Vec<[f32; 4]>,
+    normals: Vec<[f32; 3]>,
+    indices: Vec<u32>,
+}
+
+impl MeshData {
+    /// Append one flat chevron (`>` with a V-notched back), its width
+    /// billboarded toward the camera so it never goes edge-on.
+    fn push_chevron(&mut self, glyph: ChevronGlyph) {
+        let up = glyph.pos_ecef.normalize_or_zero().as_vec3();
+        let view_dir = (glyph.pos_ecef - glyph.camera_ecef)
+            .as_vec3()
+            .normalize_or_zero();
+        let mut side = glyph.tangent.cross(view_dir).normalize_or_zero();
         if side.length_squared() < 1e-6 {
-            side = up.cross(tangent).normalize_or_zero();
+            side = up.cross(glyph.tangent).normalize_or_zero();
         }
-        let center = (p - anchor).as_vec3() + up * config.ground_offset_m;
 
-        let along = cumulative[i] / total;
-        let color = pulse_color(distance_color, along, phase, config);
+        let center = glyph.center_rel + up * glyph.ground_offset_m;
+        let half_len = glyph.length_m * 0.5;
+        let half_w = glyph.width_m * 0.5;
+        let tip = center + glyph.tangent * half_len;
+        let back = center - glyph.tangent * half_len;
+        let upper = back + side * half_w;
+        let lower = back - side * half_w;
+        let notch = back + glyph.tangent * glyph.notch_m;
 
-        positions.push((center - side * half_width).to_array());
-        positions.push((center + side * half_width).to_array());
-        uvs.push([along, 0.0]);
-        uvs.push([along, 1.0]);
-        colors.push(color);
-        colors.push(color);
-        normals.push(up.to_array());
-        normals.push(up.to_array());
-
-        last_center = center;
-        last_side = side;
-        last_tangent = tangent;
-        last_up = up;
+        let base = self.positions.len() as u32;
+        for v in [tip, upper, notch, lower] {
+            self.positions.push(v.to_array());
+            self.uvs.push([0.5, 0.5]);
+            self.colors.push(glyph.color);
+            self.normals.push(up.to_array());
+        }
+        // Two triangles fanned from the tip: (tip, upper, notch), (tip, notch,
+        // lower) — a filled `>` with the notch as its inner back vertex.
+        self.indices
+            .extend([base, base + 1, base + 2, base, base + 2, base + 3]);
     }
 
-    for i in 0..n - 1 {
-        let base = (i * 2) as u32;
-        indices.extend([base, base + 1, base + 2, base + 1, base + 3, base + 2]);
+    /// Write the accumulated attributes into `mesh`.
+    fn apply(self, mesh: &mut Mesh) {
+        mesh.insert_attribute(Mesh::ATTRIBUTE_POSITION, self.positions);
+        mesh.insert_attribute(Mesh::ATTRIBUTE_UV_0, self.uvs);
+        mesh.insert_attribute(Mesh::ATTRIBUTE_COLOR, self.colors);
+        mesh.insert_attribute(Mesh::ATTRIBUTE_NORMAL, self.normals);
+        mesh.insert_indices(Indices::U32(self.indices));
     }
+}
 
-    // Arrowhead: a flat triangle past the landing point, full-bright so the
-    // target reads clearly.
-    let tip = last_center + last_tangent * config.arrow_length_m;
-    let arrow_color = pulse_color(distance_color, 1.0, phase, config);
-    let arrow_base = positions.len() as u32;
-    positions.push((last_center - last_side * config.arrow_half_width_m).to_array());
-    positions.push((last_center + last_side * config.arrow_half_width_m).to_array());
-    positions.push(tip.to_array());
-    for _ in 0..3 {
-        uvs.push([1.0, 0.5]);
-        colors.push(arrow_color);
-        normals.push(last_up.to_array());
+/// Position (ECEF) and unit tangent at arc length `s` along the polyline.
+fn sample_path(points: &[DVec3], cumulative: &[f32], s: f32) -> (DVec3, Vec3) {
+    let n = points.len();
+    if s <= 0.0 {
+        let tangent = (points[1] - points[0]).as_vec3().normalize_or_zero();
+        return (points[0], tangent);
     }
-    indices.extend([arrow_base, arrow_base + 1, arrow_base + 2]);
-
-    mesh.insert_attribute(Mesh::ATTRIBUTE_POSITION, positions);
-    mesh.insert_attribute(Mesh::ATTRIBUTE_UV_0, uvs);
-    mesh.insert_attribute(Mesh::ATTRIBUTE_COLOR, colors);
-    mesh.insert_attribute(Mesh::ATTRIBUTE_NORMAL, normals);
-    mesh.insert_indices(Indices::U32(indices));
+    for i in 1..n {
+        if s <= cumulative[i] {
+            let seg = cumulative[i] - cumulative[i - 1];
+            let f = if seg > 1e-5 {
+                (s - cumulative[i - 1]) / seg
+            } else {
+                0.0
+            };
+            let pos = points[i - 1].lerp(points[i], f64::from(f));
+            let tangent = (points[i] - points[i - 1]).as_vec3().normalize_or_zero();
+            return (pos, tangent);
+        }
+    }
+    let tangent = (points[n - 1] - points[n - 2])
+        .as_vec3()
+        .normalize_or_zero();
+    (points[n - 1], tangent)
 }
 
 /// An empty mesh with the arc's vertex layout, so the asset is valid before the
@@ -526,25 +614,14 @@ fn empty_arc_mesh() -> Mesh {
     mesh
 }
 
-/// The distance hue with its RGB scaled by the scrolling brightness pulse at
-/// length coordinate `along` (alpha untouched).
-fn pulse_color(
-    distance_color: [f32; 4],
-    along: f32,
-    phase: f32,
-    config: &LeapArcConfig,
-) -> [f32; 4] {
-    // A triangular band sweeping toward the landing as `phase` grows, sharpened
-    // so the bright crest is narrow.
-    let f = (along * config.pulse_bands - phase).rem_euclid(1.0);
-    let triangle = 1.0 - (2.0 * f - 1.0).abs();
-    let band = triangle * triangle * triangle;
-    let brightness = config.pulse_min_brightness + (1.0 - config.pulse_min_brightness) * band;
+/// The distance hue with its RGB scaled by `brightness` and its alpha by
+/// `alpha_scale`.
+fn scaled_color(color: [f32; 4], brightness: f32, alpha_scale: f32) -> [f32; 4] {
     [
-        distance_color[0] * brightness,
-        distance_color[1] * brightness,
-        distance_color[2] * brightness,
-        distance_color[3],
+        color[0] * brightness,
+        color[1] * brightness,
+        color[2] * brightness,
+        color[3] * alpha_scale,
     ]
 }
 

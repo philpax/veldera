@@ -1,22 +1,21 @@
-# Predicted-leap arc: the flat in-world ribbon drawn while charging a leap,
-# tracing the simulated flight path to where you'll land. The simulation reuses
-# the controller's own launch and air-drag math (see `trajectory.rs`), so the
-# arc matches the real leap; it can't know how you'll steer mid-air, so it shows
-# the un-steered path.
+# Predicted-leap arc: a stream of flat in-world chevrons drawn while charging a
+# leap, flowing along the simulated flight path toward an arrowhead at the
+# landing point. The simulation reuses the controller's own launch and air-drag
+# math (see `trajectory.rs`), so the arc matches the real leap; it can't know how
+# you'll steer mid-air, so it shows the un-steered path. The chevrons leave gaps
+# (and skip the stretch right at the camera) so they don't curtain your aim.
 
 # Master switch. Set to false to turn the arc off entirely.
 enabled = true
 
-# Ribbon width (m).
-width_m = 0.4
-# Lift (m) applied along local up so the arc floats just clear of the terrain it
-# grazes instead of z-fighting it.
+# Lift (m) applied along local up so the glyphs float just clear of the terrain
+# they graze instead of z-fighting it.
 ground_offset_m = 0.35
 
 # Colour at short range, [r, g, b, a]: a calm green for a gentle hop.
-near_color = [0.25, 0.9, 0.55, 0.7]
+near_color = [0.25, 0.9, 0.55, 0.85]
 # Colour at long range, [r, g, b, a]: a hot orange-red for a big committed leap.
-far_color = [1.0, 0.35, 0.15, 0.85]
+far_color = [1.0, 0.35, 0.15, 0.95]
 # Horizontal leap distance (m) at/below which the arc is fully near_color.
 near_distance_m = 8.0
 # Horizontal leap distance (m) at/above which the arc is fully far_color.
@@ -31,14 +30,22 @@ max_flight_time_s = 8.0
 # clear off the edge of loaded terrain).
 max_range_m = 1000.0
 
-# Arrowhead half-width (m) at the landing point.
-arrow_half_width_m = 0.7
-# Arrowhead length (m) past the landing point.
-arrow_length_m = 7.0
-
-# Brightness pulse scrolling toward the landing: pulses per second.
-scroll_speed = 1.2
-# Number of bright bands along the ribbon length.
-pulse_bands = 7.0
-# Brightness floor between bands, 0..1.
-pulse_min_brightness = 0.4
+# Chevron length (m), tip to back along the path.
+chevron_length_m = 2.5
+# Chevron full width (m) across the path.
+chevron_width_m = 2.0
+# Depth (m) of the V-notch cut into a chevron's back (0 = plain triangle).
+chevron_notch_m = 1.0
+# Spacing (m) between chevrons along the path. The gaps keep your aim visible.
+chevron_spacing_m = 7.0
+# Arc length (m) skipped at the player end, so nothing sits over the crosshair.
+start_offset_m = 8.0
+# Distance (m) over which a chevron fades in just past start_offset_m, so they
+# stream in smoothly rather than popping.
+fade_in_m = 6.0
+# Flow speed (m/s) the chevron stream travels toward the landing.
+flow_speed_m_s = 14.0
+# Brightness of the chevrons at the player end, easing to full at the landing.
+min_brightness = 0.45
+# Size multiplier for the larger arrowhead marking the landing point.
+landing_scale = 2.0
