@@ -196,24 +196,25 @@ pub(super) fn render_physics_tab(ui: &mut egui::Ui, params: &mut PhysicsParams) 
                  the wireframe overlay. Dynamic colliders always draw.",
             );
         });
+        // Split min/max sliders (egui has no built-in dual-range slider). Each
+        // is clamped against the other so the range stays well-ordered.
         ui.horizontal(|ui| {
-            ui.label("Depth range:");
-            ui.add(
-                egui::DragValue::new(&mut filter.depth_min)
-                    .range(0..=filter.depth_max)
-                    .speed(0.1),
-            );
-            ui.label("to");
-            ui.add(
-                egui::DragValue::new(&mut filter.depth_max)
-                    .range(filter.depth_min..=OctreePath::MAX_DEPTH)
-                    .speed(0.1),
-            );
-        })
-        .response
-        .on_hover_text(
-            "Inclusive octree-depth range for terrain-collider wireframes. \
-             Narrow it to isolate a single LoD tier.",
-        );
+            ui.label("Depth min:");
+            ui.add(egui::Slider::new(
+                &mut filter.depth_min,
+                0..=OctreePath::MAX_DEPTH,
+            ))
+            .on_hover_text("Inclusive minimum octree depth for terrain-collider wireframes.");
+        });
+        ui.horizontal(|ui| {
+            ui.label("Depth max:");
+            ui.add(egui::Slider::new(
+                &mut filter.depth_max,
+                0..=OctreePath::MAX_DEPTH,
+            ))
+            .on_hover_text("Inclusive maximum octree depth for terrain-collider wireframes.");
+        });
+        // Keep the range well-ordered after either slider moves.
+        filter.depth_min = filter.depth_min.min(filter.depth_max);
     });
 }

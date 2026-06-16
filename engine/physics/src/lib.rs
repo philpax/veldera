@@ -199,6 +199,13 @@ pub struct PhysicsStreamingConfig {
     /// never pay a build at all. Regions with no live collider coverage
     /// bypass the gate — first coverage is never delayed. Zero disables.
     pub collider_spawn_persistence_secs: f64,
+    /// Minimum octree depth a tile must reach before it hosts a collider:
+    /// coarser (shallower) tiles are skipped entirely, since their geometry is
+    /// too low-resolution to be useful collision. Trades far-field and
+    /// partial-coverage fallback collision (regions not yet refined to this
+    /// depth get none) for a cleaner near field free of coarse over-coverage.
+    /// Zero builds at every depth. Used by the v3 pipeline.
+    pub collider_min_depth: usize,
     /// Lookahead time for the lead vector (s); colliders ahead of the player
     /// load at the next-finer band before the player arrives.
     pub lead_time: f64,

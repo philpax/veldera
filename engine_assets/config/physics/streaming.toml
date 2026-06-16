@@ -87,6 +87,13 @@ collider_refine_max_speed = 50.0
 # pay a build. Regions with no live coverage bypass the gate. Zero disables.
 collider_spawn_persistence_secs = 1.0
 
+# Minimum octree depth a tile must reach before it hosts a collider (v3
+# pipeline). Coarser tiles are skipped — their geometry is too low-resolution
+# to be useful collision, and they otherwise stack coarse over-coverage on the
+# near field. Trades far-field/partial fallback collision for a cleaner near
+# field. Zero builds at every depth.
+collider_min_depth = 10
+
 # Lead vector: load colliders ahead of the player before they arrive.
 lead_time = 1.0          # lookahead time (s)
 max_lead = 200.0         # cap on lead distance (m) so fast runs don't starve nearby

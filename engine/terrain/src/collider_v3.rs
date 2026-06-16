@@ -127,7 +127,12 @@ fn update_physics_colliders_v3(
         commit_build(&mut commands, &mut lod_state, &mut v3, camera_pos, result);
     }
 
-    let target_paths = lod_state.physics_target_paths.clone();
+    let mut target_paths = lod_state.physics_target_paths.clone();
+    // Skip coarse tiles below the configured minimum depth: their geometry is
+    // too low-resolution to be useful collision, and they otherwise stack
+    // coarse over-coverage on the near field. Dropping them from the target set
+    // also retires any already-built coarse colliders through the despawn pass.
+    target_paths.retain(|path, _| path.depth() >= streaming.collider_min_depth);
 
     // Track when each path entered the target set, resetting on drop-out, for
     // the spawn-persistence gate.
