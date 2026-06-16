@@ -238,12 +238,46 @@ Done so far:
   `COLLIDER_PIPELINE` is now `V3Voxel` on this branch.
 
 Remaining:
-- **In-game verification** (needs a human at the controls): stand/drive on the
-  v3 colliders, confirm no fall-through, no invisible walls, near-field hugs the
-  rendered ground. The wrap is per-tile independent for now, so expect possible
-  hairline seams at tile borders (global-lattice + halo is the deferred Phase 5).
+- **Border consistency (the fall-through holes).** Confirmed via a dumped spot
+  (`fuse_lab --render`, near view): the source soup is one continuous solid but
+  the per-tile wrap splits into separated columns — each column is one tile, the
+  clefts are tile boundaries — and where a gap lands on the walkable top you fall
+  through. This is the impediment to smooth driving and the next thing to fix.
+  - **Skirts don't apply:** the v3 wrap is a closed solid whose only open
+    boundary is its underground bottom; the legacy boundary-edge skirt has no top
+    edges to extrude.
+  - **Prototyped global-lattice + halo (reverted).** Anchored each tile's grid to
+    a global voxel lattice (f64 ECEF projection; the math works) and fed it a halo
+    of same-depth neighbour geometry so both sides compute the same field at
+    shared nodes. *But without clipping each tile to its own cell, the halo just
+    stacks unclipped overlap* — adjacent wraps extend into each other and stick up
+    as blobs where they don't perfectly coincide, and the side seams stayed open.
+    Reverted; the lesson is that the halo is necessary but not sufficient.
+  - **Proper design (chunked-LOD meshing), to do next:**
+    1. Global-lattice-anchored grids (depth-based voxel so same-depth neighbours
+       share nodes) — prototyped, keep.
+    2. Same-depth neighbour halo so the shared-node field agrees — prototyped, keep.
+    3. **Clip each tile's extracted mesh to its octree-cell footprint** (drop the
+       halo overlap), so neighbours meet at the cell boundary with coincident
+       vertices: no gaps, no overlap blobs. This is the missing piece; needs the
+       tile's spatial cell bounds (derive from path / OBB / scale).
+    4. Cross-depth (LOD-transition) borders: lattices nest (octree-aligned) but
+       resolutions differ — needs transition cells (transvoxel-style) or a small
+       skirt at LOD boundaries. Defer; same-depth borders are the common case.
+- **In-game verification** of the rest (stand/drive; the floater curtains are a
+  known cosmetic limit — see below).
 - Then pull v2's good parts back in (generation early-out, progressive
-  stale-masking) and revisit border consistency, the canopy lift, and overhangs.
+  stale-masking), the canopy lift, and overhangs.
+
+## Known limitations (current baseline)
+
+- **Floating-fragment curtains.** Elevated photogrammetry junk (a melted plane,
+  etc.) that dominates its own tile becomes a vertical "curtain" down to the tile
+  grid floor. `wrap_floater_fraction` catches floaters small *relative to their
+  tile* but not tile-dominating ones; "solidify below the lowest surface" was
+  tested and regresses badly (downward faces 0.4→19 %, non-manifold 333→101k).
+  The principled fix is winding-number signing (deferred); these are rare and
+  mostly cosmetic (you hit junk mid-air, you don't fall through it).
 
 Gate status: every crate touched (`veldera_terrain_collider`, `veldera_terrain`,
 `veldera_physics`, `veldera_roads`, `fuse-lab`) passes `clippy --all-targets
