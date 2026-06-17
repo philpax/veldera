@@ -25,7 +25,10 @@
 //! islands, and (on native) quadric edge-collapse decimates to a physics-friendly
 //! triangle count.
 
-use std::collections::{HashMap, VecDeque};
+use std::{
+    collections::{HashMap, VecDeque},
+    time::Instant,
+};
 
 use fast_surface_nets::{
     SurfaceNetsBuffer,
@@ -201,6 +204,19 @@ pub fn wrap_soup(input: &WrapInput, settings: &WrapSettings) -> WrappedMesh {
     let shape = RuntimeShape::<u32, 3>::new(dims);
     let size = shape.size() as usize;
 
+    // Optional per-pass profiling (`WRAP_PROFILE=1`), to see where the time goes.
+    let profile = std::env::var("WRAP_PROFILE").is_ok();
+    if profile {
+        eprintln!("wrap dims {dims:?} = {size} cells, voxel {voxel:.3} m");
+    }
+    let mut t = Instant::now();
+    let mut lap = |name: &str| {
+        if profile {
+            eprintln!("  {name}: {:.1} ms", t.elapsed().as_secs_f64() * 1000.0);
+            t = Instant::now();
+        }
+    };
+
     // Unsigned distance to the nearest triangle (tile then halo), exact within
     // a band.
     let band = 1.5 * voxel;
@@ -225,9 +241,11 @@ pub fn wrap_soup(input: &WrapInput, settings: &WrapSettings) -> WrappedMesh {
         &halo_vertices,
         input.halo_triangles,
     );
+    lap("rasterize");
 
     let barrier = settings.seal_voxels * voxel;
     let mut exterior = flood_exterior(&dist, barrier, &shape, dims);
+    lap("flood");
 
     // Drop floating photogrammetry fragments *before* solidify: a floater is a
     // small shell disconnected from the main surface, but once solidify fills
@@ -245,6 +263,7 @@ pub fn wrap_soup(input: &WrapInput, settings: &WrapSettings) -> WrappedMesh {
     if settings.solidify_below_top {
         solidify_below_top(&mut exterior, &shape, dims);
     }
+    lap("solidify");
 
     // Morphological cleanup of the solid (inside) region before signing.
     let mut inside: Vec<bool> = exterior.iter().map(|&e| !e).collect();
@@ -254,6 +273,7 @@ pub fn wrap_soup(input: &WrapInput, settings: &WrapSettings) -> WrappedMesh {
     for i in 0..size {
         exterior[i] = !inside[i];
     }
+    lap("cleanup");
 
     // Signed field: + outside, - inside, magnitude clamped to the band.
     let mut sdf = vec![0.0f32; size];
@@ -261,6 +281,7 @@ pub fn wrap_soup(input: &WrapInput, settings: &WrapSettings) -> WrappedMesh {
         let d = dist[i].min(band);
         sdf[i] = if exterior[i] { d } else { -d };
     }
+    lap("sdf");
 
     let mut buffer = SurfaceNetsBuffer::default();
     surface_nets(
@@ -270,12 +291,14 @@ pub fn wrap_soup(input: &WrapInput, settings: &WrapSettings) -> WrappedMesh {
         [dims[0] - 1, dims[1] - 1, dims[2] - 1],
         &mut buffer,
     );
+    lap("surface_nets");
 
     // Drop isolated mesh islands fragmented off the main surface.
     buffer.indices = cull_mesh_components(&buffer.indices, settings.mesh_component_fraction);
     let extracted_triangles = buffer.indices.len() / 3;
 
     let indices = decimate(&buffer, settings.decimate_error);
+    lap("mesh-cull+decimate");
 
     // Cell clip: trim the wrap to this tile's horizontal Voronoi cell — the
     // bisector between two equal-size adjacent cells' centres is their shared
