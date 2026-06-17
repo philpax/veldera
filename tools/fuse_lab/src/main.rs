@@ -68,6 +68,7 @@ fn main() -> Result<(), Box<dyn Error>> {
     let mut wrap_voxel: Option<f32> = None;
     let mut rtin_error: Option<f32> = None;
     let mut render: Option<(f32, String)> = None;
+    let mut clipmap: Option<(f32, f64, String)> = None;
     let mut i = 1;
     while i < args.len() {
         match args[i].as_str() {
@@ -131,6 +132,19 @@ fn main() -> Result<(), Box<dyn Error>> {
                     .ok_or("--render needs <voxel_m> <out.png>")?;
                 render = Some((voxel.parse()?, out.clone()));
                 i += 3;
+            }
+            "--clipmap" => {
+                let voxel = args
+                    .get(i + 1)
+                    .ok_or("--clipmap needs <voxel_m> <radius_m> <out.png>")?;
+                let radius = args
+                    .get(i + 2)
+                    .ok_or("--clipmap needs <voxel_m> <radius_m> <out.png>")?;
+                let out = args
+                    .get(i + 3)
+                    .ok_or("--clipmap needs <voxel_m> <radius_m> <out.png>")?;
+                clipmap = Some((voxel.parse()?, radius.parse()?, out.clone()));
+                i += 4;
             }
             other if dump_path.is_none() => {
                 dump_path = Some(other.to_string());
@@ -273,6 +287,9 @@ fn main() -> Result<(), Box<dyn Error>> {
     }
     if let Some((voxel, out)) = &render {
         render::run(&dump, &meshes, &settings, *voxel, out)?;
+    }
+    if let Some((voxel, radius, out)) = &clipmap {
+        render::run_clipmap(&dump, &meshes, &settings, *voxel, *radius, out)?;
     }
 
     // The road modes own OBJ export when active (they write before/after pairs);

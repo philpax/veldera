@@ -11,7 +11,7 @@
 //! surface) — e.g. `RADIUS=15 ELEV=20 WIRE=1 fuse-lab dump.json --render 0.15
 //! out.png` zooms onto the near-field tiles with the triangulation visible.
 
-use std::{collections::HashMap, error::Error};
+use std::{collections::HashMap, error::Error, time::Instant};
 
 use glam::{DVec3, Vec3};
 use image::{Rgb, RgbImage};
@@ -19,6 +19,7 @@ use rocktree::Mesh as RocktreeMesh;
 use veldera_terrain_collider::{
     BuildSettings,
     dump::TileSetDump,
+    health::MeshHealth,
     wrap::{WrapInput, WrapSettings, wrap_soup},
 };
 
@@ -85,7 +86,102 @@ pub fn run(
         wrapped.add(&w.vertices, &w.triangles, shift);
     }
 
-    // A shared camera framing the union of both scenes keeps them comparable.
+    render_pair(&orig, &wrapped, up, out_path)
+}
+
+/// Phase-1 clipmap proof: gather every tile within `radius` of the captured
+/// camera into one combined soup and wrap it as a *single* grid — no per-tile
+/// halo, lattice, or clip — to confirm the whole region comes out as one
+/// seamless surface, and to time the gather + wrap (the cost that anchors the v4
+/// speed curve). Renders the source soup against the single clipmap wrap.
+pub fn run_clipmap(
+    dump: &TileSetDump,
+    meshes: &HashMap<&str, Vec<RocktreeMesh>>,
+    base_settings: &BuildSettings,
+    voxel_size: f32,
+    radius: f64,
+    out_path: &str,
+) -> Result<(), Box<dyn Error>> {
+    let camera = DVec3::from_array(dump.camera_position);
+    let up = camera.normalize_or_zero().as_vec3();
+    let down = (-camera.normalize_or_zero()).as_vec3();
+
+    // Gather: every in-radius tile's soup, offset into the camera-relative frame
+    // and concatenated into one region.
+    let gather_start = Instant::now();
+    let mut orig = Scene::default();
+    let mut vertices: Vec<Vec3> = Vec::new();
+    let mut triangles: Vec<[u32; 3]> = Vec::new();
+    let mut tiles = 0usize;
+    for tile in &dump.tiles {
+        let off = DVec3::from_array(tile.world_position) - camera;
+        if off.length() > radius {
+            continue;
+        }
+        let Some(base) = base_soup(tile, meshes, dump, base_settings) else {
+            continue;
+        };
+        let shift = off.as_vec3();
+        orig.add(&base.vertices, &base.triangles, shift);
+        let base_index = vertices.len() as u32;
+        vertices.extend(base.vertices.iter().map(|&v| v + shift));
+        triangles.extend(
+            base.triangles
+                .iter()
+                .map(|&[a, b, c]| [a + base_index, b + base_index, c + base_index]),
+        );
+        tiles += 1;
+    }
+    let gather_ms = gather_start.elapsed().as_secs_f64() * 1000.0;
+
+    // Wrap the whole region as one grid (a large cap so it isn't coarsened).
+    let wrap = WrapSettings {
+        voxel_size,
+        max_grid_dim: 1024,
+        ..WrapSettings::default()
+    };
+    let wrap_start = Instant::now();
+    let wrapped_mesh = wrap_soup(
+        &WrapInput {
+            vertices: &vertices,
+            triangles: &triangles,
+            halo_vertices: &[],
+            halo_triangles: &[],
+            down,
+            world_position: camera,
+            cell_centre: Vec3::ZERO,
+            neighbour_centres: &[],
+        },
+        &wrap,
+    );
+    let wrap_ms = wrap_start.elapsed().as_secs_f64() * 1000.0;
+
+    let health = MeshHealth::measure(&wrapped_mesh.vertices, &wrapped_mesh.triangles, 0.02);
+    println!("clipmap: {tiles} tiles within {radius:.0} m, voxel {voxel_size} m");
+    println!(
+        "  triangles: source {} -> surface-nets {} -> decimated {}",
+        triangles.len(),
+        wrapped_mesh.extracted_triangles,
+        wrapped_mesh.triangles.len()
+    );
+    println!("  gather {gather_ms:.0} ms, wrap {wrap_ms:.0} ms");
+    println!(
+        "  health: {} non-manifold edges, {} components, {} slivers",
+        health.nonmanifold_edges, health.components, health.slivers
+    );
+
+    let mut wrapped = Scene::default();
+    wrapped.add(&wrapped_mesh.vertices, &wrapped_mesh.triangles, Vec3::ZERO);
+    render_pair(&orig, &wrapped, up, out_path)
+}
+
+/// Frame both scenes with one shared oblique camera and write them side by side.
+fn render_pair(
+    orig: &Scene,
+    wrapped: &Scene,
+    up: Vec3,
+    out_path: &str,
+) -> Result<(), Box<dyn Error>> {
     let mut min = orig.min.min(wrapped.min);
     let mut max = orig.max.max(wrapped.max);
     if !min.is_finite() || !max.is_finite() {
@@ -93,17 +189,13 @@ pub fn run(
         max = Vec3::splat(1.0);
     }
     let camera = Camera::oblique(min, max, up);
-
-    let left = camera.render(&orig, PANEL);
-    let right = camera.render(&wrapped, PANEL);
+    let left = camera.render(orig, PANEL);
+    let right = camera.render(wrapped, PANEL);
     let mut canvas = RgbImage::from_pixel(PANEL.0 * 2 + 4, PANEL.1, Rgb([20, 20, 24]));
     blit(&mut canvas, &left, 0);
     blit(&mut canvas, &right, PANEL.0 + 4);
     canvas.save(out_path)?;
-    println!(
-        "render: {} -> {out_path} (left: original soup, right: wrap; red = downward-facing)",
-        dump.tiles.len()
-    );
+    println!("render: -> {out_path} (left: source soup, right: wrap; red = downward-facing)");
     Ok(())
 }
 
