@@ -408,10 +408,54 @@ the winding-number sign from the plan. The prototype (`winding_sign` flag +
 2. ✅ **`fuse_lab --clipmap-nested`**: ring hierarchy + overlap-band transitions
    offline, nested set rendered, continuous coverage confirmed, per-ring cost
    measured (Phase 2). Radial+vertical input bound is mandatory.
-3. New `collider_v4` engine module: ring state, off-thread gather+wrap, rebuild
-   trigger, double-buffered swap; add a `V4Clipmap` `ColliderPipeline` variant.
-   (Optional dense "easy wins" first: skip the cleanup BFS, adaptive DC.)
-4. In-game verify (drive); then tune radii/resolutions live via config.
+3. ✅ **`collider_v4` engine module** (first in-engine cut, 2026-06-17): ring
+   state, off-thread gather+wrap, camera-motion rebuild trigger, double-buffered
+   swap; `V4Clipmap` `ColliderPipeline` variant wired and selected. See below.
+4. **In-game verify (drive)** ← next; then tune radii/resolutions live via config.
 
 The wrap core, the config, and the dump/render tooling all already exist — v4 is
 mostly the new ring assembly + streaming on top of them.
+
+## Phase 3: in-engine, first cut (2026-06-17)
+
+Wired v4 into the engine, selected by `COLLIDER_PIPELINE = V4Clipmap` (revert to
+`V3Voxel` for the known-good prod path). Pieces:
+
+- **`veldera_terrain_collider::clip`** — pure-crate `clip_to_slab` (vertical
+  bound) and `retain_by_radius` (radial disc / annulus), lifted from the
+  `fuse_lab` prototype with the load-bearing vertex compaction. Unit-tested.
+- **`veldera_physics::terrain_v4::create_clipmap_collider`** — combines the
+  displayed-composite tiles of one ring into a single soup, bounds it
+  (slab + radial disc), wraps it as one grid (prod flood/solidify sign, per-ring
+  voxel, `max_grid_dim` raised to 1024 so the ring keeps its resolution), trims to
+  the annulus, and returns an Avian trimesh.
+- **`veldera_terrain::collider_v4`** — the reconcile: a compile-time 3-ring table
+  (0.15 m/16 m, 0.30 m/36 m, 0.60 m/70 m, each vertically windowed), one
+  `RingSlot` of live state apiece. Each frame it commits finished builds, then
+  dispatches the finest ring whose centre the camera has left by >25% of its
+  radius (off-thread via `TaskSpawner`), reusing `physics_target_paths` (the
+  WYSIWYG composite) as the non-overlapping source set. The new collider replaces
+  the old in one frame (double buffer); an empty build keeps the old rather than
+  gapping. v4 colliders carry a per-ring `DebugRender` colour (warm/green/blue),
+  shown only when physics debug is on.
+
+The positioning mirrors v3 (spawn at `ring_centre − origin_camera_position`, mesh
+built relative to `ring_centre`), so the floating-origin shift keeps it in f32
+range and the math is shift-invariant.
+
+**Known follow-ups (all flagged in code):**
+- Ring set is a `const` table — lift into the hot-reloadable streaming config so
+  radii/voxels/windows tune live (the wrap feel knobs already are).
+- No per-ring source-LoD selection: every ring samples the same displayed
+  composite, so the coarse ring rasterizes over-detailed near tiles it then trims
+  away. Feed each ring tiles at ~its own resolution.
+- Ring transitions are a plain overlap band (centroid annulus trim); the
+  collider-level 2:1 transition quality (wheel crossing the seam) is the first
+  thing to watch when driving. Upgrade to a clean radial split or transvoxel if it
+  catches.
+- Speed-scaling (drop fine rings / grow coarse at high speed) and motion-lead are
+  designed (above) but not yet implemented — the rebuild trigger is plain camera
+  distance, no velocity lead.
+- Build cost is the dense wrap (~140 ms sparse / ~800 ms dense-downtown for the
+  fine ring); off-thread and double-buffered, but the adaptive-DC extraction win
+  is still on the table if rebuild cadence proves too slow while driving.

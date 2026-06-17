@@ -15,6 +15,7 @@
 
 pub mod collider_v2;
 pub mod collider_v3;
+pub mod collider_v4;
 pub mod loader;
 pub mod lod;
 pub mod mesh;

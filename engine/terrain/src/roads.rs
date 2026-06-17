@@ -53,6 +53,15 @@ pub enum ColliderPipeline {
     /// coupling is the root cause; the successor is v4 clipmaps (camera-centred
     /// nested volumes, no per-tile boundaries). See `todo/collider-v4.md`.
     V3Voxel,
+    /// The v4 clipmap rebuild: camera-centred nested rings (doubling voxel and
+    /// radius), each a *single* collider gathering the displayed composite tiles
+    /// over it into one bounded grid and wrapping them seamlessly
+    /// ([`veldera_physics::terrain_v4`]), rebuilt off-thread as the camera moves.
+    /// Decouples colliders from tiles entirely, so there are no per-tile borders
+    /// to reconcile — the root cause of v3's seams. First in-engine cut: ring set
+    /// is a compile-time table, no per-ring source-LoD selection yet. See
+    /// `todo/collider-v4.md`.
+    V4Clipmap,
 }
 
 impl ColliderPipeline {
@@ -66,20 +75,29 @@ impl ColliderPipeline {
         matches!(self, Self::V3Voxel)
     }
 
-    /// v2 and v3 share the WYSIWYG-mirror selection and the off-thread build
-    /// plumbing; only legacy uses the synchronous banded reconcile.
+    /// The v4 clipmap rebuild.
+    pub const fn is_v4(self) -> bool {
+        matches!(self, Self::V4Clipmap)
+    }
+
+    /// v2, v3, and v4 share the WYSIWYG-mirror selection (the displayed composite
+    /// tiles + masks) and the off-thread build plumbing; only legacy uses the
+    /// synchronous banded reconcile. v4 reuses the composite as its per-ring
+    /// source set rather than building one collider per tile.
     pub const fn uses_streaming_selection(self) -> bool {
         !matches!(self, Self::Legacy)
     }
 }
 
-/// The live collider pipeline. [`V3Voxel`](ColliderPipeline::V3Voxel) — the
-/// voxel wrap, with the borked Voronoi cell clip off (`wrap_cell_clip = false`);
-/// the per-tile borders are not perfect, but it is cleaner than legacy while v4
-/// clipmaps are built (see `todo/collider-v4.md`). Set to
-/// [`Legacy`](ColliderPipeline::Legacy) for the pre-branch raw-soup colliders or
-/// [`V2WithRoads`](ColliderPipeline::V2WithRoads) for the parked v2 pipeline.
-pub const COLLIDER_PIPELINE: ColliderPipeline = ColliderPipeline::V3Voxel;
+/// The live collider pipeline. [`V4Clipmap`](ColliderPipeline::V4Clipmap) — the
+/// camera-centred nested-ring rebuild, the first in-engine cut being evaluated
+/// (see `todo/collider-v4.md`). **Revert to
+/// [`V3Voxel`](ColliderPipeline::V3Voxel) for the known-good prod colliders** (the
+/// per-tile voxel wrap, cleaner than legacy though its tile borders are
+/// imperfect) if v4 misbehaves; or [`Legacy`](ColliderPipeline::Legacy) for the
+/// pre-branch raw-soup colliders, or [`V2WithRoads`](ColliderPipeline::V2WithRoads)
+/// for the parked v2 pipeline.
+pub const COLLIDER_PIPELINE: ColliderPipeline = ColliderPipeline::V4Clipmap;
 
 /// One fitted road ribbon in ECEF, supplied by the host.
 #[derive(Clone, Debug)]

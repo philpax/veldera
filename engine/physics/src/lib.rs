@@ -30,6 +30,7 @@ mod layers;
 pub mod terrain;
 pub mod terrain_v2;
 pub mod terrain_v3;
+pub mod terrain_v4;
 
 pub use avian3d::debug_render::DebugRender;
 use avian3d::{

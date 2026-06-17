@@ -53,7 +53,7 @@ use rocktree_decode::{OctreePath, OrientedBoundingBox};
 use serde::Deserialize;
 
 use crate::{
-    collider_v2, collider_v3,
+    collider_v2, collider_v3, collider_v4,
     loader::LoaderState,
     mesh::{
         RocktreeMeshMarker, convert_mesh, convert_texture, matrix_to_world_position_and_transform,
@@ -192,6 +192,8 @@ impl Plugin for LodPlugin {
             collider_v2::register(app);
         } else if COLLIDER_PIPELINE.is_v3() {
             collider_v3::register(app);
+        } else if COLLIDER_PIPELINE.is_v4() {
+            collider_v4::register(app);
         } else {
             app.add_systems(
                 Update,

@@ -1170,6 +1170,7 @@ fn strip_to_triangles(strip: &[u16]) -> Vec<[u32; 3]> {
 #[cfg(test)]
 mod tests;
 
+pub mod clip;
 pub mod dump;
 pub mod health;
 pub mod roads;
