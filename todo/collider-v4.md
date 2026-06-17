@@ -71,6 +71,56 @@ derived from the loaded tiles).
    `collider_v3`. Double-buffer the swap (keep the old ring live until the new
    one lands).
 
+## Streaming & rebuild
+
+The core invariant: **at every frame there is at least one live collider covering
+the camera's vicinity** — no gap during a rebuild, no ring-switch frame with zero
+coverage, no main-thread stall.
+
+**Atomicity (no uncovered frame).** Two layers guarantee it:
+- *Per-ring double buffer.* A rebuild runs off-thread into a new collider; the
+  old one keeps colliding until the new one lands, then they swap in a single
+  frame. A rebuild is never a window of no collision — at worst the live ring is
+  slightly stale (centred where the camera was a moment ago).
+- *Ring transitions overlap.* Adjacent rings share a transition band (and the
+  finest ring is a disc covering the camera, coarser ones annuli around it), so
+  the camera crossing a ring boundary is always covered by both sides. Swapping a
+  re-centred or re-sampled ring is atomic because the old ring still spans the
+  camera (the rebuild threshold is a fraction of the ring radius, so the camera
+  cannot reach the old ring's edge before the new one is ready).
+
+**Rebuild triggers.** A ring rebuilds when **any** of these hold, AND it is
+debounced (≤ once per N ms) AND not already building:
+- its centre is past a per-ring motion threshold from the lead-adjusted camera
+  (re-centre), with hysteresis so hovering at the boundary doesn't thrash; **or**
+- its backing-tile fingerprint changed — a hash of the loaded tile paths in the
+  ring footprint plus their completion versions (v3's `nodes_completed_version`,
+  scoped to a ring), so stream-in/out/refine triggers a re-sample; **or**
+- it has no live collider yet (first build).
+
+Prioritise the finest, nearest ring; dispatch ~one rebuild per frame, off-thread.
+A parked, settled camera costs nothing (no trigger fires).
+
+**Motion lead.** Bias each ring's centre ahead of the camera along its velocity
+(reuse `MotionTracker`'s lead vector) so a moving vehicle gets fresh geometry
+*ahead* of it rather than centred behind.
+
+**Speed scaling (the high-speed case).** Walking / driving / yeeting are bounded
+and the fixed ring set above handles them. Free-flying at full camera speed can
+outrun the fine ring's rebuilds — and precise near-field collision is pointless
+at that speed anyway. So make the ring set a **function of camera speed**, dialled
+in via config:
+- low speed: the full fine→coarse set, frequent rebuilds (cm-accurate near field);
+- high speed: drop the finest rings and widen the rest (coarser voxels, larger
+  radii, higher motion thresholds) so far fewer, far cheaper rebuilds keep up;
+- extreme speed (pure flight): possibly only the coarsest ring, or none until the
+  camera slows — you are not touching the ground at 100 m/s.
+
+Graceful fallback: if the camera still outruns the active finest ring, it lands on
+the next coarser (larger, rarely-rebuilt) ring — degraded resolution, never a
+hole. The exact radii/voxel/threshold curves vs speed are tuning knobs, not
+structural — start conservative and measure.
+
 ## Open questions / risks
 
 - **Fine-ring rasterization cost.** Ring 0 covers a large area at fine res (40 m
