@@ -416,46 +416,57 @@ the winding-number sign from the plan. The prototype (`winding_sign` flag +
 The wrap core, the config, and the dump/render tooling all already exist — v4 is
 mostly the new ring assembly + streaming on top of them.
 
-## Phase 3: in-engine, first cut (2026-06-17)
+## Phase 3: in-engine (2026-06-17)
 
 Wired v4 into the engine, selected by `COLLIDER_PIPELINE = V4Clipmap` (revert to
 `V3Voxel` for the known-good prod path). Pieces:
 
-- **`veldera_terrain_collider::clip`** — pure-crate `clip_to_slab` (vertical
-  bound) and `retain_by_radius` (radial disc / annulus), lifted from the
-  `fuse_lab` prototype with the load-bearing vertex compaction. Unit-tested.
+- **`veldera_terrain_collider::clip`** — pure-crate `retain_by_radius` (radial
+  disc / annulus split) and `clip_to_slab`, lifted from the `fuse_lab` prototype
+  with the load-bearing vertex compaction. Unit-tested.
 - **`veldera_physics::terrain_v4::create_clipmap_collider`** — combines the
-  displayed-composite tiles of one ring into a single soup, bounds it
-  (slab + radial disc), wraps it as one grid (prod flood/solidify sign, per-ring
-  voxel, `max_grid_dim` raised to 1024 so the ring keeps its resolution), trims to
-  the annulus, and returns an Avian trimesh.
-- **`veldera_terrain::collider_v4`** — the reconcile: a compile-time 3-ring table
-  (0.15 m/16 m, 0.30 m/36 m, 0.60 m/70 m, each vertically windowed), one
-  `RingSlot` of live state apiece. Each frame it commits finished builds, then
-  dispatches the finest ring whose centre the camera has left by >25% of its
-  radius (off-thread via `TaskSpawner`), reusing `physics_target_paths` (the
-  WYSIWYG composite) as the non-overlapping source set. The new collider replaces
-  the old in one frame (double buffer); an empty build keeps the old rather than
-  gapping. v4 colliders carry a per-ring `DebugRender` colour (warm/green/blue),
-  shown only when physics debug is on.
+  displayed-composite tiles around the camera into one soup, then wraps it in
+  concentric distance **bands** of coarsening voxel and merges them into a single
+  trimesh (prod flood/solidify sign, `max_grid_dim` 1024 as a supertall safety
+  valve). **No vertical bound** — each band wraps the full geometry height.
+- **`veldera_terrain::collider_v4`** — the reconcile: a *single* camera-centred
+  collider, rebuilt off-thread when the camera leaves the build centre by >20 % of
+  the reach, reusing `physics_target_paths` (the WYSIWYG composite) as the source.
+  Double-buffered swap (old stays live until the new lands); one `DebugRender`
+  colour, shown only when physics debug is on.
 
-The positioning mirrors v3 (spawn at `ring_centre − origin_camera_position`, mesh
-built relative to `ring_centre`), so the floating-origin shift keeps it in f32
-range and the math is shift-invariant.
+Positioning mirrors v3 (spawn at `centre − origin_camera_position`, mesh built
+relative to `centre`), so the floating-origin shift keeps it in f32 range and the
+math is shift-invariant.
 
-**Known follow-ups (all flagged in code):**
-- Ring set is a `const` table — lift into the hot-reloadable streaming config so
-  radii/voxels/windows tune live (the wrap feel knobs already are).
-- No per-ring source-LoD selection: every ring samples the same displayed
-  composite, so the coarse ring rasterizes over-detailed near tiles it then trims
-  away. Feed each ring tiles at ~its own resolution.
-- Ring transitions are a plain overlap band (centroid annulus trim); the
-  collider-level 2:1 transition quality (wheel crossing the seam) is the first
-  thing to watch when driving. Upgrade to a clean radial split or transvoxel if it
-  catches.
-- Speed-scaling (drop fine rings / grow coarse at high speed) and motion-lead are
-  designed (above) but not yet implemented — the rebuild trigger is plain camera
-  distance, no velocity lead.
-- Build cost is the dense wrap (~140 ms sparse / ~800 ms dense-downtown for the
-  fine ring); off-thread and double-buffered, but the adaptive-DC extraction win
-  is still on the table if rebuild cadence proves too slow while driving.
+**The vertical-bound dead end (and why bands).** The first cut bounded each ring's
+height (a slab around the local ground) for cost — but that broke the hard
+requirement that you interact with the *full* height of a skyscraper (v3 wrapped
+full tile height, so it could). Drive-testing showed the breakage directly:
+camera-relative slab → ground clipped out → fall-through, "rings only appear when
+submerged", and `solidify` curtains from elevated objects. A ground-centred slab
+fixed the camera-height part but is still 2.5D in extent. **Full height is
+non-negotiable**, so the bound is gone. Cost is instead managed by *distance-graded
+resolution*: the grid is `horizontal² × vertical`, so the near band stays cheap via
+a small radius (full height over a small footprint, like a v3 tile) and the far
+bands stay cheap via a coarse voxel (large radius, few cells). One collider, full
+height, coarse far field — the user's call, and the right one.
+
+**Known follow-ups (flagged in code):**
+- **Band-boundary quality** is the inherent rough edge: two voxel grids of
+  different resolution meet at a circle, so the surface steps there. The clean fix
+  is a continuous adaptive octree extractor (one grid, smoothly graded resolution,
+  no band seams) — the documented end-state. The bands are the stepped interim.
+- Band set is a `const` table — lift into the hot-reloadable streaming config to
+  tune voxels/radii live.
+- No per-band source-LoD selection: every band samples the same displayed
+  composite, so the coarse band rasterizes over-detailed near tiles. Feed each
+  band tiles at ~its own resolution to cut cost.
+- Stacked drivable surfaces (overpass over road) need a **3D sign**, not a taller
+  grid: `solidify_below_top` is 2.5D and fills under the topmost surface. Deferred
+  (a pre-existing v3 limit too).
+- Speed-scaling + motion-lead (designed above) not yet implemented — the rebuild
+  trigger is plain camera distance.
+- Build cost is the dense wrap, now full-height; off-thread and double-buffered.
+  Watch the `collider_v4` build logs while driving; if cadence lags, coarsen the
+  near band, shrink the reach, or pursue the adaptive octree.
