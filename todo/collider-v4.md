@@ -170,8 +170,7 @@ the full geometry extent. This both (a) cuts the grid height ~5× → brings a r
 back under ~150 ms, and (b) gives exactly what driving wants — the drivable
 surface plus the low building walls, dropping the roofs we never touch. The
 solidify already makes it 2.5 D; the height window just clips the grid's top.
-Next experiment: add a `--clipmap` height window and re-measure (expect the urban
-r=30 case to drop from 635 ms toward ~130 ms).
+Confirmed in Phase 1c below (up to 4× on tall regions, drivable surface intact).
 
 ## Phase 1b: sparse-by-chunking failed; spheres bound the vertical (2026-06-17)
 
@@ -206,6 +205,46 @@ too slow.
 
 Next experiment: bound the `--clipmap` grid to a sphere box (camera ± R) and
 re-measure the fine-sphere cost vs the geometry-sized grid.
+
+## Phase 1c: vertical bound confirmed (2026-06-17, `fuse_lab --clipmap-sphere`)
+
+`--clipmap-sphere <voxel> <radius> <below> <above>` gathers a region like
+`--clipmap`, then wraps it twice: full-height (the geometry-extent cylinder) and
+clipped to a vertical window `[camera − below, camera + above]` around the local
+ground (the slab/sphere bound). The clip is a true triangle-split against the two
+horizontal planes, then a vertex compaction — the latter is load-bearing, because
+`wrap_soup` sizes its grid over *every* input vertex, so leaving the clipped-away
+verts in place keeps the grid full-height (the bug the first run hit: 0 % gain
+until compaction dropped the unreferenced verts).
+
+Measured at voxel 0.15 m, window `[−4, +18]` m, across dumps of differing height:
+
+| region | full height → wrap | bounded height → wrap | speedup |
+| --- | --- | --- | --- |
+| tall block, r=25 m | 23.5 m → 570 ms | 4.7 m → 142 ms | **4.0×** |
+| medium, r=30 m | 30.7 m → 1434 ms | 20.6 m → 1190 ms | 1.2× |
+| low/flat, r=25 m | 5.9 m → 262 ms | 4.0 m → 190 ms | 1.4× |
+
+The speedup tracks exactly how much roof there is to drop: a tall block (the
+drivable surface sitting atop a 23 m column) goes 4× faster, and the render
+confirms the **drivable top surface is byte-for-byte preserved** — only the dead
+column below and the sky above are clipped. `solidify_below_top` still fills the
+surviving slab to a solid half-space down to the grid floor, so the collider the
+wheels rest on is unchanged. Low/flat regions barely change (nothing to clip),
+which is correct: the bound costs nothing where there is no roof.
+
+**Conclusion: the bound is a free, benign win** — it never touches the drivable
+surface and pays off precisely on the expensive (tall) regions that motivated it.
+It is the right vertical policy for the v4 fine sphere. The remaining lever for the
+*medium* case (where buildings are comparable to the window, so little is clipped)
+is the horizontal extent and the extractor, not the height — i.e. nesting (smaller
+fine sphere) and adaptive DC (next section), not a tighter window.
+
+Open tuning: the window is camera-relative, which assumes the camera sits near the
+drivable surface (true for a grounded vehicle/eye-height camera; these dumps bear
+it out). A free-fly camera high above the street would need the window re-centred
+on the *local ground* (raycast or the loaded tiles' lower envelope), not the
+camera — a v4 streaming concern, not a wrap concern.
 
 ## Extraction: drop Surface Nets + decimate for adaptive Dual Contouring
 

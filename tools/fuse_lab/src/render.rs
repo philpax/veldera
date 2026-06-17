@@ -292,6 +292,204 @@ pub fn run_clipmap_sparse(
     render_pair(&orig, &wrapped, up, out_path)
 }
 
+/// Phase-1 "bound the vertical" experiment: gather a camera-centred region like
+/// `run_clipmap`, then wrap it **twice** — once full-height (the cylinder the
+/// Phase-1 grid was, sized to the buildings' full extent) and once clipped to a
+/// vertical window `[camera − below, camera + above]` around the local ground (a
+/// sphere/slab bound). Renders the two wraps side by side and reports the cell
+/// count and wrap time for each, to measure how much the height bound buys.
+///
+/// The bound drops the roofs we never drive on and keeps the ground plus the low
+/// building walls; with the wrap's 2.5D solidify the clipped wall tops become
+/// solid pillars (a flat ledge at `above`, far overhead, irrelevant to driving).
+#[allow(clippy::too_many_arguments)]
+pub fn run_clipmap_sphere(
+    dump: &TileSetDump,
+    meshes: &HashMap<&str, Vec<RocktreeMesh>>,
+    base_settings: &BuildSettings,
+    voxel_size: f32,
+    radius: f64,
+    below: f32,
+    above: f32,
+    out_path: &str,
+) -> Result<(), Box<dyn Error>> {
+    let camera = DVec3::from_array(dump.camera_position);
+    let up = camera.normalize_or_zero().as_vec3();
+    let down = (-camera.normalize_or_zero()).as_vec3();
+
+    // Gather the in-radius region into one camera-relative soup (camera at the
+    // origin, so a vertex's altitude relative to the camera is `v · up`).
+    let mut vertices: Vec<Vec3> = Vec::new();
+    let mut triangles: Vec<[u32; 3]> = Vec::new();
+    let mut tiles = 0usize;
+    for tile in &dump.tiles {
+        let off = DVec3::from_array(tile.world_position) - camera;
+        if off.length() > radius {
+            continue;
+        }
+        let Some(base) = base_soup(tile, meshes, dump, base_settings) else {
+            continue;
+        };
+        let shift = off.as_vec3();
+        let base_index = vertices.len() as u32;
+        vertices.extend(base.vertices.iter().map(|&v| v + shift));
+        triangles.extend(
+            base.triangles
+                .iter()
+                .map(|&[a, b, c]| [a + base_index, b + base_index, c + base_index]),
+        );
+        tiles += 1;
+    }
+
+    let altitude = |vs: &[Vec3]| {
+        vs.iter()
+            .fold((f32::INFINITY, f32::NEG_INFINITY), |(lo, hi), v| {
+                let a = v.dot(up);
+                (lo.min(a), hi.max(a))
+            })
+    };
+    let (full_lo, full_hi) = altitude(&vertices);
+
+    // Clip to the vertical window around the camera.
+    let (clipped_verts, clipped_tris) = clip_slab(vertices.clone(), &triangles, up, -below, above);
+    let (clip_lo, clip_hi) = altitude(&clipped_verts);
+
+    let wrap_with = |verts: &[Vec3], tris: &[[u32; 3]]| {
+        let wrap = WrapSettings {
+            voxel_size,
+            max_grid_dim: 4096,
+            ..WrapSettings::default()
+        };
+        let start = Instant::now();
+        let mesh = wrap_soup(
+            &WrapInput {
+                vertices: verts,
+                triangles: tris,
+                halo_vertices: &[],
+                halo_triangles: &[],
+                down,
+                world_position: camera,
+                cell_centre: Vec3::ZERO,
+                neighbour_centres: &[],
+            },
+            &wrap,
+        );
+        (mesh, start.elapsed().as_secs_f64() * 1000.0)
+    };
+
+    let (full_mesh, full_ms) = wrap_with(&vertices, &triangles);
+    let (clip_mesh, clip_ms) = wrap_with(&clipped_verts, &clipped_tris);
+
+    let full_health = MeshHealth::measure(&full_mesh.vertices, &full_mesh.triangles, 0.02);
+    let clip_health = MeshHealth::measure(&clip_mesh.vertices, &clip_mesh.triangles, 0.02);
+    println!("clipmap-sphere: {tiles} tiles within {radius:.0} m, voxel {voxel_size} m");
+    println!(
+        "  full-height  {:.1} m tall, {full_ms:.0} ms -> {} tris, {} non-manifold, {} components",
+        full_hi - full_lo,
+        full_mesh.triangles.len(),
+        full_health.nonmanifold_edges,
+        full_health.components
+    );
+    println!(
+        "  bounded [{below:.0},+{above:.0}]  {:.1} m tall, {clip_ms:.0} ms -> {} tris, {} non-manifold, {} components",
+        clip_hi - clip_lo,
+        clip_mesh.triangles.len(),
+        clip_health.nonmanifold_edges,
+        clip_health.components
+    );
+    if full_ms > 0.0 {
+        println!("  speedup {:.1}x", full_ms / clip_ms.max(0.001));
+    }
+
+    let mut full = Scene::default();
+    full.add(&full_mesh.vertices, &full_mesh.triangles, Vec3::ZERO);
+    let mut bounded = Scene::default();
+    bounded.add(&clip_mesh.vertices, &clip_mesh.triangles, Vec3::ZERO);
+    render_pair_labelled(
+        &full,
+        &bounded,
+        up,
+        out_path,
+        "left: full-height (cylinder), right: vertical-bounded (sphere)",
+    )
+}
+
+/// Clip a soup to the slab `lo ≤ v·up ≤ hi` (a vertical window along the radial
+/// `up`). Triangles fully inside are kept, fully outside dropped, crossing ones
+/// split at the plane — so the wrapped grid's vertical extent shrinks to the
+/// window instead of the buildings' full height.
+fn clip_slab(
+    verts: Vec<Vec3>,
+    tris: &[[u32; 3]],
+    up: Vec3,
+    lo: f32,
+    hi: f32,
+) -> (Vec<Vec3>, Vec<[u32; 3]>) {
+    let (verts, tris) = clip_plane(verts, tris, up, hi);
+    let (verts, tris) = clip_plane(verts, &tris, -up, -lo);
+    // Drop the vertices no surviving triangle references: `wrap_soup` sizes its
+    // grid over *every* input vertex, so leaving the clipped-away ones in place
+    // would keep the grid full-height and defeat the bound.
+    compact(verts, tris)
+}
+
+/// Remove vertices unreferenced by `tris` and reindex, so the vertex list spans
+/// only the surviving geometry.
+fn compact(verts: Vec<Vec3>, tris: Vec<[u32; 3]>) -> (Vec<Vec3>, Vec<[u32; 3]>) {
+    let mut remap = vec![u32::MAX; verts.len()];
+    let mut out_verts: Vec<Vec3> = Vec::new();
+    let mut out_tris: Vec<[u32; 3]> = Vec::with_capacity(tris.len());
+    for tri in &tris {
+        let mut mapped = [0u32; 3];
+        for (slot, &v) in mapped.iter_mut().zip(tri.iter()) {
+            if remap[v as usize] == u32::MAX {
+                remap[v as usize] = out_verts.len() as u32;
+                out_verts.push(verts[v as usize]);
+            }
+            *slot = remap[v as usize];
+        }
+        out_tris.push(mapped);
+    }
+    (out_verts, out_tris)
+}
+
+/// Keep the half-space `v·normal ≤ offset`, splitting crossing triangles at the
+/// plane (Sutherland-Hodgman over the three edges, the kept polygon
+/// fan-triangulated). The 3D analogue of the wrap's horizontal `clip_halfspace`.
+fn clip_plane(
+    mut verts: Vec<Vec3>,
+    tris: &[[u32; 3]],
+    normal: Vec3,
+    offset: f32,
+) -> (Vec<Vec3>, Vec<[u32; 3]>) {
+    let signed = |v: Vec3| v.dot(normal) - offset;
+    let mut out: Vec<[u32; 3]> = Vec::with_capacity(tris.len());
+    for &idx in tris {
+        let p = [
+            verts[idx[0] as usize],
+            verts[idx[1] as usize],
+            verts[idx[2] as usize],
+        ];
+        let sd = [signed(p[0]), signed(p[1]), signed(p[2])];
+        let mut poly: Vec<u32> = Vec::with_capacity(4);
+        for i in 0..3 {
+            let j = (i + 1) % 3;
+            if sd[i] <= 0.0 {
+                poly.push(idx[i]);
+            }
+            if (sd[i] <= 0.0) != (sd[j] <= 0.0) {
+                let t = sd[i] / (sd[i] - sd[j]);
+                verts.push(p[i] + (p[j] - p[i]) * t);
+                poly.push((verts.len() - 1) as u32);
+            }
+        }
+        for k in 1..poly.len().saturating_sub(1) {
+            out.push([poly[0], poly[k], poly[k + 1]]);
+        }
+    }
+    (verts, out)
+}
+
 /// v4 R&D: wrap one camera-centred region twice — once with the prod flood +
 /// column-solidify sign, once with the generalized winding number — and render
 /// them side by side so the two signs can be compared directly. The winding

@@ -71,6 +71,7 @@ fn main() -> Result<(), Box<dyn Error>> {
     let mut clipmap: Option<(f32, f64, String)> = None;
     let mut clipmap_sparse: Option<(f32, f64, f32, String)> = None;
     let mut winding: Option<(f32, f64, String)> = None;
+    let mut clipmap_sphere: Option<(f32, f64, f32, f32, String)> = None;
     let mut i = 1;
     while i < args.len() {
         match args[i].as_str() {
@@ -164,6 +165,23 @@ fn main() -> Result<(), Box<dyn Error>> {
                 clipmap_sparse =
                     Some((voxel.parse()?, radius.parse()?, chunk.parse()?, out.clone()));
                 i += 5;
+            }
+            "--clipmap-sphere" => {
+                let need =
+                    "--clipmap-sphere needs <voxel_m> <radius_m> <below_m> <above_m> <out.png>";
+                let voxel = args.get(i + 1).ok_or(need)?;
+                let radius = args.get(i + 2).ok_or(need)?;
+                let below = args.get(i + 3).ok_or(need)?;
+                let above = args.get(i + 4).ok_or(need)?;
+                let out = args.get(i + 5).ok_or(need)?;
+                clipmap_sphere = Some((
+                    voxel.parse()?,
+                    radius.parse()?,
+                    below.parse()?,
+                    above.parse()?,
+                    out.clone(),
+                ));
+                i += 6;
             }
             "--winding" => {
                 let voxel = args
@@ -325,6 +343,11 @@ fn main() -> Result<(), Box<dyn Error>> {
     }
     if let Some((voxel, radius, chunk, out)) = &clipmap_sparse {
         render::run_clipmap_sparse(&dump, &meshes, &settings, *voxel, *radius, *chunk, out)?;
+    }
+    if let Some((voxel, radius, below, above, out)) = &clipmap_sphere {
+        render::run_clipmap_sphere(
+            &dump, &meshes, &settings, *voxel, *radius, *below, *above, out,
+        )?;
     }
     if let Some((voxel, radius, out)) = &winding {
         render::run_winding(&dump, &meshes, &settings, *voxel, *radius, out)?;
