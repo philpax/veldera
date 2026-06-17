@@ -42,6 +42,7 @@ use veldera_terrain_collider::{
     dump::{DumpTile, TileSetDump},
 };
 
+mod heightfield;
 mod planarize;
 mod render;
 mod roads;
@@ -77,6 +78,7 @@ fn main() -> Result<(), Box<dyn Error>> {
     let mut clipmap_nested: Option<String> = None;
     let mut planar: Option<(f32, f64, String)> = None;
     let mut adaptive: Option<(f32, f64, f32, String)> = None;
+    let mut heightfield: Option<(f32, f64, String)> = None;
     let mut i = 1;
     while i < args.len() {
         match args[i].as_str() {
@@ -214,6 +216,14 @@ fn main() -> Result<(), Box<dyn Error>> {
                     out.clone(),
                 ));
                 i += 5;
+            }
+            "--heightfield" => {
+                let need = "--heightfield needs <voxel_m> <radius_m> <out.png>";
+                let voxel = args.get(i + 1).ok_or(need)?;
+                let radius = args.get(i + 2).ok_or(need)?;
+                let out = args.get(i + 3).ok_or(need)?;
+                heightfield = Some((voxel.parse()?, radius.parse()?, out.clone()));
+                i += 4;
             }
             "--winding" => {
                 let voxel = args
@@ -389,6 +399,9 @@ fn main() -> Result<(), Box<dyn Error>> {
     }
     if let Some((voxel, radius, dc_error, out)) = &adaptive {
         render::run_adaptive(&dump, &meshes, &settings, *voxel, *radius, *dc_error, out)?;
+    }
+    if let Some((voxel, radius, out)) = &heightfield {
+        render::run_heightfield(&dump, &meshes, &settings, *voxel, *radius, out)?;
     }
     if let Some((voxel, radius, out)) = &winding {
         render::run_winding(&dump, &meshes, &settings, *voxel, *radius, out)?;

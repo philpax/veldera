@@ -683,6 +683,68 @@ pub fn run_planar(
 /// and time. The non-manifold-edge count is the crack detector: adaptive DC's
 /// octree contour is watertight by construction, so it must stay at parity with
 /// Surface Nets. Renders the two surfaces side by side.
+/// `--heightfield <voxel> <radius> <out.png>`: build the 2.5D drivable-height
+/// surface (see [`crate::heightfield`]) over the near field and render it against
+/// the source soup, so the sign-blocking and road-smoothness behaviour can be
+/// eyeballed. `RADIUS`/`ELEV` env knobs frame the view as for `--render`.
+pub fn run_heightfield(
+    dump: &TileSetDump,
+    meshes: &HashMap<&str, Vec<RocktreeMesh>>,
+    base_settings: &BuildSettings,
+    voxel_size: f32,
+    radius: f64,
+    out_path: &str,
+) -> Result<(), Box<dyn Error>> {
+    let camera = DVec3::from_array(dump.camera_position);
+    let up = camera.normalize_or_zero().as_vec3();
+
+    let mut vertices: Vec<Vec3> = Vec::new();
+    let mut triangles: Vec<[u32; 3]> = Vec::new();
+    let mut tiles = 0usize;
+    for tile in &dump.tiles {
+        let off = DVec3::from_array(tile.world_position) - camera;
+        if off.length() > radius {
+            continue;
+        }
+        let Some(base) = base_soup(tile, meshes, dump, base_settings) else {
+            continue;
+        };
+        let shift = off.as_vec3();
+        let base_index = vertices.len() as u32;
+        vertices.extend(base.vertices.iter().map(|&v| v + shift));
+        triangles.extend(
+            base.triangles
+                .iter()
+                .map(|&[a, b, c]| [a + base_index, b + base_index, c + base_index]),
+        );
+        tiles += 1;
+    }
+
+    let start = Instant::now();
+    let (hf_verts, hf_tris) =
+        crate::heightfield::build_heightfield(&vertices, &triangles, up, voxel_size, radius as f32);
+    let ms = start.elapsed().as_secs_f64() * 1000.0;
+    let health = MeshHealth::measure(&hf_verts, &hf_tris, 0.02);
+    println!(
+        "heightfield: {tiles} tiles within {radius:.0} m, voxel {voxel_size} m -> {ms:.0} ms, {} tris, {} non-manifold, {} components",
+        hf_tris.len(),
+        health.nonmanifold_edges,
+        health.components
+    );
+
+    let mut soup = Scene::default();
+    soup.add(&vertices, &triangles, Vec3::ZERO);
+    let mut hf = Scene::default();
+    hf.add(&hf_verts, &hf_tris, Vec3::ZERO);
+    render_pair_labelled(
+        &soup,
+        &hf,
+        up,
+        out_path,
+        "left: source soup, right: 2.5D height surface",
+    )
+}
+
 pub fn run_adaptive(
     dump: &TileSetDump,
     meshes: &HashMap<&str, Vec<RocktreeMesh>>,
