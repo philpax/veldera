@@ -4,19 +4,25 @@
 //! reliable signal. Renders the original soup and the voxel wrap side by side
 //! from a shared oblique orthographic camera, with downward-facing triangles
 //! tinted red so spurious overhangs and noise bubbles stand out.
+//!
+//! Two env knobs adjust the camera for close inspection: `ELEV` (camera
+//! elevation in degrees, default 35) and `RADIUS` (only render tiles within this
+//! many metres of the captured camera, default unbounded) — e.g.
+//! `RADIUS=15 ELEV=20 fuse-lab dump.json --render 0.15 out.png` zooms onto the
+//! near-field tiles to inspect border seams.
 
 use std::{collections::HashMap, error::Error};
 
-use glam::Vec3;
+use glam::{DVec3, Vec3};
 use image::{Rgb, RgbImage};
 use rocktree::Mesh as RocktreeMesh;
 use veldera_terrain_collider::{
     BuildSettings,
     dump::TileSetDump,
-    wrap::{WrapSettings, wrap_soup},
+    wrap::{WrapInput, WrapSettings, wrap_soup},
 };
 
-use crate::wrap::base_soup;
+use crate::wrap::{base_soup, tile_halo};
 
 /// Width and height of one panel, in pixels.
 const PANEL: (u32, u32) = (900, 760);
@@ -45,19 +51,34 @@ pub fn run(
     let mut orig = Scene::default();
     let mut wrapped = Scene::default();
 
+    let radius: f64 = std::env::var("RADIUS")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(f64::INFINITY);
     for tile in &dump.tiles {
+        let off = DVec3::from_array(tile.world_position) - DVec3::from_array(dump.camera_position);
+        if off.length() > radius {
+            continue;
+        }
         let Some(base) = base_soup(tile, meshes, dump, base_settings) else {
             continue;
         };
         // Both geometries are in the tile's own frame; shift into the scene
         // frame by the tile's ECEF offset from the origin.
-        let shift = Vec3::new(
-            (tile.world_position[0] - dump.camera_position[0]) as f32,
-            (tile.world_position[1] - dump.camera_position[1]) as f32,
-            (tile.world_position[2] - dump.camera_position[2]) as f32,
-        );
+        let shift = off.as_vec3();
         orig.add(&base.vertices, &base.triangles, shift);
-        let w = wrap_soup(&base.vertices, &base.triangles, tile.down(), &wrap);
+        let (halo_vertices, halo_triangles) = tile_halo(tile, meshes, dump, base_settings);
+        let w = wrap_soup(
+            &WrapInput {
+                vertices: &base.vertices,
+                triangles: &base.triangles,
+                halo_vertices: &halo_vertices,
+                halo_triangles: &halo_triangles,
+                down: tile.down(),
+                world_position: DVec3::from_array(tile.world_position),
+            },
+            &wrap,
+        );
         wrapped.add(&w.vertices, &w.triangles, shift);
     }
 
@@ -136,7 +157,11 @@ impl Camera {
         let h1 = up.cross(h0);
         // Azimuth 45°, elevation 35° looking down toward the scene.
         let az = std::f32::consts::FRAC_PI_4;
-        let el = 35f32.to_radians();
+        let el = std::env::var("ELEV")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(35.0f32)
+            .to_radians();
         let horiz = h0 * az.cos() + h1 * az.sin();
         let forward = -(horiz * el.cos() + up * el.sin()).normalize();
         let right = forward.cross(up).normalize();

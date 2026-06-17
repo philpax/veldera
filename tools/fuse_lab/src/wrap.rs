@@ -6,13 +6,13 @@
 
 use std::{collections::HashMap, error::Error, path::Path, time::Instant};
 
-use glam::Vec3;
+use glam::{DVec3, Vec3};
 use rocktree::Mesh as RocktreeMesh;
 use veldera_terrain_collider::{
     BuildSettings, BuiltGeometry, SurfaceProbe, build_tile_geometry,
     dump::{DumpTile, TileSetDump},
     health::MeshHealth,
-    wrap::{WrapSettings, WrappedMesh, wrap_soup},
+    wrap::{WrapInput, WrapSettings, WrappedMesh, wrap_soup},
 };
 
 /// Triangle altitude below which a wrapped triangle counts as a sliver (m).
@@ -45,8 +45,19 @@ pub fn run(
             continue;
         };
 
+        let (halo_vertices, halo_triangles) = tile_halo(tile, meshes, dump, base_settings);
         let start = Instant::now();
-        let wrapped = wrap_soup(&base.vertices, &base.triangles, tile.down(), &wrap);
+        let wrapped = wrap_soup(
+            &WrapInput {
+                vertices: &base.vertices,
+                triangles: &base.triangles,
+                halo_vertices: &halo_vertices,
+                halo_triangles: &halo_triangles,
+                down: tile.down(),
+                world_position: DVec3::from_array(tile.world_position),
+            },
+            &wrap,
+        );
         wrap_secs += start.elapsed().as_secs_f64();
         if wrapped.triangles.is_empty() {
             continue;
@@ -128,6 +139,42 @@ pub(crate) fn base_soup(
         tile.down(),
         &settings,
     )
+}
+
+/// Build a tile's wrap halo: each same-depth lateral neighbour's base soup,
+/// offset into this tile's local frame, concatenated. Same depth only — a
+/// coarser/finer neighbour overlaps the tile and would stamp a conflicting
+/// surface (mixed-depth borders need transition handling, deferred).
+pub(crate) fn tile_halo(
+    tile: &DumpTile,
+    meshes: &HashMap<&str, Vec<RocktreeMesh>>,
+    dump: &TileSetDump,
+    base_settings: &BuildSettings,
+) -> (Vec<Vec3>, Vec<[u32; 3]>) {
+    let tiles: HashMap<&str, &DumpTile> = dump.tiles.iter().map(|t| (t.path.as_str(), t)).collect();
+    let tile_wp = DVec3::from_array(tile.world_position);
+    let mut vertices: Vec<Vec3> = Vec::new();
+    let mut triangles: Vec<[u32; 3]> = Vec::new();
+    for lateral in &tile.laterals {
+        let Some(neighbour) = tiles.get(lateral.as_str()) else {
+            continue;
+        };
+        if neighbour.depth != tile.depth {
+            continue;
+        }
+        let Some(soup) = base_soup(neighbour, meshes, dump, base_settings) else {
+            continue;
+        };
+        let offset = (DVec3::from_array(neighbour.world_position) - tile_wp).as_vec3();
+        let base = vertices.len() as u32;
+        vertices.extend(soup.vertices.iter().map(|&v| v + offset));
+        triangles.extend(
+            soup.triangles
+                .iter()
+                .map(|&[a, b, c]| [a + base, b + base, c + base]),
+        );
+    }
+    (vertices, triangles)
 }
 
 /// `100 * num / den`, or 0 when `den` is 0.

@@ -34,6 +34,10 @@ use fast_surface_nets::{
 };
 use glam::Vec3;
 
+/// Voxels of neighbour halo included around each tile (and grid margin), so the
+/// wrap surface reaches past the tile border and meets the neighbour's.
+const HALO_MARGIN_VOXELS: u32 = 3;
+
 /// Knobs for the voxel wrap. Defaults are the values validated offline on the
 /// Jersey City and bridge dumps (see `todo/collider-v3.md`).
 #[derive(Debug, Clone, Copy)]
@@ -102,75 +106,108 @@ pub struct WrappedMesh {
     pub extracted_triangles: usize,
 }
 
-/// Wrap a triangle soup in a clean watertight surface. `down` is the tile's
-/// radial down direction (the grid is aligned to `-down`).
-pub fn wrap_soup(
-    vertices: &[Vec3],
-    triangles: &[[u32; 3]],
-    down: Vec3,
-    settings: &WrapSettings,
-) -> WrappedMesh {
-    if triangles.is_empty() {
+/// Inputs to [`wrap_soup`] for one tile.
+pub struct WrapInput<'a> {
+    /// The tile's octant-clipped soup, in the tile's local (world-position
+    /// relative) frame.
+    pub vertices: &'a [Vec3],
+    pub triangles: &'a [[u32; 3]],
+    /// Same-depth neighbour geometry near the shared borders, in this tile's
+    /// local frame (each neighbour offset by its world-position difference). It
+    /// extends the wrap across the boundary; combined with the global lattice it
+    /// makes both sides agree at the shared nodes so their surfaces coincide.
+    pub halo_vertices: &'a [Vec3],
+    pub halo_triangles: &'a [[u32; 3]],
+    /// Radial down at the tile (the grid's `-z`).
+    pub down: Vec3,
+    /// The tile's ECEF world position, used to anchor the grid to a global voxel
+    /// lattice so neighbouring tiles place nodes at the same world points.
+    pub world_position: glam::DVec3,
+}
+
+/// Wrap a triangle soup in a clean watertight surface, aligned to a global voxel
+/// lattice so adjacent tiles' surfaces coincide at shared borders.
+pub fn wrap_soup(input: &WrapInput, settings: &WrapSettings) -> WrappedMesh {
+    if input.triangles.is_empty() {
         return WrappedMesh::default();
     }
     // Up-aligned orthonormal frame: x = e1, y = e2, z = up.
-    let up = -down.normalize_or_zero();
+    let up = -input.down.normalize_or_zero();
     let reference = if up.x.abs() < 0.9 { Vec3::X } else { Vec3::Y };
     let e1 = up.cross(reference).normalize();
     let e2 = up.cross(e1);
     let to_frame = |v: Vec3| Vec3::new(v.dot(e1), v.dot(e2), v.dot(up));
     let to_world = |f: Vec3| e1 * f.x + e2 * f.y + up * f.z;
 
-    let frame_vertices: Vec<Vec3> = vertices.iter().map(|&v| to_frame(v)).collect();
-    let vertices = &frame_vertices;
+    let frame_vertices: Vec<Vec3> = input.vertices.iter().map(|&v| to_frame(v)).collect();
+    let halo_vertices: Vec<Vec3> = input.halo_vertices.iter().map(|&v| to_frame(v)).collect();
     let mut min = Vec3::splat(f32::INFINITY);
     let mut max = Vec3::splat(f32::NEG_INFINITY);
-    for v in vertices {
+    for v in &frame_vertices {
         min = min.min(*v);
         max = max.max(*v);
     }
 
-    // Coarsen the voxel so the grid (plus a 2-node pad each side) fits the cap.
+    // Coarsen the voxel so the grid (plus margin) fits the cap. Coarsening makes
+    // the voxel depend on tile extent, which breaks lattice sharing — but it only
+    // triggers for large/coarse tiles, where seams matter far less; fine
+    // near-field tiles keep the exact `voxel_size` and share.
     let extent = max - min;
-    let cap = (settings.max_grid_dim.saturating_sub(5)).max(1) as f32;
+    let margin = HALO_MARGIN_VOXELS;
+    let cap = (settings.max_grid_dim.saturating_sub(2 * margin + 1)).max(1) as f32;
     let voxel = settings
         .voxel_size
         .max(extent.x / cap)
         .max(extent.y / cap)
         .max(extent.z / cap);
-    let pad = 2u32;
-    let origin = min - Vec3::splat(pad as f32 * voxel);
-    let dim = |e: f32| (e / voxel).ceil() as u32 + 2 * pad + 1;
-    let dims = [dim(extent.x), dim(extent.y), dim(extent.z)];
+
+    // Anchor the grid to a global voxel lattice in frame coordinates relative to
+    // the planet centre, rather than the tile's own bounding box: a grid node
+    // then lands at the same world position for any tile, so two adjacent tiles
+    // (sharing the halo geometry and the same voxel) extract a surface that
+    // coincides at the border. f64 for the ECEF-scale projection; the returned
+    // origin is tile-relative and small enough for f32.
+    let wp = input.world_position;
+    let anchor = |axis: Vec3, lo: f32| -> f32 {
+        let wp_proj = wp.dot(axis.as_dvec3());
+        let global_lo = wp_proj + f64::from(lo) - f64::from(margin) * f64::from(voxel);
+        let idx = (global_lo / f64::from(voxel)).floor();
+        (idx * f64::from(voxel) - wp_proj) as f32
+    };
+    let origin = Vec3::new(anchor(e1, min.x), anchor(e2, min.y), anchor(up, min.z));
+    let dim = |hi: f32, o: f32| (((hi + margin as f32 * voxel) - o) / voxel).ceil() as u32 + 1;
+    let dims = [
+        dim(max.x, origin.x),
+        dim(max.y, origin.y),
+        dim(max.z, origin.z),
+    ];
     let shape = RuntimeShape::<u32, 3>::new(dims);
     let size = shape.size() as usize;
-    let node_pos =
-        |x: u32, y: u32, z: u32| origin + Vec3::new(x as f32, y as f32, z as f32) * voxel;
 
-    // Unsigned distance to the nearest triangle, exact within a band.
+    // Unsigned distance to the nearest triangle (tile then halo), exact within
+    // a band.
     let band = 1.5 * voxel;
     let mut dist = vec![f32::INFINITY; size];
-    for &[ia, ib, ic] in triangles {
-        let (a, b, c) = (
-            vertices[ia as usize],
-            vertices[ib as usize],
-            vertices[ic as usize],
-        );
-        let lo = (a.min(b).min(c) - origin - Vec3::splat(band)) / voxel;
-        let hi = (a.max(b).max(c) - origin + Vec3::splat(band)) / voxel;
-        let clamp = |v: f32, n: u32| (v.floor().max(0.0) as u32).min(n - 1);
-        for z in clamp(lo.z, dims[2])..=clamp(hi.z, dims[2]) {
-            for y in clamp(lo.y, dims[1])..=clamp(hi.y, dims[1]) {
-                for x in clamp(lo.x, dims[0])..=clamp(hi.x, dims[0]) {
-                    let d = point_triangle_distance(node_pos(x, y, z), a, b, c);
-                    let i = shape.linearize([x, y, z]) as usize;
-                    if d < dist[i] {
-                        dist[i] = d;
-                    }
-                }
-            }
-        }
-    }
+    rasterize_distance(
+        &mut dist,
+        &shape,
+        dims,
+        origin,
+        voxel,
+        band,
+        &frame_vertices,
+        input.triangles,
+    );
+    rasterize_distance(
+        &mut dist,
+        &shape,
+        dims,
+        origin,
+        voxel,
+        band,
+        &halo_vertices,
+        input.halo_triangles,
+    );
 
     let barrier = settings.seal_voxels * voxel;
     let mut exterior = flood_exterior(&dist, barrier, &shape, dims);
@@ -235,6 +272,41 @@ pub fn wrap_soup(
         vertices: out_vertices,
         triangles,
         extracted_triangles,
+    }
+}
+
+/// Rasterize each triangle's unsigned distance into `dist` within a band around
+/// it, taking the min where bands overlap. Called for the tile soup then its
+/// halo, so a node near a shared border sees both sides' geometry.
+#[allow(clippy::too_many_arguments)]
+fn rasterize_distance(
+    dist: &mut [f32],
+    shape: &RuntimeShape<u32, 3>,
+    dims: [u32; 3],
+    origin: Vec3,
+    voxel: f32,
+    band: f32,
+    verts: &[Vec3],
+    tris: &[[u32; 3]],
+) {
+    let node_pos =
+        |x: u32, y: u32, z: u32| origin + Vec3::new(x as f32, y as f32, z as f32) * voxel;
+    for &[ia, ib, ic] in tris {
+        let (a, b, c) = (verts[ia as usize], verts[ib as usize], verts[ic as usize]);
+        let lo = (a.min(b).min(c) - origin - Vec3::splat(band)) / voxel;
+        let hi = (a.max(b).max(c) - origin + Vec3::splat(band)) / voxel;
+        let clamp = |v: f32, n: u32| (v.floor().max(0.0) as u32).min(n.saturating_sub(1));
+        for z in clamp(lo.z, dims[2])..=clamp(hi.z, dims[2]) {
+            for y in clamp(lo.y, dims[1])..=clamp(hi.y, dims[1]) {
+                for x in clamp(lo.x, dims[0])..=clamp(hi.x, dims[0]) {
+                    let d = point_triangle_distance(node_pos(x, y, z), a, b, c);
+                    let i = shape.linearize([x, y, z]) as usize;
+                    if d < dist[i] {
+                        dist[i] = d;
+                    }
+                }
+            }
+        }
     }
 }
 
@@ -582,9 +654,14 @@ mod tests {
         ];
         let tris = vec![[0, 1, 2], [0, 2, 3]];
         let out = wrap_soup(
-            &verts,
-            &tris,
-            Vec3::new(0.0, 0.0, -1.0),
+            &WrapInput {
+                vertices: &verts,
+                triangles: &tris,
+                halo_vertices: &[],
+                halo_triangles: &[],
+                down: Vec3::new(0.0, 0.0, -1.0),
+                world_position: glam::DVec3::ZERO,
+            },
             &WrapSettings::default(),
         );
         assert!(!out.triangles.is_empty());
@@ -615,7 +692,17 @@ mod tests {
 
     #[test]
     fn empty_soup_wraps_to_nothing() {
-        let out = wrap_soup(&[], &[], Vec3::NEG_Z, &WrapSettings::default());
+        let out = wrap_soup(
+            &WrapInput {
+                vertices: &[],
+                triangles: &[],
+                halo_vertices: &[],
+                halo_triangles: &[],
+                down: Vec3::NEG_Z,
+                world_position: glam::DVec3::ZERO,
+            },
+            &WrapSettings::default(),
+        );
         assert!(out.triangles.is_empty());
         assert!(out.vertices.is_empty());
     }
