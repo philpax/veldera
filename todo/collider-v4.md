@@ -292,7 +292,20 @@ contact). And all three rings here sample the *same* (finest) source tiles —
 over-detailed for the coarse rings; the engine should feed each ring tiles at its
 own LoD (cheaper coarse rings), per the open question below.
 
-## Extraction: drop Surface Nets + decimate for adaptive Dual Contouring
+## Extraction: adaptive Dual Contouring — DONE (2026-06-17)
+
+Implemented in `veldera_terrain_collider::adaptive_dc` and selected by v4
+(`Extractor::AdaptiveDc`, `dc_error 16`). It replaced the decimation-off interim:
+the octree collapses planar cells within a bounded QEF error, so there is no
+decimation pass (and thus none of the metre-scale road-heave meshopt's
+extent-relative error caused on full-height bands), the surface is deterministic on
+the global lattice (no rebuild pop), and the QEF keeps curbs/walls crisp. Validated
+offline (`fuse_lab --adaptive`): 239k→18k tris across `dc_error` 0–64, staying one
+component with ~80 non-manifold edges (collapse does not crack — the contour
+traversal is watertight by construction; that residue is minor QEF edge-case noise,
+fine for a collider). The original analysis that motivated it follows.
+
+
 
 Profiling the dense wrap (urban r=30, 643 ms) showed the decimate pass at 160 ms
 crushing **472 k Surface Nets triangles down to 244** — Surface Nets is

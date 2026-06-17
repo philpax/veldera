@@ -23,7 +23,7 @@ use bevy::{math::DVec3, prelude::*};
 
 pub use veldera_terrain_collider::{
     BuildSettings, TileMeshes,
-    wrap::{WrapInput, WrapSettings},
+    wrap::{Extractor, WrapInput, WrapSettings},
 };
 use veldera_terrain_collider::{build_tile_geometry, clip::retain_by_radius};
 
@@ -106,21 +106,21 @@ pub fn create_clipmap_collider(
         // neighbour clip. The cap guards a supertall band from exploding the grid
         // (it coarsens the voxel to fit rather than allocating gigacells).
         //
-        // Decimation is disabled (`decimate_error = 0`). meshopt's error is
-        // *relative to the mesh extent*, and a full-height band's extent is the
-        // tallest building (~100s of m), so even 1 % is metres of allowed
-        // displacement on the road — it heaves the surface and, re-decimating
-        // differently each rebuild, makes the rebuilds pop. The raw Surface Nets
-        // surface instead follows the road to sub-voxel accuracy and is a
-        // deterministic function of the global voxel lattice, so the overlap
-        // between consecutive rebuilds is identical (no pop). Denser, but a static
-        // trimesh handles it.
+        // Extract with adaptive Dual Contouring, not Surface Nets + decimation.
+        // meshopt's decimation error is relative to the mesh extent, and a
+        // full-height band's extent is the tallest building (~100s of m), so even
+        // 1 % is metres of allowed displacement on the road — heaving the surface
+        // and, re-rolled each rebuild, popping. Adaptive DC instead collapses
+        // planar cells within a bounded QEF error directly (no decimation), so it
+        // is smooth, error-bounded, deterministic on the global lattice (identical
+        // overlap between rebuilds → no pop), and keeps curbs/walls crisp.
         let wrap = WrapSettings {
             voxel_size: band.voxel,
             max_grid_dim: 1024,
             cell_clip: false,
             winding_sign: false,
-            decimate_error: 0.0,
+            extractor: Extractor::AdaptiveDc,
+            dc_error: 16.0,
             ..*wrap_base
         };
         let wrapped = veldera_terrain_collider::wrap::wrap_soup(
