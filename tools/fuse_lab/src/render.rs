@@ -20,6 +20,7 @@ use veldera_terrain_collider::{
     BuildSettings,
     dump::TileSetDump,
     health::MeshHealth,
+    heightfield::{HeightfieldSettings, build_height_quadtree},
     wrap::{Extractor, WrapInput, WrapSettings, wrap_soup},
 };
 
@@ -720,19 +721,22 @@ pub fn run_heightfield(
         tiles += 1;
     }
 
-    let quadtree = std::env::var("QUADTREE").is_ok();
-    let start = Instant::now();
-    let (hf_verts, hf_tris) = if quadtree {
-        crate::heightfield::build_height_quadtree(
-            &vertices,
-            &triangles,
-            up,
-            voxel_size,
-            radius as f32,
-        )
-    } else {
-        crate::heightfield::build_heightfield(&vertices, &triangles, up, voxel_size, radius as f32)
+    let env_f32 = |name: &str, default: f32| {
+        std::env::var(name)
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(default)
     };
+    let settings = HeightfieldSettings {
+        near_voxel: voxel_size,
+        radius: radius as f32,
+        ring_m: env_f32("RING", 30.0),
+        far_voxel: env_f32("FAR", voxel_size * 16.0),
+        percentile: env_f32("PCT", 0.3),
+        skirt_depth: env_f32("SKIRT", 2.0),
+    };
+    let start = Instant::now();
+    let (hf_verts, hf_tris) = build_height_quadtree(&vertices, &triangles, up, &settings);
     let ms = start.elapsed().as_secs_f64() * 1000.0;
     let health = MeshHealth::measure(&hf_verts, &hf_tris, 0.02);
     println!(

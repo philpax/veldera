@@ -1174,5 +1174,6 @@ pub mod adaptive_dc;
 pub mod clip;
 pub mod dump;
 pub mod health;
+pub mod heightfield;
 pub mod roads;
 pub mod wrap;
