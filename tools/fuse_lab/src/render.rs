@@ -5,11 +5,11 @@
 //! from a shared oblique orthographic camera, with downward-facing triangles
 //! tinted red so spurious overhangs and noise bubbles stand out.
 //!
-//! Two env knobs adjust the camera for close inspection: `ELEV` (camera
-//! elevation in degrees, default 35) and `RADIUS` (only render tiles within this
-//! many metres of the captured camera, default unbounded) — e.g.
-//! `RADIUS=15 ELEV=20 fuse-lab dump.json --render 0.15 out.png` zooms onto the
-//! near-field tiles to inspect border seams.
+//! Env knobs for close inspection: `ELEV` (camera elevation in degrees, default
+//! 35), `RADIUS` (only render tiles within this many metres of the captured
+//! camera, default unbounded), and `WIRE` (overlay triangle edges on the shaded
+//! surface) — e.g. `RADIUS=15 ELEV=20 WIRE=1 fuse-lab dump.json --render 0.15
+//! out.png` zooms onto the near-field tiles with the triangulation visible.
 
 use std::{collections::HashMap, error::Error};
 
@@ -206,6 +206,9 @@ impl Camera {
         // Light from over the camera's shoulder, slightly up.
         let light = (self.up * 0.7 - self.forward * 0.5 + self.right * 0.2).normalize();
         let mut zbuf = vec![f32::INFINITY; (w * h) as usize];
+        // `WIRE` overlays each triangle's edges on the shaded surface, so the
+        // triangulation and any non-meeting borders are visible.
+        let wire = std::env::var("WIRE").is_ok();
 
         for &[ia, ib, ic] in &scene.triangles {
             let (wa, wb, wc) = (
@@ -232,8 +235,51 @@ impl Camera {
                 [(sa, pa.z), (sb, pb.z), (sc, pc.z)],
                 colour,
             );
+            if wire {
+                let edge_colour = Rgb([30, 90, 140]);
+                for &((p, pz), (q, qz)) in &[
+                    ((sa, pa.z), (sb, pb.z)),
+                    ((sb, pb.z), (sc, pc.z)),
+                    ((sc, pc.z), (sa, pa.z)),
+                ] {
+                    draw_line(&mut img, &mut zbuf, (w, h), (p, pz), (q, qz), edge_colour);
+                }
+            }
         }
         img
+    }
+}
+
+/// Draw a depth-tested line (used for the wireframe overlay). A small bias lets
+/// an edge win over the fill of its own triangle while staying hidden behind
+/// nearer surfaces.
+fn draw_line(
+    img: &mut RgbImage,
+    zbuf: &mut [f32],
+    (w, h): (u32, u32),
+    a: ((f32, f32), f32),
+    b: ((f32, f32), f32),
+    colour: Rgb<u8>,
+) {
+    const BIAS: f32 = 0.05;
+    let ((ax, ay), az) = a;
+    let ((bx, by), bz) = b;
+    let (x0, y0) = (ax.round() as i32, ay.round() as i32);
+    let (x1, y1) = (bx.round() as i32, by.round() as i32);
+    let steps = (x1 - x0).abs().max((y1 - y0).abs()).max(1);
+    for s in 0..=steps {
+        let t = s as f32 / steps as f32;
+        let x = (x0 as f32 + (x1 - x0) as f32 * t).round() as i32;
+        let y = (y0 as f32 + (y1 - y0) as f32 * t).round() as i32;
+        if x < 0 || y < 0 || x as u32 >= w || y as u32 >= h {
+            continue;
+        }
+        let depth = az + (bz - az) * t - BIAS;
+        let i = (y as u32 * w + x as u32) as usize;
+        if depth < zbuf[i] {
+            zbuf[i] = depth;
+            img.put_pixel(x as u32, y as u32, colour);
+        }
     }
 }
 
