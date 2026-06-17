@@ -42,6 +42,7 @@ use veldera_terrain_collider::{
     dump::{DumpTile, TileSetDump},
 };
 
+mod planarize;
 mod render;
 mod roads;
 mod rtin;

@@ -718,12 +718,30 @@ pub fn run_adaptive(
         tiles += 1;
     }
 
+    // Diagnostic knobs for the curtain/hilliness investigation: FLOATER overrides
+    // the pre-solidify floater cull fraction (prod is 0.1), OPEN the post-solidify
+    // morphological-open radius in voxels (prod is now 1).
+    let floater_fraction = std::env::var("FLOATER")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(0.1f32);
+    let open_radius = std::env::var("OPEN")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(0u32);
+    let sign_smooth_passes = std::env::var("SMOOTH")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(0u32);
     let wrap_with = |extractor: Extractor| {
         let wrap = WrapSettings {
             voxel_size,
             max_grid_dim: 1024,
             extractor,
             dc_error,
+            floater_fraction,
+            open_radius,
+            sign_smooth_passes,
             ..WrapSettings::default()
         };
         let start = Instant::now();
@@ -765,16 +783,27 @@ pub fn run_adaptive(
         dc_health.components
     );
 
-    let mut sn = Scene::default();
-    sn.add(&sn_mesh.vertices, &sn_mesh.triangles, Vec3::ZERO);
+    println!("  (FLOATER={floater_fraction}, OPEN={open_radius}, SMOOTH={sign_smooth_passes})");
+
+    // PLANAR (degrees): if set, snap the DC surface onto per-region best-fit planes
+    // before rendering — large flat faces at arbitrary grades, no within-face bumps.
+    let dc_vertices = match std::env::var("PLANAR").ok().and_then(|v| v.parse().ok()) {
+        Some(tol) if tol > 0.0 => {
+            crate::planarize::planarize(&dc_mesh.vertices, &dc_mesh.triangles, tol)
+        }
+        _ => dc_mesh.vertices.clone(),
+    };
+
+    let mut soup = Scene::default();
+    soup.add(&vertices, &triangles, Vec3::ZERO);
     let mut dc = Scene::default();
-    dc.add(&dc_mesh.vertices, &dc_mesh.triangles, Vec3::ZERO);
+    dc.add(&dc_vertices, &dc_mesh.triangles, Vec3::ZERO);
     render_pair_labelled(
-        &sn,
+        &soup,
         &dc,
         up,
         out_path,
-        "left: surface nets + decimate, right: adaptive DC",
+        "left: source soup, right: adaptive DC wrap",
     )
 }
 
