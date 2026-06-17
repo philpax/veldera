@@ -313,7 +313,20 @@ directly, no decimation pass:
   and decimation-free, but 2.5D heightfield — single-valued, loses walls and
   overhangs. Does not fit v4's 3D requirement.
 - A cheap coplanar-merge post-pass would replace meshopt but still allocates the
-  472 k first — doesn't fix the churn.
+  472 k first — doesn't fix the churn. **Tried and rejected** (2026-06-17,
+  `fuse_lab --planar`): pure-Rust planar *vertex* decimation (drop coplanar
+  interior vertices, ear-clip the planar ring; manifold-preserving on truly flat
+  input, unit-tested). It also doubles as the missing wasm-safe replacement for
+  the native-only meshopt pass (v3 ships undecimated on web). But it barely fires
+  on real data — Surface Nets over photogrammetry is micro-bumpy everywhere (each
+  voxel quad's normal differs slightly from the SDF gradient), so almost nothing
+  is coplanar. On a 25 m urban region (693 k raw tris): at 2°/10°/20° tolerance it
+  reached only 506 k/451 k/265 k tris (meshopt: **859**), at ~1 s, with rising
+  non-manifold edges. Exact-coplanar removal is the wrong tool for a bumpy
+  surface; the wasm-safe decimator must be error-tolerant (a quadric simplifier
+  port) or — better — the mesh must be adaptive from the start (octree DC, which
+  never generates the dense surface). The module is kept as the reproducible
+  counter-evidence, like `--clipmap-sparse` and `--winding`.
 
 **The convergence (revised — winding sign dropped, see next section):** adaptive
 DC uses an *octree*, the *same* structure the sparse storage wants, so an octree

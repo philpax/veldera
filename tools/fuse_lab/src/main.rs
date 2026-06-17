@@ -45,6 +45,7 @@ use veldera_terrain_collider::{
 mod render;
 mod roads;
 mod rtin;
+mod simplify;
 mod wrap;
 
 /// Two rim vertices closer than this horizontally are considered the same
@@ -73,6 +74,7 @@ fn main() -> Result<(), Box<dyn Error>> {
     let mut winding: Option<(f32, f64, String)> = None;
     let mut clipmap_sphere: Option<(f32, f64, f32, f32, String)> = None;
     let mut clipmap_nested: Option<String> = None;
+    let mut planar: Option<(f32, f64, String)> = None;
     let mut i = 1;
     while i < args.len() {
         match args[i].as_str() {
@@ -188,6 +190,14 @@ fn main() -> Result<(), Box<dyn Error>> {
                 let out = args.get(i + 1).ok_or("--clipmap-nested needs <out.png>")?;
                 clipmap_nested = Some(out.clone());
                 i += 2;
+            }
+            "--planar" => {
+                let need = "--planar needs <voxel_m> <radius_m> <out.png>";
+                let voxel = args.get(i + 1).ok_or(need)?;
+                let radius = args.get(i + 2).ok_or(need)?;
+                let out = args.get(i + 3).ok_or(need)?;
+                planar = Some((voxel.parse()?, radius.parse()?, out.clone()));
+                i += 4;
             }
             "--winding" => {
                 let voxel = args
@@ -357,6 +367,9 @@ fn main() -> Result<(), Box<dyn Error>> {
     }
     if let Some(out) = &clipmap_nested {
         render::run_clipmap_nested(&dump, &meshes, &settings, out)?;
+    }
+    if let Some((voxel, radius, out)) = &planar {
+        render::run_planar(&dump, &meshes, &settings, *voxel, *radius, out)?;
     }
     if let Some((voxel, radius, out)) = &winding {
         render::run_winding(&dump, &meshes, &settings, *voxel, *radius, out)?;

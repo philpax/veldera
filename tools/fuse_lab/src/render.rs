@@ -565,6 +565,118 @@ pub fn run_clipmap_nested(
     )
 }
 
+/// Compare decimation strategies on one camera-centred region: wrap it three
+/// ways — raw Surface Nets (no decimation), the native meshopt quadric pass (the
+/// prod path), and pure-Rust planar vertex decimation (the wasm-safe candidate) —
+/// and report each one's triangle count, time, and mesh health. Renders meshopt
+/// (left) against planar (right) so the surfaces can be compared directly.
+pub fn run_planar(
+    dump: &TileSetDump,
+    meshes: &HashMap<&str, Vec<RocktreeMesh>>,
+    base_settings: &BuildSettings,
+    voxel_size: f32,
+    radius: f64,
+    out_path: &str,
+) -> Result<(), Box<dyn Error>> {
+    let camera = DVec3::from_array(dump.camera_position);
+    let up = camera.normalize_or_zero().as_vec3();
+    let down = (-camera.normalize_or_zero()).as_vec3();
+
+    let mut vertices: Vec<Vec3> = Vec::new();
+    let mut triangles: Vec<[u32; 3]> = Vec::new();
+    let mut tiles = 0usize;
+    for tile in &dump.tiles {
+        let off = DVec3::from_array(tile.world_position) - camera;
+        if off.length() > radius {
+            continue;
+        }
+        let Some(base) = base_soup(tile, meshes, dump, base_settings) else {
+            continue;
+        };
+        let shift = off.as_vec3();
+        let base_index = vertices.len() as u32;
+        vertices.extend(base.vertices.iter().map(|&v| v + shift));
+        triangles.extend(
+            base.triangles
+                .iter()
+                .map(|&[a, b, c]| [a + base_index, b + base_index, c + base_index]),
+        );
+        tiles += 1;
+    }
+
+    let wrap_with = |decimate_error: f32| {
+        let wrap = WrapSettings {
+            voxel_size,
+            max_grid_dim: 4096,
+            decimate_error,
+            ..WrapSettings::default()
+        };
+        wrap_soup(
+            &WrapInput {
+                vertices: &vertices,
+                triangles: &triangles,
+                halo_vertices: &[],
+                halo_triangles: &[],
+                down,
+                world_position: camera,
+                cell_centre: Vec3::ZERO,
+                neighbour_centres: &[],
+            },
+            &wrap,
+        )
+    };
+
+    let raw = wrap_with(0.0);
+    let meshopt_start = Instant::now();
+    let meshopt = wrap_with(0.01);
+    let meshopt_ms = meshopt_start.elapsed().as_secs_f64() * 1000.0;
+
+    // `PLANAR_TOL` (degrees) sweeps the coplanarity tolerance; default 2°.
+    let tol = std::env::var("PLANAR_TOL")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(2.0f32);
+    let planar_start = Instant::now();
+    let (pv, pt) = crate::simplify::planar_decimate(&raw.vertices, &raw.triangles, tol);
+    let planar_ms = planar_start.elapsed().as_secs_f64() * 1000.0;
+    println!("  (planar tolerance {tol}°)");
+
+    let raw_h = MeshHealth::measure(&raw.vertices, &raw.triangles, 0.02);
+    let meshopt_h = MeshHealth::measure(&meshopt.vertices, &meshopt.triangles, 0.02);
+    let planar_h = MeshHealth::measure(&pv, &pt, 0.02);
+    println!("planar: {tiles} tiles within {radius:.0} m, voxel {voxel_size} m");
+    println!(
+        "  raw surface-nets : {} tris, {} non-manifold, {} components",
+        raw.triangles.len(),
+        raw_h.nonmanifold_edges,
+        raw_h.components
+    );
+    println!(
+        "  meshopt (native) : {} tris, {meshopt_ms:.0} ms (incl. wrap), {} non-manifold, {} components",
+        meshopt.triangles.len(),
+        meshopt_h.nonmanifold_edges,
+        meshopt_h.components
+    );
+    println!(
+        "  planar (rust)    : {} tris, {planar_ms:.0} ms (post-pass only), {} non-manifold, {} components",
+        pt.len(),
+        planar_h.nonmanifold_edges,
+        planar_h.components
+    );
+
+    let mut left = Scene::default();
+    left.add(&meshopt.vertices, &meshopt.triangles, Vec3::ZERO);
+    let mut right = Scene::default();
+    right.add(&pv, &pt, Vec3::ZERO);
+    render_pair_labelled(
+        &left,
+        &right,
+        up,
+        out_path,
+        "left: meshopt decimate, right: planar decimate",
+    )
+}
+
 /// Clip a soup to the slab `lo ≤ v·up ≤ hi` (a vertical window along the radial
 /// `up`). Triangles fully inside are kept, fully outside dropped, crossing ones
 /// split at the plane — so the wrapped grid's vertical extent shrinks to the
