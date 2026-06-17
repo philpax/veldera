@@ -43,6 +43,15 @@ pub enum ColliderPipeline {
     /// voxel field into a clean watertight surface
     /// ([`veldera_terrain_collider::wrap`]) rather than reusing the source soup.
     /// No road layer (deferred). See `todo/collider-v3.md`.
+    ///
+    /// Live, and an improvement over the legacy raw-soup colliders (clean,
+    /// manifold, no rats-nest), but not the end state: adjacent tiles' borders
+    /// never fully line up. The global lattice + same-depth halo make them meet
+    /// on flat ground, and the Voronoi `wrap_cell_clip` (off by default) removes
+    /// the halo overlap but leaves residual edge mismatches and the odd hole, so
+    /// it ships off — the halo overlap is bumpier but never holed. The per-tile
+    /// coupling is the root cause; the successor is v4 clipmaps (camera-centred
+    /// nested volumes, no per-tile boundaries). See `todo/collider-v4.md`.
     V3Voxel,
 }
 
@@ -64,9 +73,11 @@ impl ColliderPipeline {
     }
 }
 
-/// The live collider pipeline. [`V3Voxel`](ColliderPipeline::V3Voxel) on the
-/// `collider-v3` branch — the lean voxel-rebuild baseline. Set to
-/// [`Legacy`](ColliderPipeline::Legacy) for the pre-branch behaviour, or
+/// The live collider pipeline. [`V3Voxel`](ColliderPipeline::V3Voxel) — the
+/// voxel wrap, with the borked Voronoi cell clip off (`wrap_cell_clip = false`);
+/// the per-tile borders are not perfect, but it is cleaner than legacy while v4
+/// clipmaps are built (see `todo/collider-v4.md`). Set to
+/// [`Legacy`](ColliderPipeline::Legacy) for the pre-branch raw-soup colliders or
 /// [`V2WithRoads`](ColliderPipeline::V2WithRoads) for the parked v2 pipeline.
 pub const COLLIDER_PIPELINE: ColliderPipeline = ColliderPipeline::V3Voxel;
 

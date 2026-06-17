@@ -77,6 +77,13 @@ pub struct WrapSettings {
     /// Quadric decimation error bound, relative to the tile's extent (native
     /// only; ignored on wasm). 0 disables decimation.
     pub decimate_error: f32,
+    /// Clip each tile to its horizontal Voronoi cell against `neighbour_centres`
+    /// so same-depth neighbours partition the ground instead of overlapping.
+    /// Off by default: the split is geometrically correct but leaves residual
+    /// edge mismatches and the occasional hole at borders (the per-tile coupling
+    /// is the root cause — the successor is v4 clipmaps). With it off the halo
+    /// still overlaps neighbours, which is bumpier but never holed.
+    pub cell_clip: bool,
 }
 
 impl Default for WrapSettings {
@@ -92,6 +99,7 @@ impl Default for WrapSettings {
             floater_fraction: 0.0,
             mesh_component_fraction: 0.05,
             decimate_error: 0.01,
+            cell_clip: false,
         }
     }
 }
@@ -283,18 +291,18 @@ pub fn wrap_soup(input: &WrapInput, settings: &WrapSettings) -> WrappedMesh {
         .chunks_exact(3)
         .map(|c| [c[0], c[1], c[2]])
         .collect();
-    let tile_c = to_frame(input.cell_centre).truncate();
-    for &neighbour_centre in input.neighbour_centres {
-        let nc = to_frame(neighbour_centre).truncate();
-        let dir = nc - tile_c;
-        if dir.length_squared() < 1e-9 {
-            continue;
+    if settings.cell_clip && !input.neighbour_centres.is_empty() {
+        let tile_c = to_frame(input.cell_centre).truncate();
+        for &neighbour_centre in input.neighbour_centres {
+            let nc = to_frame(neighbour_centre).truncate();
+            let dir = nc - tile_c;
+            if dir.length_squared() < 1e-9 {
+                continue;
+            }
+            // Keep the side closer to this tile's centre.
+            (verts, triangles) =
+                clip_halfspace(verts, &triangles, (tile_c + nc) * 0.5, dir.normalize());
         }
-        // Keep the side closer to this tile's centre.
-        (verts, triangles) =
-            clip_halfspace(verts, &triangles, (tile_c + nc) * 0.5, dir.normalize());
-    }
-    if !input.neighbour_centres.is_empty() {
         // Drop the slivers the clip splits leave at the cell edges (a triangle
         // grazing a bisector yields a near-degenerate strip). Filter by the
         // triangle's smallest altitude, not area, so long thin strips go too;

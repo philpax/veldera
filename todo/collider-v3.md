@@ -1,5 +1,18 @@
 # Collider v3: voxel-rebuilt terrain colliders
 
+> **STATUS (2026-06-17): live, but not the end state.** `COLLIDER_PIPELINE =
+> V3Voxel`. The per-tile voxel wrap drives smoothly on flat ground and meets the
+> cleanliness goals (manifold, no floaters, no rats-nest) — a real improvement
+> over legacy. But adjacent tiles' borders never fully line up: the global
+> lattice + same-depth halo make them meet, and the Voronoi cell clip removes the
+> halo overlap, yet the clip leaves residual edge mismatches and the odd hole, so
+> it ships **off** (`wrap_cell_clip = false` — the halo overlap is bumpier but
+> never holed). Same-depth clipping also does nothing for coarse-over-fine
+> overlap. The per-tile coupling is the root cause; the successor is **v4
+> clipmaps** (camera-centred nested volumes, no per-tile boundaries) — see
+> `todo/collider-v4.md`. The wrap core, config, and `fuse_lab` tooling carry over
+> to v4 unchanged.
+
 R&D plan (started 2026-06-16, branch `collider-v3`) for generating terrain
 colliders by *rebuilding* clean collision geometry from a mid-resolution voxel
 representation of the masked source geometry — never reusing the photogrammetry

@@ -241,6 +241,12 @@ pub struct PhysicsStreamingConfig {
     /// v3 voxel-wrap quadric decimation error bound, relative to the tile's
     /// extent (native only; ignored on wasm). Zero disables decimation.
     pub wrap_decimate_error: f32,
+    /// v3 voxel-wrap cell clip: trim each tile to its Voronoi cell so same-depth
+    /// neighbours partition the ground instead of overlapping. Off by default —
+    /// geometrically correct but leaves residual edge mismatches and holes at
+    /// borders (per-tile coupling; superseded by v4 clipmaps). Off keeps the halo
+    /// overlap, which is bumpier but never holed.
+    pub wrap_cell_clip: bool,
     /// Lookahead time for the lead vector (s); colliders ahead of the player
     /// load at the next-finer band before the player arrives.
     pub lead_time: f64,
@@ -269,6 +275,7 @@ impl PhysicsStreamingConfig {
             floater_fraction: self.wrap_floater_fraction,
             mesh_component_fraction: self.wrap_mesh_component_fraction,
             decimate_error: self.wrap_decimate_error,
+            cell_clip: self.wrap_cell_clip,
         }
     }
 }

@@ -125,6 +125,13 @@ wrap_floater_fraction = 0.1
 # disables decimation (dense Surface Nets output).
 wrap_decimate_error = 0.01
 
+# Cell clip: trim each tile to its Voronoi cell so same-depth neighbours
+# partition the ground instead of overlapping. Off — geometrically correct but
+# leaves residual edge mismatches and the odd hole at borders (the per-tile
+# coupling is the root cause; v4 clipmaps is the successor). Off keeps the halo
+# overlap (bumpier but never holed).
+wrap_cell_clip = false
+
 # Lead vector: load colliders ahead of the player before they arrive.
 lead_time = 1.0          # lookahead time (s)
 max_lead = 200.0         # cap on lead distance (m) so fast runs don't starve nearby
