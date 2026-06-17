@@ -138,6 +138,41 @@ Graceful fallback: if the camera still outruns the active finest ring, it lands 
 the next coarser (larger, rarely-rebuilt) ring — degraded resolution, never a
 hole.
 
+## Phase 1 results (2026-06-17, `fuse_lab --clipmap`)
+
+The single-ring proof works and confirms the premise. Gathering a region's tiles
+into one grid and wrapping it as a single field yields **one seamless surface**
+where per-tile wrapping fragmented it:
+
+- flat 4-tile seam region: source 519 tris → **1 component, 0 non-manifold edges,
+  0 slivers**, decimated to 122 tris (per-tile wrap gave ~3 components/tile and
+  hundreds of slivers over the same area). Render: one clean continuous slab, no
+  creases.
+- gather is negligible (≤1 ms); the cost is the wrap.
+
+**Key finding — vertical extent dominates the cost.** The grid is
+horizontal² × vertical, and the wrap is O(cells). On flat/sparse regions it is
+cheap, but on dense downtown the *building height* blows up the vertical axis:
+
+| region (voxel 0.15 m) | tiles | wrap time |
+| --- | --- | --- |
+| flat seam, r=25 m | 4 | 68 ms |
+| urban, r=20 m | 3 | 130 ms |
+| urban, r=30 m | 13 | 635 ms |
+
+635 ms for a single 30 m ring is too slow for a rebuild — and it is wrapping the
+*whole building columns* (ground to roof), which is both expensive and pointless:
+you drive on the ground and hit street-level walls, never the 50 m-up roofs.
+
+**Therefore: bound each ring's vertical range** to a window around the local
+ground (e.g. camera altitude − vehicle drop … + a few metres of clearance), not
+the full geometry extent. This both (a) cuts the grid height ~5× → brings a ring
+back under ~150 ms, and (b) gives exactly what driving wants — the drivable
+surface plus the low building walls, dropping the roofs we never touch. The
+solidify already makes it 2.5 D; the height window just clips the grid's top.
+Next experiment: add a `--clipmap` height window and re-measure (expect the urban
+r=30 case to drop from 635 ms toward ~130 ms).
+
 ## Open questions / risks
 
 - **Fine-ring rasterization cost.** Ring 0 covers a large area at fine res (40 m
