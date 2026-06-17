@@ -173,6 +173,40 @@ solidify already makes it 2.5 D; the height window just clips the grid's top.
 Next experiment: add a `--clipmap` height window and re-measure (expect the urban
 r=30 case to drop from 635 ms toward ~130 ms).
 
+## Phase 1b: sparse-by-chunking failed; spheres bound the vertical (2026-06-17)
+
+Tried `--clipmap-sparse`: chunk the region on the shared lattice, wrap only
+non-empty chunks. On urban r=30 it was **3.4× *slower*** (2150 ms vs 632 ms) with
+a triangle explosion (56 k vs 244). Three reasons, the third load-bearing:
+1. per-chunk fixed overhead × 251 chunks;
+2. no cross-chunk decimation, and the halo margin double-counts triangles;
+3. **the wrap's sign (flood-from-sky + solidify) is 2.5D** — a chunk *inside* a
+   building has no sky to flood from, so per-chunk signing is simply wrong. The
+   sign has to be **global**; chunking only the meshing does not cut the dominant
+   cost, which is the field + flood, not the extraction.
+
+So "reuse the wrap core per chunk" is wrong. But the negative result clarified the
+real structure, and it is exactly the spheres idea:
+
+**The Phase-1 grid was sized to the geometry extent (full building height) — a
+cylinder. A sphere bounds the vertical too.** A fine sphere of radius R only
+contains geometry within R *in every direction*, so its grid is ~2R per axis
+regardless of how tall the buildings are. Nest them: a small fine sphere (vertical
+bounded by R → cheap), coarser spheres outward at bigger voxels (cheap). That is
+the v4 structure — **nested camera-centred spheres, each a dense grid bounded to
+its radius**, not rings (cylinders) and not per-chunk.
+
+**Cost reality.** Dense 3D at 0.15 m is still ~8 M cells for a 30 m fine sphere
+(~130 ms), bounded by nesting + speed-scaling — feasible off-thread, not "cheap."
+Genuinely O(surface) needs sparse storage **and a global sign that needs no
+flood** — i.e. the fast/generalized **winding number** (the robust sign deferred
+since v3). That is the bigger lift; the dense nested-sphere path is the pragmatic
+first build, with winding-number sparse as the upgrade if rebuild cadence proves
+too slow.
+
+Next experiment: bound the `--clipmap` grid to a sphere box (camera ± R) and
+re-measure the fine-sphere cost vs the geometry-sized grid.
+
 ## Open questions / risks
 
 - **Fine-ring rasterization cost.** Ring 0 covers a large area at fine res (40 m
