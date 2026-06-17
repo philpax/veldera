@@ -11,12 +11,12 @@
 //! for now each tile wraps independently. No road layer.
 
 use avian3d::prelude::*;
-use bevy::prelude::*;
+use bevy::{math::DVec3, prelude::*};
 
 use veldera_terrain_collider::build_tile_geometry;
 pub use veldera_terrain_collider::{
     BuildSettings, TileMeshes,
-    wrap::{WrapSettings, WrappedMesh},
+    wrap::{WrapInput, WrapSettings, WrappedMesh},
 };
 
 /// Base-soup settings for the wrap: octant clipping only, with none of the seam
@@ -42,22 +42,55 @@ pub struct WrapBuildStats {
 }
 
 /// Build one tile's terrain collider by wrapping its octant-clipped soup into a
-/// clean voxel surface. Returns the collider (or `None` for an empty build — a
-/// mask that removed all geometry, which callers record as a live empty commit)
-/// along with the build statistics either way.
+/// clean voxel surface. `neighbours` are the tile's same-depth lateral
+/// neighbours (their `TileMeshes` already offset into this tile's frame) with
+/// the octant mask each was selected with; their geometry forms the wrap halo so
+/// the surface meets the neighbours' at the shared borders. `world_position`
+/// anchors the global voxel lattice. Returns the collider (or `None` for an
+/// empty build — a mask that removed all geometry, which callers record as a
+/// live empty commit) along with the build statistics either way.
+#[allow(clippy::too_many_arguments)]
 pub fn create_terrain_collider(
     tile: &TileMeshes,
     octant_mask: u8,
     sub_cut: u64,
+    neighbours: &[(TileMeshes, u8)],
     down: Vec3,
+    world_position: DVec3,
     wrap: &WrapSettings,
 ) -> (Option<Collider>, WrapBuildStats) {
     let Some(base) = build_tile_geometry(tile, octant_mask, sub_cut, &[], down, &BASE_SETTINGS)
     else {
         return (None, WrapBuildStats::default());
     };
-    let wrapped: WrappedMesh =
-        veldera_terrain_collider::wrap::wrap_soup(&base.vertices, &base.triangles, down, wrap);
+    // Build the halo from each same-depth neighbour's octant-clipped soup (the
+    // neighbour `TileMeshes` already carries its offset into this tile's frame).
+    let mut halo_vertices: Vec<Vec3> = Vec::new();
+    let mut halo_triangles: Vec<[u32; 3]> = Vec::new();
+    for (neighbour, neighbour_mask) in neighbours {
+        if let Some(soup) =
+            build_tile_geometry(neighbour, *neighbour_mask, 0, &[], down, &BASE_SETTINGS)
+        {
+            let base_index = halo_vertices.len() as u32;
+            halo_vertices.extend(soup.vertices);
+            halo_triangles.extend(
+                soup.triangles
+                    .iter()
+                    .map(|&[a, b, c]| [a + base_index, b + base_index, c + base_index]),
+            );
+        }
+    }
+    let wrapped: WrappedMesh = veldera_terrain_collider::wrap::wrap_soup(
+        &WrapInput {
+            vertices: &base.vertices,
+            triangles: &base.triangles,
+            halo_vertices: &halo_vertices,
+            halo_triangles: &halo_triangles,
+            down,
+            world_position,
+        },
+        wrap,
+    );
     let stats = WrapBuildStats {
         input_triangles: base.triangles.len(),
         extracted_triangles: wrapped.extracted_triangles,

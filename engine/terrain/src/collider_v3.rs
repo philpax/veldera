@@ -259,16 +259,51 @@ fn update_physics_colliders_v3(
 
         // Radial down at the node; it varies negligibly across one tile.
         let down = (-node_data.world_position.normalize()).as_vec3();
+        let world_position = node_data.world_position;
         let build_tile = OwnedTileMeshes {
             meshes: Arc::clone(&node_data.meshes),
             rotation: node_data.transform.rotation,
             scale: node_data.transform.scale,
+            offset: Vec3::ZERO,
         };
+        // Same-depth lateral neighbours form the wrap halo so the surface meets
+        // theirs at the shared borders (the global lattice makes both sides agree
+        // at the shared nodes). Only same depth shares the lattice cleanly.
+        let neighbours: Vec<(OwnedTileMeshes, u8)> =
+            crate::collider_v2::lateral_neighbour_paths(&lod_state, path)
+                .into_iter()
+                .filter(|n| n.depth() == path.depth())
+                .filter_map(|n| {
+                    let neighbour = lod_state.node_data.get(&n)?;
+                    let neighbour_mask = *lod_state.physics_target_paths.get(&n)?;
+                    Some((
+                        OwnedTileMeshes {
+                            meshes: Arc::clone(&neighbour.meshes),
+                            rotation: neighbour.transform.rotation,
+                            scale: neighbour.transform.scale,
+                            offset: (neighbour.world_position - world_position).as_vec3(),
+                        },
+                        neighbour_mask,
+                    ))
+                })
+                .collect();
         let wrap = streaming.wrap_settings();
         let tx = channel.tx.clone();
         spawner.spawn(async move {
             let tile = build_tile.as_tile_meshes();
-            let (collider, _stats) = create_terrain_collider(&tile, mask, 0, down, &wrap);
+            let neighbour_tiles: Vec<(TileMeshes, u8)> = neighbours
+                .iter()
+                .map(|(meshes, m)| (meshes.as_tile_meshes(), *m))
+                .collect();
+            let (collider, _stats) = create_terrain_collider(
+                &tile,
+                mask,
+                0,
+                &neighbour_tiles,
+                down,
+                world_position,
+                &wrap,
+            );
             let _ = tx
                 .send(ColliderV3BuildResult {
                     path,
@@ -381,6 +416,10 @@ struct OwnedTileMeshes {
     meshes: Arc<Vec<RocktreeMesh>>,
     rotation: Quat,
     scale: Vec3,
+    /// Translation of this tile's origin relative to the tile being built (zero
+    /// for the build tile itself; the world-position difference for a halo
+    /// neighbour).
+    offset: Vec3,
 }
 
 impl OwnedTileMeshes {
@@ -389,7 +428,7 @@ impl OwnedTileMeshes {
             meshes: &self.meshes,
             rotation: self.rotation,
             scale: self.scale,
-            offset: Vec3::ZERO,
+            offset: self.offset,
         }
     }
 }
