@@ -720,9 +720,19 @@ pub fn run_heightfield(
         tiles += 1;
     }
 
+    let quadtree = std::env::var("QUADTREE").is_ok();
     let start = Instant::now();
-    let (hf_verts, hf_tris) =
-        crate::heightfield::build_heightfield(&vertices, &triangles, up, voxel_size, radius as f32);
+    let (hf_verts, hf_tris) = if quadtree {
+        crate::heightfield::build_height_quadtree(
+            &vertices,
+            &triangles,
+            up,
+            voxel_size,
+            radius as f32,
+        )
+    } else {
+        crate::heightfield::build_heightfield(&vertices, &triangles, up, voxel_size, radius as f32)
+    };
     let ms = start.elapsed().as_secs_f64() * 1000.0;
     let health = MeshHealth::measure(&hf_verts, &hf_tris, 0.02);
     println!(
