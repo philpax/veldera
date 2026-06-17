@@ -43,7 +43,7 @@ use veldera_physics::{
 use crate::{
     lod::{ColliderReconcile, LoadedNodeData, LodState, poll_lod_node_tasks},
     roads::{COLLIDER_PIPELINE, RoadIndex, RoadOverlay, TerrainTileSnapshot, tile_bounding_radius},
-    viz_v2::{draw_collider_wireframes, draw_render_mesh_wireframes, draw_road_overlay},
+    viz_v2::{draw_collider_wireframes, draw_road_overlay},
 };
 
 /// Register the v2 collider reconcile, its state and channels, and the v2
@@ -63,12 +63,7 @@ pub(crate) fn register(app: &mut App) {
         )
         .add_systems(
             Update,
-            (
-                draw_collider_wireframes,
-                draw_render_mesh_wireframes,
-                draw_road_overlay,
-            )
-                .after(ColliderReconcile),
+            (draw_collider_wireframes, draw_road_overlay).after(ColliderReconcile),
         );
 
     // The dump writer needs filesystem access; the request resource exists

@@ -64,7 +64,7 @@ use crate::{
         ColliderVizFilter, LodVizGizmos, LodVizSettings, configure_lod_viz_gizmos, draw_lod_viz,
         reconcile_collider_wireframes,
     },
-    viz_v2::{RenderMeshVizFilter, RoadVizSettings},
+    viz_v2::{RenderMeshVizFilter, RoadVizSettings, draw_render_mesh_wireframes},
 };
 
 // The tile-dump request resource lives in the v2 collider module but is
@@ -187,7 +187,11 @@ impl Plugin for LodPlugin {
         app.init_resource::<RoadOverlay>()
             .init_resource::<RenderMeshVizFilter>()
             .init_resource::<RoadVizSettings>()
-            .init_resource::<collider_v2::TileDumpRequest>();
+            .init_resource::<collider_v2::TileDumpRequest>()
+            // The render-mesh wireframe overlay reads only the displayed rocktree
+            // tiles and the shared filter, so it is pipeline-agnostic — register it
+            // unconditionally rather than inside the v2 path (where v3/v4 lost it).
+            .add_systems(Update, draw_render_mesh_wireframes.after(ColliderReconcile));
         if COLLIDER_PIPELINE.is_v2() {
             collider_v2::register(app);
         } else if COLLIDER_PIPELINE.is_v3() {
