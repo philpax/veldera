@@ -34,12 +34,17 @@ use veldera_physics::{
 
 use crate::lod::{ColliderReconcile, LodState, poll_lod_node_tasks};
 
-/// The distance bands of the single collider: voxel and radius roughly double
-/// outward, full height each. Fine near (a small radius keeps the cell count down
-/// despite full height), coarse far (a large voxel keeps it down despite the
-/// radius). A compile-time table for this cut; a follow-up lifts it into the
-/// hot-reloadable streaming config.
-const BANDS: [BandSpec; 3] = [
+/// The distance bands of the single collider: voxel and radius coarsen outward,
+/// full height each. Fine near (a small radius keeps the cell count down despite
+/// full height), coarse far (a large voxel keeps it down despite the radius). The
+/// reach matches the leap-arc's `max_range_m` (~1 km): a fully-charged yeet
+/// launches at 150 m/s, and the leap-preview arc collide-and-slides against these
+/// colliders to find its landing, so it predicts (and the player lands) wrong past
+/// wherever the colliders stop. The far bands are deliberately coarse — a leap
+/// landing 600 m out needs *a* surface there, not cm precision. A compile-time
+/// table for this cut; a follow-up lifts it into the hot-reloadable streaming
+/// config.
+const BANDS: [BandSpec; 6] = [
     BandSpec {
         voxel: 0.3,
         inner_radius: 0.0,
@@ -55,20 +60,38 @@ const BANDS: [BandSpec; 3] = [
         inner_radius: 45.0,
         outer_radius: 95.0,
     },
+    BandSpec {
+        voxel: 3.0,
+        inner_radius: 95.0,
+        outer_radius: 250.0,
+    },
+    BandSpec {
+        voxel: 8.0,
+        inner_radius: 250.0,
+        outer_radius: 550.0,
+    },
+    BandSpec {
+        voxel: 18.0,
+        inner_radius: 550.0,
+        outer_radius: 1000.0,
+    },
 ];
 
 /// The collider's reach (the outermost band's outer radius).
-const MAX_RADIUS: f32 = 95.0;
+const MAX_RADIUS: f32 = BANDS[BANDS.len() - 1].outer_radius;
 
 /// Debug-wireframe colour, shown only while the physics debug visualisation is
 /// enabled.
 const COLLIDER_COLOUR: Color = Color::srgb(0.4, 0.9, 0.45);
 
-/// Rebuild once the camera has moved this fraction of the reach from the build
-/// centre. The collider is large, so it tolerates being stale by this much (the
-/// camera stays well inside it); a generous threshold keeps the rebuild (a few
-/// hundred ms) comfortably ahead of the camera reaching the edge.
-const REBUILD_FRACTION: f32 = 0.2;
+/// Rebuild once the camera has moved this far (m) from the build centre. Tied to
+/// the innermost (finest) band's radius, *not* the full reach: the fine band is
+/// the small precise disc the player actually stands on, so the whole collider
+/// must re-centre on that cadence to keep them inside it, even though the coarse
+/// outer bands reach far past it. (Re-wrapping the far bands every time the fine
+/// band moves is more work than they need — they barely change; the proper fix is
+/// a per-band rebuild cadence, see `todo/collider-v4.md`.)
+const REBUILD_DISTANCE: f32 = BANDS[0].outer_radius;
 
 /// Register the v4 collider reconcile and its state/build channel. Called from
 /// [`crate::lod::LodPlugin::build`] when [`crate::roads::COLLIDER_PIPELINE`]
@@ -153,7 +176,7 @@ fn update_physics_colliders_v4(
     if v4.building {
         return;
     }
-    let threshold = (MAX_RADIUS * REBUILD_FRACTION).max(2.0);
+    let threshold = REBUILD_DISTANCE.max(2.0);
     let moved = v4
         .centre
         .map_or(f64::INFINITY, |c| (camera_pos - c).length());
