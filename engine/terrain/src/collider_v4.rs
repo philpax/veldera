@@ -1,22 +1,19 @@
-//! The v4 clipmap terrain-collider reconcile: one camera-centred collider whose
-//! resolution coarsens with distance.
+//! The v4 terrain-collider reconcile: one camera-centred 2.5D drivable-height
+//! surface whose resolution coarsens with distance.
 //!
 //! Used only when the v4 collider pipeline is selected (see
 //! [`crate::roads::COLLIDER_PIPELINE`]). Unlike v3 (one collider per displayed
 //! tile, fighting to make adjacent tiles' borders agree), v4 maintains a *single*
-//! camera-centred collider, rebuilt off-thread as the camera moves. It is built
-//! by gathering the displayed composite tiles around the camera
+//! camera-centred collider, rebuilt off-thread as the camera moves. It is built by
+//! gathering the displayed composite tiles around the camera
 //! ([`LodState::physics_target_paths`] — the same non-overlapping WYSIWYG set v3
-//! builds per tile) into one soup and wrapping it in concentric distance bands of
-//! coarsening voxel size, merged into one trimesh
-//! ([`veldera_physics::terrain_v4::create_clipmap_collider`]): fine near the
-//! camera, coarse far out, at full geometry height (so skyscrapers are fully
-//! present). The new collider replaces the old in one frame (double buffer), so
-//! there is never a frame without coverage.
-//!
-//! The bands are an interim, stepped approximation of distance-graded resolution
-//! (a continuous adaptive octree extractor is the end-state, `todo/collider-v4.md`);
-//! their boundaries are an inherent rough edge.
+//! builds per tile) into one soup and extracting a distance-graded drivable-height
+//! surface from it ([`veldera_physics::terrain_v4::create_height_collider`]): a
+//! quadtree over the ground, fine near the camera and coarse far out, sampled by a
+//! robust drivable height so overhead clutter (signs, canopies) is rejected, with
+//! building faces re-emerging as the vertical cliffs between cells. The new
+//! collider replaces the old in one frame (double buffer), so there is never a
+//! frame without coverage.
 
 use std::sync::Arc;
 
@@ -29,69 +26,42 @@ use veldera_async::TaskSpawner;
 use veldera_geo::floating_origin::{FloatingOriginCamera, WorldPosition};
 use veldera_physics::{
     DebugRender, GameLayer, PhysicsState, PhysicsStreamingConfig,
-    terrain_v4::{BandSpec, TileMeshes, create_clipmap_collider},
+    terrain_v4::{HeightfieldSettings, TileMeshes, create_height_collider},
 };
 
 use crate::lod::{ColliderReconcile, LodState, poll_lod_node_tasks};
 
-/// The distance bands of the single collider: voxel and radius coarsen outward,
-/// full height each. Fine near (a small radius keeps the cell count down despite
-/// full height), coarse far (a large voxel keeps it down despite the radius). The
-/// reach matches the leap-arc's `max_range_m` (~1 km): a fully-charged yeet
-/// launches at 150 m/s, and the leap-preview arc collide-and-slides against these
-/// colliders to find its landing, so it predicts (and the player lands) wrong past
-/// wherever the colliders stop. The far bands are deliberately coarse — a leap
-/// landing 600 m out needs *a* surface there, not cm precision. A compile-time
-/// table for this cut; a follow-up lifts it into the hot-reloadable streaming
-/// config.
-const BANDS: [BandSpec; 6] = [
-    BandSpec {
-        voxel: 0.3,
-        inner_radius: 0.0,
-        outer_radius: 18.0,
-    },
-    BandSpec {
-        voxel: 0.6,
-        inner_radius: 18.0,
-        outer_radius: 45.0,
-    },
-    BandSpec {
-        voxel: 1.2,
-        inner_radius: 45.0,
-        outer_radius: 95.0,
-    },
-    BandSpec {
-        voxel: 3.0,
-        inner_radius: 95.0,
-        outer_radius: 250.0,
-    },
-    BandSpec {
-        voxel: 8.0,
-        inner_radius: 250.0,
-        outer_radius: 550.0,
-    },
-    BandSpec {
-        voxel: 18.0,
-        inner_radius: 550.0,
-        outer_radius: 1000.0,
-    },
-];
+/// Settings for the single camera-centred 2.5D drivable-height surface: a quadtree
+/// over the ground, `near_voxel` fine near the camera, coarsening to `far_voxel`
+/// (one doubling per `ring_m`) out to `radius`. The reach is sized toward the
+/// leap-arc's `max_range_m` — a fully-charged yeet launches at 150 m/s and the
+/// leap-preview arc collide-and-slides against this collider to find its landing,
+/// so it predicts (and the player lands) wrong past wherever the collider stops.
+/// `percentile` is the overhead-clutter-rejection dial (low keeps the road under a
+/// sign). A compile-time table for now; a follow-up lifts it into the
+/// hot-reloadable streaming config.
+const HEIGHTFIELD: HeightfieldSettings = HeightfieldSettings {
+    near_voxel: 0.3,
+    radius: 500.0,
+    ring_m: 30.0,
+    far_voxel: 18.0,
+    percentile: 0.3,
+    skirt_depth: 2.0,
+};
 
-/// The collider's reach (the outermost band's outer radius).
-const MAX_RADIUS: f32 = BANDS[BANDS.len() - 1].outer_radius;
+/// The collider's reach.
+const MAX_RADIUS: f32 = HEIGHTFIELD.radius;
 
 /// Debug-wireframe colour, shown only while the physics debug visualisation is
 /// enabled.
 const COLLIDER_COLOUR: Color = Color::srgb(0.4, 0.9, 0.45);
 
 /// Rebuild once the camera has moved this far (m) from the build centre. Tied to
-/// the innermost (finest) band's radius, *not* the full reach: the fine band is
-/// the small precise disc the player actually stands on, so the whole collider
-/// must re-centre on that cadence to keep them inside it, even though the coarse
-/// outer bands reach far past it. (Re-wrapping the far bands every time the fine
-/// band moves is more work than they need — they barely change; the proper fix is
-/// a per-band rebuild cadence, see `todo/collider-v4.md`.)
-const REBUILD_DISTANCE: f32 = BANDS[0].outer_radius;
+/// the fine near-field scale, *not* the full reach: the fine cells are the precise
+/// surface the player actually stands on, so the whole collider must re-centre on
+/// that cadence to keep them inside it, even though the coarse far field reaches
+/// far past it.
+const REBUILD_DISTANCE: f32 = 18.0;
 
 /// Register the v4 collider reconcile and its state/build channel. Called from
 /// [`crate::lod::LodPlugin::build`] when [`crate::roads::COLLIDER_PIPELINE`]
@@ -241,14 +211,13 @@ fn update_physics_colliders_v4(
         tiles.len()
     );
 
-    let wrap = streaming.wrap_settings();
     let tx = channel.tx.clone();
     spawner.spawn(async move {
         let tile_refs: Vec<(TileMeshes, u8)> = tiles
             .iter()
             .map(|(m, mask)| (m.as_tile_meshes(), *mask))
             .collect();
-        let collider = create_clipmap_collider(&tile_refs, down, camera_pos, &BANDS, &wrap);
+        let collider = create_height_collider(&tile_refs, down, &HEIGHTFIELD);
         let _ = tx
             .send(ColliderV4BuildResult {
                 centre: camera_pos,
