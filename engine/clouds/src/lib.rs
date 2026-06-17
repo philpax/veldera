@@ -1050,10 +1050,19 @@ impl ExtractComponent for CloudCameraEcef {
 /// state too — there's no hidden accumulator. A global runtime resource,
 /// separate from the [`CloudLayers`] configuration: set it every frame from
 /// your world clock. The recommended value is `day_of_year * 86400 +
-/// utc_seconds`, optionally wrapped modulo a safe number (e.g. 1e6) to keep f32
-/// precision. Mirrored into the render world each frame via [`ExtractResource`].
+/// utc_seconds`. Mirrored into the render world each frame via
+/// [`ExtractResource`].
+///
+/// Kept as f64 and **not** wrapped: the time-driven offsets (wind, weather
+/// drift) are `rate * time` reduced modulo a *config* period (the noise/weather
+/// tile), and a fixed wrap of the shared time only stays seamless when that
+/// wrap is a whole multiple of every such period — which it can't be once the
+/// tiles are tunable. Wrapping the time therefore teleported the cloud field
+/// and flipped coverage whenever the clock crossed the wrap boundary. f64
+/// holds a full year of seconds (~3.2e7) exactly, so the per-offset f64
+/// reductions in `prepare_cloud_uniforms` stay precise without any wrap.
 #[derive(Resource, ExtractResource, Clone, Copy, Debug, Default)]
-pub struct CloudWorldTime(pub f32);
+pub struct CloudWorldTime(pub f64);
 
 /// Equirectangular topography of the planet, used by the climate model
 /// to differentiate ocean from land in coverage modulation.

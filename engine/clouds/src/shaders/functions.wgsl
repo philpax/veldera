@@ -283,10 +283,9 @@ fn sample_layer_density_breakdown(
     b.climate_base = climate_coverage(world_pos, layer.coverage, layer.climate_strength);
     b.regional_coverage = b.climate_base;
     if layer.weather_tile > 0.0 && layer.weather_strength > 0.0 {
-        let t = cloud.time_seconds;
-        let r_drift = vec3<f32>(t * 2.0, 0.0, 0.0);
-        let c_drift = vec3<f32>(t * 8.0, 0.0, 0.0);
-        let p_drift = vec3<f32>(t * 25.0, 0.0, 0.0);
+        let r_drift = vec3<f32>(layer.weather_drift.x, 0.0, 0.0);
+        let c_drift = vec3<f32>(layer.weather_drift.y, 0.0, 0.0);
+        let p_drift = vec3<f32>(layer.weather_drift.z, 0.0, 0.0);
         let r_uv = (world_pos + r_drift) / layer.weather_tile;
         let c_uv = (world_pos + c_drift) / (layer.weather_tile * 10.0);
         let p_uv = (world_pos + p_drift) / (layer.weather_tile * 40.0);

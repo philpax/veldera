@@ -65,6 +65,17 @@ pub struct GpuCloudSubLayer {
     /// 4-byte slot (which would otherwise be `vec3` alignment padding)
     /// so the struct size stays compact.
     pub climate_strength: f32,
+
+    /// Per-octave weather-map drift offsets (metres), packed as
+    /// `(regional, cloud, pocket)`. Each is `speed * world_time` reduced
+    /// modulo that octave's spatial period (`weather_tile * {1, 10, 40}`) in
+    /// f64, so the world-time origin contributes a whole number of tiles and
+    /// the shader's `fract` sees no seam when world time advances past the
+    /// once-tractable f32 range. Speeds (2 / 8 / 25 m/s) mirror the octaves
+    /// in `functions.wgsl`, `cloud_composite.wgsl`, and
+    /// `cloud_shadow_bake.wgsl`.
+    pub weather_drift: Vec3,
+    pub pad_weather: u32,
 }
 
 #[derive(Component, ShaderType, Clone)]

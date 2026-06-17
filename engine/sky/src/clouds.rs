@@ -360,11 +360,11 @@ fn apply_cloud_climate_config(
     *settings = config.0;
 }
 
-/// Pushes `day_of_year * 86400 + utc_seconds` into [`CloudWorldTime`]. Wraps the
-/// value modulo ~12 days so f32 stays precise (per-frame wind offsets wrap
-/// modulo the noise tile, so the once-every-12-day boundary is invisible at any
-/// sane time-of-day speed).
+/// Pushes `day_of_year * 86400 + utc_seconds` into [`CloudWorldTime`] as a
+/// continuous f64. Deliberately unwrapped — see [`CloudWorldTime`] for why a
+/// fixed wrap teleported the cloud field at the boundary. The only residual
+/// discontinuity is the once-a-year `day_of_year` rollover (and intentional
+/// manual date jumps), both of which the time-driven offsets simply track.
 fn sync_cloud_world_time(time_state: Res<TimeOfDayState>, mut time: ResMut<CloudWorldTime>) {
-    let absolute = f64::from(time_state.day_of_year()) * 86400.0 + time_state.current_utc_seconds();
-    time.0 = (absolute.rem_euclid(1_000_000.0)) as f32;
+    time.0 = f64::from(time_state.day_of_year()) * 86400.0 + time_state.current_utc_seconds();
 }

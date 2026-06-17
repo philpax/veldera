@@ -100,7 +100,7 @@ pub(super) fn render_atmosphere_tab(
     }
 }
 
-fn render_overview(ui: &mut egui::Ui, cloud: &mut CloudLayers, world_time: f32) {
+fn render_overview(ui: &mut egui::Ui, cloud: &mut CloudLayers, world_time: f64) {
     ui.label("Quality:");
     ui.horizontal(|ui| {
         for tier in [CloudQuality::Low, CloudQuality::Medium, CloudQuality::High] {

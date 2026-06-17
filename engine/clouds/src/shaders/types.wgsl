@@ -51,6 +51,13 @@ struct CloudSubLayer {
     // Per-layer climate-strength multiplier in [0, 1]. Lives in
     // what would otherwise be vec3 alignment padding.
     climate_strength: f32,
+
+    // Per-octave weather-map drift (m), packed (regional, cloud, pocket).
+    // CPU-computed `speed * world_time` reduced modulo each octave's spatial
+    // period in f64 so world-time advance leaves no seam after `fract`.
+    // Added directly to the sample position in the weather blocks.
+    weather_drift: vec3<f32>,
+    pad_weather: u32,
 }
 
 struct CloudUniform {

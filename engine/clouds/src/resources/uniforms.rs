@@ -77,7 +77,13 @@ pub fn prepare_cloud_uniforms(
     // that night-time cloud shadows follow the moon instead of
     // degenerating because the (below-horizon) sun was picked.
 
-    let world_time = world_time.0;
+    // Continuous f64 world time (see `CloudWorldTime`). All `rate * time mod
+    // period` offsets reduce from this in f64 so they stay seamless. The
+    // shader's `time_seconds` is a wrapped f32 used only by period-1.0 noise
+    // taps (climate, sim, domain warp), whose rates make `1e6 * rate` an
+    // integer, so the wrap is invisible to them.
+    let absolute = world_time.0;
+    let time_seconds = absolute.rem_euclid(1_000_000.0) as f32;
     for (
         entity,
         cloud,
@@ -196,9 +202,10 @@ pub fn prepare_cloud_uniforms(
         };
 
         // Pack up to MAX_CLOUD_LAYERS sub-layers into the uniform array.
-        // Wind offset is `velocity * world_time` (wrapped to bound f32
-        // precision), so cloud state is a pure function of world time —
-        // jumping the world clock immediately jumps the clouds too.
+        // The wind and weather-drift offsets are `rate * absolute` reduced
+        // modulo their period in f64, so cloud state is a pure function of
+        // world time — jumping the world clock immediately jumps the clouds
+        // too — without the seam a wrapped time would introduce.
         let mut gpu_layers = [GpuCloudSubLayer::default(); MAX_CLOUD_LAYERS];
         // `enabled` is a master switch: zero active layers means the raymarch
         // accumulates no density, so nothing composites onto the scene.
@@ -208,9 +215,33 @@ pub fn prepare_cloud_uniforms(
             0
         };
         for (i, sub) in cloud.layers.iter().take(layer_count).enumerate() {
-            let wrap = (sub.noise_tile * 32.0).max(1.0);
-            let raw = sub.wind_velocity * world_time;
-            let wind_offset = Vec2::new(raw.x.rem_euclid(wrap), raw.y.rem_euclid(wrap));
+            // Wind translation `velocity * time`, reduced modulo the noise
+            // wrap in f64. Done from the continuous f64 `absolute` (not a
+            // wrapped time) so the cloud field never teleports mid-flight.
+            let wrap = f64::from((sub.noise_tile * 32.0).max(1.0));
+            let raw = sub.wind_velocity.as_dvec2() * absolute;
+            let wind_offset =
+                Vec2::new(raw.x.rem_euclid(wrap) as f32, raw.y.rem_euclid(wrap) as f32);
+            // Weather-map octave drift `speed * time`, reduced modulo each
+            // octave's spatial period (`weather_tile * {1, 10, 40}`) in f64 so
+            // the world-time origin contributes a whole number of tiles and the
+            // shader's `fract` sees no seam. Speeds (2 / 8 / 25 m/s) and tile
+            // multipliers mirror the octaves in `functions.wgsl`,
+            // `cloud_composite.wgsl`, and `cloud_shadow_bake.wgsl`.
+            let weather_tile_f64 = f64::from(sub.weather_tile.max(0.0));
+            let weather_drift_octave = |speed: f64, mult: f64| {
+                let period = weather_tile_f64 * mult;
+                if period > 0.0 {
+                    (absolute * speed).rem_euclid(period) as f32
+                } else {
+                    0.0
+                }
+            };
+            let weather_drift = Vec3::new(
+                weather_drift_octave(2.0, 1.0),
+                weather_drift_octave(8.0, 10.0),
+                weather_drift_octave(25.0, 40.0),
+            );
             let tile = f64::from(sub.noise_tile.max(1.0));
             // Per-axis `(cam / tile).fract()`, in f64 to retain the
             // precision before the result gets used as a small f32 add
@@ -243,6 +274,8 @@ pub fn prepare_cloud_uniforms(
                 warp_uv_offset,
                 climate_strength: sub.climate_strength.clamp(0.0, 1.0),
                 enabled: u32::from(sub.enabled),
+                weather_drift,
+                pad_weather: 0,
             };
         }
 
@@ -343,7 +376,7 @@ pub fn prepare_cloud_uniforms(
         //
         // Camera moves never trigger reinit — the sim is a global
         // field, camera-independent.
-        let world_time_now = f64::from(world_time);
+        let world_time_now = absolute;
         let sim_dt = f64::from(cloud.sim.dt_seconds.max(1.0));
         let max_catchup_seconds = f64::from(cloud.sim.max_steps_per_frame.max(1)) * sim_dt * 240.0;
         let prev_sim = sim_state_prev.copied().unwrap_or_default();
@@ -378,7 +411,7 @@ pub fn prepare_cloud_uniforms(
             buffer_size,
             full_size,
             layer_count: layer_count as u32,
-            time_seconds: world_time,
+            time_seconds,
             raymarch_jitter: u32::from(cloud.raymarch_jitter),
             raymarch_jitter_magnitude: cloud.raymarch_jitter_magnitude,
             raymarch_taa_jitter_magnitude: cloud.raymarch_taa_jitter_magnitude,

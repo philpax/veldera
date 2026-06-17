@@ -167,10 +167,9 @@ fn density_at_camera_for_layer(layer_i: u32) -> f32 {
     let climate_base = climate_coverage(camera_world, layer.coverage, layer.climate_strength);
     var regional_coverage = climate_base;
     if layer.weather_tile > 0.0 && layer.weather_strength > 0.0 {
-        let t = cloud.time_seconds;
-        let r_drift = vec3<f32>(t * 2.0, 0.0, 0.0);
-        let c_drift = vec3<f32>(t * 8.0, 0.0, 0.0);
-        let p_drift = vec3<f32>(t * 25.0, 0.0, 0.0);
+        let r_drift = vec3<f32>(layer.weather_drift.x, 0.0, 0.0);
+        let c_drift = vec3<f32>(layer.weather_drift.y, 0.0, 0.0);
+        let p_drift = vec3<f32>(layer.weather_drift.z, 0.0, 0.0);
         let r_uv = (camera_world + r_drift) / layer.weather_tile;
         let c_uv = (camera_world + c_drift) / (layer.weather_tile * 10.0);
         let p_uv = (camera_world + p_drift) / (layer.weather_tile * 40.0);
