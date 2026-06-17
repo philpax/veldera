@@ -6,7 +6,7 @@
 
 use std::{collections::HashMap, error::Error, path::Path, time::Instant};
 
-use glam::{DVec3, Vec3};
+use glam::{DVec3, Quat, Vec3};
 use rocktree::Mesh as RocktreeMesh;
 use veldera_terrain_collider::{
     BuildSettings, BuiltGeometry, SurfaceProbe, build_tile_geometry,
@@ -17,6 +17,14 @@ use veldera_terrain_collider::{
 
 /// Triangle altitude below which a wrapped triangle counts as a sliver (m).
 const SLIVER_ALTITUDE: f32 = 0.02;
+
+/// Centre of the rocktree 0-255 local lattice (the cell centre in local units).
+const LATTICE_CENTRE: f32 = 127.5;
+
+/// A tile's cell centre in its own baked frame (relative to its world position).
+pub(crate) fn cell_centre(tile: &DumpTile) -> Vec3 {
+    Quat::from_array(tile.rotation) * (Vec3::from_array(tile.scale) * LATTICE_CENTRE)
+}
 
 /// Run the wrap workbench over a loaded dump at the given voxel size.
 pub fn run(
@@ -45,7 +53,8 @@ pub fn run(
             continue;
         };
 
-        let (halo_vertices, halo_triangles) = tile_halo(tile, meshes, dump, base_settings);
+        let (halo_vertices, halo_triangles, neighbour_centres) =
+            tile_halo(tile, meshes, dump, base_settings);
         let start = Instant::now();
         let wrapped = wrap_soup(
             &WrapInput {
@@ -55,6 +64,8 @@ pub fn run(
                 halo_triangles: &halo_triangles,
                 down: tile.down(),
                 world_position: DVec3::from_array(tile.world_position),
+                cell_centre: cell_centre(tile),
+                neighbour_centres: &neighbour_centres,
             },
             &wrap,
         );
@@ -150,11 +161,12 @@ pub(crate) fn tile_halo(
     meshes: &HashMap<&str, Vec<RocktreeMesh>>,
     dump: &TileSetDump,
     base_settings: &BuildSettings,
-) -> (Vec<Vec3>, Vec<[u32; 3]>) {
+) -> (Vec<Vec3>, Vec<[u32; 3]>, Vec<Vec3>) {
     let tiles: HashMap<&str, &DumpTile> = dump.tiles.iter().map(|t| (t.path.as_str(), t)).collect();
     let tile_wp = DVec3::from_array(tile.world_position);
     let mut vertices: Vec<Vec3> = Vec::new();
     let mut triangles: Vec<[u32; 3]> = Vec::new();
+    let mut centres: Vec<Vec3> = Vec::new();
     for lateral in &tile.laterals {
         let Some(neighbour) = tiles.get(lateral.as_str()) else {
             continue;
@@ -173,8 +185,9 @@ pub(crate) fn tile_halo(
                 .iter()
                 .map(|&[a, b, c]| [a + base, b + base, c + base]),
         );
+        centres.push(cell_centre(neighbour) + offset);
     }
-    (vertices, triangles)
+    (vertices, triangles, centres)
 }
 
 /// `100 * num / den`, or 0 when `den` is 0.

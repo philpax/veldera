@@ -80,6 +80,11 @@ pub fn create_terrain_collider(
             );
         }
     }
+    // Cell centre of a tile in this tile's frame: the centre of the rocktree
+    // 0-255 local lattice, baked, plus its offset. Used to clip each tile to its
+    // horizontal Voronoi cell so same-depth neighbours don't overlap.
+    let cell_centre = |tm: &TileMeshes| tm.rotation * (tm.scale * 127.5) + tm.offset;
+    let neighbour_centres: Vec<Vec3> = neighbours.iter().map(|(tm, _)| cell_centre(tm)).collect();
     let wrapped: WrappedMesh = veldera_terrain_collider::wrap::wrap_soup(
         &WrapInput {
             vertices: &base.vertices,
@@ -88,6 +93,8 @@ pub fn create_terrain_collider(
             halo_triangles: &halo_triangles,
             down,
             world_position,
+            cell_centre: cell_centre(tile),
+            neighbour_centres: &neighbour_centres,
         },
         wrap,
     );

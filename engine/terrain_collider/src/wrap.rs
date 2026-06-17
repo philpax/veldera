@@ -32,7 +32,7 @@ use fast_surface_nets::{
     ndshape::{RuntimeShape, Shape},
     surface_nets,
 };
-use glam::Vec3;
+use glam::{Vec2, Vec3};
 
 /// Voxels of neighbour halo included around each tile (and grid margin), so the
 /// wrap surface reaches past the tile border and meets the neighbour's.
@@ -123,6 +123,15 @@ pub struct WrapInput<'a> {
     /// The tile's ECEF world position, used to anchor the grid to a global voxel
     /// lattice so neighbouring tiles place nodes at the same world points.
     pub world_position: glam::DVec3,
+    /// This tile's cell centre, in the tile's local frame. With
+    /// `neighbour_centres`, the extracted mesh is clipped to the tile's
+    /// horizontal Voronoi cell so same-depth neighbours partition the ground
+    /// instead of overlapping (the cell boundary is the bisector between two
+    /// equal-size adjacent cells' centres).
+    pub cell_centre: Vec3,
+    /// Same-depth neighbour cell centres, in the tile's local frame. Empty
+    /// disables the cell clip.
+    pub neighbour_centres: &'a [Vec3],
 }
 
 /// Wrap a triangle soup in a clean watertight surface, aligned to a global voxel
@@ -259,20 +268,95 @@ pub fn wrap_soup(input: &WrapInput, settings: &WrapSettings) -> WrappedMesh {
     let extracted_triangles = buffer.indices.len() / 3;
 
     let indices = decimate(&buffer, settings.decimate_error);
-    let out_vertices = buffer
+
+    // Cell clip: trim the wrap to this tile's horizontal Voronoi cell — the
+    // bisector between two equal-size adjacent cells' centres is their shared
+    // boundary, so clipping each tile to the side of every bisector makes
+    // same-depth neighbours partition the ground (no overlap) while meeting
+    // exactly at the boundary (no gap, since both sides split at the same plane).
+    let mut verts: Vec<Vec3> = buffer
         .positions
         .iter()
-        .map(|&[x, y, z]| to_world(origin + Vec3::new(x, y, z) * voxel))
+        .map(|&[x, y, z]| origin + Vec3::new(x, y, z) * voxel)
         .collect();
-    let triangles = indices
+    let mut triangles: Vec<[u32; 3]> = indices
         .chunks_exact(3)
         .map(|c| [c[0], c[1], c[2]])
         .collect();
+    let tile_c = to_frame(input.cell_centre).truncate();
+    for &neighbour_centre in input.neighbour_centres {
+        let nc = to_frame(neighbour_centre).truncate();
+        let dir = nc - tile_c;
+        if dir.length_squared() < 1e-9 {
+            continue;
+        }
+        // Keep the side closer to this tile's centre.
+        (verts, triangles) =
+            clip_halfspace(verts, &triangles, (tile_c + nc) * 0.5, dir.normalize());
+    }
+    if !input.neighbour_centres.is_empty() {
+        // Drop the slivers the clip splits leave at the cell edges (a triangle
+        // grazing a bisector yields a near-degenerate strip). Filter by the
+        // triangle's smallest altitude, not area, so long thin strips go too;
+        // any sub-centimetre gap a dropped strip leaves is far too small to
+        // matter, and the neighbour covers the other side of the bisector.
+        const MIN_ALTITUDE: f32 = 0.01;
+        triangles.retain(|&[a, b, c]| {
+            let (va, vb, vc) = (verts[a as usize], verts[b as usize], verts[c as usize]);
+            let area2 = (vb - va).cross(vc - va).length();
+            let longest = (vb - va)
+                .length()
+                .max((vc - vb).length())
+                .max((va - vc).length());
+            longest > 1e-6 && area2 / longest > MIN_ALTITUDE
+        });
+    }
+    let out_vertices = verts.into_iter().map(to_world).collect();
     WrappedMesh {
         vertices: out_vertices,
         triangles,
         extracted_triangles,
     }
+}
+
+/// Clip a mesh to the half-space `{ v : (v.xy − point)·normal ≤ 0 }`, a vertical
+/// plane through the horizontal line. Triangles wholly inside are kept, wholly
+/// outside dropped, and crossing ones split at the plane (intersection vertices
+/// appended, the kept polygon fan-triangulated). Adjacent tiles split at the
+/// same bisector plane, so their clipped edges coincide.
+fn clip_halfspace(
+    mut verts: Vec<Vec3>,
+    tris: &[[u32; 3]],
+    point: Vec2,
+    normal: Vec2,
+) -> (Vec<Vec3>, Vec<[u32; 3]>) {
+    let signed = |v: Vec3| (v.truncate() - point).dot(normal);
+    let mut out: Vec<[u32; 3]> = Vec::with_capacity(tris.len());
+    for &idx in tris {
+        let p = [
+            verts[idx[0] as usize],
+            verts[idx[1] as usize],
+            verts[idx[2] as usize],
+        ];
+        let sd = [signed(p[0]), signed(p[1]), signed(p[2])];
+        // Sutherland-Hodgman over the triangle's three edges.
+        let mut poly: Vec<u32> = Vec::with_capacity(4);
+        for i in 0..3 {
+            let j = (i + 1) % 3;
+            if sd[i] <= 0.0 {
+                poly.push(idx[i]);
+            }
+            if (sd[i] <= 0.0) != (sd[j] <= 0.0) {
+                let t = sd[i] / (sd[i] - sd[j]);
+                verts.push(p[i] + (p[j] - p[i]) * t);
+                poly.push((verts.len() - 1) as u32);
+            }
+        }
+        for k in 1..poly.len().saturating_sub(1) {
+            out.push([poly[0], poly[k], poly[k + 1]]);
+        }
+    }
+    (verts, out)
 }
 
 /// Rasterize each triangle's unsigned distance into `dist` within a band around
@@ -661,6 +745,8 @@ mod tests {
                 halo_triangles: &[],
                 down: Vec3::new(0.0, 0.0, -1.0),
                 world_position: glam::DVec3::ZERO,
+                cell_centre: Vec3::ZERO,
+                neighbour_centres: &[],
             },
             &WrapSettings::default(),
         );
@@ -700,6 +786,8 @@ mod tests {
                 halo_triangles: &[],
                 down: Vec3::NEG_Z,
                 world_position: glam::DVec3::ZERO,
+                cell_centre: Vec3::ZERO,
+                neighbour_centres: &[],
             },
             &WrapSettings::default(),
         );

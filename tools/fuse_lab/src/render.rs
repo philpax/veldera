@@ -22,7 +22,7 @@ use veldera_terrain_collider::{
     wrap::{WrapInput, WrapSettings, wrap_soup},
 };
 
-use crate::wrap::{base_soup, tile_halo};
+use crate::wrap::{base_soup, cell_centre, tile_halo};
 
 /// Width and height of one panel, in pixels.
 const PANEL: (u32, u32) = (900, 760);
@@ -67,7 +67,8 @@ pub fn run(
         // frame by the tile's ECEF offset from the origin.
         let shift = off.as_vec3();
         orig.add(&base.vertices, &base.triangles, shift);
-        let (halo_vertices, halo_triangles) = tile_halo(tile, meshes, dump, base_settings);
+        let (halo_vertices, halo_triangles, neighbour_centres) =
+            tile_halo(tile, meshes, dump, base_settings);
         let w = wrap_soup(
             &WrapInput {
                 vertices: &base.vertices,
@@ -76,6 +77,8 @@ pub fn run(
                 halo_triangles: &halo_triangles,
                 down: tile.down(),
                 world_position: DVec3::from_array(tile.world_position),
+                cell_centre: cell_centre(tile),
+                neighbour_centres: &neighbour_centres,
             },
             &wrap,
         );
