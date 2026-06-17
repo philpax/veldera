@@ -105,21 +105,38 @@ A parked, settled camera costs nothing (no trigger fires).
 (reuse `MotionTracker`'s lead vector) so a moving vehicle gets fresh geometry
 *ahead* of it rather than centred behind.
 
-**Speed scaling (the high-speed case).** Walking / driving / yeeting are bounded
-and the fixed ring set above handles them. Free-flying at full camera speed can
-outrun the fine ring's rebuilds — and precise near-field collision is pointless
-at that speed anyway. So make the ring set a **function of camera speed**, dialled
-in via config:
-- low speed: the full fine→coarse set, frequent rebuilds (cm-accurate near field);
-- high speed: drop the finest rings and widen the rest (coarser voxels, larger
-  radii, higher motion thresholds) so far fewer, far cheaper rebuilds keep up;
-- extreme speed (pure flight): possibly only the coarsest ring, or none until the
-  camera slows — you are not touching the ground at 100 m/s.
+**Speed scaling (the high-speed case).** Target upper bound: **~1000 kph
+(≈278 m/s)** — a hypercar, not just flight (360 kph is well within a hypercar's
+range, so the earlier ~100 m/s figure was too low). At 278 m/s the camera moves
+~4.4 m/frame and ~140 m during a half-second rebuild, so it traverses a 40 m fine
+ring in ~0.14 s. Fine near-field collision is then both impossible to maintain and
+pointless (the car cannot react to a sub-metre bump at that speed; the suspension
+averages it). So the ring set is a **function of camera speed**, trading
+**resolution for reach**:
+- low speed (walking/driving/yeeting — bounded): the full fine→coarse set,
+  frequent rebuilds, cm-accurate near field;
+- high speed: drop the fine rings and grow the coarse ones — bigger voxels, much
+  larger radii, and the lead pushed far ahead, so a few cheap rebuilds keep
+  collision *where the car is going*. E.g. at ~278 m/s, roughly a single coarse
+  ring at ~0.5–1 m voxel, ~250 m radius, lead ~150 m ahead, re-centred every
+  ~50–80 m of travel.
+
+**The binding constraint is rebuild latency vs traversal.** The off-thread
+rebuild of the active ring must finish before the camera exits the lead-covered
+region: `ring_radius + lead − rebuild_latency × speed` must stay comfortably
+positive. Coarser/cheaper rebuilds finish faster, which is *why* the ring
+coarsens with speed — it is what makes the rebuild keep up, not just what the car
+needs. So the coarse-ring rebuild cost (rasterize-all-tiles-in-radius + wrap) must
+be measured to set the speed→(radius, voxel, lead, threshold) curve; that curve is
+a tuning knob, the structure is unchanged.
+
+Airborne high speed (a big yeet/jump) is *easier*, not harder: with no ground
+contact until landing, there is air time to build the landing zone ahead and no
+need for continuous near-field coverage during the arc.
 
 Graceful fallback: if the camera still outruns the active finest ring, it lands on
 the next coarser (larger, rarely-rebuilt) ring — degraded resolution, never a
-hole. The exact radii/voxel/threshold curves vs speed are tuning knobs, not
-structural — start conservative and measure.
+hole.
 
 ## Open questions / risks
 
