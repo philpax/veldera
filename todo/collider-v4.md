@@ -207,6 +207,38 @@ too slow.
 Next experiment: bound the `--clipmap` grid to a sphere box (camera ± R) and
 re-measure the fine-sphere cost vs the geometry-sized grid.
 
+## Extraction: drop Surface Nets + decimate for adaptive Dual Contouring
+
+Profiling the dense wrap (urban r=30, 643 ms) showed the decimate pass at 160 ms
+crushing **472 k Surface Nets triangles down to 244** — Surface Nets is
+uniform-density (one quad per surface cell regardless of flatness), so a flat
+region generates hundreds of thousands of triangles that are then discarded
+(~9 MB allocated and thrown away *per rebuild*).
+
+The fix is an **adaptive** extractor that emits few triangles on flat surfaces
+directly, no decimation pass:
+
+- **Adaptive/octree Dual Contouring** (Ju et al. 2002): build an octree over the
+  SDF, collapse cells where the surface is locally planar (QEF residual under a
+  bound), extract on the adaptive leaves → coarse triangles on flat ground, fine
+  on detail, *directly*. Kills the decimate cost and the allocate-then-discard
+  churn, and as a bonus preserves sharp man-made edges (curbs, walls) the way
+  Surface Nets rounds off.
+- **RTIN/MARTINI heightmesh** (already prototyped, `fuse_lab --rtin`): adaptive
+  and decimation-free, but 2.5D heightfield — single-valued, loses walls and
+  overhangs. Does not fit v4's 3D requirement.
+- A cheap coplanar-merge post-pass would replace meshopt but still allocates the
+  472 k first — doesn't fix the churn.
+
+**The convergence:** adaptive DC uses an *octree*, which is the *same* structure
+the sparse storage wants. So one octree gives all three v4 wins at once — sparse
+storage (cost), the flood replaced by a flood-free **winding-number** sign, and
+adaptive extraction (no decimate). The coherent v4 core is therefore
+**sparse octree + winding-number sign + adaptive Dual Contouring**, dropping the
+dense grid, the global flood, *and* Surface Nets + meshopt together — not the
+dense-grid wrap reused per region. (Rust: the `isosurface` crate has
+non-adaptive DC to evaluate/extend; adaptive octree DC may need implementing.)
+
 ## Open questions / risks
 
 - **Fine-ring rasterization cost.** Ring 0 covers a large area at fine res (40 m
