@@ -253,17 +253,23 @@ Remaining:
     stacks unclipped overlap* — adjacent wraps extend into each other and stick up
     as blobs where they don't perfectly coincide, and the side seams stayed open.
     Reverted; the lesson is that the halo is necessary but not sufficient.
-  - **Proper design (chunked-LOD meshing), to do next:**
-    1. Global-lattice-anchored grids (depth-based voxel so same-depth neighbours
-       share nodes) — prototyped, keep.
-    2. Same-depth neighbour halo so the shared-node field agrees — prototyped, keep.
-    3. **Clip each tile's extracted mesh to its octree-cell footprint** (drop the
-       halo overlap), so neighbours meet at the cell boundary with coincident
-       vertices: no gaps, no overlap blobs. This is the missing piece; needs the
-       tile's spatial cell bounds (derive from path / OBB / scale).
-    4. Cross-depth (LOD-transition) borders: lattices nest (octree-aligned) but
+  - **Global lattice + same-depth halo — DONE, flat terrain (2026-06-17).**
+    Each tile's grid is anchored to a global voxel lattice (f64 ECEF projection),
+    and `wrap_soup` takes a halo of same-depth neighbour geometry, so adjacent
+    tiles place nodes at the same world points and sample the same field — their
+    surfaces coincide at the border. Validated on a flat four-tile seam dump: the
+    clefted columns became one continuous smooth surface; no regression on the
+    urban/bridge dumps. Wired in-engine (`terrain_v3` builds the halo from the
+    same-depth laterals `collider_v3` gathers). Closes the flat fall-through seams.
+  - **Remaining for full border consistency:**
+    1. **Clip each tile's mesh to its octree-cell footprint.** On height-varying
+       borders (building complexes) the unclipped halo overlap still stacks as
+       small blobs — flat terrain coincides cleanly, but clipping each tile to its
+       cell would make every border meet exactly. Needs the tile's spatial cell
+       bounds (derive from path / OBB / scale).
+    2. Cross-depth (LOD-transition) borders: lattices nest (octree-aligned) but
        resolutions differ — needs transition cells (transvoxel-style) or a small
-       skirt at LOD boundaries. Defer; same-depth borders are the common case.
+       skirt at LOD boundaries. The halo is same-depth only for now.
 - **In-game verification** of the rest (stand/drive; the floater curtains are a
   known cosmetic limit — see below).
 - Then pull v2's good parts back in (generation early-out, progressive
