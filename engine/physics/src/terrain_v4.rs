@@ -121,6 +121,14 @@ pub fn create_clipmap_collider(
             winding_sign: false,
             extractor: Extractor::AdaptiveDc,
             dc_error: 16.0,
+            // Erode single-voxel protrusions off the solidified mass before
+            // extraction. Without it, a lone high feature in a column — a stray
+            // photogrammetry triangle, an overhanging facade, a pole — becomes the
+            // column's topmost voxel, `solidify_below_top` fills beneath it, and
+            // the surface drapes up to that false ceiling (hilliness above flat
+            // ground). Radius 1 dissolves the one-voxel hash while leaving the
+            // broad ground surface intact.
+            open_radius: 1,
             ..*wrap_base
         };
         let wrapped = veldera_terrain_collider::wrap::wrap_soup(
