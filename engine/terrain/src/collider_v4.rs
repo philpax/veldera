@@ -36,46 +36,31 @@ use veldera_physics::{
 
 use crate::lod::{ColliderReconcile, LodState, poll_lod_node_tasks};
 
-/// The clipmap ring set: voxel and radius roughly double outward, each ring
-/// vertically bounded around the local ground. The innermost has `inner_radius`
-/// 0 (a full disc); the rest are annuli owning the band outside the finer ring.
-/// A compile-time table for this first cut; a follow-up lifts it into the
-/// hot-reloadable streaming config.
-const RINGS: [RingSpec; 3] = [
-    RingSpec {
-        voxel: 0.15,
-        inner_radius: 0.0,
-        outer_radius: 16.0,
-        below: 4.0,
-        above: 16.0,
-    },
-    RingSpec {
-        voxel: 0.30,
-        inner_radius: 16.0,
-        outer_radius: 36.0,
-        below: 6.0,
-        above: 22.0,
-    },
-    RingSpec {
-        voxel: 0.60,
-        inner_radius: 36.0,
-        outer_radius: 70.0,
-        below: 10.0,
-        above: 30.0,
-    },
-];
+/// The clipmap ring set. Currently a **single** camera-centred disc: the
+/// three-ring version overlapped at the transition bands (bumpy) and added
+/// complexity for little gain when driving rebuilds every ring anyway. One
+/// uniform-resolution collider has no internal overlap; grading the resolution by
+/// distance *within* one mesh (so the far field is coarse and cheap) is the
+/// adaptive Dual Contouring follow-up. `below`/`above` are now measured from the
+/// estimated ground under the camera, not the camera itself. A compile-time table
+/// for this cut; a follow-up lifts it into the hot-reloadable streaming config.
+const RINGS: [RingSpec; 1] = [RingSpec {
+    voxel: 0.25,
+    inner_radius: 0.0,
+    outer_radius: 30.0,
+    below: 4.0,
+    above: 24.0,
+}];
 
-/// Per-ring debug-wireframe colours (warm → green → blue, fine → coarse), shown
-/// only while the physics debug visualisation is enabled.
-const RING_COLOURS: [Color; 3] = [
-    Color::srgb(0.95, 0.55, 0.3),
-    Color::srgb(0.4, 0.9, 0.45),
-    Color::srgb(0.4, 0.6, 1.0),
-];
+/// Per-ring debug-wireframe colours, shown only while the physics debug
+/// visualisation is enabled.
+const RING_COLOURS: [Color; 1] = [Color::srgb(0.4, 0.9, 0.45)];
 
 /// Rebuild a ring once the camera has moved this fraction of its outer radius
-/// from the ring's centre (with a small floor so the fine ring still has slack).
-const REBUILD_FRACTION: f32 = 0.25;
+/// from the ring's centre (with a small floor). Larger than a naive value so the
+/// rebuild (a few hundred ms off-thread) finishes well before the camera reaches
+/// the rebuilt region's edge.
+const REBUILD_FRACTION: f32 = 0.35;
 
 /// Register the v4 collider reconcile and its state/build channel. Called from
 /// [`crate::lod::LodPlugin::build`] when [`crate::roads::COLLIDER_PIPELINE`]
@@ -196,8 +181,18 @@ fn update_physics_colliders_v4(
 
         let tiles = gather_ring_tiles(&lod_state, &streaming, camera_pos, spec.outer_radius);
         if tiles.is_empty() {
+            debug!(target: "collider_v4", "ring {i}: no tiles in range, deferring");
             continue;
         }
+
+        let moved = v4.rings[i]
+            .centre
+            .map_or(f64::INFINITY, |c| (camera_pos - c).length());
+        info!(
+            target: "collider_v4",
+            "dispatch ring {i}: {} tiles, camera moved {moved:.1} m (threshold {threshold:.1} m)",
+            tiles.len()
+        );
 
         let wrap = streaming.wrap_settings();
         let spec = *spec;
@@ -270,9 +265,15 @@ fn commit_build(
     let Some(collider) = result.collider else {
         // Nothing wrapped under the ring; keep the previous collider, but record
         // the centre so we do not immediately re-dispatch the same empty build.
+        warn!(
+            target: "collider_v4",
+            "commit ring {}: empty build (no geometry wrapped); keeping previous collider",
+            result.ring
+        );
         v4.rings[result.ring].centre = Some(result.centre);
         return;
     };
+    info!(target: "collider_v4", "commit ring {}: built", result.ring);
 
     // Camera-relative position in the commit-time origin frame; the ring mesh is
     // built relative to its centre, so this places it correctly.

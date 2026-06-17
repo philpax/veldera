@@ -95,10 +95,26 @@ pub fn create_clipmap_collider(
     if triangles.is_empty() {
         return None;
     }
+    let soup_tris = triangles.len();
+
+    // Estimate the ground altitude under the ring centre and window the slab
+    // around *it*, not the centre: the centre is the camera, which floats above
+    // the ground (chase/free camera), so a camera-relative window clips the
+    // drivable surface out entirely (and, catching only elevated objects, lets
+    // the column solidify fill curtains down to the grid floor). The ground is
+    // the dominant surface near the centre column, so its median altitude is a
+    // robust reference.
+    let ground = ground_altitude(&vertices, up);
 
     // Bound the input to the ring volume before wrapping (mandatory; see module
     // docs): a vertical slab around the ground, then a radial disc.
-    let (vertices, triangles) = clip_to_slab(vertices, &triangles, up, -ring.below, ring.above);
+    let (vertices, triangles) = clip_to_slab(
+        vertices,
+        &triangles,
+        up,
+        ground - ring.below,
+        ground + ring.above,
+    );
     if triangles.is_empty() {
         return None;
     }
@@ -152,5 +168,29 @@ pub fn create_clipmap_collider(
         return None;
     }
 
+    info!(
+        target: "collider_v4",
+        "ring build: {} tiles, soup {soup_tris} tris, ground {ground:.1} m, final {} tris",
+        tiles.len(),
+        triangles.len()
+    );
     Collider::try_trimesh(vertices, triangles).ok()
+}
+
+/// Median altitude (`v·up`) of the vertices within [`GROUND_PROBE_RADIUS`] of the
+/// ring centre column — a robust estimate of the drivable surface under the
+/// camera, used to centre the vertical window. Falls back to 0 (the centre
+/// altitude) when no central geometry is present.
+fn ground_altitude(vertices: &[Vec3], up: Vec3) -> f32 {
+    const GROUND_PROBE_RADIUS: f32 = 8.0;
+    let mut altitudes: Vec<f32> = vertices
+        .iter()
+        .filter(|&&v| (v - up * v.dot(up)).length() < GROUND_PROBE_RADIUS)
+        .map(|&v| v.dot(up))
+        .collect();
+    if altitudes.is_empty() {
+        return 0.0;
+    }
+    altitudes.sort_unstable_by(f32::total_cmp);
+    altitudes[altitudes.len() / 2]
 }
