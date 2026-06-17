@@ -246,6 +246,52 @@ it out). A free-fly camera high above the street would need the window re-centre
 on the *local ground* (raycast or the loaded tiles' lower envelope), not the
 camera — a v4 streaming concern, not a wrap concern.
 
+## Phase 2: nested rings confirmed (2026-06-17, `fuse_lab --clipmap-nested`)
+
+Built the full hierarchy offline: three camera-centred rings of doubling voxel and
+radius, each vertically bounded, each trimmed to its annulus with a 4 m inward
+overlap band, composited through one shared depth buffer (warm = fine, green = mid,
+blue = coarse):
+
+| ring | voxel | radius | tiles | wrap | annulus tris |
+| --- | --- | --- | --- | --- | --- |
+| fine | 0.15 m | 0–20 m | 53 | 794 ms | 1304 |
+| mid | 0.30 m | 20–45 m | 88 | 666 ms | 1405 / 1585 |
+| coarse | 0.60 m | 45–95 m | 97 | 371 ms | 1030 / 1506 |
+| **total** | | | | **1831 ms** | |
+
+The render confirms the **core premise**: the three rings nest into one continuous
+surface, resolution coarsening outward, meeting (not gapping) in the overlap bands —
+in place of v3's hundreds of arbitrary tile borders, ~2 internal ring boundaries
+of a fixed, known 2:1 ratio. This is the structural payoff the whole v4 redesign
+was for, and it holds.
+
+Two findings that shape the engine build:
+
+1. **Bound the input radially *and* vertically before wrapping.** The first run
+   took 3406 ms on the fine ring because the tile gather over-collects (tiles are
+   large, so reaching radius R pulls in geometry well past R), and `wrap_soup`
+   sizes its grid to the input extent — so it wrapped, and paid for, geometry it
+   then threw away in the annulus trim. Culling the input triangles to
+   `r_outer + overlap` before the wrap dropped the fine ring to **794 ms** (and the
+   set from 4993 → 1831 ms). The grid must be bounded on every axis, not just the
+   vertical.
+2. **The per-rebuild budget is one ring, and the fine ring drives it.** Streaming
+   rebuilds a single ring on its own trigger, not the whole set — so the relevant
+   cost is ~800 ms for the fine ring in *dense downtown* (the worst case; sparser
+   areas were ~140 ms in Phase 1c). That is the figure the speed→(radius, voxel,
+   lead) curve must respect, and the regime the extraction win below targets:
+   adaptive DC removes the decimate + Surface-Nets churn (~50 ms of it) and the
+   cleanup BFS another ~20 ms, with a smaller fine radius taking the rest.
+
+Not yet tested (Phase 3, in-engine): the **collider-level transition quality** — a
+wheel crossing the 2:1 boundary between two overlapping rings. The offline annulus
+trim is a ragged centroid cull; the engine wants either a clean radial split or to
+lean on the physics handling the overlap (two valid colliders, finer wins on
+contact). And all three rings here sample the *same* (finest) source tiles —
+over-detailed for the coarse rings; the engine should feed each ring tiles at its
+own LoD (cheaper coarse rings), per the open question below.
+
 ## Extraction: drop Surface Nets + decimate for adaptive Dual Contouring
 
 Profiling the dense wrap (urban r=30, 643 ms) showed the decimate pass at 160 ms
@@ -344,12 +390,14 @@ the winding-number sign from the plan. The prototype (`winding_sign` flag +
 
 ## Phasing (validate offline first, like v3)
 
-1. **`fuse_lab --clipmap`**: over a committed dump, build a single ring (gather
-   all tiles in radius → one grid → wrap) and render it. Confirm one seamless
-   surface, no seams, measure cost. This is the core proof.
-2. Add the ring hierarchy + transitions offline; render the nested set.
+1. ✅ **`fuse_lab --clipmap`**: single ring, one seamless surface, cost measured
+   (Phase 1). Vertical bound added (`--clipmap-sphere`, Phase 1c).
+2. ✅ **`fuse_lab --clipmap-nested`**: ring hierarchy + overlap-band transitions
+   offline, nested set rendered, continuous coverage confirmed, per-ring cost
+   measured (Phase 2). Radial+vertical input bound is mandatory.
 3. New `collider_v4` engine module: ring state, off-thread gather+wrap, rebuild
    trigger, double-buffered swap; add a `V4Clipmap` `ColliderPipeline` variant.
+   (Optional dense "easy wins" first: skip the cleanup BFS, adaptive DC.)
 4. In-game verify (drive); then tune radii/resolutions live via config.
 
 The wrap core, the config, and the dump/render tooling all already exist — v4 is

@@ -72,6 +72,7 @@ fn main() -> Result<(), Box<dyn Error>> {
     let mut clipmap_sparse: Option<(f32, f64, f32, String)> = None;
     let mut winding: Option<(f32, f64, String)> = None;
     let mut clipmap_sphere: Option<(f32, f64, f32, f32, String)> = None;
+    let mut clipmap_nested: Option<String> = None;
     let mut i = 1;
     while i < args.len() {
         match args[i].as_str() {
@@ -182,6 +183,11 @@ fn main() -> Result<(), Box<dyn Error>> {
                     out.clone(),
                 ));
                 i += 6;
+            }
+            "--clipmap-nested" => {
+                let out = args.get(i + 1).ok_or("--clipmap-nested needs <out.png>")?;
+                clipmap_nested = Some(out.clone());
+                i += 2;
             }
             "--winding" => {
                 let voxel = args
@@ -348,6 +354,9 @@ fn main() -> Result<(), Box<dyn Error>> {
         render::run_clipmap_sphere(
             &dump, &meshes, &settings, *voxel, *radius, *below, *above, out,
         )?;
+    }
+    if let Some(out) = &clipmap_nested {
+        render::run_clipmap_nested(&dump, &meshes, &settings, out)?;
     }
     if let Some((voxel, radius, out)) = &winding {
         render::run_winding(&dump, &meshes, &settings, *voxel, *radius, out)?;

@@ -414,6 +414,157 @@ pub fn run_clipmap_sphere(
     )
 }
 
+/// Phase-2 nested-sphere proof: build the v4 hierarchy offline — N camera-centred
+/// spheres of doubling voxel size and radius, each vertically bounded, each
+/// trimmed to its annulus (the inner area belongs to the finer sphere inside it)
+/// with a small inward overlap band so adjacent spheres meet rather than gap.
+/// Combines them into one coloured scene (warm → green → blue, fine → coarse) and
+/// reports per-ring tris/time plus the total, the rebuild cost of the whole set.
+///
+/// This validates the core v4 premise: that a handful of fixed-ratio rings nest
+/// into continuous coverage, in place of v3's hundreds of arbitrary tile borders.
+/// The annulus trim is centroid-based (a ragged boundary, not a clean split) —
+/// good enough to eyeball the nesting; the real engine would split at the radius
+/// or lean on the physics overlap.
+pub fn run_clipmap_nested(
+    dump: &TileSetDump,
+    meshes: &HashMap<&str, Vec<RocktreeMesh>>,
+    base_settings: &BuildSettings,
+    out_path: &str,
+) -> Result<(), Box<dyn Error>> {
+    let camera = DVec3::from_array(dump.camera_position);
+    let up = camera.normalize_or_zero().as_vec3();
+    let down = (-camera.normalize_or_zero()).as_vec3();
+
+    // (voxel m, inner radius, outer radius, vertical window above, tint). Voxel
+    // and radius roughly double outward; each ring's inner radius is the finer
+    // ring's outer radius, so the rings partition the plane into annuli
+    // (warm = fine, green = mid, blue = coarse).
+    let rings: [(f32, f64, f64, f32, Vec3); 3] = [
+        (0.15, 0.0, 20.0, 18.0, Vec3::new(1.25, 0.8, 0.6)),
+        (0.30, 20.0, 45.0, 24.0, Vec3::new(0.7, 1.2, 0.7)),
+        (0.60, 45.0, 95.0, 36.0, Vec3::new(0.7, 0.85, 1.3)),
+    ];
+    // Adjacent rings overlap inward by this much so the transition meets rather
+    // than gaps; the drivable surface sits ~`BELOW` under the camera in every
+    // ring, so that window is constant.
+    const OVERLAP: f64 = 4.0;
+    const BELOW: f32 = 4.0;
+
+    let horiz = |v: Vec3| (v - up * v.dot(up)).length() as f64;
+
+    let mut source = Scene::default();
+    let mut ring_scenes: Vec<Scene> = Vec::new();
+    let mut total_ms = 0.0;
+    println!("clipmap-nested: {} rings", rings.len());
+    for (voxel, r_inner, r_outer, above, tint) in rings {
+        // Gather every tile whose centre is within the outer radius (plus a
+        // margin for tile extent) into the camera-relative frame.
+        let mut vertices: Vec<Vec3> = Vec::new();
+        let mut triangles: Vec<[u32; 3]> = Vec::new();
+        let mut tiles = 0usize;
+        for tile in &dump.tiles {
+            let off = DVec3::from_array(tile.world_position) - camera;
+            if off.length() > r_outer + 25.0 {
+                continue;
+            }
+            let Some(base) = base_soup(tile, meshes, dump, base_settings) else {
+                continue;
+            };
+            let shift = off.as_vec3();
+            // The source panel shows the finest ring's footprint (the densest
+            // soup), enough to compare against the wrapped set.
+            if voxel <= 0.16 {
+                source.add(&base.vertices, &base.triangles, shift);
+            }
+            let base_index = vertices.len() as u32;
+            vertices.extend(base.vertices.iter().map(|&v| v + shift));
+            triangles.extend(
+                base.triangles
+                    .iter()
+                    .map(|&[a, b, c]| [a + base_index, b + base_index, c + base_index]),
+            );
+            tiles += 1;
+        }
+
+        let (verts, tris) = clip_slab(vertices, &triangles, up, -BELOW, above);
+        // Bound the input radially to the ring's outer radius (plus the overlap
+        // band) before wrapping: `wrap_soup` sizes its grid to the input extent,
+        // so without this the ring would wrap (and pay for) all the geometry the
+        // gather over-collected, then throw the surplus away in the annulus trim.
+        let band_outer = r_outer + OVERLAP;
+        let radial: Vec<[u32; 3]> = tris
+            .iter()
+            .copied()
+            .filter(|&[a, b, c]| {
+                let centroid = (verts[a as usize] + verts[b as usize] + verts[c as usize]) / 3.0;
+                horiz(centroid) <= band_outer
+            })
+            .collect();
+        let (verts, tris) = compact(verts, radial);
+        let wrap = WrapSettings {
+            voxel_size: voxel,
+            max_grid_dim: 4096,
+            ..WrapSettings::default()
+        };
+        let start = Instant::now();
+        let mesh = wrap_soup(
+            &WrapInput {
+                vertices: &verts,
+                triangles: &tris,
+                halo_vertices: &[],
+                halo_triangles: &[],
+                down,
+                world_position: camera,
+                cell_centre: Vec3::ZERO,
+                neighbour_centres: &[],
+            },
+            &wrap,
+        );
+        let ms = start.elapsed().as_secs_f64() * 1000.0;
+        total_ms += ms;
+
+        // Trim to the annulus: keep triangles whose centroid is at least the
+        // inner radius out (minus the overlap band), so the finer ring owns the
+        // interior and the two meet in the band.
+        let keep_from = (r_inner - OVERLAP).max(0.0);
+        let kept: Vec<[u32; 3]> = mesh
+            .triangles
+            .iter()
+            .copied()
+            .filter(|&[a, b, c]| {
+                let centroid = (mesh.vertices[a as usize]
+                    + mesh.vertices[b as usize]
+                    + mesh.vertices[c as usize])
+                    / 3.0;
+                horiz(centroid) >= keep_from
+            })
+            .collect();
+        println!(
+            "  ring voxel {voxel:.2} m, r {r_inner:.0}–{r_outer:.0} m: {tiles} tiles, {ms:.0} ms -> {} of {} tris (annulus)",
+            kept.len(),
+            mesh.triangles.len()
+        );
+
+        let mut ring_scene = Scene {
+            tint,
+            ..Scene::default()
+        };
+        ring_scene.add(&mesh.vertices, &kept, Vec3::ZERO);
+        ring_scenes.push(ring_scene);
+    }
+    println!("  total {total_ms:.0} ms for the nested set");
+
+    let ring_refs: Vec<&Scene> = ring_scenes.iter().collect();
+    render_multi(
+        &source,
+        &ring_refs,
+        up,
+        out_path,
+        "left: source soup, right: nested rings (warm=fine, green=mid, blue=coarse)",
+    )
+}
+
 /// Clip a soup to the slab `lo ≤ v·up ≤ hi` (a vertical window along the radial
 /// `up`). Triangles fully inside are kept, fully outside dropped, crossing ones
 /// split at the plane — so the wrapped grid's vertical extent shrinks to the
@@ -630,12 +781,46 @@ fn render_pair_labelled(
     Ok(())
 }
 
-/// A world-space triangle mesh accumulated across tiles, with its bounds.
+/// As [`render_pair_labelled`], but the right panel composites several tinted
+/// scenes (the nested rings) through one shared camera and depth buffer.
+fn render_multi(
+    left: &Scene,
+    right: &[&Scene],
+    up: Vec3,
+    out_path: &str,
+    caption: &str,
+) -> Result<(), Box<dyn Error>> {
+    let mut min = left.min;
+    let mut max = left.max;
+    for s in right {
+        min = min.min(s.min);
+        max = max.max(s.max);
+    }
+    if !min.is_finite() || !max.is_finite() {
+        min = Vec3::splat(-1.0);
+        max = Vec3::splat(1.0);
+    }
+    let camera = Camera::oblique(min, max, up);
+    let left_img = camera.render(left, PANEL);
+    let right_img = camera.render_many(right, PANEL);
+    let mut canvas = RgbImage::from_pixel(PANEL.0 * 2 + 4, PANEL.1, Rgb([20, 20, 24]));
+    blit(&mut canvas, &left_img, 0);
+    blit(&mut canvas, &right_img, PANEL.0 + 4);
+    canvas.save(out_path)?;
+    println!("render: -> {out_path} ({caption}; red = downward-facing)");
+    Ok(())
+}
+
+/// A world-space triangle mesh accumulated across tiles, with its bounds and a
+/// shading tint (an RGB multiplier on the grey Lambert shade, so the nested rings
+/// can be told apart by colour). The default is the slight blue bias the other
+/// views use.
 struct Scene {
     vertices: Vec<Vec3>,
     triangles: Vec<[u32; 3]>,
     min: Vec3,
     max: Vec3,
+    tint: Vec3,
 }
 
 impl Default for Scene {
@@ -645,6 +830,7 @@ impl Default for Scene {
             triangles: Vec::new(),
             min: Vec3::splat(f32::INFINITY),
             max: Vec3::splat(f32::NEG_INFINITY),
+            tint: Vec3::new(1.0, 1.0, 1.05),
         }
     }
 }
@@ -701,25 +887,34 @@ impl Camera {
         }
     }
 
-    fn render(&self, scene: &Scene, (w, h): (u32, u32)) -> RgbImage {
+    fn render(&self, scene: &Scene, dims: (u32, u32)) -> RgbImage {
+        self.render_many(&[scene], dims)
+    }
+
+    /// Render several scenes into one image through a shared depth buffer, each
+    /// with its own tint, so overlapping nested rings composite correctly (the
+    /// nearest surface wins per pixel). The projection scale is fit to the union
+    /// of all the scenes' bounds.
+    fn render_many(&self, scenes: &[&Scene], (w, h): (u32, u32)) -> RgbImage {
         let mut img = RgbImage::from_pixel(w, h, Rgb([28, 28, 34]));
-        if scene.triangles.is_empty() {
-            return img;
-        }
-        // Project all vertices to screen-space (sx, sy in world units, depth).
-        let proj: Vec<Vec3> = scene
-            .vertices
+        let project = |v: Vec3| {
+            let r = v - self.centre;
+            Vec3::new(r.dot(self.right), r.dot(self.cam_up), r.dot(self.forward))
+        };
+        let projs: Vec<Vec<Vec3>> = scenes
             .iter()
-            .map(|&v| {
-                let r = v - self.centre;
-                Vec3::new(r.dot(self.right), r.dot(self.cam_up), r.dot(self.forward))
-            })
+            .map(|s| s.vertices.iter().map(|&v| project(v)).collect())
             .collect();
         let mut pmin = Vec3::splat(f32::INFINITY);
         let mut pmax = Vec3::splat(f32::NEG_INFINITY);
-        for p in &proj {
-            pmin = pmin.min(*p);
-            pmax = pmax.max(*p);
+        for proj in &projs {
+            for p in proj {
+                pmin = pmin.min(*p);
+                pmax = pmax.max(*p);
+            }
+        }
+        if !pmin.is_finite() {
+            return img;
         }
         let span = (pmax - pmin).max(Vec3::splat(1e-3));
         let margin = 0.04;
@@ -736,39 +931,49 @@ impl Camera {
         // triangulation and any non-meeting borders are visible.
         let wire = std::env::var("WIRE").is_ok();
 
-        for &[ia, ib, ic] in &scene.triangles {
-            let (wa, wb, wc) = (
-                scene.vertices[ia as usize],
-                scene.vertices[ib as usize],
-                scene.vertices[ic as usize],
-            );
-            let normal = (wb - wa).cross(wc - wa).normalize_or_zero();
-            let lambert = normal.dot(light).abs().clamp(0.15, 1.0);
-            let downward = normal.dot(self.up) < -0.3;
-            let shade = (lambert * 215.0) as u8;
-            let colour = if downward {
-                Rgb([(120.0 + lambert * 135.0) as u8, shade / 3, shade / 3])
-            } else {
-                Rgb([shade, shade, (shade as f32 * 1.05).min(255.0) as u8])
-            };
+        for (scene, proj) in scenes.iter().zip(&projs) {
+            for &[ia, ib, ic] in &scene.triangles {
+                let (wa, wb, wc) = (
+                    scene.vertices[ia as usize],
+                    scene.vertices[ib as usize],
+                    scene.vertices[ic as usize],
+                );
+                let normal = (wb - wa).cross(wc - wa).normalize_or_zero();
+                let lambert = normal.dot(light).abs().clamp(0.15, 1.0);
+                let downward = normal.dot(self.up) < -0.3;
+                let shade = lambert * 215.0;
+                let colour = if downward {
+                    Rgb([
+                        (120.0 + lambert * 135.0) as u8,
+                        (shade / 3.0) as u8,
+                        (shade / 3.0) as u8,
+                    ])
+                } else {
+                    Rgb([
+                        (shade * scene.tint.x).min(255.0) as u8,
+                        (shade * scene.tint.y).min(255.0) as u8,
+                        (shade * scene.tint.z).min(255.0) as u8,
+                    ])
+                };
 
-            let (pa, pb, pc) = (proj[ia as usize], proj[ib as usize], proj[ic as usize]);
-            let (sa, sb, sc) = (to_px(pa), to_px(pb), to_px(pc));
-            raster_triangle(
-                &mut img,
-                &mut zbuf,
-                (w, h),
-                [(sa, pa.z), (sb, pb.z), (sc, pc.z)],
-                colour,
-            );
-            if wire {
-                let edge_colour = Rgb([30, 90, 140]);
-                for &((p, pz), (q, qz)) in &[
-                    ((sa, pa.z), (sb, pb.z)),
-                    ((sb, pb.z), (sc, pc.z)),
-                    ((sc, pc.z), (sa, pa.z)),
-                ] {
-                    draw_line(&mut img, &mut zbuf, (w, h), (p, pz), (q, qz), edge_colour);
+                let (pa, pb, pc) = (proj[ia as usize], proj[ib as usize], proj[ic as usize]);
+                let (sa, sb, sc) = (to_px(pa), to_px(pb), to_px(pc));
+                raster_triangle(
+                    &mut img,
+                    &mut zbuf,
+                    (w, h),
+                    [(sa, pa.z), (sb, pb.z), (sc, pc.z)],
+                    colour,
+                );
+                if wire {
+                    let edge_colour = Rgb([30, 90, 140]);
+                    for &((p, pz), (q, qz)) in &[
+                        ((sa, pa.z), (sb, pb.z)),
+                        ((sb, pb.z), (sc, pc.z)),
+                        ((sc, pc.z), (sa, pa.z)),
+                    ] {
+                        draw_line(&mut img, &mut zbuf, (w, h), (p, pz), (q, qz), edge_colour);
+                    }
                 }
             }
         }
