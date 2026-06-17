@@ -230,14 +230,59 @@ directly, no decimation pass:
 - A cheap coplanar-merge post-pass would replace meshopt but still allocates the
   472 k first — doesn't fix the churn.
 
-**The convergence:** adaptive DC uses an *octree*, which is the *same* structure
-the sparse storage wants. So one octree gives all three v4 wins at once — sparse
-storage (cost), the flood replaced by a flood-free **winding-number** sign, and
-adaptive extraction (no decimate). The coherent v4 core is therefore
-**sparse octree + winding-number sign + adaptive Dual Contouring**, dropping the
-dense grid, the global flood, *and* Surface Nets + meshopt together — not the
-dense-grid wrap reused per region. (Rust: the `isosurface` crate has
-non-adaptive DC to evaluate/extend; adaptive octree DC may need implementing.)
+**The convergence (revised — winding sign dropped, see next section):** adaptive
+DC uses an *octree*, the *same* structure the sparse storage wants, so an octree
+gives two v4 wins at once — sparse storage (cost) and adaptive extraction (no
+decimate pass). The third hoped-for win, replacing the flood with a flood-free
+**winding-number** sign, was prototyped and **rejected** (next section): it is
+both catastrophically slow without a tree and *wrong* for open half-space terrain.
+So the v4 core is **sparse octree + flood/solidify sign + adaptive Dual
+Contouring** — the octree still drops the dense grid and Surface Nets + meshopt,
+but the proven flood + column-solidify sign is retained per cell-block rather than
+swapped out. (Rust: the `isosurface` crate has non-adaptive DC to evaluate/extend;
+adaptive octree DC may need implementing.)
+
+## Winding-number sign: prototyped, rejected (2026-06-17, `fuse_lab --winding`)
+
+The convergence above hinged on the generalized winding number replacing the
+flood as a flood-free, sparse-friendly, robust sign — the keystone and the
+highest-risk piece, so it was prototyped first (gated behind
+`WrapSettings::winding_sign`, off in prod; driven only from `fuse_lab --winding`).
+On a 40 m region at a *coarse* 0.5 m voxel (38 tiles, Jersey City dump), against
+the prod flood + column-solidify sign on the identical field:
+
+| sign | time | tris | non-manifold edges | components |
+| --- | --- | --- | --- | --- |
+| flood + solidify | **175 ms** | 1287 | 5 | 1 |
+| winding number | **1 160 546 ms (~19 min)** | 2031 | 112 | 2 |
+
+It fails on **both** axes, each for a fundamental reason:
+
+1. **Cost (~6600× slower).** Brute-force Van Oosterom–Strackee is
+   O(cells × triangles) with no acceleration — every grid node sums the solid
+   angle of every triangle. At a *coarse* half-metre voxel it already took 19
+   minutes; the 0.15 m prod voxel is ~37× more cells. Usable only with a
+   Barnes-Hut / fast-winding tree (Barill et al. 2018), which is itself the big
+   lift — and even then it must beat a 175 ms flood, not just be sub-exponential.
+2. **Quality — and this is the load-bearing one.** The winding number is an
+   inside/outside test for a *closed* surface. Terrain soup is an **open sheet**
+   (a ground patch clipped by the octant mask, plus leaky photogrammetry), so its
+   raw winding field has no consistent interior: the right panel balloons the
+   ground into a rounded potato, loses the building structure the flood keeps, and
+   tears holes at the open rim (112 non-manifold edges vs 5). Crucially, the
+   winding number gives *no* "solid below the ground" notion — that is exactly
+   what `solidify_below_top` supplies, and the winding sign would still need an
+   equivalent 2.5D half-space step bolted on. It does not actually remove the
+   machinery it was meant to replace.
+
+**Conclusion.** The winding number is the wrong sign for open, half-space terrain,
+independent of the speed problem. **v4 keeps the flood + column-solidify sign**
+(the prod v3 core, reused per ring/sphere as Phase 1 already validated). The
+sparse-octree storage and adaptive Dual Contouring extraction stand on their own —
+they do not depend on the winding sign — so the v4 core is revised to
+**nested dense-to-sparse spheres + flood/solidify sign + adaptive DC**, dropping
+the winding-number sign from the plan. The prototype (`winding_sign` flag +
+`fuse_lab --winding`) stays in the tree, off, as the reproducible evidence.
 
 ## Open questions / risks
 

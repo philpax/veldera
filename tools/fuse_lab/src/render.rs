@@ -292,12 +292,128 @@ pub fn run_clipmap_sparse(
     render_pair(&orig, &wrapped, up, out_path)
 }
 
+/// v4 R&D: wrap one camera-centred region twice — once with the prod flood +
+/// column-solidify sign, once with the generalized winding number — and render
+/// them side by side so the two signs can be compared directly. The winding
+/// number is O(cells × triangles), so keep `radius`/`voxel_size` modest; the
+/// printed timings show how it scales against the flood.
+pub fn run_winding(
+    dump: &TileSetDump,
+    meshes: &HashMap<&str, Vec<RocktreeMesh>>,
+    base_settings: &BuildSettings,
+    voxel_size: f32,
+    radius: f64,
+    out_path: &str,
+) -> Result<(), Box<dyn Error>> {
+    let camera = DVec3::from_array(dump.camera_position);
+    let up = camera.normalize_or_zero().as_vec3();
+    let down = (-camera.normalize_or_zero()).as_vec3();
+
+    // Gather the in-radius region into one camera-relative soup.
+    let mut vertices: Vec<Vec3> = Vec::new();
+    let mut triangles: Vec<[u32; 3]> = Vec::new();
+    let mut tiles = 0usize;
+    for tile in &dump.tiles {
+        let off = DVec3::from_array(tile.world_position) - camera;
+        if off.length() > radius {
+            continue;
+        }
+        let Some(base) = base_soup(tile, meshes, dump, base_settings) else {
+            continue;
+        };
+        let shift = off.as_vec3();
+        let base_index = vertices.len() as u32;
+        vertices.extend(base.vertices.iter().map(|&v| v + shift));
+        triangles.extend(
+            base.triangles
+                .iter()
+                .map(|&[a, b, c]| [a + base_index, b + base_index, c + base_index]),
+        );
+        tiles += 1;
+    }
+
+    let wrap_with = |winding_sign: bool| {
+        let wrap = WrapSettings {
+            voxel_size,
+            max_grid_dim: 1024,
+            winding_sign,
+            ..WrapSettings::default()
+        };
+        let start = Instant::now();
+        let mesh = wrap_soup(
+            &WrapInput {
+                vertices: &vertices,
+                triangles: &triangles,
+                halo_vertices: &[],
+                halo_triangles: &[],
+                down,
+                world_position: camera,
+                cell_centre: Vec3::ZERO,
+                neighbour_centres: &[],
+            },
+            &wrap,
+        );
+        (mesh, start.elapsed().as_secs_f64() * 1000.0)
+    };
+
+    let (flood_mesh, flood_ms) = wrap_with(false);
+    let (winding_mesh, winding_ms) = wrap_with(true);
+
+    let flood_health = MeshHealth::measure(&flood_mesh.vertices, &flood_mesh.triangles, 0.02);
+    let winding_health = MeshHealth::measure(&winding_mesh.vertices, &winding_mesh.triangles, 0.02);
+    println!("winding: {tiles} tiles within {radius:.0} m, voxel {voxel_size} m");
+    println!(
+        "  flood   {flood_ms:.0} ms -> {} tris, {} non-manifold, {} components, {} slivers",
+        flood_mesh.triangles.len(),
+        flood_health.nonmanifold_edges,
+        flood_health.components,
+        flood_health.slivers
+    );
+    println!(
+        "  winding {winding_ms:.0} ms -> {} tris, {} non-manifold, {} components, {} slivers",
+        winding_mesh.triangles.len(),
+        winding_health.nonmanifold_edges,
+        winding_health.components,
+        winding_health.slivers
+    );
+
+    let mut flood = Scene::default();
+    flood.add(&flood_mesh.vertices, &flood_mesh.triangles, Vec3::ZERO);
+    let mut winding = Scene::default();
+    winding.add(&winding_mesh.vertices, &winding_mesh.triangles, Vec3::ZERO);
+    render_pair_labelled(
+        &flood,
+        &winding,
+        up,
+        out_path,
+        "left: flood sign, right: winding sign",
+    )
+}
+
 /// Frame both scenes with one shared oblique camera and write them side by side.
 fn render_pair(
     orig: &Scene,
     wrapped: &Scene,
     up: Vec3,
     out_path: &str,
+) -> Result<(), Box<dyn Error>> {
+    render_pair_labelled(
+        orig,
+        wrapped,
+        up,
+        out_path,
+        "left: source soup, right: wrap",
+    )
+}
+
+/// As [`render_pair`], with a caller-supplied caption for what the two panels
+/// show (used by the v4 flood-vs-winding comparison).
+fn render_pair_labelled(
+    orig: &Scene,
+    wrapped: &Scene,
+    up: Vec3,
+    out_path: &str,
+    caption: &str,
 ) -> Result<(), Box<dyn Error>> {
     let mut min = orig.min.min(wrapped.min);
     let mut max = orig.max.max(wrapped.max);
@@ -312,7 +428,7 @@ fn render_pair(
     blit(&mut canvas, &left, 0);
     blit(&mut canvas, &right, PANEL.0 + 4);
     canvas.save(out_path)?;
-    println!("render: -> {out_path} (left: source soup, right: wrap; red = downward-facing)");
+    println!("render: -> {out_path} ({caption}; red = downward-facing)");
     Ok(())
 }
 

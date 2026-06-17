@@ -87,6 +87,17 @@ pub struct WrapSettings {
     /// is the root cause — the successor is v4 clipmaps). With it off the halo
     /// still overlaps neighbours, which is bumpier but never holed.
     pub cell_clip: bool,
+    /// **v4 R&D, off by default — evaluated and rejected; kept as reproducible
+    /// evidence.** Sign the field with the generalized winding number instead of
+    /// the sky flood + column solidify. It was prototyped as the v4 keystone (a
+    /// flood-free, per-cell, sparse-friendly sign) and found wanting on both
+    /// axes: brute-force O(cells × triangles) is ~6600× slower than the flood
+    /// (~19 min on a coarse 40 m region), and — the load-bearing problem — the
+    /// winding number is an inside/outside test for a *closed* surface, so on
+    /// open half-space terrain it balloons the ground into a rounded blob and
+    /// tears holes at the rim. Drive it from `fuse_lab --winding` to reproduce;
+    /// see `todo/collider-v4.md`.
+    pub winding_sign: bool,
 }
 
 impl Default for WrapSettings {
@@ -103,6 +114,7 @@ impl Default for WrapSettings {
             mesh_component_fraction: 0.05,
             decimate_error: 0.01,
             cell_clip: false,
+            winding_sign: false,
         }
     }
 }
@@ -243,27 +255,49 @@ pub fn wrap_soup(input: &WrapInput, settings: &WrapSettings) -> WrappedMesh {
     );
     lap("rasterize");
 
-    let barrier = settings.seal_voxels * voxel;
-    let mut exterior = flood_exterior(&dist, barrier, &shape, dims);
-    lap("flood");
+    let mut exterior = if settings.winding_sign {
+        // v4 R&D sign: the generalized winding number is a true inside/outside
+        // test, so it replaces the whole flood → floater-cull → column-solidify
+        // chain (those exist to recover a sign from non-watertight soup; the
+        // winding number doesn't need them). Per-cell and order-independent, it
+        // also drops cleanly into a sparse octree later.
+        let interior = winding_interior(
+            &frame_vertices,
+            input.triangles,
+            &shape,
+            dims,
+            origin,
+            voxel,
+        );
+        lap("flood");
+        let ext: Vec<bool> = interior.iter().map(|&i| !i).collect();
+        lap("solidify");
+        ext
+    } else {
+        let barrier = settings.seal_voxels * voxel;
+        let mut exterior = flood_exterior(&dist, barrier, &shape, dims);
+        lap("flood");
 
-    // Drop floating photogrammetry fragments *before* solidify: a floater is a
-    // small shell disconnected from the main surface, but once solidify fills
-    // every column down to the grid floor the floater's curtain joins the main
-    // solid there and can no longer be separated. Cull it now; solidify then
-    // fills only under what survives (it scans the inside/outside field, not the
-    // raw distance, so a culled floater leaves no curtain).
-    if settings.floater_fraction > 0.0 {
-        let mut inside: Vec<bool> = exterior.iter().map(|&e| !e).collect();
-        cull_small_solid_components(&mut inside, &shape, dims, settings.floater_fraction);
-        for i in 0..size {
-            exterior[i] = !inside[i];
+        // Drop floating photogrammetry fragments *before* solidify: a floater is
+        // a small shell disconnected from the main surface, but once solidify
+        // fills every column down to the grid floor the floater's curtain joins
+        // the main solid there and can no longer be separated. Cull it now;
+        // solidify then fills only under what survives (it scans the
+        // inside/outside field, not the raw distance, so a culled floater leaves
+        // no curtain).
+        if settings.floater_fraction > 0.0 {
+            let mut inside: Vec<bool> = exterior.iter().map(|&e| !e).collect();
+            cull_small_solid_components(&mut inside, &shape, dims, settings.floater_fraction);
+            for i in 0..size {
+                exterior[i] = !inside[i];
+            }
         }
-    }
-    if settings.solidify_below_top {
-        solidify_below_top(&mut exterior, &shape, dims);
-    }
-    lap("solidify");
+        if settings.solidify_below_top {
+            solidify_below_top(&mut exterior, &shape, dims);
+        }
+        lap("solidify");
+        exterior
+    };
 
     // Morphological cleanup of the solid (inside) region before signing.
     let mut inside: Vec<bool> = exterior.iter().map(|&e| !e).collect();
@@ -462,6 +496,55 @@ fn flood_exterior(
         }
     }
     exterior
+}
+
+/// Sign every grid node with the generalized winding number of the triangle
+/// soup: a node is interior iff `|w| > 0.5`, where `w` is the sum of each
+/// triangle's signed solid angle subtended at the node, divided by `4π`. This is
+/// the v4 R&D sign — flood-free, order-independent, and robust to the holes and
+/// self-intersections of photogrammetry (an open or leaky surface yields a
+/// continuous fractional `w` that still steps by ~1 across a genuine shell).
+/// O(cells × triangles); only viable on small regions until a Barnes-Hut tree
+/// accelerates it.
+fn winding_interior(
+    verts: &[Vec3],
+    tris: &[[u32; 3]],
+    shape: &RuntimeShape<u32, 3>,
+    dims: [u32; 3],
+    origin: Vec3,
+    voxel: f32,
+) -> Vec<bool> {
+    let size = shape.size() as usize;
+    let mut interior = vec![false; size];
+    // Precompute the triangle vertices once; the inner loop is per-cell hot.
+    let geo: Vec<(Vec3, Vec3, Vec3)> = tris
+        .iter()
+        .map(|&[ia, ib, ic]| (verts[ia as usize], verts[ib as usize], verts[ic as usize]))
+        .collect();
+    for z in 0..dims[2] {
+        for y in 0..dims[1] {
+            for x in 0..dims[0] {
+                let p = origin + Vec3::new(x as f32, y as f32, z as f32) * voxel;
+                let mut w = 0.0f32;
+                for &(a, b, c) in &geo {
+                    w += solid_angle(a - p, b - p, c - p);
+                }
+                let i = shape.linearize([x, y, z]) as usize;
+                interior[i] = (w / (4.0 * std::f32::consts::PI)).abs() > 0.5;
+            }
+        }
+    }
+    interior
+}
+
+/// Signed solid angle subtended by triangle `(a, b, c)` at the origin, via the
+/// Van Oosterom–Strackee formula. `a`, `b`, and `c` are the triangle vertices
+/// relative to the viewpoint. Returns a value in `(−2π, 2π)`.
+fn solid_angle(a: Vec3, b: Vec3, c: Vec3) -> f32 {
+    let (la, lb, lc) = (a.length(), b.length(), c.length());
+    let numerator = a.dot(b.cross(c));
+    let denominator = la * lb * lc + a.dot(b) * lc + b.dot(c) * la + c.dot(a) * lb;
+    2.0 * numerator.atan2(denominator)
 }
 
 /// Mark every node below each column's topmost interior voxel as interior, so

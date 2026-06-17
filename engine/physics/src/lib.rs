@@ -276,6 +276,9 @@ impl PhysicsStreamingConfig {
             mesh_component_fraction: self.wrap_mesh_component_fraction,
             decimate_error: self.wrap_decimate_error,
             cell_clip: self.wrap_cell_clip,
+            // v4 R&D only; the prod v3 path keeps the flood + column solidify
+            // sign. Driven from `fuse_lab`, never the engine.
+            winding_sign: false,
         }
     }
 }

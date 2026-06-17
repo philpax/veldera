@@ -70,6 +70,7 @@ fn main() -> Result<(), Box<dyn Error>> {
     let mut render: Option<(f32, String)> = None;
     let mut clipmap: Option<(f32, f64, String)> = None;
     let mut clipmap_sparse: Option<(f32, f64, f32, String)> = None;
+    let mut winding: Option<(f32, f64, String)> = None;
     let mut i = 1;
     while i < args.len() {
         match args[i].as_str() {
@@ -163,6 +164,19 @@ fn main() -> Result<(), Box<dyn Error>> {
                 clipmap_sparse =
                     Some((voxel.parse()?, radius.parse()?, chunk.parse()?, out.clone()));
                 i += 5;
+            }
+            "--winding" => {
+                let voxel = args
+                    .get(i + 1)
+                    .ok_or("--winding needs <voxel_m> <radius_m> <out.png>")?;
+                let radius = args
+                    .get(i + 2)
+                    .ok_or("--winding needs <voxel_m> <radius_m> <out.png>")?;
+                let out = args
+                    .get(i + 3)
+                    .ok_or("--winding needs <voxel_m> <radius_m> <out.png>")?;
+                winding = Some((voxel.parse()?, radius.parse()?, out.clone()));
+                i += 4;
             }
             other if dump_path.is_none() => {
                 dump_path = Some(other.to_string());
@@ -311,6 +325,9 @@ fn main() -> Result<(), Box<dyn Error>> {
     }
     if let Some((voxel, radius, chunk, out)) = &clipmap_sparse {
         render::run_clipmap_sparse(&dump, &meshes, &settings, *voxel, *radius, *chunk, out)?;
+    }
+    if let Some((voxel, radius, out)) = &winding {
+        render::run_winding(&dump, &meshes, &settings, *voxel, *radius, out)?;
     }
 
     // The road modes own OBJ export when active (they write before/after pairs);
