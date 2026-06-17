@@ -120,7 +120,13 @@ pub fn create_clipmap_collider(
             cell_clip: false,
             winding_sign: false,
             extractor: Extractor::AdaptiveDc,
-            dc_error: 16.0,
+            // QEF collapse bound in voxel² units (scale-invariant, so one value
+            // grades every band proportionally). 16 was far too loose — at the
+            // 0.3 m near band it permitted ~1.2 m of vertex drift, faceting the
+            // flat road into the hilliness seen on dumps; 4 (~0.5 m near) tracks
+            // the road while still collapsing planar ground hard. Verified offline
+            // in `fuse_lab --adaptive` against the captured dumps.
+            dc_error: 4.0,
             // Erode single-voxel protrusions off the solidified mass before
             // extraction. Without it, a lone high feature in a column — a stray
             // photogrammetry triangle, an overhanging facade, a pole — becomes the
