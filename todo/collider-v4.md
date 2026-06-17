@@ -483,3 +483,49 @@ height, coarse far field — the user's call, and the right one.
 - Build cost is the dense wrap, now full-height; off-thread and double-buffered.
   Watch the `collider_v4` build logs while driving; if cadence lags, coarsen the
   near band, shrink the reach, or pursue the adaptive octree.
+
+## Next: 2.5D distance-graded height quadtree (decided 2026-06-17)
+
+Drive-testing the banded full-height wrap (dc_error now 4, floater 0.1, open 1)
+flattened the gross road faceting, but three structural problems remain, all from
+the dense-grid + `solidify_below_top` approach:
+
+- **Curtains** — `solidify_below_top` builds a full-depth solid slab; the radial
+  band trim cuts through it and exposes the slab's vertical side walls hanging to
+  the grid floor. Confirmed in `fuse_lab --adaptive` (the slab is a block, not a
+  surface).
+- **Residual road bumps** — the source photogrammetry is genuinely noisy at
+  sub-metre scale, so a faithful wrap is bumpy. dc_error tightening helps the
+  faceting but cannot remove source roughness; smoothing must *deviate* from the
+  source.
+- **Signs block roads** — `solidify_below_top` fills under the *topmost* surface,
+  so a road sign / gantry / canopy hanging over the road becomes the column top
+  and blocks it. This is now a hard bug to fix, not deferred.
+
+**Decision: replace the bands with one continuous 2.5D distance-graded height
+quadtree → crack-free TIN.** A quadtree over the up-aligned ground plane, cell size
+growing with camera distance (near = fine, far = coarse, no rings → no band seams →
+no curtains). It is a *surface*, not a solid slab (a trimesh collider is a surface
+anyway), so no slab walls. Walls/skyscrapers emerge as the near-vertical triangles
+where adjacent cells' heights cliff — full height preserved. 2.5D is accepted: true
+3D (tunnels, stacked freeways) comes later via **OSM-carved passages** subtracted
+from the 2.5D base, not a 3D extractor.
+
+Design constraints (validate in `fuse_lab` first, then wire into the engine):
+1. **Robust drivable-height sampling** — per cell, reject thin overhead clutter
+   (signs, gantries, tree canopies) so they never become the column top. Start with
+   the area-weighted median height of the cell's upward-facing triangles (road
+   dominates by area; sparse overhead is outvoted); refine toward "top of the
+   topmost *thick* solid run" if median is insufficient.
+2. **Edge-aware (amplitude-keyed) denoise** as the primary smoother — removes
+   sub-X-cm hash while keeping sharp creases (curbs, trench lips, wall bases) and
+   high-amplitude features (mounds). NOT angle-based planar fitting as the base:
+   angle conflates noisy-flat-road with gentle-mound (proven on the construction
+   dump — `planarize.rs` preserves mounds at 20° but then can't flatten the road).
+3. **Planar snap as a complement** — apply only to confidently-planar regions
+   (roads, plazas, building faces) for extra crispness.
+4. **Trees/canopies** — semantic, handled at height-sampling (take the ground
+   return, not the canopy); not a smoothing knob.
+5. Distance-graded, crack-free (balanced 2:1 quadtree + midpoint insertion),
+   deterministic on a world-anchored lattice so rebuilds reproduce identical
+   geometry (no rebuild pop).
