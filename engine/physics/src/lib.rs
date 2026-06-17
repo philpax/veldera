@@ -280,6 +280,9 @@ impl PhysicsStreamingConfig {
             // v4 R&D only; the prod v3 path keeps the flood + column solidify
             // sign. Driven from `fuse_lab`, never the engine.
             winding_sign: false,
+            // Default extractor; v4's banded builder overrides it per band.
+            extractor: veldera_terrain_collider::wrap::Extractor::default(),
+            dc_error: 4.0,
         }
     }
 }

@@ -75,6 +75,7 @@ fn main() -> Result<(), Box<dyn Error>> {
     let mut clipmap_sphere: Option<(f32, f64, f32, f32, String)> = None;
     let mut clipmap_nested: Option<String> = None;
     let mut planar: Option<(f32, f64, String)> = None;
+    let mut adaptive: Option<(f32, f64, f32, String)> = None;
     let mut i = 1;
     while i < args.len() {
         match args[i].as_str() {
@@ -198,6 +199,20 @@ fn main() -> Result<(), Box<dyn Error>> {
                 let out = args.get(i + 3).ok_or(need)?;
                 planar = Some((voxel.parse()?, radius.parse()?, out.clone()));
                 i += 4;
+            }
+            "--adaptive" => {
+                let need = "--adaptive needs <voxel_m> <radius_m> <dc_error> <out.png>";
+                let voxel = args.get(i + 1).ok_or(need)?;
+                let radius = args.get(i + 2).ok_or(need)?;
+                let dc_error = args.get(i + 3).ok_or(need)?;
+                let out = args.get(i + 4).ok_or(need)?;
+                adaptive = Some((
+                    voxel.parse()?,
+                    radius.parse()?,
+                    dc_error.parse()?,
+                    out.clone(),
+                ));
+                i += 5;
             }
             "--winding" => {
                 let voxel = args
@@ -370,6 +385,9 @@ fn main() -> Result<(), Box<dyn Error>> {
     }
     if let Some((voxel, radius, out)) = &planar {
         render::run_planar(&dump, &meshes, &settings, *voxel, *radius, out)?;
+    }
+    if let Some((voxel, radius, dc_error, out)) = &adaptive {
+        render::run_adaptive(&dump, &meshes, &settings, *voxel, *radius, *dc_error, out)?;
     }
     if let Some((voxel, radius, out)) = &winding {
         render::run_winding(&dump, &meshes, &settings, *voxel, *radius, out)?;

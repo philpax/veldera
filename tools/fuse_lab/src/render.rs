@@ -20,7 +20,7 @@ use veldera_terrain_collider::{
     BuildSettings,
     dump::TileSetDump,
     health::MeshHealth,
-    wrap::{WrapInput, WrapSettings, wrap_soup},
+    wrap::{Extractor, WrapInput, WrapSettings, wrap_soup},
 };
 
 use crate::wrap::{base_soup, cell_centre, tile_halo};
@@ -674,6 +674,107 @@ pub fn run_planar(
         up,
         out_path,
         "left: meshopt decimate, right: planar decimate",
+    )
+}
+
+/// v4 R&D: wrap one camera-centred region (full height, single grid) twice — once
+/// with Surface Nets + meshopt decimation (the prod extractor), once with
+/// adaptive Dual Contouring — and report each one's triangle count, mesh health,
+/// and time. The non-manifold-edge count is the crack detector: adaptive DC's
+/// octree contour is watertight by construction, so it must stay at parity with
+/// Surface Nets. Renders the two surfaces side by side.
+pub fn run_adaptive(
+    dump: &TileSetDump,
+    meshes: &HashMap<&str, Vec<RocktreeMesh>>,
+    base_settings: &BuildSettings,
+    voxel_size: f32,
+    radius: f64,
+    dc_error: f32,
+    out_path: &str,
+) -> Result<(), Box<dyn Error>> {
+    let camera = DVec3::from_array(dump.camera_position);
+    let up = camera.normalize_or_zero().as_vec3();
+    let down = (-camera.normalize_or_zero()).as_vec3();
+
+    let mut vertices: Vec<Vec3> = Vec::new();
+    let mut triangles: Vec<[u32; 3]> = Vec::new();
+    let mut tiles = 0usize;
+    for tile in &dump.tiles {
+        let off = DVec3::from_array(tile.world_position) - camera;
+        if off.length() > radius {
+            continue;
+        }
+        let Some(base) = base_soup(tile, meshes, dump, base_settings) else {
+            continue;
+        };
+        let shift = off.as_vec3();
+        let base_index = vertices.len() as u32;
+        vertices.extend(base.vertices.iter().map(|&v| v + shift));
+        triangles.extend(
+            base.triangles
+                .iter()
+                .map(|&[a, b, c]| [a + base_index, b + base_index, c + base_index]),
+        );
+        tiles += 1;
+    }
+
+    let wrap_with = |extractor: Extractor| {
+        let wrap = WrapSettings {
+            voxel_size,
+            max_grid_dim: 1024,
+            extractor,
+            dc_error,
+            ..WrapSettings::default()
+        };
+        let start = Instant::now();
+        let mesh = wrap_soup(
+            &WrapInput {
+                vertices: &vertices,
+                triangles: &triangles,
+                halo_vertices: &[],
+                halo_triangles: &[],
+                down,
+                world_position: camera,
+                cell_centre: Vec3::ZERO,
+                neighbour_centres: &[],
+            },
+            &wrap,
+        );
+        (mesh, start.elapsed().as_secs_f64() * 1000.0)
+    };
+
+    let (sn_mesh, sn_ms) = wrap_with(Extractor::SurfaceNets);
+    let (dc_mesh, dc_ms) = wrap_with(Extractor::AdaptiveDc);
+
+    let sn_health = MeshHealth::measure(&sn_mesh.vertices, &sn_mesh.triangles, 0.02);
+    let dc_health = MeshHealth::measure(&dc_mesh.vertices, &dc_mesh.triangles, 0.02);
+    println!(
+        "adaptive: {tiles} tiles within {radius:.0} m, voxel {voxel_size} m, dc_error {dc_error}"
+    );
+    println!(
+        "  surface-nets : {sn_ms:.0} ms -> {} tris, {} non-manifold, {} components",
+        sn_mesh.triangles.len(),
+        sn_health.nonmanifold_edges,
+        sn_health.components
+    );
+    println!(
+        "  adaptive-dc  : {dc_ms:.0} ms -> {} tris ({} pre-cull), {} non-manifold, {} components",
+        dc_mesh.triangles.len(),
+        dc_mesh.extracted_triangles,
+        dc_health.nonmanifold_edges,
+        dc_health.components
+    );
+
+    let mut sn = Scene::default();
+    sn.add(&sn_mesh.vertices, &sn_mesh.triangles, Vec3::ZERO);
+    let mut dc = Scene::default();
+    dc.add(&dc_mesh.vertices, &dc_mesh.triangles, Vec3::ZERO);
+    render_pair_labelled(
+        &sn,
+        &dc,
+        up,
+        out_path,
+        "left: surface nets + decimate, right: adaptive DC",
     )
 }
 

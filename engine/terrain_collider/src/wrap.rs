@@ -37,9 +37,25 @@ use fast_surface_nets::{
 };
 use glam::{Vec2, Vec3};
 
+use crate::adaptive_dc;
+
 /// Voxels of neighbour halo included around each tile (and grid margin), so the
 /// wrap surface reaches past the tile border and meets the neighbour's.
 const HALO_MARGIN_VOXELS: u32 = 3;
+
+/// Which surface extractor turns the signed field into a mesh.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum Extractor {
+    /// Surface Nets: uniform density (one quad per surface cell), then quadric
+    /// decimation culls the flat-region surplus. The prod default.
+    #[default]
+    SurfaceNets,
+    /// Adaptive Dual Contouring: emits coarse triangles on flat regions directly
+    /// (an octree collapses planar cells within [`WrapSettings::dc_error`]), so no
+    /// decimation pass is needed — and snaps to sharp man-made edges. See
+    /// [`crate::adaptive_dc`].
+    AdaptiveDc,
+}
 
 /// Knobs for the voxel wrap. Defaults are the values validated offline on the
 /// Jersey City and bridge dumps (see `todo/collider-v3.md`).
@@ -98,6 +114,12 @@ pub struct WrapSettings {
     /// tears holes at the rim. Drive it from `fuse_lab --winding` to reproduce;
     /// see `todo/collider-v4.md`.
     pub winding_sign: bool,
+    /// Which extractor turns the signed field into a mesh.
+    pub extractor: Extractor,
+    /// Adaptive DC collapse threshold (QEF residual, in voxel² units): eight cells
+    /// merge into one when the merged vertex's error is below this. Higher →
+    /// coarser/fewer triangles on near-planar regions. Ignored by Surface Nets.
+    pub dc_error: f32,
 }
 
 impl Default for WrapSettings {
@@ -115,6 +137,8 @@ impl Default for WrapSettings {
             decimate_error: 0.01,
             cell_clip: false,
             winding_sign: false,
+            extractor: Extractor::SurfaceNets,
+            dc_error: 4.0,
         }
     }
 }
@@ -317,37 +341,56 @@ pub fn wrap_soup(input: &WrapInput, settings: &WrapSettings) -> WrappedMesh {
     }
     lap("sdf");
 
-    let mut buffer = SurfaceNetsBuffer::default();
-    surface_nets(
-        &sdf,
-        &shape,
-        [0; 3],
-        [dims[0] - 1, dims[1] - 1, dims[2] - 1],
-        &mut buffer,
-    );
-    lap("surface_nets");
-
-    // Drop isolated mesh islands fragmented off the main surface.
-    buffer.indices = cull_mesh_components(&buffer.indices, settings.mesh_component_fraction);
-    let extracted_triangles = buffer.indices.len() / 3;
-
-    let indices = decimate(&buffer, settings.decimate_error);
-    lap("mesh-cull+decimate");
+    // Extract the surface: Surface Nets (+ decimate) or adaptive Dual Contouring.
+    // Both yield frame-space vertices and triangles plus the pre-cull count.
+    let (mut verts, mut triangles, extracted_triangles) = match settings.extractor {
+        Extractor::SurfaceNets => {
+            let mut buffer = SurfaceNetsBuffer::default();
+            surface_nets(
+                &sdf,
+                &shape,
+                [0; 3],
+                [dims[0] - 1, dims[1] - 1, dims[2] - 1],
+                &mut buffer,
+            );
+            lap("surface_nets");
+            buffer.indices =
+                cull_mesh_components(&buffer.indices, settings.mesh_component_fraction);
+            let extracted = buffer.indices.len() / 3;
+            let indices = decimate(&buffer, settings.decimate_error);
+            lap("mesh-cull+decimate");
+            let verts: Vec<Vec3> = buffer
+                .positions
+                .iter()
+                .map(|&[x, y, z]| origin + Vec3::new(x, y, z) * voxel)
+                .collect();
+            let triangles: Vec<[u32; 3]> = indices
+                .chunks_exact(3)
+                .map(|c| [c[0], c[1], c[2]])
+                .collect();
+            (verts, triangles, extracted)
+        }
+        Extractor::AdaptiveDc => {
+            let (grid_verts, tris) =
+                adaptive_dc::adaptive_dual_contour(&sdf, &shape, dims, settings.dc_error);
+            lap("adaptive_dc");
+            // Drop isolated islands (same component cull as Surface Nets), via the
+            // flat index form, then map grid → frame.
+            let flat: Vec<u32> = tris.iter().flatten().copied().collect();
+            let culled = cull_mesh_components(&flat, settings.mesh_component_fraction);
+            let triangles: Vec<[u32; 3]> =
+                culled.chunks_exact(3).map(|c| [c[0], c[1], c[2]]).collect();
+            let verts: Vec<Vec3> = grid_verts.iter().map(|&v| origin + v * voxel).collect();
+            lap("mesh-cull");
+            (verts, triangles, tris.len())
+        }
+    };
 
     // Cell clip: trim the wrap to this tile's horizontal Voronoi cell — the
     // bisector between two equal-size adjacent cells' centres is their shared
     // boundary, so clipping each tile to the side of every bisector makes
     // same-depth neighbours partition the ground (no overlap) while meeting
     // exactly at the boundary (no gap, since both sides split at the same plane).
-    let mut verts: Vec<Vec3> = buffer
-        .positions
-        .iter()
-        .map(|&[x, y, z]| origin + Vec3::new(x, y, z) * voxel)
-        .collect();
-    let mut triangles: Vec<[u32; 3]> = indices
-        .chunks_exact(3)
-        .map(|c| [c[0], c[1], c[2]])
-        .collect();
     if settings.cell_clip && !input.neighbour_centres.is_empty() {
         let tile_c = to_frame(input.cell_centre).truncate();
         for &neighbour_centre in input.neighbour_centres {
