@@ -175,6 +175,123 @@ pub fn run_clipmap(
     render_pair(&orig, &wrapped, up, out_path)
 }
 
+/// Phase-1b sparse proof: the same region as `run_clipmap`, but voxelized as a
+/// **sparse set of chunks on one global lattice** — bin the triangles into
+/// camera-frame chunks (with a halo margin), wrap only the non-empty chunks, and
+/// combine. This is the storage the real v4 wants: cost scales with surface area
+/// (chunks the surface passes through), not the volume the dense grid pays for.
+/// Reports how many chunks were non-empty and the total wrap time to compare
+/// against the dense `--clipmap`.
+pub fn run_clipmap_sparse(
+    dump: &TileSetDump,
+    meshes: &HashMap<&str, Vec<RocktreeMesh>>,
+    base_settings: &BuildSettings,
+    voxel_size: f32,
+    radius: f64,
+    chunk_m: f32,
+    out_path: &str,
+) -> Result<(), Box<dyn Error>> {
+    let camera = DVec3::from_array(dump.camera_position);
+    let up = camera.normalize_or_zero().as_vec3();
+    let down = (-camera.normalize_or_zero()).as_vec3();
+
+    // Gather the region's soup in the camera-relative frame.
+    let mut orig = Scene::default();
+    let mut vertices: Vec<Vec3> = Vec::new();
+    let mut triangles: Vec<[u32; 3]> = Vec::new();
+    for tile in &dump.tiles {
+        let off = DVec3::from_array(tile.world_position) - camera;
+        if off.length() > radius {
+            continue;
+        }
+        let Some(base) = base_soup(tile, meshes, dump, base_settings) else {
+            continue;
+        };
+        let shift = off.as_vec3();
+        orig.add(&base.vertices, &base.triangles, shift);
+        let base_index = vertices.len() as u32;
+        vertices.extend(base.vertices.iter().map(|&v| v + shift));
+        triangles.extend(
+            base.triangles
+                .iter()
+                .map(|&[a, b, c]| [a + base_index, b + base_index, c + base_index]),
+        );
+    }
+
+    // The same up-frame the wrap uses, so chunks align to the lattice.
+    let reference = if up.x.abs() < 0.9 { Vec3::X } else { Vec3::Y };
+    let e1 = up.cross(reference).normalize();
+    let e2 = up.cross(e1);
+    let to_frame = |v: Vec3| Vec3::new(v.dot(e1), v.dot(e2), v.dot(up));
+
+    // Bin each triangle into every chunk its (margin-expanded) frame bbox covers.
+    let margin = 3.0 * voxel_size;
+    let mut chunks: HashMap<[i32; 3], Vec<[Vec3; 3]>> = HashMap::new();
+    for &[a, b, c] in &triangles {
+        let tri = [
+            vertices[a as usize],
+            vertices[b as usize],
+            vertices[c as usize],
+        ];
+        let (fa, fb, fc) = (to_frame(tri[0]), to_frame(tri[1]), to_frame(tri[2]));
+        let lo = fa.min(fb).min(fc) - Vec3::splat(margin);
+        let hi = fa.max(fb).max(fc) + Vec3::splat(margin);
+        let cell = |v: f32| (v / chunk_m).floor() as i32;
+        for cz in cell(lo.z)..=cell(hi.z) {
+            for cy in cell(lo.y)..=cell(hi.y) {
+                for cx in cell(lo.x)..=cell(hi.x) {
+                    chunks.entry([cx, cy, cz]).or_default().push(tri);
+                }
+            }
+        }
+    }
+
+    // Wrap each non-empty chunk on the shared (camera-anchored) lattice.
+    let wrap = WrapSettings {
+        voxel_size,
+        max_grid_dim: 1024,
+        ..WrapSettings::default()
+    };
+    let wrap_start = Instant::now();
+    let mut wrapped = Scene::default();
+    let mut out_tris = 0usize;
+    for tris in chunks.values() {
+        let chunk_verts: Vec<Vec3> = tris.iter().flatten().copied().collect();
+        let chunk_indices: Vec<[u32; 3]> = (0..tris.len() as u32)
+            .map(|i| [3 * i, 3 * i + 1, 3 * i + 2])
+            .collect();
+        let w = wrap_soup(
+            &WrapInput {
+                vertices: &chunk_verts,
+                triangles: &chunk_indices,
+                halo_vertices: &[],
+                halo_triangles: &[],
+                down,
+                world_position: camera,
+                cell_centre: Vec3::ZERO,
+                neighbour_centres: &[],
+            },
+            &wrap,
+        );
+        out_tris += w.triangles.len();
+        wrapped.add(&w.vertices, &w.triangles, Vec3::ZERO);
+    }
+    let wrap_ms = wrap_start.elapsed().as_secs_f64() * 1000.0;
+
+    println!(
+        "clipmap-sparse: {} chunks ({} m) over {radius:.0} m, voxel {voxel_size} m",
+        chunks.len(),
+        chunk_m
+    );
+    println!(
+        "  source {} tris -> chunked wrap {out_tris} tris",
+        triangles.len()
+    );
+    println!("  wrap {wrap_ms:.0} ms (vs the dense single grid)");
+
+    render_pair(&orig, &wrapped, up, out_path)
+}
+
 /// Frame both scenes with one shared oblique camera and write them side by side.
 fn render_pair(
     orig: &Scene,
