@@ -11,7 +11,10 @@
 //! diagnostics tab uses, so the in-world view and the top-down map read as one
 //! visualisation.
 
-use std::collections::HashSet;
+use std::{
+    collections::{HashSet, hash_map::DefaultHasher},
+    hash::{Hash, Hasher},
+};
 
 use avian3d::prelude::ColliderAabb;
 use bevy::{gizmos::config::GizmoConfigStore, prelude::*};
@@ -127,6 +130,25 @@ pub fn depth_color(depth: usize) -> Color {
     Color::srgb_u8(r as u8, g as u8, b as u8)
 }
 
+/// Jitter a depth colour per tile so adjacent same-depth colliders (which would
+/// otherwise share a colour) read apart — useful when tiles overlap. The shift
+/// is a deterministic hash of the path, small enough that the depth hue stays
+/// recognisable: a modest hue rotation plus saturation/lightness offsets.
+fn tile_tint(base: Color, path: OctreePath) -> Color {
+    let mut hasher = DefaultHasher::new();
+    path.hash(&mut hasher);
+    let h = hasher.finish();
+    // Three independent values in [-1, 1] from different bytes of the hash.
+    let signed = |shift: u32| (((h >> shift) & 0xff) as f32 / 255.0) * 2.0 - 1.0;
+    let hsla = Hsla::from(base);
+    Color::from(Hsla::new(
+        (hsla.hue + signed(0) * 22.0).rem_euclid(360.0),
+        (hsla.saturation + signed(8) * 0.25).clamp(0.2, 1.0),
+        (hsla.lightness + signed(16) * 0.18).clamp(0.2, 0.9),
+        hsla.alpha,
+    ))
+}
+
 /// Reconcile per-entity [`DebugRender`] overrides on terrain colliders against
 /// [`ColliderVizFilter`].
 ///
@@ -158,7 +180,7 @@ pub(crate) fn reconcile_collider_wireframes(
             && (filter.depth_min..=filter.depth_max).contains(&depth);
 
         let desired = if within {
-            DebugRender::collider(depth_color(depth))
+            DebugRender::collider(tile_tint(depth_color(depth), terrain.path))
         } else {
             DebugRender::none()
         };
