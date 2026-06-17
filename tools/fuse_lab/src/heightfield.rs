@@ -39,7 +39,20 @@ pub struct Sampler {
     pct: f32,
     prj: Vec<[(f32, f32, f32); 3]>,
     bucket: Vec<Vec<u32>>,
+    /// Coarse diffusion-filled background height grid, queried where the fine
+    /// sample finds no covering triangle, so small gaps fill smoothly instead of
+    /// punching holes in the collider. `None` cells are genuine exterior.
+    bg_cell: f32,
+    bg_n: usize,
+    bg_origin: f32,
+    bg: Vec<Option<f32>>,
 }
+
+/// Coarse background cell size (m) and the number of diffusion passes that fill
+/// its holes (each pass grows the fill by one cell, so this bounds the gap width
+/// fillable to `BG_FILL_PASSES * BG_CELL` metres; wider gaps stay exterior).
+const BG_CELL: f32 = 4.0;
+const BG_FILL_PASSES: usize = 16;
 
 impl Sampler {
     /// Build a sampler over the soup (already in a camera-relative frame) within a
@@ -86,7 +99,7 @@ impl Sampler {
                 }
             }
         }
-        Self {
+        let mut sampler = Self {
             e1,
             e2,
             up,
@@ -96,16 +109,65 @@ impl Sampler {
             pct,
             prj,
             bucket,
+            bg_cell: BG_CELL,
+            bg_n: 0,
+            bg_origin: -radius,
+            bg: Vec::new(),
+        };
+        sampler.build_background(radius);
+        sampler
+    }
+
+    /// Build the coarse background grid (fine sample at each cell centre) and
+    /// diffusion-fill its holes from valid neighbours.
+    fn build_background(&mut self, radius: f32) {
+        let bg_n = ((2.0 * radius / self.bg_cell).ceil() as usize).max(1);
+        let mut bg: Vec<Option<f32>> = vec![None; bg_n * bg_n];
+        for j in 0..bg_n {
+            for i in 0..bg_n {
+                let x = self.bg_origin + (i as f32 + 0.5) * self.bg_cell;
+                let y = self.bg_origin + (j as f32 + 0.5) * self.bg_cell;
+                bg[j * bg_n + i] = self.sample_fine(x, y);
+            }
         }
+        for _ in 0..BG_FILL_PASSES {
+            let mut next = bg.clone();
+            let mut changed = false;
+            for j in 0..bg_n {
+                for i in 0..bg_n {
+                    if bg[j * bg_n + i].is_some() {
+                        continue;
+                    }
+                    let mut sum = 0.0;
+                    let mut count = 0u32;
+                    for (di, dj) in [(-1i32, 0i32), (1, 0), (0, -1), (0, 1)] {
+                        let (ni, nj) = (i as i32 + di, j as i32 + dj);
+                        if ni < 0 || nj < 0 || ni >= bg_n as i32 || nj >= bg_n as i32 {
+                            continue;
+                        }
+                        if let Some(h) = bg[nj as usize * bg_n + ni as usize] {
+                            sum += h;
+                            count += 1;
+                        }
+                    }
+                    if count > 0 {
+                        next[j * bg_n + i] = Some(sum / count as f32);
+                        changed = true;
+                    }
+                }
+            }
+            bg = next;
+            if !changed {
+                break;
+            }
+        }
+        self.bg_n = bg_n;
+        self.bg = bg;
     }
 
-    /// World (camera-relative) position of a frame point.
-    pub fn position(&self, x: f32, y: f32, h: f32) -> Vec3 {
-        self.e1 * x + self.e2 * y + self.up * h
-    }
-
-    /// Drivable height at `(x, y)`, or `None` if no upward surface covers it.
-    pub fn sample(&self, x: f32, y: f32) -> Option<f32> {
+    /// Fine sample: low percentile of the upward triangles covering `(x, y)`, or
+    /// `None` if none cover it.
+    fn sample_fine(&self, x: f32, y: f32) -> Option<f32> {
         let cx = (((x - self.origin) / self.voxel).floor() as i32).clamp(0, self.n - 1);
         let cy = (((y - self.origin) / self.voxel).floor() as i32).clamp(0, self.n - 1);
         let mut heights: Vec<f32> = Vec::new();
@@ -120,6 +182,32 @@ impl Sampler {
         heights.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
         let k = ((heights.len() as f32 - 1.0) * self.pct).round() as usize;
         Some(heights[k])
+    }
+
+    /// Background height at `(x, y)` by nearest coarse cell, or `None` if that cell
+    /// is still exterior after filling.
+    fn sample_background(&self, x: f32, y: f32) -> Option<f32> {
+        if self.bg_n == 0 {
+            return None;
+        }
+        let i =
+            (((x - self.bg_origin) / self.bg_cell).floor() as i32).clamp(0, self.bg_n as i32 - 1);
+        let j =
+            (((y - self.bg_origin) / self.bg_cell).floor() as i32).clamp(0, self.bg_n as i32 - 1);
+        self.bg[j as usize * self.bg_n + i as usize]
+    }
+
+    /// World (camera-relative) position of a frame point.
+    pub fn position(&self, x: f32, y: f32, h: f32) -> Vec3 {
+        self.e1 * x + self.e2 * y + self.up * h
+    }
+
+    /// Drivable height at `(x, y)`: the fine sample where a surface covers the
+    /// point, else the diffusion-filled coarse background (so small gaps fill
+    /// smoothly), else `None` for genuine exterior.
+    pub fn sample(&self, x: f32, y: f32) -> Option<f32> {
+        self.sample_fine(x, y)
+            .or_else(|| self.sample_background(x, y))
     }
 }
 
@@ -205,15 +293,33 @@ pub fn build_height_quadtree(
         let doublings = (d / ring).floor().max(0.0);
         (near_voxel * 2f32.powf(doublings)).clamp(near_voxel, far_voxel)
     };
+    // A cell subdivides iff it is larger than the resolution wanted at its centre.
+    let should_subdivide = |x0: f32, y0: f32, size: f32| -> bool {
+        let (cx, cy) = (x0 + size * 0.5, y0 + size * 0.5);
+        size > desired_size((cx * cx + cy * cy).sqrt()) && size > near_voxel
+    };
+    // The leaf size that the same rule would assign to the point `(px, py)` — used
+    // to detect LOD boundaries (a neighbour of a different size) without a map.
+    let leaf_size_at = |px: f32, py: f32| -> f32 {
+        let (mut x0, mut y0, mut size) = (-radius, -radius, 2.0 * radius);
+        while should_subdivide(x0, y0, size) {
+            let h = size * 0.5;
+            if px >= x0 + h {
+                x0 += h;
+            }
+            if py >= y0 + h {
+                y0 += h;
+            }
+            size = h;
+        }
+        size
+    };
 
     // Recursively subdivide the root square, collecting leaf (min corner, size).
     let mut leaves: Vec<(f32, f32, f32)> = Vec::new();
     let mut stack = vec![(-radius, -radius, 2.0 * radius)];
     while let Some((x0, y0, size)) = stack.pop() {
-        let cx = x0 + size * 0.5;
-        let cy = y0 + size * 0.5;
-        let d = (cx * cx + cy * cy).sqrt();
-        if size > desired_size(d) && size > near_voxel {
+        if should_subdivide(x0, y0, size) {
             let h = size * 0.5;
             stack.push((x0, y0, h));
             stack.push((x0 + h, y0, h));
@@ -245,9 +351,23 @@ pub fn build_height_quadtree(
             .collect();
         push(p[0], p[1], p[2], &mut out_verts, &mut out_tris);
         push(p[0], p[2], p[3], &mut out_verts, &mut out_tris);
-        // Vertical skirts around the perimeter, dropping `skirt` below each edge.
+        // Vertical skirts, but only on edges that border a differently-sized leaf
+        // (an LOD boundary, where the surfaces can crack) — same-size neighbours
+        // share corner samples exactly, so they need no skirt.
         let drop = sampler.up * skirt;
+        let eps = near_voxel * 0.5;
+        let (cx, cy) = (x0 + size * 0.5, y0 + size * 0.5);
+        // Outward midpoint per edge: bottom, right, top, left.
+        let outward = [
+            (cx, y0 - eps),
+            (x1 + eps, cy),
+            (cx, y1 + eps),
+            (x0 - eps, cy),
+        ];
         for e in 0..4 {
+            if (leaf_size_at(outward[e].0, outward[e].1) - size).abs() < eps {
+                continue;
+            }
             let (a, b) = (p[e], p[(e + 1) % 4]);
             let (ad, bd) = (a - drop, b - drop);
             push(a, b, bd, &mut out_verts, &mut out_tris);
