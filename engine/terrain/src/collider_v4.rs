@@ -26,7 +26,10 @@ use veldera_async::TaskSpawner;
 use veldera_geo::floating_origin::{FloatingOriginCamera, WorldPosition};
 use veldera_physics::{
     DebugRender, GameLayer, PhysicsState, PhysicsStreamingConfig,
-    terrain_v4::{HeightfieldSettings, TileMeshes, create_height_collider},
+    terrain_v4::{
+        HeightfieldSettings, Octree3dSettings, OctreeColliderSettings, TileMeshes,
+        create_height_collider, create_octree_collider,
+    },
 };
 
 use crate::lod::{ColliderReconcile, LodState, poll_lod_node_tasks};
@@ -61,7 +64,33 @@ const HEIGHTFIELD: HeightfieldSettings = HeightfieldSettings {
     flatness_tolerance: 0.2,
 };
 
-/// The collider's reach.
+/// Select the experimental full-3D octree extractor instead of the 2.5D height
+/// field. The octree gives real building walls with no clutter classification, at
+/// higher build cost (~1.5–2 s / ~300k tris at 500 m, off-thread); the height field
+/// is lighter and is the proven default. Flip to drive-test the octree.
+const USE_OCTREE: bool = false;
+
+/// Settings for the 3D octree extractor (used when [`USE_OCTREE`]). Near voxel 0.5 m
+/// (cubic cell-count → ~9× cheaper than 0.3 m, and 0.5 m is fine collider detail for
+/// driving), coarsening to 8 m by `ring_m`, out to the same reach. `collapse_error`
+/// merges coplanar cells; `seal_cells` opens thin air pockets; a light smooth takes
+/// the per-cell jitter off.
+const OCTREE: OctreeColliderSettings = OctreeColliderSettings {
+    octree: Octree3dSettings {
+        near_voxel: 0.5,
+        ring_m: 40.0,
+        far_voxel: 8.0,
+        band_cells: 0.0,
+        seal_cells: 0,
+    },
+    collapse_error: 0.05,
+    skirt_cells: 2.0,
+    smooth_iters: 1,
+    smooth_lambda: 0.5,
+};
+
+/// The collider's reach — the radius tiles are gathered within. The height field
+/// also takes it as its `radius`; the octree builds over whatever soup it's handed.
 const MAX_RADIUS: f32 = HEIGHTFIELD.radius;
 
 /// Debug-wireframe colour, shown only while the physics debug visualisation is
@@ -229,7 +258,11 @@ fn update_physics_colliders_v4(
             .iter()
             .map(|(m, mask)| (m.as_tile_meshes(), *mask))
             .collect();
-        let collider = create_height_collider(&tile_refs, down, &HEIGHTFIELD);
+        let collider = if USE_OCTREE {
+            create_octree_collider(&tile_refs, down, &OCTREE)
+        } else {
+            create_height_collider(&tile_refs, down, &HEIGHTFIELD)
+        };
         let _ = tx
             .send(ColliderV4BuildResult {
                 centre: camera_pos,
