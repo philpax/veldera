@@ -31,6 +31,11 @@ pub struct Octree3dSettings {
     /// subdivides, so the thin gaps between surfaces (e.g. under a sign) get fine
     /// cells the flood can pass through laterally.
     pub band_cells: f32,
+    /// Morphological seal radius, in cells: after flooding, the exterior is opened
+    /// (eroded then dilated) by this many cells, which removes thin air pockets —
+    /// the gaps inside/under a thin photogrammetry sheet — so the ground reads as
+    /// one solid top surface instead of a doubled shell. 0 disables.
+    pub seal_cells: u32,
 }
 
 /// A built, flooded octree.
@@ -141,6 +146,9 @@ impl Octree3d {
         let all: Vec<u32> = (0..ftris.len() as u32).collect();
         octree.subdivide((0, 0, 0, 0), &ftris, &all, settings);
         octree.flood();
+        if settings.seal_cells > 0 {
+            octree.seal(settings.seal_cells);
+        }
         octree.ftris = ftris;
         octree
     }
@@ -235,6 +243,59 @@ impl Octree3d {
                     self.nodes.get_mut(&nb).unwrap().exterior = true;
                     queue.push(nb);
                 }
+            }
+        }
+    }
+
+    /// Morphological opening of the exterior by `r` cells (erode then dilate), to
+    /// seal thin air pockets — the gaps inside or under a thin photogrammetry sheet
+    /// — so the surface is solid below the ground rather than a doubled shell. Big
+    /// open air erodes then dilates back unchanged; a pocket ≤ 2r cells thick erodes
+    /// away and has no seed to dilate back, so it stays solid.
+    fn seal(&mut self, r: u32) {
+        // Only the finest air cells take part: a thin pocket is made of fine cells
+        // (they subdivided because a surface is near), while open air is coarse
+        // leaves — eroding one of those as a single unit would eat a huge chunk of
+        // sky. So a coarse air leaf is left exterior throughout.
+        let fine = |me: &Self, k: Key| me.cell_box(k).1 <= me.near_voxel * 1.5;
+        // Erode: a fine exterior leaf bordering any non-exterior leaf becomes interior.
+        for _ in 0..r {
+            let clear: Vec<Key> = self
+                .nodes
+                .iter()
+                .filter(|(_, n)| !n.internal && n.exterior)
+                .map(|(&k, _)| k)
+                .filter(|&k| fine(self, k))
+                .filter(|&k| {
+                    (0..6).any(|f| {
+                        self.face_neighbours(k, f)
+                            .iter()
+                            .any(|nb| !self.nodes[nb].exterior)
+                    })
+                })
+                .collect();
+            for key in clear {
+                self.nodes.get_mut(&key).unwrap().exterior = false;
+            }
+        }
+        // Dilate: a fine empty interior leaf bordering exterior becomes exterior again.
+        for _ in 0..r {
+            let set: Vec<Key> = self
+                .nodes
+                .iter()
+                .filter(|(_, n)| !n.internal && !n.exterior && !n.has_surface)
+                .map(|(&k, _)| k)
+                .filter(|&k| fine(self, k))
+                .filter(|&k| {
+                    (0..6).any(|f| {
+                        self.face_neighbours(k, f)
+                            .iter()
+                            .any(|nb| self.nodes[nb].exterior)
+                    })
+                })
+                .collect();
+            for key in set {
+                self.nodes.get_mut(&key).unwrap().exterior = true;
             }
         }
     }
