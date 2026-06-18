@@ -39,6 +39,13 @@ const BG_FILL_PASSES: usize = 16;
 /// `near_voxel`-sized bucket would be tens of millions of cells.
 const MIN_BUCKET_CELL: f32 = 2.0;
 
+/// Cell size (m) of the building-classification grid, and the vertical spread (m)
+/// of covering surfaces above which a cell is "tall" (a candidate building or
+/// clutter). Tall cells are connected-component labelled; components whose area
+/// reaches `building_min_area_m2` are buildings, the rest clutter.
+const MASK_CELL: f32 = 3.0;
+const TALL_SPREAD: f32 = 4.0;
+
 /// Knobs for the 2.5D height-surface extraction.
 #[derive(Debug, Clone, Copy)]
 pub struct HeightfieldSettings {
@@ -50,10 +57,19 @@ pub struct HeightfieldSettings {
     pub ring_m: f32,
     /// Largest leaf size (m); the coarsening clamps here however far out.
     pub far_voxel: f32,
-    /// Height percentile taken per sample point, `0..1`. Low rejects overhead
-    /// clutter (signs, canopies) by treating the road beneath as the surface;
-    /// the sign-fidelity-vs-feature dial.
+    /// Height percentile taken per sample point on open *ground*, `0..1`. Low
+    /// rejects thin overhead clutter (signs, canopies, poles) by treating the
+    /// road beneath as the surface.
     pub percentile: f32,
+    /// Height percentile taken inside a detected *building* footprint, `0..1`.
+    /// High, so a building is a solid plateau at roof height with clean wall
+    /// cliffs, rather than collapsing to its occluded base. Cells are classed as
+    /// building vs ground by [`building_min_area_m2`](Self::building_min_area_m2).
+    pub building_percentile: f32,
+    /// Minimum footprint area (m²) of a tall connected region for it to count as a
+    /// building (use `building_percentile`) rather than clutter (a sign, pole, or
+    /// lone tree — use `percentile`, the ground beneath).
+    pub building_min_area_m2: f32,
     /// Depth (m) of the vertical skirts dropped on LOD-boundary edges to plug the
     /// cracks where leaves of different size meet.
     pub skirt_depth: f32,
@@ -88,6 +104,8 @@ pub fn build_height_quadtree(
         radius,
         bin,
         settings.percentile,
+        settings.building_percentile,
+        settings.building_min_area_m2,
         near_voxel * 0.25,
     );
 
@@ -232,6 +250,12 @@ struct Sampler {
     bg_n: usize,
     bg_origin: f32,
     bg: Vec<Option<f32>>,
+    /// Per-cell building classification (on a `MASK_CELL` grid): a sample inside a
+    /// building footprint takes `building_pct` (roof), elsewhere `pct` (ground).
+    building_pct: f32,
+    mask_n: usize,
+    mask_origin: f32,
+    building: Vec<bool>,
     /// Memoized `sample` results, keyed by `(x, y)` quantized to `cache_quantum`.
     /// The quadtree samples the same dyadic corner/midpoint positions many times
     /// over (flatness tests, the final emit, and the skirt neighbour walk), so the
@@ -241,6 +265,7 @@ struct Sampler {
 }
 
 impl Sampler {
+    #[allow(clippy::too_many_arguments)]
     fn new(
         verts: &[Vec3],
         tris: &[[u32; 3]],
@@ -248,6 +273,8 @@ impl Sampler {
         radius: f32,
         bin: f32,
         pct: f32,
+        building_pct: f32,
+        building_min_area_m2: f32,
         cache_quantum: f32,
     ) -> Self {
         let reference = if up.x.abs() < 0.9 { Vec3::X } else { Vec3::Y };
@@ -297,11 +324,100 @@ impl Sampler {
             bg_n: 0,
             bg_origin: -radius,
             bg: Vec::new(),
+            building_pct,
+            mask_n: 0,
+            mask_origin: -radius,
+            building: Vec::new(),
             cache_quantum: cache_quantum.max(1e-4),
             cache: RefCell::new(HashMap::new()),
         };
+        sampler.build_mask(radius, building_min_area_m2);
         sampler.build_background(radius);
         sampler
+    }
+
+    /// Classify each `MASK_CELL` cell as building or not: a cell is "tall" when the
+    /// vertical spread of its covering surfaces (ground-percentile to
+    /// building-percentile) exceeds `TALL_SPREAD`; tall cells are connected-component
+    /// labelled, and a component is a building once its area reaches
+    /// `min_area_m2` (smaller tall regions are clutter — signs, poles, lone trees).
+    fn build_mask(&mut self, radius: f32, min_area_m2: f32) {
+        let mask_n = ((2.0 * radius / MASK_CELL).ceil() as usize).max(1);
+        let mut tall = vec![false; mask_n * mask_n];
+        for j in 0..mask_n {
+            for i in 0..mask_n {
+                let x = self.mask_origin + (i as f32 + 0.5) * MASK_CELL;
+                let y = self.mask_origin + (j as f32 + 0.5) * MASK_CELL;
+                let heights = self.covering_heights(x, y);
+                if let (Some(lo), Some(hi)) = (
+                    percentile_of(&heights, self.pct),
+                    percentile_of(&heights, self.building_pct),
+                ) && hi - lo > TALL_SPREAD
+                {
+                    tall[j * mask_n + i] = true;
+                }
+            }
+        }
+        // Flood-fill tall components; mark those large enough as building.
+        let min_cells = (min_area_m2 / (MASK_CELL * MASK_CELL)).ceil() as usize;
+        let mut building = vec![false; mask_n * mask_n];
+        let mut visited = vec![false; mask_n * mask_n];
+        for start in 0..mask_n * mask_n {
+            if !tall[start] || visited[start] {
+                continue;
+            }
+            let mut stack = vec![start];
+            let mut component = Vec::new();
+            visited[start] = true;
+            while let Some(c) = stack.pop() {
+                component.push(c);
+                let (i, j) = (c % mask_n, c / mask_n);
+                for (di, dj) in [(-1i32, 0i32), (1, 0), (0, -1), (0, 1)] {
+                    let (ni, nj) = (i as i32 + di, j as i32 + dj);
+                    if ni < 0 || nj < 0 || ni >= mask_n as i32 || nj >= mask_n as i32 {
+                        continue;
+                    }
+                    let nc = nj as usize * mask_n + ni as usize;
+                    if tall[nc] && !visited[nc] {
+                        visited[nc] = true;
+                        stack.push(nc);
+                    }
+                }
+            }
+            if component.len() >= min_cells {
+                for c in component {
+                    building[c] = true;
+                }
+            }
+        }
+        self.mask_n = mask_n;
+        self.building = building;
+    }
+
+    /// Whether `(x, y)` falls in a cell classified as building.
+    fn is_building(&self, x: f32, y: f32) -> bool {
+        if self.mask_n == 0 {
+            return false;
+        }
+        let i =
+            (((x - self.mask_origin) / MASK_CELL).floor() as i32).clamp(0, self.mask_n as i32 - 1);
+        let j =
+            (((y - self.mask_origin) / MASK_CELL).floor() as i32).clamp(0, self.mask_n as i32 - 1);
+        self.building[j as usize * self.mask_n + i as usize]
+    }
+
+    /// Sorted heights of the upward-facing triangles covering `(x, y)`.
+    fn covering_heights(&self, x: f32, y: f32) -> Vec<f32> {
+        let cx = (((x - self.origin) / self.voxel).floor() as i32).clamp(0, self.n - 1);
+        let cy = (((y - self.origin) / self.voxel).floor() as i32).clamp(0, self.n - 1);
+        let mut heights: Vec<f32> = Vec::new();
+        for &ti in &self.bucket[cy as usize * self.n as usize + cx as usize] {
+            if let Some(h) = sample_triangle(&self.prj[ti as usize], x, y) {
+                heights.push(h);
+            }
+        }
+        heights.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+        heights
     }
 
     fn build_background(&mut self, radius: f32) {
@@ -369,20 +485,15 @@ impl Sampler {
     }
 
     fn sample_fine(&self, x: f32, y: f32) -> Option<f32> {
-        let cx = (((x - self.origin) / self.voxel).floor() as i32).clamp(0, self.n - 1);
-        let cy = (((y - self.origin) / self.voxel).floor() as i32).clamp(0, self.n - 1);
-        let mut heights: Vec<f32> = Vec::new();
-        for &ti in &self.bucket[cy as usize * self.n as usize + cx as usize] {
-            if let Some(h) = sample_triangle(&self.prj[ti as usize], x, y) {
-                heights.push(h);
-            }
-        }
-        if heights.is_empty() {
-            return None;
-        }
-        heights.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
-        let k = ((heights.len() as f32 - 1.0) * self.pct).round() as usize;
-        Some(heights[k])
+        let heights = self.covering_heights(x, y);
+        // Building footprints take the high (roof) percentile for a solid plateau;
+        // open ground takes the low percentile to reject thin overhead clutter.
+        let pct = if self.is_building(x, y) {
+            self.building_pct
+        } else {
+            self.pct
+        };
+        percentile_of(&heights, pct)
     }
 
     fn sample_background(&self, x: f32, y: f32) -> Option<f32> {
@@ -395,6 +506,15 @@ impl Sampler {
             (((y - self.bg_origin) / self.bg_cell).floor() as i32).clamp(0, self.bg_n as i32 - 1);
         self.bg[j as usize * self.bg_n + i as usize]
     }
+}
+
+/// The `pct` percentile (`0..1`) of a pre-sorted slice, or `None` if empty.
+fn percentile_of(sorted: &[f32], pct: f32) -> Option<f32> {
+    if sorted.is_empty() {
+        return None;
+    }
+    let k = ((sorted.len() as f32 - 1.0) * pct.clamp(0.0, 1.0)).round() as usize;
+    Some(sorted[k])
 }
 
 /// If `(x, y)` lies inside the 2D projection of triangle `p`, return the

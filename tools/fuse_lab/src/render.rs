@@ -733,6 +733,8 @@ pub fn run_heightfield(
         ring_m: env_f32("RING", 30.0),
         far_voxel: env_f32("FAR", voxel_size * 16.0),
         percentile: env_f32("PCT", 0.3),
+        building_percentile: env_f32("BPCT", 0.9),
+        building_min_area_m2: env_f32("BAREA", 150.0),
         skirt_depth: env_f32("SKIRT", 2.0),
         flatness_tolerance: env_f32("FLAT", 0.2),
     };

@@ -51,6 +51,10 @@ const HEIGHTFIELD: HeightfieldSettings = HeightfieldSettings {
     ring_m: 40.0,
     far_voxel: 8.0,
     percentile: 0.3,
+    // Building footprints (tall regions ≥ 150 m²) take the roof height for a solid
+    // plateau; smaller tall regions (signs, poles, lone trees) stay ground.
+    building_percentile: 0.9,
+    building_min_area_m2: 150.0,
     skirt_depth: 2.0,
     // Flat ground collapses to large cells; surfaces deviating > 20 cm keep
     // refining (curbs, bumps, building edges).
