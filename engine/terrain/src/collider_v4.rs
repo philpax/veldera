@@ -43,8 +43,13 @@ use crate::lod::{ColliderReconcile, LodState, poll_lod_node_tasks};
 const HEIGHTFIELD: HeightfieldSettings = HeightfieldSettings {
     near_voxel: 0.3,
     radius: 500.0,
-    ring_m: 30.0,
-    far_voxel: 18.0,
+    // Resolution coarsens one step per 40 m out, capped at 8 m. Kept relatively
+    // fine far out (a doubling every 40 m, not 30, and an 8 m floor, not 18) so
+    // distant buildings aren't staircased — the flatness merge keeps that
+    // affordable by collapsing the far *flat* ground regardless. ~580 ms / 350k
+    // tris over 700 m of dense urban; coarsen these if the build cost bites.
+    ring_m: 40.0,
+    far_voxel: 8.0,
     percentile: 0.3,
     skirt_depth: 2.0,
     // Flat ground collapses to large cells; surfaces deviating > 20 cm keep
