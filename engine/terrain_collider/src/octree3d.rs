@@ -14,22 +14,11 @@
 //! exterior boundary so the sign and any flood leaks are visible; adaptive Dual
 //! Contouring replaces the blocky extraction once the sign is trusted.
 
-use std::time::Instant;
+#[cfg(not(target_arch = "wasm32"))]
+use rayon::prelude::*;
 
 use glam::{Mat3, Vec3};
-use rayon::prelude::*;
 use rustc_hash::FxHashMap;
-
-/// Coarse per-stage timing to stderr, gated on `OCT_PROFILE=1`. Cheap to call and
-/// compiled out of the hot path when the env var is unset.
-fn profile(stage: &str, start: Instant) {
-    if std::env::var_os("OCT_PROFILE").is_some() {
-        eprintln!(
-            "  [oct] {stage}: {:.0} ms",
-            start.elapsed().as_secs_f64() * 1000.0
-        );
-    }
-}
 
 /// Octree build/flood settings.
 #[derive(Debug, Clone, Copy)]
@@ -179,16 +168,10 @@ impl Octree3d {
         };
         // Recursive subdivide, partitioning triangle indices down the tree.
         let all: Vec<u32> = (0..ftris.len() as u32).collect();
-        let t = Instant::now();
         octree.subdivide((0, 0, 0, 0), &ftris, &all, settings);
-        profile("subdivide", t);
-        let t = Instant::now();
         octree.flood();
-        profile("flood", t);
         if settings.seal_cells > 0 {
-            let t = Instant::now();
             octree.seal(settings.seal_cells);
-            profile("seal", t);
         }
         octree.ftris = ftris;
         octree
@@ -618,9 +601,7 @@ impl Octree3d {
         collapse_error: f32,
         skirt_cells: f32,
     ) -> (Vec<Vec3>, Vec<[u32; 3]>) {
-        let t = Instant::now();
         let corner_ext = self.corner_ext_map();
-        profile("corner_ext_map", t);
         let q = self.near_voxel * 0.25;
         let ckey = |p: Vec3| {
             (
@@ -629,7 +610,6 @@ impl Octree3d {
                 (p.z / q).round() as i64,
             )
         };
-        let t = Instant::now();
         // 1. Per finest surface leaf: accumulate the QEF, solve the vertex, and
         //    record the corner-sign mask in the proc convention (`i = 4x + 2y + z`).
         let leaves: Vec<Key> = self
@@ -641,58 +621,58 @@ impl Octree3d {
         // Each leaf's QEF, vertex, and mask depend only on its own geometry and the
         // shared (immutable) flood/corner state, so the heavy per-leaf solve runs in
         // parallel over a `&self` borrow; the cheap write-back is then sequential.
-        let solved: Vec<(Key, Qef, Vec3, u8)> = leaves
-            .par_iter()
-            .map(|&key| {
-                let (min, size) = self.cell_box(key);
-                // Proc-convention corners: index bits are (x, y, z) high-to-low.
-                let pc: [Vec3; 8] = std::array::from_fn(|i| min + proc_corner_offset(i) * size);
-                let signs: [bool; 8] =
-                    std::array::from_fn(|i| self.corner_solid(pc[i], &corner_ext, &ckey));
-                let mut mask = 0u8;
-                for (i, &s) in signs.iter().enumerate() {
-                    if s {
-                        mask |= 1 << i;
-                    }
+        let solve = |&key: &Key| {
+            let (min, size) = self.cell_box(key);
+            // Proc-convention corners: index bits are (x, y, z) high-to-low.
+            let pc: [Vec3; 8] = std::array::from_fn(|i| min + proc_corner_offset(i) * size);
+            let signs: [bool; 8] =
+                std::array::from_fn(|i| self.corner_solid(pc[i], &corner_ext, &ckey));
+            let mut mask = 0u8;
+            for (i, &s) in signs.iter().enumerate() {
+                if s {
+                    mask |= 1 << i;
                 }
-                let tris = &self.nodes[&key].tris;
-                let mut qef = Qef::default();
-                for &[a, b] in &PROC_EDGES {
-                    if signs[a] == signs[b] {
-                        continue;
-                    }
-                    let (p, n) = self.edge_hermite(pc[a], pc[b], tris);
-                    qef.add(p, n);
+            }
+            let tris = &self.nodes[&key].tris;
+            let mut qef = Qef::default();
+            for &[a, b] in &PROC_EDGES {
+                if signs[a] == signs[b] {
+                    continue;
                 }
-                let position = if qef.count > 0 {
-                    qef.solve(min, size)
-                } else {
-                    min + Vec3::splat(size * 0.5)
-                };
-                (key, qef, position, mask)
-            })
-            .collect();
+                let (p, n) = self.edge_hermite(pc[a], pc[b], tris);
+                qef.add(p, n);
+            }
+            let position = if qef.count > 0 {
+                qef.solve(min, size)
+            } else {
+                min + Vec3::splat(size * 0.5)
+            };
+            (key, qef, position, mask)
+        };
+        // The per-leaf solve borrows only shared (immutable) state, so it runs in
+        // parallel natively; wasm lacks threads, so it falls back to a sequential
+        // pass producing the identical result.
+        #[cfg(not(target_arch = "wasm32"))]
+        let solved: Vec<(Key, Qef, Vec3, u8)> = leaves.par_iter().map(solve).collect();
+        #[cfg(target_arch = "wasm32")]
+        let solved: Vec<(Key, Qef, Vec3, u8)> = leaves.iter().map(solve).collect();
         for (key, qef, position, mask) in solved {
             let node = self.nodes.get_mut(&key).unwrap();
             node.qef = qef;
             node.position = position;
             node.corners = mask;
         }
-        profile("leaf_qef", t);
 
         // 2. Bottom-up collapse to a fixpoint. An internal node whose eight children
         //    are all surface leaves merges their QEFs; if the merged vertex's
         //    residual error is under tolerance it becomes a leaf carrying the merged
         //    QEF, the union of triangle indices, and the parent's own corner signs.
         if collapse_error > 0.0 {
-            let t = Instant::now();
             self.collapse(collapse_error, &corner_ext, &ckey);
-            profile("collapse", t);
         }
 
         // 3. Crack-free connection via the proc traversal. Collect leaf vertices and
         //    index them, then walk the octree emitting a quad per minimal edge.
-        let t = Instant::now();
         let mut verts: Vec<Vec3> = Vec::new();
         let mut leaf_vert: FxHashMap<Key, u32> = FxHashMap::default();
         for (&key, node) in &self.nodes {
@@ -704,7 +684,6 @@ impl Octree3d {
         }
         let mut tris: Vec<[u32; 3]> = Vec::new();
         self.cell_proc((0, 0, 0, 0), &leaf_vert, &mut tris);
-        profile("proc_traversal", t);
 
         // The proc traversal is crack-free for uniform T-junctions, but a thin
         // single-cell photogrammetry sheet still cracks where a collapsed coarse

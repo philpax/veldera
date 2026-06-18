@@ -3119,9 +3119,7 @@ dependencies = [
  "glam 0.30.10",
  "image",
  "martini_rtin",
- "rayon",
  "rocktree",
- "rustc-hash 2.1.1",
  "serde",
  "serde_json",
  "veldera_geo",
@@ -7511,8 +7509,10 @@ dependencies = [
  "glam 0.30.10",
  "meshopt",
  "proptest",
+ "rayon",
  "rocktree",
  "rocktree-decode",
+ "rustc-hash 2.1.1",
  "serde",
 ]
 

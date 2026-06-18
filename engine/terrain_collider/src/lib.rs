@@ -1175,5 +1175,6 @@ pub mod clip;
 pub mod dump;
 pub mod health;
 pub mod heightfield;
+pub mod octree3d;
 pub mod roads;
 pub mod wrap;

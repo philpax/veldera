@@ -10,9 +10,7 @@ description = "Offline workbench for terrain-collider border fusion: load an in-
 glam = { workspace = true }
 image = { workspace = true, features = ["png"] }
 martini_rtin = { workspace = true }
-rayon = "1.11"
 rocktree = { workspace = true }
-rustc-hash = "2.1"
 serde = { workspace = true, features = ["derive"] }
 serde_json = { workspace = true }
 veldera_geo = { workspace = true }

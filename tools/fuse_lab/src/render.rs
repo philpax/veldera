@@ -731,7 +731,7 @@ pub fn run_octree3d(
             .and_then(|v| v.parse().ok())
             .unwrap_or(default)
     };
-    let settings = crate::octree3d::Octree3dSettings {
+    let settings = veldera_terrain_collider::octree3d::Octree3dSettings {
         near_voxel,
         ring_m: env_f32("RING", 30.0),
         far_voxel: env_f32("FAR", near_voxel * 16.0),
@@ -739,7 +739,8 @@ pub fn run_octree3d(
         seal_cells: env_f32("SEAL", 2.0) as u32,
     };
     let start = Instant::now();
-    let mut octree = crate::octree3d::Octree3d::build(&vertices, &triangles, up, &settings);
+    let mut octree =
+        veldera_terrain_collider::octree3d::Octree3d::build(&vertices, &triangles, up, &settings);
     let build_ms = start.elapsed().as_secs_f64() * 1000.0;
     // COLLAPSE is the flat-cell collapse error tolerance: coplanar regions merge
     // into coarse cells (fewer triangles) when the merged QEF residual is under it.
@@ -759,7 +760,7 @@ pub fn run_octree3d(
         };
         let iters = env_f32("SMOOTH", 2.0) as u32;
         let v = if iters > 0 {
-            crate::octree3d::smooth_mesh(&v, &t, iters, env_f32("LAMBDA", 0.5))
+            veldera_terrain_collider::octree3d::smooth_mesh(&v, &t, iters, env_f32("LAMBDA", 0.5))
         } else {
             v
         };
