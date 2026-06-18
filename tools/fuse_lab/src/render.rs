@@ -747,12 +747,15 @@ pub fn run_octree3d(
         octree.dual_contour()
     };
     let (leaves, surface, exterior) = octree.stats();
+    let health = MeshHealth::measure(&oct_verts, &oct_tris, 0.02);
     println!(
         "octree3d: {tiles} tiles within {radius:.0} m, near {near_voxel} m -> {build_ms:.0} ms",
     );
     println!(
-        "  {leaves} leaves ({surface} surface, {exterior} exterior), {} tris",
-        oct_tris.len()
+        "  {leaves} leaves ({surface} surface, {exterior} exterior), {} tris, {} components, {} non-manifold",
+        oct_tris.len(),
+        health.components,
+        health.nonmanifold_edges
     );
 
     let mut soup = Scene::default();
