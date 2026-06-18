@@ -569,6 +569,38 @@ const EDGES: [(usize, usize); 12] = [
     (3, 7),
 ];
 
+/// Laplacian smoothing: `iters` passes moving each vertex a fraction `lambda`
+/// toward the mean of its edge neighbours. Smooths the mass-point dual's
+/// per-cell jitter (the bumpy road) at the cost of softening sharp features —
+/// keep `lambda`/`iters` modest, or replace with QEF for crease preservation.
+pub fn smooth_mesh(verts: &[Vec3], tris: &[[u32; 3]], iters: u32, lambda: f32) -> Vec<Vec3> {
+    let n = verts.len();
+    let mut adj: Vec<Vec<u32>> = vec![Vec::new(); n];
+    for &[a, b, c] in tris {
+        for (x, y) in [(a, b), (b, c), (c, a)] {
+            adj[x as usize].push(y);
+            adj[y as usize].push(x);
+        }
+    }
+    let mut pos = verts.to_vec();
+    for _ in 0..iters {
+        let mut next = pos.clone();
+        for v in 0..n {
+            if adj[v].is_empty() {
+                continue;
+            }
+            let mut sum = Vec3::ZERO;
+            for &nb in &adj[v] {
+                sum += pos[nb as usize];
+            }
+            let mean = sum / adj[v].len() as f32;
+            next[v] = pos[v].lerp(mean, lambda);
+        }
+        pos = next;
+    }
+    pos
+}
+
 /// Möller–Trumbore segment/triangle intersection: the ray `a + t·dir` parameter
 /// `t ∈ [0, 1]` where it pierces the triangle, or `None`.
 fn segment_tri(a: Vec3, dir: Vec3, t: &[Vec3; 3]) -> Option<f32> {

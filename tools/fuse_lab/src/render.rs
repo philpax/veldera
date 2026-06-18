@@ -744,7 +744,14 @@ pub fn run_octree3d(
     let (oct_verts, oct_tris) = if std::env::var("BLOCKY").is_ok() {
         octree.boundary_quads()
     } else {
-        octree.dual_contour()
+        let (v, t) = octree.dual_contour();
+        let iters = env_f32("SMOOTH", 2.0) as u32;
+        let v = if iters > 0 {
+            crate::octree3d::smooth_mesh(&v, &t, iters, env_f32("LAMBDA", 0.5))
+        } else {
+            v
+        };
+        (v, t)
     };
     let (leaves, surface, exterior) = octree.stats();
     let health = MeshHealth::measure(&oct_verts, &oct_tris, 0.02);
