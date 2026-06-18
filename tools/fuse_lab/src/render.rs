@@ -739,13 +739,24 @@ pub fn run_octree3d(
         seal_cells: env_f32("SEAL", 2.0) as u32,
     };
     let start = Instant::now();
-    let octree = crate::octree3d::Octree3d::build(&vertices, &triangles, up, &settings);
+    let mut octree = crate::octree3d::Octree3d::build(&vertices, &triangles, up, &settings);
     let build_ms = start.elapsed().as_secs_f64() * 1000.0;
+    // COLLAPSE is the flat-cell collapse error tolerance: coplanar regions merge
+    // into coarse cells (fewer triangles) when the merged QEF residual is under it.
+    // 0 disables collapse and reproduces the un-collapsed dual_contour exactly.
+    let collapse = env_f32("COLLAPSE", 0.05);
     // BLOCKY=1 renders the raw exterior-boundary cubes; default is dual contouring.
     let (oct_verts, oct_tris) = if std::env::var("BLOCKY").is_ok() {
         octree.boundary_quads()
     } else {
-        let (v, t) = octree.dual_contour();
+        // SKIRT (in cells) plugs residual LOD-boundary cracks with short vertical
+        // skirts; 0 leaves the crack-free proc output bare. Only meaningful with
+        // collapse, which is what creates the mixed-size boundaries.
+        let (v, t) = if collapse > 0.0 {
+            octree.dual_contour_collapsed(collapse, env_f32("SKIRT", 2.0))
+        } else {
+            octree.dual_contour()
+        };
         let iters = env_f32("SMOOTH", 2.0) as u32;
         let v = if iters > 0 {
             crate::octree3d::smooth_mesh(&v, &t, iters, env_f32("LAMBDA", 0.5))
