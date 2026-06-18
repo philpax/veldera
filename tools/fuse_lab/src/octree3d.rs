@@ -482,16 +482,20 @@ impl Octree3d {
                 aa.partial_cmp(&ab).unwrap_or(std::cmp::Ordering::Equal)
             });
             let [v0, v1, v2, v3] = [ordered[0], ordered[1], ordered[2], ordered[3]];
-            // The angular order is CCW about +axis (normal points +axis). The
-            // surface normal must point toward exterior, which lies toward the
-            // exterior end of the sign-change edge: keep CCW when the high-axis
-            // corner is exterior, reverse when the low-axis corner is.
-            if fan.outside_low {
-                tris.push([v0, v2, v1]);
-                tris.push([v0, v3, v2]);
-            } else {
-                tris.push([v0, v1, v2]);
-                tris.push([v0, v2, v3]);
+            // Orient each triangle toward the exterior side of the edge. A
+            // sign-change edge crosses the surface, so its axis is roughly the
+            // surface normal; exterior lies toward the edge's exterior end. This is
+            // robust where the angular order's handedness is fragile.
+            let axis_vec = [self.frame.e1, self.frame.e2, self.frame.up][fan.axis];
+            let exterior_dir = axis_vec * if fan.outside_low { -1.0 } else { 1.0 };
+            for tri in [[v0, v1, v2], [v0, v2, v3]] {
+                let n = (verts[tri[1] as usize] - verts[tri[0] as usize])
+                    .cross(verts[tri[2] as usize] - verts[tri[0] as usize]);
+                if n.dot(exterior_dir) >= 0.0 {
+                    tris.push(tri);
+                } else {
+                    tris.push([tri[0], tri[2], tri[1]]);
+                }
             }
         }
         (verts, tris)
