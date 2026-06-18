@@ -38,7 +38,10 @@ pub struct Octree3d {
     pub frame: Frame,
     pub root_min: Vec3,
     pub root_size: f32,
+    near_voxel: f32,
     nodes: HashMap<Key, Node>,
+    /// Frame-space triangles, kept for Hermite data during extraction.
+    ftris: Vec<[Vec3; 3]>,
 }
 
 /// Up-aligned orthonormal frame the octree is built in (z = up).
@@ -75,6 +78,8 @@ struct Node {
     has_surface: bool,
     /// Flood result: reachable from the sky (air). Meaningful for empty leaves.
     exterior: bool,
+    /// Frame-triangle indices overlapping this surface leaf (for Hermite data).
+    tris: Vec<u32>,
 }
 
 impl Octree3d {
@@ -117,12 +122,15 @@ impl Octree3d {
             frame,
             root_min,
             root_size,
+            near_voxel: settings.near_voxel,
             nodes: HashMap::new(),
+            ftris: Vec::new(),
         };
         // Recursive subdivide, partitioning triangle indices down the tree.
         let all: Vec<u32> = (0..ftris.len() as u32).collect();
         octree.subdivide((0, 0, 0, 0), &ftris, &all, settings);
         octree.flood();
+        octree.ftris = ftris;
         octree
     }
 
@@ -164,6 +172,7 @@ impl Octree3d {
                     internal: true,
                     has_surface: false,
                     exterior: false,
+                    tris: Vec::new(),
                 },
             );
             let (l, i, j, k) = key;
@@ -177,6 +186,7 @@ impl Octree3d {
                     internal: false,
                     has_surface: !exact.is_empty(),
                     exterior: false,
+                    tris: exact,
                 },
             );
         }
@@ -311,6 +321,163 @@ impl Octree3d {
         tris.push([base, base + 2, base + 3]);
     }
 
+    /// Dual-contour the flooded octree into a smooth surface. Each surface leaf
+    /// gets one dual vertex on the geometry (the mean of its sign-change edge
+    /// crossings); the surface connects four cells' dual vertices around every
+    /// sign-change edge. Corner inside/outside comes from the flood (a corner is
+    /// exterior if it touches any exterior empty leaf). Camera-relative verts.
+    pub fn dual_contour(&self) -> (Vec<Vec3>, Vec<[u32; 3]>) {
+        let q = self.near_voxel * 0.25;
+        let ckey = |p: Vec3| {
+            (
+                (p.x / q).round() as i64,
+                (p.y / q).round() as i64,
+                (p.z / q).round() as i64,
+            )
+        };
+        // Corner inside/outside: every corner of an exterior empty leaf is exterior
+        // (exterior wins); corners touching only surface/interior default interior.
+        let mut corner_ext: HashMap<(i64, i64, i64), bool> = HashMap::new();
+        for (&key, node) in &self.nodes {
+            if node.internal || node.has_surface {
+                continue;
+            }
+            let (min, size) = self.cell_box(key);
+            for c in CORNER_OFFSETS {
+                let p = min + c * size;
+                let e = corner_ext.entry(ckey(p)).or_insert(false);
+                *e = *e || node.exterior;
+            }
+        }
+        let sign_ext = |p: Vec3| corner_ext.get(&ckey(p)).copied().unwrap_or(false);
+
+        // Per surface leaf: dual vertex = mean of sign-change edge crossings.
+        let mut verts: Vec<Vec3> = Vec::new();
+        let mut leaf_vert: HashMap<Key, u32> = HashMap::new();
+        for (&key, node) in &self.nodes {
+            if node.internal || !node.has_surface {
+                continue;
+            }
+            let (min, size) = self.cell_box(key);
+            let corners: [Vec3; 8] = std::array::from_fn(|i| min + CORNER_OFFSETS[i] * size);
+            let signs: [bool; 8] = std::array::from_fn(|i| sign_ext(corners[i]));
+            let mut acc = Vec3::ZERO;
+            let mut cnt = 0u32;
+            for &(a, b) in &EDGES {
+                if signs[a] != signs[b] {
+                    acc += self.edge_crossing(corners[a], corners[b], &node.tris);
+                    cnt += 1;
+                }
+            }
+            if cnt == 0 {
+                continue;
+            }
+            leaf_vert.insert(key, verts.len() as u32);
+            verts.push(self.frame.to_world(acc / cnt as f32));
+        }
+
+        // Connect: gather, per sign-change edge, the dual vertices of the cells
+        // sharing it, then emit a quad ordered around the edge axis.
+        struct EdgeFan {
+            axis: usize,
+            perp: (f32, f32),
+            outside_low: bool,
+            verts: Vec<u32>,
+        }
+        let mut edges: HashMap<(i64, i64, i64, i64, i64, i64), EdgeFan> = HashMap::new();
+        for (&key, node) in &self.nodes {
+            if node.internal || !node.has_surface {
+                continue;
+            }
+            let Some(&vidx) = leaf_vert.get(&key) else {
+                continue;
+            };
+            let (min, size) = self.cell_box(key);
+            let corners: [Vec3; 8] = std::array::from_fn(|i| min + CORNER_OFFSETS[i] * size);
+            let signs: [bool; 8] = std::array::from_fn(|i| sign_ext(corners[i]));
+            for &(a, b) in &EDGES {
+                if signs[a] == signs[b] {
+                    continue;
+                }
+                let (pa, pb) = (corners[a], corners[b]);
+                let axis = if pa.x != pb.x {
+                    0
+                } else if pa.y != pb.y {
+                    1
+                } else {
+                    2
+                };
+                let (lo, hi) = if pa[axis] < pb[axis] {
+                    (pa, pb)
+                } else {
+                    (pb, pa)
+                };
+                let ek = (
+                    (lo.x / q).round() as i64,
+                    (lo.y / q).round() as i64,
+                    (lo.z / q).round() as i64,
+                    (hi.x / q).round() as i64,
+                    (hi.y / q).round() as i64,
+                    (hi.z / q).round() as i64,
+                );
+                let (p1, p2) = [(1usize, 2usize), (0, 2), (0, 1)][axis];
+                // Exterior at the lower-axis corner — orients the winding.
+                let outside_low = sign_ext(lo);
+                let fan = edges.entry(ek).or_insert_with(|| EdgeFan {
+                    axis,
+                    perp: (lo[p1], lo[p2]),
+                    outside_low,
+                    verts: Vec::new(),
+                });
+                fan.verts.push(vidx);
+            }
+        }
+
+        let mut tris: Vec<[u32; 3]> = Vec::new();
+        for fan in edges.values() {
+            if fan.verts.len() != 4 {
+                continue; // LOD-boundary edge — left as a crack for now.
+            }
+            let (p1, p2) = [(1usize, 2usize), (0, 2), (0, 1)][fan.axis];
+            let mut ordered = fan.verts.clone();
+            ordered.sort_by(|&va, &vb| {
+                let a = verts[va as usize];
+                let b = verts[vb as usize];
+                let aa = (a[p1] - fan.perp.0).atan2(a[p2] - fan.perp.1);
+                let ab = (b[p1] - fan.perp.0).atan2(b[p2] - fan.perp.1);
+                aa.partial_cmp(&ab).unwrap_or(std::cmp::Ordering::Equal)
+            });
+            let [v0, v1, v2, v3] = [ordered[0], ordered[1], ordered[2], ordered[3]];
+            if fan.outside_low {
+                tris.push([v0, v1, v2]);
+                tris.push([v0, v2, v3]);
+            } else {
+                tris.push([v0, v2, v1]);
+                tris.push([v0, v3, v2]);
+            }
+        }
+        (verts, tris)
+    }
+
+    /// The point where edge `[a, b]` first crosses one of `tri_idx`'s triangles, or
+    /// the edge midpoint if none is hit.
+    fn edge_crossing(&self, a: Vec3, b: Vec3, tri_idx: &[u32]) -> Vec3 {
+        let dir = b - a;
+        let mut best = f32::INFINITY;
+        for &ti in tri_idx {
+            if let Some(t) = segment_tri(a, dir, &self.ftris[ti as usize])
+                && t < best
+            {
+                best = t;
+            }
+        }
+        if best.is_finite() {
+            a + dir * best
+        } else {
+            a + dir * 0.5
+        }
+    }
+
     /// Diagnostics: (leaf count, surface-leaf count, exterior-leaf count).
     pub fn stats(&self) -> (usize, usize, usize) {
         let mut leaves = 0;
@@ -329,6 +496,62 @@ impl Octree3d {
             }
         }
         (leaves, surface, exterior)
+    }
+}
+
+/// Corner `i` offset, with `i = x + 2y + 4z`.
+const CORNER_OFFSETS: [Vec3; 8] = [
+    Vec3::new(0.0, 0.0, 0.0),
+    Vec3::new(1.0, 0.0, 0.0),
+    Vec3::new(0.0, 1.0, 0.0),
+    Vec3::new(1.0, 1.0, 0.0),
+    Vec3::new(0.0, 0.0, 1.0),
+    Vec3::new(1.0, 0.0, 1.0),
+    Vec3::new(0.0, 1.0, 1.0),
+    Vec3::new(1.0, 1.0, 1.0),
+];
+
+/// The 12 cell edges as corner-index pairs (the two corners differ in one axis).
+const EDGES: [(usize, usize); 12] = [
+    (0, 1),
+    (2, 3),
+    (4, 5),
+    (6, 7),
+    (0, 2),
+    (1, 3),
+    (4, 6),
+    (5, 7),
+    (0, 4),
+    (1, 5),
+    (2, 6),
+    (3, 7),
+];
+
+/// Möller–Trumbore segment/triangle intersection: the ray `a + t·dir` parameter
+/// `t ∈ [0, 1]` where it pierces the triangle, or `None`.
+fn segment_tri(a: Vec3, dir: Vec3, t: &[Vec3; 3]) -> Option<f32> {
+    let (e1, e2) = (t[1] - t[0], t[2] - t[0]);
+    let pv = dir.cross(e2);
+    let det = e1.dot(pv);
+    if det.abs() < 1e-12 {
+        return None;
+    }
+    let inv = 1.0 / det;
+    let tv = a - t[0];
+    let u = tv.dot(pv) * inv;
+    if !(0.0..=1.0).contains(&u) {
+        return None;
+    }
+    let qv = tv.cross(e1);
+    let v = dir.dot(qv) * inv;
+    if v < 0.0 || u + v > 1.0 {
+        return None;
+    }
+    let hit = e2.dot(qv) * inv;
+    if (0.0..=1.0).contains(&hit) {
+        Some(hit)
+    } else {
+        None
     }
 }
 

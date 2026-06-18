@@ -740,13 +740,18 @@ pub fn run_octree3d(
     let start = Instant::now();
     let octree = crate::octree3d::Octree3d::build(&vertices, &triangles, up, &settings);
     let build_ms = start.elapsed().as_secs_f64() * 1000.0;
-    let (oct_verts, oct_tris) = octree.boundary_quads();
+    // BLOCKY=1 renders the raw exterior-boundary cubes; default is dual contouring.
+    let (oct_verts, oct_tris) = if std::env::var("BLOCKY").is_ok() {
+        octree.boundary_quads()
+    } else {
+        octree.dual_contour()
+    };
     let (leaves, surface, exterior) = octree.stats();
     println!(
         "octree3d: {tiles} tiles within {radius:.0} m, near {near_voxel} m -> {build_ms:.0} ms",
     );
     println!(
-        "  {leaves} leaves ({surface} surface, {exterior} exterior), boundary {} tris",
+        "  {leaves} leaves ({surface} surface, {exterior} exterior), {} tris",
         oct_tris.len()
     );
 
