@@ -812,6 +812,10 @@ pub fn run_adaptive(
         .ok()
         .and_then(|v| v.parse().ok())
         .unwrap_or(0u32);
+    // SOLIDIFY=0 turns off the 2.5D column solidify, leaving the raw 3D flood
+    // surface — the test for the octree pivot (sign stays overhead, building stays
+    // walls, no per-column collapse).
+    let solidify_below_top = std::env::var("SOLIDIFY").map(|v| v != "0").unwrap_or(true);
     let wrap_with = |extractor: Extractor| {
         let wrap = WrapSettings {
             voxel_size,
@@ -821,6 +825,7 @@ pub fn run_adaptive(
             floater_fraction,
             open_radius,
             sign_smooth_passes,
+            solidify_below_top,
             ..WrapSettings::default()
         };
         let start = Instant::now();
