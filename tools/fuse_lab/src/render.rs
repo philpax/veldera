@@ -735,7 +735,7 @@ pub fn run_octree3d(
         near_voxel,
         ring_m: env_f32("RING", 30.0),
         far_voxel: env_f32("FAR", near_voxel * 16.0),
-        band_cells: env_f32("BAND", 1.0),
+        band_cells: env_f32("BAND", 0.0),
     };
     let start = Instant::now();
     let octree = crate::octree3d::Octree3d::build(&vertices, &triangles, up, &settings);
