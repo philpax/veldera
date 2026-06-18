@@ -42,6 +42,12 @@ pub struct Octree3d {
     nodes: HashMap<Key, Node>,
     /// Frame-space triangles, kept for Hermite data during extraction.
     ftris: Vec<[Vec3; 3]>,
+    /// The soup's horizontal (xy) footprint. The cube root is taller than this
+    /// when buildings are present, and the empty margins outside the footprint
+    /// would let the sky-flood pour down the sides and under the terrain; the
+    /// flood is confined to the footprint (margins are treated as solid).
+    foot_min: glam::Vec2,
+    foot_max: glam::Vec2,
 }
 
 /// Up-aligned orthonormal frame the octree is built in (z = up).
@@ -106,6 +112,9 @@ impl Octree3d {
                 hi = hi.max(*v);
             }
         }
+        // The soup footprint (before padding), to confine the flood horizontally.
+        let foot_min = glam::Vec2::new(lo.x, lo.y);
+        let foot_max = glam::Vec2::new(hi.x, hi.y);
         // A cube root, padded a cell so the surface never touches the boundary.
         let pad = settings.near_voxel * 4.0;
         lo -= Vec3::splat(pad);
@@ -125,6 +134,8 @@ impl Octree3d {
             near_voxel: settings.near_voxel,
             nodes: HashMap::new(),
             ftris: Vec::new(),
+            foot_min,
+            foot_max,
         };
         // Recursive subdivide, partitioning triangle indices down the tree.
         let all: Vec<u32> = (0..ftris.len() as u32).collect();
@@ -193,7 +204,9 @@ impl Octree3d {
     }
 
     /// Sky-flood: empty leaves reachable from the root's top (+z) face are exterior.
-    /// Surface leaves are barriers; everything unreached is interior (solid).
+    /// Surface leaves are barriers, as are cells outside the soup footprint (so the
+    /// flood can't pour down the empty margins and under the terrain); everything
+    /// unreached is interior (solid).
     fn flood(&mut self) {
         let leaves: Vec<Key> = self
             .nodes
@@ -201,13 +214,12 @@ impl Octree3d {
             .filter(|(_, n)| !n.internal)
             .map(|(&k, _)| k)
             .collect();
-        // Seed: empty leaves on the top face.
+        // Seed: floodable leaves on the top face.
         let mut queue: Vec<Key> = Vec::new();
         for &key in &leaves {
             let (min, size) = self.cell_box(key);
             let top = min.z + size;
-            let node = &self.nodes[&key];
-            if !node.has_surface && top >= self.root_min.z + self.root_size - 1e-3 {
+            if self.floodable(key) && top >= self.root_min.z + self.root_size - 1e-3 {
                 queue.push(key);
             }
         }
@@ -217,8 +229,7 @@ impl Octree3d {
         while let Some(key) = queue.pop() {
             for face in 0..6 {
                 for nb in self.face_neighbours(key, face) {
-                    let n = &self.nodes[&nb];
-                    if n.internal || n.has_surface || n.exterior {
+                    if self.nodes[&nb].exterior || !self.floodable(nb) {
                         continue;
                     }
                     self.nodes.get_mut(&nb).unwrap().exterior = true;
@@ -226,6 +237,20 @@ impl Octree3d {
                 }
             }
         }
+    }
+
+    /// Whether the flood may pass through a leaf: it must be an empty leaf whose
+    /// footprint overlaps the soup's horizontal extent (margin cells are solid).
+    fn floodable(&self, key: Key) -> bool {
+        let node = &self.nodes[&key];
+        if node.internal || node.has_surface {
+            return false;
+        }
+        let (min, size) = self.cell_box(key);
+        min.x + size > self.foot_min.x
+            && min.x < self.foot_max.x
+            && min.y + size > self.foot_min.y
+            && min.y < self.foot_max.y
     }
 
     /// Leaf neighbours across a face (0:-x 1:+x 2:-y 3:+y 4:-z 5:+z), at any size.
@@ -335,18 +360,27 @@ impl Octree3d {
                 (p.z / q).round() as i64,
             )
         };
-        // Corner inside/outside: every corner of an exterior empty leaf is exterior
-        // (exterior wins); corners touching only surface/interior default interior.
+        // Corner inside/outside, from the exterior↔surface boundary faces: a
+        // surface leaf's face that borders an exterior empty leaf has its (fine)
+        // corners marked exterior. Stamping the *surface* leaf's corners (not the
+        // air leaf's) makes this correct even when the air leaf is much coarser —
+        // the bug that turned the surface to noise. Corners not marked default
+        // interior.
         let mut corner_ext: HashMap<(i64, i64, i64), bool> = HashMap::new();
         for (&key, node) in &self.nodes {
-            if node.internal || node.has_surface {
+            if node.internal || !node.exterior {
                 continue;
             }
-            let (min, size) = self.cell_box(key);
-            for c in CORNER_OFFSETS {
-                let p = min + c * size;
-                let e = corner_ext.entry(ckey(p)).or_insert(false);
-                *e = *e || node.exterior;
+            for face in 0..6 {
+                for nb in self.face_neighbours(key, face) {
+                    if !self.nodes[&nb].has_surface {
+                        continue;
+                    }
+                    let (nmin, nsize) = self.cell_box(nb);
+                    for p in face_corners(nmin, nsize, opposite(face)) {
+                        corner_ext.insert(ckey(p), true);
+                    }
+                }
             }
         }
         let sign_ext = |p: Vec3| corner_ext.get(&ckey(p)).copied().unwrap_or(false);
@@ -420,7 +454,7 @@ impl Octree3d {
                     (hi.y / q).round() as i64,
                     (hi.z / q).round() as i64,
                 );
-                let (p1, p2) = [(1usize, 2usize), (0, 2), (0, 1)][axis];
+                let (p1, p2) = [(1usize, 2usize), (2, 0), (0, 1)][axis];
                 // Exterior at the lower-axis corner — orients the winding.
                 let outside_low = sign_ext(lo);
                 let fan = edges.entry(ek).or_insert_with(|| EdgeFan {
@@ -438,7 +472,7 @@ impl Octree3d {
             if fan.verts.len() != 4 {
                 continue; // LOD-boundary edge — left as a crack for now.
             }
-            let (p1, p2) = [(1usize, 2usize), (0, 2), (0, 1)][fan.axis];
+            let (p1, p2) = [(1usize, 2usize), (2, 0), (0, 1)][fan.axis];
             let mut ordered = fan.verts.clone();
             ordered.sort_by(|&va, &vb| {
                 let a = verts[va as usize];
@@ -448,12 +482,16 @@ impl Octree3d {
                 aa.partial_cmp(&ab).unwrap_or(std::cmp::Ordering::Equal)
             });
             let [v0, v1, v2, v3] = [ordered[0], ordered[1], ordered[2], ordered[3]];
+            // The angular order is CCW about +axis (normal points +axis). The
+            // surface normal must point toward exterior, which lies toward the
+            // exterior end of the sign-change edge: keep CCW when the high-axis
+            // corner is exterior, reverse when the low-axis corner is.
             if fan.outside_low {
-                tris.push([v0, v1, v2]);
-                tris.push([v0, v2, v3]);
-            } else {
                 tris.push([v0, v2, v1]);
                 tris.push([v0, v3, v2]);
+            } else {
+                tris.push([v0, v1, v2]);
+                tris.push([v0, v2, v3]);
             }
         }
         (verts, tris)
