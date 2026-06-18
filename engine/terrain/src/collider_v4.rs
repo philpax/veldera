@@ -47,6 +47,9 @@ const HEIGHTFIELD: HeightfieldSettings = HeightfieldSettings {
     far_voxel: 18.0,
     percentile: 0.3,
     skirt_depth: 2.0,
+    // Flat ground collapses to large cells; surfaces deviating > 20 cm keep
+    // refining (curbs, bumps, building edges).
+    flatness_tolerance: 0.2,
 };
 
 /// The collider's reach.

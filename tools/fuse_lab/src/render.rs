@@ -734,6 +734,7 @@ pub fn run_heightfield(
         far_voxel: env_f32("FAR", voxel_size * 16.0),
         percentile: env_f32("PCT", 0.3),
         skirt_depth: env_f32("SKIRT", 2.0),
+        flatness_tolerance: env_f32("FLAT", 0.2),
     };
     let start = Instant::now();
     let (hf_verts, hf_tris) = build_height_quadtree(&vertices, &triangles, up, &settings);

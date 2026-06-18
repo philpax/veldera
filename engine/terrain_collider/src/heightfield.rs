@@ -18,7 +18,7 @@
 //! LOD-boundary edges to plug the cracks where a coarse leaf meets finer ones (a
 //! collider tolerates a sub-surface skirt; it never tunnels through one).
 
-use std::collections::HashMap;
+use std::{cell::RefCell, collections::HashMap};
 
 use glam::Vec3;
 
@@ -57,6 +57,12 @@ pub struct HeightfieldSettings {
     /// Depth (m) of the vertical skirts dropped on LOD-boundary edges to plug the
     /// cracks where leaves of different size meet.
     pub skirt_depth: f32,
+    /// Max height (m) a cell's surface may deviate from the plane through its
+    /// corners before the cell must subdivide. A cell flatter than this stops
+    /// subdividing early however near it is — so dead-flat road collapses to large
+    /// triangles while curbs, bumps, and edges keep refining. Set to 0 to disable
+    /// (subdivide purely by distance).
+    pub flatness_tolerance: f32,
 }
 
 /// Build a distance-graded 2.5D height surface from a triangle soup already in a
@@ -75,7 +81,15 @@ pub fn build_height_quadtree(
     let ring = settings.ring_m.max(1e-3);
     let skirt = settings.skirt_depth;
     let bin = near_voxel.max(MIN_BUCKET_CELL);
-    let sampler = Sampler::new(verts, tris, up, radius, bin, settings.percentile);
+    let sampler = Sampler::new(
+        verts,
+        tris,
+        up,
+        radius,
+        bin,
+        settings.percentile,
+        near_voxel * 0.25,
+    );
 
     // Desired leaf size at horizontal distance `d`: near_voxel doubling every
     // `ring` metres, clamped to far_voxel.
@@ -83,10 +97,47 @@ pub fn build_height_quadtree(
         let doublings = (d / ring).floor().max(0.0);
         (near_voxel * 2f32.powf(doublings)).clamp(near_voxel, far_voxel)
     };
-    // A cell subdivides iff it is larger than the resolution wanted at its centre.
+    let flat_tol = settings.flatness_tolerance;
+    // Whether the cell's surface is planar enough (within `flat_tol`) to represent
+    // at its current size: sample the four edge midpoints and the centre and
+    // compare each to the bilinear prediction from the corners. A missing sample
+    // (a surface boundary crossing the cell) counts as non-flat so the boundary
+    // refines. Disabled when `flat_tol <= 0`.
+    let is_flat = |x0: f32, y0: f32, size: f32| -> bool {
+        if flat_tol <= 0.0 {
+            return false;
+        }
+        let (x1, y1) = (x0 + size, y0 + size);
+        let (cx, cy) = (x0 + size * 0.5, y0 + size * 0.5);
+        let (Some(h00), Some(h10), Some(h11), Some(h01)) = (
+            sampler.sample(x0, y0),
+            sampler.sample(x1, y0),
+            sampler.sample(x1, y1),
+            sampler.sample(x0, y1),
+        ) else {
+            return false;
+        };
+        // (test point, bilinear prediction from the corners).
+        let tests = [
+            (cx, cy, (h00 + h10 + h11 + h01) * 0.25),
+            (cx, y0, (h00 + h10) * 0.5),
+            (cx, y1, (h01 + h11) * 0.5),
+            (x0, cy, (h00 + h01) * 0.5),
+            (x1, cy, (h10 + h11) * 0.5),
+        ];
+        tests.iter().all(|&(tx, ty, pred)| {
+            sampler
+                .sample(tx, ty)
+                .is_some_and(|h| (h - pred).abs() <= flat_tol)
+        })
+    };
+    // A cell subdivides iff it is larger than the resolution wanted at its centre
+    // *and* its surface is not already flat enough to represent at this size.
     let should_subdivide = |x0: f32, y0: f32, size: f32| -> bool {
         let (cx, cy) = (x0 + size * 0.5, y0 + size * 0.5);
-        size > desired_size((cx * cx + cy * cy).sqrt()) && size > near_voxel
+        size > desired_size((cx * cx + cy * cy).sqrt())
+            && size > near_voxel
+            && !is_flat(x0, y0, size)
     };
     // The leaf size the same rule assigns to a point — detects LOD boundaries
     // (a neighbour of a different size) without a map.
@@ -181,10 +232,24 @@ struct Sampler {
     bg_n: usize,
     bg_origin: f32,
     bg: Vec<Option<f32>>,
+    /// Memoized `sample` results, keyed by `(x, y)` quantized to `cache_quantum`.
+    /// The quadtree samples the same dyadic corner/midpoint positions many times
+    /// over (flatness tests, the final emit, and the skirt neighbour walk), so the
+    /// cache turns that into one fine sample per unique point.
+    cache_quantum: f32,
+    cache: RefCell<HashMap<(i64, i64), Option<f32>>>,
 }
 
 impl Sampler {
-    fn new(verts: &[Vec3], tris: &[[u32; 3]], up: Vec3, radius: f32, bin: f32, pct: f32) -> Self {
+    fn new(
+        verts: &[Vec3],
+        tris: &[[u32; 3]],
+        up: Vec3,
+        radius: f32,
+        bin: f32,
+        pct: f32,
+        cache_quantum: f32,
+    ) -> Self {
         let reference = if up.x.abs() < 0.9 { Vec3::X } else { Vec3::Y };
         let e1 = up.cross(reference).normalize();
         let e2 = up.cross(e1);
@@ -232,6 +297,8 @@ impl Sampler {
             bg_n: 0,
             bg_origin: -radius,
             bg: Vec::new(),
+            cache_quantum: cache_quantum.max(1e-4),
+            cache: RefCell::new(HashMap::new()),
         };
         sampler.build_background(radius);
         sampler
@@ -287,8 +354,18 @@ impl Sampler {
     }
 
     fn sample(&self, x: f32, y: f32) -> Option<f32> {
-        self.sample_fine(x, y)
-            .or_else(|| self.sample_background(x, y))
+        let key = (
+            (x / self.cache_quantum).round() as i64,
+            (y / self.cache_quantum).round() as i64,
+        );
+        if let Some(&v) = self.cache.borrow().get(&key) {
+            return v;
+        }
+        let v = self
+            .sample_fine(x, y)
+            .or_else(|| self.sample_background(x, y));
+        self.cache.borrow_mut().insert(key, v);
+        v
     }
 
     fn sample_fine(&self, x: f32, y: f32) -> Option<f32> {
