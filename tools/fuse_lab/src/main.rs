@@ -42,6 +42,7 @@ use veldera_terrain_collider::{
     dump::{DumpTile, TileSetDump},
 };
 
+mod octree3d;
 mod planarize;
 mod render;
 mod roads;
@@ -78,6 +79,7 @@ fn main() -> Result<(), Box<dyn Error>> {
     let mut planar: Option<(f32, f64, String)> = None;
     let mut adaptive: Option<(f32, f64, f32, String)> = None;
     let mut heightfield: Option<(f32, f64, String)> = None;
+    let mut octree3d: Option<(f32, f64, String)> = None;
     let mut i = 1;
     while i < args.len() {
         match args[i].as_str() {
@@ -222,6 +224,14 @@ fn main() -> Result<(), Box<dyn Error>> {
                 let radius = args.get(i + 2).ok_or(need)?;
                 let out = args.get(i + 3).ok_or(need)?;
                 heightfield = Some((voxel.parse()?, radius.parse()?, out.clone()));
+                i += 4;
+            }
+            "--octree3d" => {
+                let need = "--octree3d needs <near_voxel_m> <radius_m> <out.png>";
+                let voxel = args.get(i + 1).ok_or(need)?;
+                let radius = args.get(i + 2).ok_or(need)?;
+                let out = args.get(i + 3).ok_or(need)?;
+                octree3d = Some((voxel.parse()?, radius.parse()?, out.clone()));
                 i += 4;
             }
             "--winding" => {
@@ -401,6 +411,9 @@ fn main() -> Result<(), Box<dyn Error>> {
     }
     if let Some((voxel, radius, out)) = &heightfield {
         render::run_heightfield(&dump, &meshes, &settings, *voxel, *radius, out)?;
+    }
+    if let Some((voxel, radius, out)) = &octree3d {
+        render::run_octree3d(&dump, &meshes, &settings, *voxel, *radius, out)?;
     }
     if let Some((voxel, radius, out)) = &winding {
         render::run_winding(&dump, &meshes, &settings, *voxel, *radius, out)?;

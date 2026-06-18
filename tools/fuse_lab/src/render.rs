@@ -688,6 +688,81 @@ pub fn run_planar(
 /// surface (see [`crate::heightfield`]) over the near field and render it against
 /// the source soup, so the sign-blocking and road-smoothness behaviour can be
 /// eyeballed. `RADIUS`/`ELEV` env knobs frame the view as for `--render`.
+/// `--octree3d <near_voxel> <radius> <out.png>`: build the 3D sparse octree, sky-
+/// flood it, and render the blocky exterior boundary against the source soup — the
+/// first validation of the threshold-free 3D direction (sign + leak behaviour).
+/// `ELEV`/`RADIUS` env knobs frame the view; `RING`/`FAR`/`BAND` tune the octree.
+pub fn run_octree3d(
+    dump: &TileSetDump,
+    meshes: &HashMap<&str, Vec<RocktreeMesh>>,
+    base_settings: &BuildSettings,
+    near_voxel: f32,
+    radius: f64,
+    out_path: &str,
+) -> Result<(), Box<dyn Error>> {
+    let camera = DVec3::from_array(dump.camera_position);
+    let up = camera.normalize_or_zero().as_vec3();
+
+    let mut vertices: Vec<Vec3> = Vec::new();
+    let mut triangles: Vec<[u32; 3]> = Vec::new();
+    let mut tiles = 0usize;
+    for tile in &dump.tiles {
+        let off = DVec3::from_array(tile.world_position) - camera;
+        if off.length() > radius {
+            continue;
+        }
+        let Some(base) = base_soup(tile, meshes, dump, base_settings) else {
+            continue;
+        };
+        let shift = off.as_vec3();
+        let base_index = vertices.len() as u32;
+        vertices.extend(base.vertices.iter().map(|&v| v + shift));
+        triangles.extend(
+            base.triangles
+                .iter()
+                .map(|&[a, b, c]| [a + base_index, b + base_index, c + base_index]),
+        );
+        tiles += 1;
+    }
+
+    let env_f32 = |name: &str, default: f32| {
+        std::env::var(name)
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(default)
+    };
+    let settings = crate::octree3d::Octree3dSettings {
+        near_voxel,
+        ring_m: env_f32("RING", 30.0),
+        far_voxel: env_f32("FAR", near_voxel * 16.0),
+        band_cells: env_f32("BAND", 1.0),
+    };
+    let start = Instant::now();
+    let octree = crate::octree3d::Octree3d::build(&vertices, &triangles, up, &settings);
+    let build_ms = start.elapsed().as_secs_f64() * 1000.0;
+    let (oct_verts, oct_tris) = octree.boundary_quads();
+    let (leaves, surface, exterior) = octree.stats();
+    println!(
+        "octree3d: {tiles} tiles within {radius:.0} m, near {near_voxel} m -> {build_ms:.0} ms",
+    );
+    println!(
+        "  {leaves} leaves ({surface} surface, {exterior} exterior), boundary {} tris",
+        oct_tris.len()
+    );
+
+    let mut soup = Scene::default();
+    soup.add(&vertices, &triangles, Vec3::ZERO);
+    let mut oct = Scene::default();
+    oct.add(&oct_verts, &oct_tris, Vec3::ZERO);
+    render_pair_labelled(
+        &soup,
+        &oct,
+        up,
+        out_path,
+        "left: source soup, right: octree sky-flood boundary (blocky)",
+    )
+}
+
 pub fn run_heightfield(
     dump: &TileSetDump,
     meshes: &HashMap<&str, Vec<RocktreeMesh>>,
