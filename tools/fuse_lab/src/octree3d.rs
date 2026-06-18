@@ -16,7 +16,7 @@
 
 use std::collections::HashMap;
 
-use glam::Vec3;
+use glam::{Mat3, Vec3};
 
 /// Octree build/flood settings.
 #[derive(Debug, Clone, Copy)]
@@ -456,19 +456,21 @@ impl Octree3d {
             let (min, size) = self.cell_box(key);
             let corners: [Vec3; 8] = std::array::from_fn(|i| min + CORNER_OFFSETS[i] * size);
             let signs: [bool; 8] = std::array::from_fn(|i| sign_ext(corners[i]));
-            let mut acc = Vec3::ZERO;
-            let mut cnt = 0u32;
+            // Hermite data on each sign-change edge: the crossing point and the
+            // surface normal there. The QEF vertex minimizes squared distance to
+            // those planes, so a flat patch (parallel normals) snaps onto the plane
+            // (smooth) while a crease resolves the sharp intersection.
+            let mut planes: Vec<(Vec3, Vec3)> = Vec::new();
             for &(a, b) in &EDGES {
                 if signs[a] != signs[b] {
-                    acc += self.edge_crossing(corners[a], corners[b], &node.tris);
-                    cnt += 1;
+                    planes.push(self.edge_hermite(corners[a], corners[b], &node.tris));
                 }
             }
-            if cnt == 0 {
+            if planes.is_empty() {
                 continue;
             }
             leaf_vert.insert(key, verts.len() as u32);
-            verts.push(self.frame.to_world(acc / cnt as f32));
+            verts.push(self.frame.to_world(solve_qef(&planes, min, size)));
         }
 
         // Connect: gather, per sign-change edge, the dual vertices of the cells
@@ -562,22 +564,26 @@ impl Octree3d {
         (verts, tris)
     }
 
-    /// The point where edge `[a, b]` first crosses one of `tri_idx`'s triangles, or
-    /// the edge midpoint if none is hit.
-    fn edge_crossing(&self, a: Vec3, b: Vec3, tri_idx: &[u32]) -> Vec3 {
+    /// Hermite data for edge `[a, b]`: the point where it first crosses one of
+    /// `tri_idx`'s triangles and that triangle's normal, or the midpoint with the
+    /// edge direction if none is hit.
+    fn edge_hermite(&self, a: Vec3, b: Vec3, tri_idx: &[u32]) -> (Vec3, Vec3) {
         let dir = b - a;
         let mut best = f32::INFINITY;
+        let mut normal = dir.normalize_or_zero();
         for &ti in tri_idx {
-            if let Some(t) = segment_tri(a, dir, &self.ftris[ti as usize])
-                && t < best
+            let t = &self.ftris[ti as usize];
+            if let Some(param) = segment_tri(a, dir, t)
+                && param < best
             {
-                best = t;
+                best = param;
+                normal = (t[1] - t[0]).cross(t[2] - t[0]).normalize_or_zero();
             }
         }
         if best.is_finite() {
-            a + dir * best
+            (a + dir * best, normal)
         } else {
-            a + dir * 0.5
+            (a + dir * 0.5, normal)
         }
     }
 
@@ -629,6 +635,36 @@ const EDGES: [(usize, usize); 12] = [
     (2, 6),
     (3, 7),
 ];
+
+/// Solve the quadratic error function for a dual vertex: minimize the squared
+/// distance to the planes `(point, normal)`, ridge-regularized toward the mass
+/// point so a flat cell (rank-deficient `AᵀA`) stays well-posed and lands on the
+/// plane, then clamp into the cell (the QEF can over-shoot on sharp features).
+fn solve_qef(planes: &[(Vec3, Vec3)], min: Vec3, size: f32) -> Vec3 {
+    let mut mass = Vec3::ZERO;
+    for (p, _) in planes {
+        mass += *p;
+    }
+    mass /= planes.len() as f32;
+
+    let mut ata = Mat3::ZERO;
+    let mut atb = Vec3::ZERO;
+    for (p, n) in planes {
+        ata += Mat3::from_cols(*n * n.x, *n * n.y, *n * n.z);
+        atb += *n * n.dot(*p);
+    }
+    // Ridge toward the mass point: (AᵀA + λI) x = Aᵀb + λ·mass.
+    let lambda = 0.1;
+    ata += Mat3::from_diagonal(Vec3::splat(lambda));
+    atb += lambda * mass;
+
+    let x = if ata.determinant().abs() > 1e-9 {
+        ata.inverse() * atb
+    } else {
+        mass
+    };
+    x.clamp(min, min + Vec3::splat(size))
+}
 
 /// Laplacian smoothing: `iters` passes moving each vertex a fraction `lambda`
 /// toward the mean of its edge neighbours. Smooths the mass-point dual's
