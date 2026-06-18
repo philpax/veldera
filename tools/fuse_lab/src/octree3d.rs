@@ -14,9 +14,22 @@
 //! exterior boundary so the sign and any flood leaks are visible; adaptive Dual
 //! Contouring replaces the blocky extraction once the sign is trusted.
 
-use std::collections::HashMap;
+use std::time::Instant;
 
 use glam::{Mat3, Vec3};
+use rayon::prelude::*;
+use rustc_hash::FxHashMap;
+
+/// Coarse per-stage timing to stderr, gated on `OCT_PROFILE=1`. Cheap to call and
+/// compiled out of the hot path when the env var is unset.
+fn profile(stage: &str, start: Instant) {
+    if std::env::var_os("OCT_PROFILE").is_some() {
+        eprintln!(
+            "  [oct] {stage}: {:.0} ms",
+            start.elapsed().as_secs_f64() * 1000.0
+        );
+    }
+}
 
 /// Octree build/flood settings.
 #[derive(Debug, Clone, Copy)]
@@ -44,7 +57,7 @@ pub struct Octree3d {
     pub root_min: Vec3,
     pub root_size: f32,
     near_voxel: f32,
-    nodes: HashMap<Key, Node>,
+    nodes: FxHashMap<Key, Node>,
     /// Frame-space triangles, kept for Hermite data during extraction.
     ftris: Vec<[Vec3; 3]>,
     /// The soup's horizontal (xy) footprint. The cube root is taller than this
@@ -159,17 +172,23 @@ impl Octree3d {
             root_min,
             root_size,
             near_voxel: settings.near_voxel,
-            nodes: HashMap::new(),
+            nodes: FxHashMap::default(),
             ftris: Vec::new(),
             foot_min,
             foot_max,
         };
         // Recursive subdivide, partitioning triangle indices down the tree.
         let all: Vec<u32> = (0..ftris.len() as u32).collect();
+        let t = Instant::now();
         octree.subdivide((0, 0, 0, 0), &ftris, &all, settings);
+        profile("subdivide", t);
+        let t = Instant::now();
         octree.flood();
+        profile("flood", t);
         if settings.seal_cells > 0 {
+            let t = Instant::now();
             octree.seal(settings.seal_cells);
+            profile("seal", t);
         }
         octree.ftris = ftris;
         octree
@@ -446,7 +465,7 @@ impl Octree3d {
         // air leaf's) makes this correct even when the air leaf is much coarser —
         // the bug that turned the surface to noise. Corners not marked default
         // interior.
-        let mut corner_ext: HashMap<(i64, i64, i64), bool> = HashMap::new();
+        let mut corner_ext: FxHashMap<(i64, i64, i64), bool> = FxHashMap::default();
         for (&key, node) in &self.nodes {
             if node.internal || !node.exterior {
                 continue;
@@ -467,7 +486,7 @@ impl Octree3d {
 
         // Per surface leaf: dual vertex = mean of sign-change edge crossings.
         let mut verts: Vec<Vec3> = Vec::new();
-        let mut leaf_vert: HashMap<Key, u32> = HashMap::new();
+        let mut leaf_vert: FxHashMap<Key, u32> = FxHashMap::default();
         for (&key, node) in &self.nodes {
             if node.internal || !node.has_surface {
                 continue;
@@ -500,7 +519,7 @@ impl Octree3d {
             outside_low: bool,
             verts: Vec<u32>,
         }
-        let mut edges: HashMap<(i64, i64, i64, i64, i64, i64), EdgeFan> = HashMap::new();
+        let mut edges: FxHashMap<(i64, i64, i64, i64, i64, i64), EdgeFan> = FxHashMap::default();
         for (&key, node) in &self.nodes {
             if node.internal || !node.has_surface {
                 continue;
@@ -599,7 +618,9 @@ impl Octree3d {
         collapse_error: f32,
         skirt_cells: f32,
     ) -> (Vec<Vec3>, Vec<[u32; 3]>) {
+        let t = Instant::now();
         let corner_ext = self.corner_ext_map();
+        profile("corner_ext_map", t);
         let q = self.near_voxel * 0.25;
         let ckey = |p: Vec3| {
             (
@@ -608,6 +629,7 @@ impl Octree3d {
                 (p.z / q).round() as i64,
             )
         };
+        let t = Instant::now();
         // 1. Per finest surface leaf: accumulate the QEF, solve the vertex, and
         //    record the corner-sign mask in the proc convention (`i = 4x + 2y + z`).
         let leaves: Vec<Key> = self
@@ -616,50 +638,63 @@ impl Octree3d {
             .filter(|(_, n)| !n.internal && n.has_surface)
             .map(|(&k, _)| k)
             .collect();
-        for key in leaves {
-            let (min, size) = self.cell_box(key);
-            // Proc-convention corners: index bits are (x, y, z) high-to-low.
-            let pc: [Vec3; 8] = std::array::from_fn(|i| min + proc_corner_offset(i) * size);
-            let signs: [bool; 8] =
-                std::array::from_fn(|i| self.corner_solid(pc[i], &corner_ext, &ckey));
-            let mut mask = 0u8;
-            for (i, &s) in signs.iter().enumerate() {
-                if s {
-                    mask |= 1 << i;
+        // Each leaf's QEF, vertex, and mask depend only on its own geometry and the
+        // shared (immutable) flood/corner state, so the heavy per-leaf solve runs in
+        // parallel over a `&self` borrow; the cheap write-back is then sequential.
+        let solved: Vec<(Key, Qef, Vec3, u8)> = leaves
+            .par_iter()
+            .map(|&key| {
+                let (min, size) = self.cell_box(key);
+                // Proc-convention corners: index bits are (x, y, z) high-to-low.
+                let pc: [Vec3; 8] = std::array::from_fn(|i| min + proc_corner_offset(i) * size);
+                let signs: [bool; 8] =
+                    std::array::from_fn(|i| self.corner_solid(pc[i], &corner_ext, &ckey));
+                let mut mask = 0u8;
+                for (i, &s) in signs.iter().enumerate() {
+                    if s {
+                        mask |= 1 << i;
+                    }
                 }
-            }
-            let tris = self.nodes[&key].tris.clone();
-            let mut qef = Qef::default();
-            for &[a, b] in &PROC_EDGES {
-                if signs[a] == signs[b] {
-                    continue;
+                let tris = &self.nodes[&key].tris;
+                let mut qef = Qef::default();
+                for &[a, b] in &PROC_EDGES {
+                    if signs[a] == signs[b] {
+                        continue;
+                    }
+                    let (p, n) = self.edge_hermite(pc[a], pc[b], tris);
+                    qef.add(p, n);
                 }
-                let (p, n) = self.edge_hermite(pc[a], pc[b], &tris);
-                qef.add(p, n);
-            }
-            let position = if qef.count > 0 {
-                qef.solve(min, size)
-            } else {
-                min + Vec3::splat(size * 0.5)
-            };
+                let position = if qef.count > 0 {
+                    qef.solve(min, size)
+                } else {
+                    min + Vec3::splat(size * 0.5)
+                };
+                (key, qef, position, mask)
+            })
+            .collect();
+        for (key, qef, position, mask) in solved {
             let node = self.nodes.get_mut(&key).unwrap();
             node.qef = qef;
             node.position = position;
             node.corners = mask;
         }
+        profile("leaf_qef", t);
 
         // 2. Bottom-up collapse to a fixpoint. An internal node whose eight children
         //    are all surface leaves merges their QEFs; if the merged vertex's
         //    residual error is under tolerance it becomes a leaf carrying the merged
         //    QEF, the union of triangle indices, and the parent's own corner signs.
         if collapse_error > 0.0 {
+            let t = Instant::now();
             self.collapse(collapse_error, &corner_ext, &ckey);
+            profile("collapse", t);
         }
 
         // 3. Crack-free connection via the proc traversal. Collect leaf vertices and
         //    index them, then walk the octree emitting a quad per minimal edge.
+        let t = Instant::now();
         let mut verts: Vec<Vec3> = Vec::new();
-        let mut leaf_vert: HashMap<Key, u32> = HashMap::new();
+        let mut leaf_vert: FxHashMap<Key, u32> = FxHashMap::default();
         for (&key, node) in &self.nodes {
             if node.internal || !node.has_surface || node.corners == 0 || node.corners == 255 {
                 continue;
@@ -669,6 +704,7 @@ impl Octree3d {
         }
         let mut tris: Vec<[u32; 3]> = Vec::new();
         self.cell_proc((0, 0, 0, 0), &leaf_vert, &mut tris);
+        profile("proc_traversal", t);
 
         // The proc traversal is crack-free for uniform T-junctions, but a thin
         // single-cell photogrammetry sheet still cracks where a collapsed coarse
@@ -687,7 +723,7 @@ impl Octree3d {
     /// Build the corner inside/outside map exactly as `dual_contour` does: a
     /// surface leaf's face that borders an exterior empty leaf has its (fine)
     /// corners stamped exterior; corners not stamped default interior (solid).
-    fn corner_ext_map(&self) -> HashMap<(i64, i64, i64), bool> {
+    fn corner_ext_map(&self) -> FxHashMap<(i64, i64, i64), bool> {
         let q = self.near_voxel * 0.25;
         let ckey = |p: Vec3| {
             (
@@ -696,7 +732,7 @@ impl Octree3d {
                 (p.z / q).round() as i64,
             )
         };
-        let mut corner_ext: HashMap<(i64, i64, i64), bool> = HashMap::new();
+        let mut corner_ext: FxHashMap<(i64, i64, i64), bool> = FxHashMap::default();
         for (&key, node) in &self.nodes {
             if node.internal || !node.exterior {
                 continue;
@@ -721,7 +757,7 @@ impl Octree3d {
     fn collapse(
         &mut self,
         collapse_error: f32,
-        corner_ext: &HashMap<(i64, i64, i64), bool>,
+        corner_ext: &FxHashMap<(i64, i64, i64), bool>,
         ckey: &impl Fn(Vec3) -> (i64, i64, i64),
     ) {
         // A node collapses only when none of its children is internal (all are
@@ -833,7 +869,7 @@ impl Octree3d {
     fn corner_solid(
         &self,
         p: Vec3,
-        corner_ext: &HashMap<(i64, i64, i64), bool>,
+        corner_ext: &FxHashMap<(i64, i64, i64), bool>,
         ckey: &impl Fn(Vec3) -> (i64, i64, i64),
     ) -> bool {
         match corner_ext.get(&ckey(p)) {
@@ -870,7 +906,7 @@ impl Octree3d {
     }
 
     /// Whether `key` names a present leaf carrying a dual vertex.
-    fn proc_leaf<'a>(&self, key: Key, leaf_vert: &'a HashMap<Key, u32>) -> Option<&'a u32> {
+    fn proc_leaf<'a>(&self, key: Key, leaf_vert: &'a FxHashMap<Key, u32>) -> Option<&'a u32> {
         leaf_vert.get(&key)
     }
 
@@ -908,7 +944,7 @@ impl Octree3d {
         self.nodes.get(&key).is_some_and(|n| !n.internal)
     }
 
-    fn cell_proc(&self, key: Key, leaf_vert: &HashMap<Key, u32>, out: &mut Vec<[u32; 3]>) {
+    fn cell_proc(&self, key: Key, leaf_vert: &FxHashMap<Key, u32>, out: &mut Vec<[u32; 3]>) {
         if self.proc_is_leaf(key) || !self.nodes.contains_key(&key) {
             return;
         }
@@ -939,7 +975,7 @@ impl Octree3d {
         &self,
         nodes: [Key; 2],
         dir: usize,
-        leaf_vert: &HashMap<Key, u32>,
+        leaf_vert: &FxHashMap<Key, u32>,
         out: &mut Vec<[u32; 3]>,
     ) {
         if self.proc_is_leaf(nodes[0]) && self.proc_is_leaf(nodes[1]) {
@@ -977,7 +1013,7 @@ impl Octree3d {
         &self,
         nodes: [Key; 4],
         dir: usize,
-        leaf_vert: &HashMap<Key, u32>,
+        leaf_vert: &FxHashMap<Key, u32>,
         out: &mut Vec<[u32; 3]>,
     ) {
         if nodes.iter().all(|&k| self.proc_is_leaf(k)) {
@@ -1003,7 +1039,7 @@ impl Octree3d {
         &self,
         nodes: [Key; 4],
         dir: usize,
-        leaf_vert: &HashMap<Key, u32>,
+        leaf_vert: &FxHashMap<Key, u32>,
         out: &mut Vec<[u32; 3]>,
     ) {
         // The smallest of the four cells owns the edge: its sign change decides
