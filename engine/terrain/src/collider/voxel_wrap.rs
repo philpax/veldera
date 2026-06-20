@@ -1,26 +1,26 @@
-//! The v3 terrain-collider reconcile: a lean, stable baseline.
+//! The voxel-wrap terrain-collider reconcile: a lean, stable baseline.
 //!
-//! Used only when the v3 collider pipeline is selected (see
-//! [`crate::roads::COLLIDER_PIPELINE`]). It reuses the trusted legacy reconcile
-//! shape ([`crate::lod::update_physics_colliders`] — deepest-first spawn,
-//! coverage-masked octants, replacement-gated despawn) and the v2 off-thread
-//! dispatch/commit mechanics, but drops everything v2 layered on top (fusion,
-//! sub-octant carving, road carve-and-emit, the adjacency/road rebuild
-//! fingerprints, the prefix-refcount coverage cache, and the generation
+//! Used only when the voxel-wrap algorithm is selected (see
+//! [`crate::collider::COLLIDER`]). It reuses the trusted raw-tiles reconcile
+//! shape ([`crate::collider::raw_tiles`] — deepest-first spawn, coverage-masked
+//! octants, replacement-gated despawn) and the OSM-road off-thread
+//! dispatch/commit mechanics, but drops everything the OSM-road path layers on
+//! top (fusion, sub-octant carving, road carve-and-emit, the adjacency/road
+//! rebuild fingerprints, the prefix-refcount coverage cache, and the generation
 //! early-out). The per-tile build is the voxel wrap
 //! ([`veldera_physics::terrain_v3`]) rather than a cleaned copy of the source
 //! soup.
 //!
-//! The selection is shared with v2: the banded walk and the WYSIWYG mirror
-//! ([`crate::collider_v2::compute_physics_targets`]) write
-//! [`LodState::physics_target_paths`], and this reconcile drives the spawned
-//! colliders toward it. The live set is the shared
+//! The selection is shared with the OSM-road path: the banded walk and the
+//! WYSIWYG mirror ([`crate::collider::osm_roads::compute_physics_targets`])
+//! write [`LodState::physics_target_paths`], and this reconcile drives the
+//! spawned colliders toward it. The live set is the shared
 //! [`LodState::physics_colliders`] `(entity, mask)` map (no parallel
 //! bookkeeping); only the in-flight builds are tracked here.
 //!
-//! This is the baseline to stabilise first; v2's optimisations (early-out,
-//! progressive stale-masking, border fusion) can be pulled back in once it is
-//! standing on rendered ground.
+//! This is the baseline to stabilise first; the OSM-road path's optimisations
+//! (early-out, progressive stale-masking, border fusion) can be pulled back in
+//! once it is standing on rendered ground.
 
 use std::{collections::HashMap, sync::Arc};
 
@@ -38,14 +38,14 @@ use veldera_physics::{
 };
 
 use crate::{
+    collider::viz::reconcile_collider_wireframes,
     lod::{ColliderReconcile, LodState, poll_lod_node_tasks},
-    viz::reconcile_collider_wireframes,
 };
 
-/// Register the v3 collider reconcile, its in-flight state and build channel,
-/// and the shared per-entity wireframe overlay. Called from
-/// [`crate::lod::LodPlugin::build`] when [`crate::roads::COLLIDER_PIPELINE`]
-/// selects v3.
+/// Register the voxel-wrap collider reconcile, its in-flight state and build
+/// channel, and the shared per-entity wireframe overlay. Called from
+/// [`crate::lod::LodPlugin::build`] when [`crate::collider::COLLIDER`] selects
+/// the voxel-wrap algorithm.
 pub(crate) fn register(app: &mut App) {
     app.init_resource::<ColliderV3State>()
         .init_resource::<ColliderV3BuildChannel>()
@@ -62,43 +62,10 @@ pub(crate) fn register(app: &mut App) {
 
     // The dump writer needs filesystem access; the request resource is shared
     // (initialised in LodPlugin::build), so the "Dump nearby tiles" button works
-    // on the v3 path too. No-op on the web.
+    // on this path too. The voxel wrap carries no carve state, so the shared
+    // carve-less dump system serves it. No-op on the web.
     #[cfg(not(target_arch = "wasm32"))]
-    app.add_systems(Update, process_tile_dump_requests);
-}
-
-/// Capture and write a tile dump when requested (the shared "Dump nearby tiles"
-/// button). v3 carries no v2 carve/road state, so the capture passes `None` —
-/// `sub_cut` is zero and roads are empty, which is exactly what a v3 wrap uses.
-#[cfg(not(target_arch = "wasm32"))]
-fn process_tile_dump_requests(
-    mut request: ResMut<crate::collider_v2::TileDumpRequest>,
-    lod_state: Res<LodState>,
-    streaming: Res<PhysicsStreamingConfig>,
-    road_overlay: Res<crate::roads::RoadOverlay>,
-    viz_filter: Res<crate::viz::ColliderVizFilter>,
-    camera_query: Query<&FloatingOriginCamera>,
-) {
-    if !request.wanted {
-        return;
-    }
-    request.wanted = false;
-    let Ok(camera) = camera_query.single() else {
-        return;
-    };
-
-    // Capture what the user is inspecting: the collider-wireframe radius, with a
-    // floor so a tight wireframe view still grabs the neighbourhood.
-    let radius = f64::from(viz_filter.radius_m).max(50.0);
-    let dump = crate::collider_v2::capture_tile_dump(
-        &lod_state,
-        None,
-        &streaming,
-        &road_overlay,
-        camera.position,
-        radius,
-    );
-    crate::collider_v2::write_tile_dump(&dump, radius);
+    app.add_systems(Update, crate::collider::shared::process_tile_dump_requests);
 }
 
 /// v3 reconcile bookkeeping: the builds currently running on background tasks,
@@ -270,7 +237,7 @@ fn update_physics_colliders_v3(
         // theirs at the shared borders (the global lattice makes both sides agree
         // at the shared nodes). Only same depth shares the lattice cleanly.
         let neighbours: Vec<(OwnedTileMeshes, u8)> =
-            crate::collider_v2::lateral_neighbour_paths(&lod_state, path)
+            crate::collider::osm_roads::lateral_neighbour_paths(&lod_state, path)
                 .into_iter()
                 .filter(|n| n.depth() == path.depth())
                 .filter_map(|n| {

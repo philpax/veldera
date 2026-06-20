@@ -28,8 +28,8 @@ use veldera_geo::{
 };
 use veldera_roads::{GeoBbox, OverpassRoadSource, RoadClass, RoadSource, RoadWay};
 use veldera_terrain::{
+    collider::{COLLIDER, EcefRibbon, EcefStation, RoadOverlay, TerrainTileSnapshot},
     lod::LodState,
-    roads::{COLLIDER_PIPELINE, EcefRibbon, EcefStation, RoadOverlay, TerrainTileSnapshot},
 };
 use veldera_terrain_collider::{
     BuildSettings, SurfaceProbe, TileMeshes, build_tile_geometry,
@@ -64,13 +64,13 @@ impl RoadsPlugin {
 
 impl Plugin for RoadsPlugin {
     fn build(&self, app: &mut App) {
-        // The road feature only runs on the v2 pipeline (see
-        // `COLLIDER_PIPELINE`): otherwise register nothing so no Overpass
-        // traffic or off-thread fits ever run. The diagnostics resource still
-        // exists (the UI reads it unconditionally) and says so.
-        if !COLLIDER_PIPELINE.is_v2() {
+        // The road feature only runs on the OSM-road algorithm (see
+        // `COLLIDER`): otherwise register nothing so no Overpass traffic or
+        // off-thread fits ever run. The diagnostics resource still exists (the
+        // UI reads it unconditionally) and says so.
+        if !COLLIDER.is_osm_roads() {
             app.insert_resource(RoadsDiagnostics {
-                status: "disabled (COLLIDER_PIPELINE is not V2WithRoads)".to_string(),
+                status: "disabled (COLLIDER is not OsmRoads)".to_string(),
                 ..default()
             });
             return;
@@ -507,7 +507,7 @@ fn half_width_for(way: &RoadWay, lane_width: f32) -> f32 {
 }
 
 /// The debug-viz colour byte for a class (links share their parent's colour),
-/// matching `veldera_terrain::viz`.
+/// matching `veldera_terrain::collider::viz`.
 fn class_byte(class: RoadClass) -> u8 {
     match class {
         RoadClass::Motorway | RoadClass::MotorwayLink => 0,

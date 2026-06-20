@@ -53,35 +53,31 @@ use rocktree_decode::{OctreePath, OrientedBoundingBox};
 use serde::Deserialize;
 
 use crate::{
-    collider_v2, collider_v3, collider_v4,
+    collider::{
+        self, COLLIDER,
+        viz::{
+            ColliderVizFilter, LodVizGizmos, LodVizSettings, configure_lod_viz_gizmos, draw_lod_viz,
+        },
+    },
     loader::LoaderState,
     mesh::{
         RocktreeMeshMarker, convert_mesh, convert_texture, matrix_to_world_position_and_transform,
     },
-    roads::{COLLIDER_PIPELINE, RoadOverlay},
     terrain_material::{TerrainMaterial, TerrainMaterialExtension},
-    viz::{
-        ColliderVizFilter, LodVizGizmos, LodVizSettings, configure_lod_viz_gizmos, draw_lod_viz,
-        reconcile_collider_wireframes,
-    },
-    viz_v2::{RenderMeshVizFilter, RoadVizSettings, draw_render_mesh_wireframes},
 };
 
-// The tile-dump request resource lives in the v2 collider module but is
+// The tile-dump request resource lives in the shared collider core but is
 // re-exported here so the diagnostics UI references it under `lod`; the
 // resource is registered unconditionally so the dump button stays wired on
-// both collider paths (a no-op on the legacy path, where nothing reads it).
-pub use crate::collider_v2::TileDumpRequest;
-
-use avian3d::prelude::*;
+// every collider path (a no-op on the raw-tiles path, where nothing reads it).
+pub use crate::collider::shared::TileDumpRequest;
 
 use veldera_async::TaskSpawner;
 use veldera_config::ConfigPlugin;
 use veldera_constants::EARTH_RADIUS_M_F64;
-use veldera_geo::floating_origin::{FloatingOriginCamera, WorldPosition};
+use veldera_geo::floating_origin::FloatingOriginCamera;
 use veldera_physics::{
-    GameLayer, MotionTracker, PhysicsState, PhysicsStreamingConfig, TerrainCollider,
-    desired_physics_depth, within_innermost_band,
+    MotionTracker, PhysicsStreamingConfig, desired_physics_depth, within_innermost_band,
 };
 
 /// Hot-reloadable LoD streaming parameters, loaded from
@@ -179,44 +175,19 @@ impl Plugin for LodPlugin {
             .add_systems(Startup, configure_lod_viz_gizmos)
             .add_systems(Update, draw_lod_viz.after(ColliderReconcile));
 
-        // The v2 reconcile (off-thread fusion/carve/road pipeline plus its
-        // own overlays) for v2, or main's pre-branch synchronous build and
-        // wireframe reconcile otherwise (see `COLLIDER_PIPELINE`). The
-        // road/render-mesh overlay resources are initialised unconditionally so
-        // the diagnostics UI reads them on every path.
-        app.init_resource::<RoadOverlay>()
-            .init_resource::<RenderMeshVizFilter>()
-            .init_resource::<RoadVizSettings>()
-            .init_resource::<collider_v2::TileDumpRequest>()
-            // The render-mesh wireframe overlay reads only the displayed rocktree
-            // tiles and the shared filter, so it is pipeline-agnostic — register it
-            // unconditionally rather than inside the v2 path (where v3/v4 lost it).
-            .add_systems(Update, draw_render_mesh_wireframes.after(ColliderReconcile));
-        if COLLIDER_PIPELINE.is_v2() {
-            collider_v2::register(app);
-        } else if COLLIDER_PIPELINE.is_v3() {
-            collider_v3::register(app);
-        } else if COLLIDER_PIPELINE.is_v4() {
-            collider_v4::register(app);
-        } else {
-            app.add_systems(
-                Update,
-                update_physics_colliders
-                    .in_set(ColliderReconcile)
-                    .after(poll_lod_node_tasks),
-            )
-            .add_systems(
-                Update,
-                reconcile_collider_wireframes.after(ColliderReconcile),
-            );
-        }
+        // The shared overlay wiring (the host-filled `RoadOverlay`, the
+        // render-mesh and road overlay filter resources the diagnostics UI reads
+        // on every path, the shared `TileDumpRequest`, and the pipeline-agnostic
+        // render-mesh wireframe overlay), then the live algorithm's reconcile,
+        // state, and its own overlays (see `collider::COLLIDER`).
+        collider::shared::register_shared(app);
+        collider::register(app);
     }
 }
 
-/// Anchor set for whichever collider reconcile is active — the v2
-/// [`collider_v2::update_physics_colliders`] or the legacy
-/// [`update_physics_colliders`] — so the in-world overlays order after it
-/// regardless of which one [`COLLIDER_PIPELINE`] registered.
+/// Anchor set for whichever collider reconcile is active (see
+/// [`collider::COLLIDER`]) so the in-world overlays order after it regardless of
+/// which algorithm registered.
 #[derive(SystemSet, Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub(crate) struct ColliderReconcile;
 
@@ -361,17 +332,19 @@ pub struct LodState {
     /// Physics collider entities keyed by node path, with the octant mask
     /// each entity was built with (so mask changes trigger a rebuild). The
     /// single source of truth for "what collider entities exist", written by
-    /// whichever reconcile is active; the v2 path mirrors its richer
-    /// [`collider_v2::ColliderV2State`] records into this shape so the
+    /// whichever reconcile is active; the OSM-road path mirrors its richer
+    /// [`collider::osm_roads::ColliderV2State`] records into this shape so the
     /// diagnostics UI, the in-world overlay, and the retention/unload path
-    /// work identically on both paths.
+    /// work identically on every path.
     pub(crate) physics_colliders: HashMap<OctreePath, (Entity, u8)>,
     /// Paths the physics BFS selected as collider hosts this frame, with
     /// their octant-coverage masks.
     ///
     /// Computed by the physics side of [`unified_bfs_traversal`] in
-    /// `update_lod_requests` and consumed by `update_physics_colliders` to
-    /// spawn/despawn the actual trimesh entities. Stored on `LodState`
+    /// `update_lod_requests` and consumed by the active collider reconcile (see
+    /// [`collider::COLLIDER`]) to spawn/despawn the actual trimesh entities,
+    /// except on the camera-centred paths, which gather it into a single
+    /// collider. Stored on `LodState`
     /// rather than passed directly so the two systems can run as separate
     /// Bevy systems without a shared parameter.
     pub(crate) physics_target_paths: HashMap<OctreePath, u8>,
@@ -451,15 +424,15 @@ impl LodState {
     /// Snapshot the raw build inputs of every loaded terrain tile within
     /// `radius` of `center` (ECEF), for off-thread road fitting. The fit must
     /// sample this *raw* photogrammetry, never the road-modified colliders.
-    /// A v2-only entry point (`client/roads` calls it only when the v2 road
+    /// An OSM-road entry point (`client/roads` calls it only when the OSM-road
     /// pipeline is enabled).
     #[must_use]
     pub fn loaded_terrain_snapshot(
         &self,
         center: DVec3,
         radius: f64,
-    ) -> Vec<crate::roads::TerrainTileSnapshot> {
-        collider_v2::loaded_terrain_snapshot(self, center, radius)
+    ) -> Vec<crate::collider::shared::TerrainTileSnapshot> {
+        collider::shared::loaded_terrain_snapshot(self, center, radius)
     }
 
     /// Bitmask of `path`'s octants that have at least one live collider
@@ -688,10 +661,10 @@ struct UnifiedWalkCtx<'a> {
     lod_state: &'a LodState,
     tuning: &'a LodTuning,
     physics_bands: &'a [(f64, usize)],
-    /// Radius (m) within which the near field is handled by the v2 WYSIWYG
-    /// mirror selection ([`collider_v2::compute_physics_targets`]) instead of
-    /// this banded walk; `0.0` on the legacy path, where the walk covers the
-    /// whole near field itself.
+    /// Radius (m) within which the near field is handled by the WYSIWYG
+    /// mirror selection ([`collider::osm_roads::compute_physics_targets`])
+    /// instead of this banded walk; `0.0` on the raw-tiles path, where the walk
+    /// covers the whole near field itself.
     wysiwyg_radius: f64,
     frustum: Frustum,
     lod_metrics: LodMetrics,
@@ -700,9 +673,9 @@ struct UnifiedWalkCtx<'a> {
     lead: DVec3,
 }
 
-/// The legacy physics distance bands (m → target depth), used by the legacy
-/// pipeline (see [`COLLIDER_PIPELINE`]). On the streaming-selection paths (v2
-/// and v3) the bands come from the streaming config instead, and the WYSIWYG
+/// The pre-branch physics distance bands (m → target depth), used by the
+/// raw-tiles algorithm (see [`collider::COLLIDER`]). On the streaming-selection
+/// paths the bands come from the streaming config instead, and the WYSIWYG
 /// mirror handles the near field.
 const LEGACY_PHYSICS_BANDS: &[(f64, usize)] = &[(50.0, 0), (150.0, 1), (400.0, 2), (1000.0, 3)];
 
@@ -875,18 +848,18 @@ fn unified_walk(
 
         // -------- physics-side decision --------
         let phys_dist = effective_distance(&child_node.obb, ctx.camera_pos, ctx.lead);
-        // Within the v2 WYSIWYG radius the near field belongs to the mirror
+        // Within the WYSIWYG radius the near field belongs to the mirror
         // selection (`compute_physics_targets`), so this walk treats every
         // region whose near distance is inside the radius exactly like
         // "beyond the outermost band" — covered by someone else, nothing to
-        // do here. On the legacy path `wysiwyg_radius` is `0.0`, so the walk
+        // do here. On the raw-tiles path `wysiwyg_radius` is `0.0`, so the walk
         // covers the whole near field itself.
-        let phys_target =
-            if COLLIDER_PIPELINE.uses_streaming_selection() && phys_dist <= ctx.wysiwyg_radius {
-                None
-            } else {
-                desired_physics_depth(ctx.physics_bands, phys_dist)
-            };
+        let phys_target = if COLLIDER.uses_streaming_selection() && phys_dist <= ctx.wysiwyg_radius
+        {
+            None
+        } else {
+            desired_physics_depth(ctx.physics_bands, phys_dist)
+        };
         let physics_in_range = phys_target.is_some();
         let physics_at_or_past_target =
             physics_in_range && phys_target.is_some_and(|t| child_path.depth() >= t);
@@ -956,14 +929,14 @@ fn unified_walk(
             handled_mask |= octant_bit;
         }
 
-        // WYSIWYG near field (legacy path only): within the innermost band,
+        // WYSIWYG near field (raw-tiles path only): within the innermost band,
         // when the renderer displays at least one child of this node, push
         // the commit down so collision matches the displayed meshes. The
         // recursion's coverage mask lets this node's own (post-recursion)
         // commit cover exactly the octants the children don't, mirroring the
         // render compositing in every partial-load state. A no-op on the
         // streaming-selection paths — the WYSIWYG mirror handles the near field.
-        let wysiwyg_descend = !COLLIDER_PIPELINE.uses_streaming_selection()
+        let wysiwyg_descend = !COLLIDER.uses_streaming_selection()
             && physics_in_range
             && physics_at_or_past_target
             && !octant_handled
@@ -1285,12 +1258,13 @@ fn update_lod_requests(
         .as_ref()
         .is_some_and(|last| freeze.0 || last.matches(&current_signature, &tuning));
 
-    // The v2 path uses the streaming bands beyond the WYSIWYG mirror radius;
-    // the legacy path uses main's hardcoded bands and no mirror, so the
-    // banded walk covers the near field too (colliding the displayed mesh via
-    // the innermost-band descent rather than the coarser mirror).
+    // The streaming-selection paths use the streaming bands beyond the WYSIWYG
+    // mirror radius; the raw-tiles path uses main's hardcoded bands and no
+    // mirror, so the banded walk covers the near field too (colliding the
+    // displayed mesh via the innermost-band descent rather than the coarser
+    // mirror).
     let (physics_bands, wysiwyg_radius): (&[(f64, usize)], f64) =
-        if COLLIDER_PIPELINE.uses_streaming_selection() {
+        if COLLIDER.uses_streaming_selection() {
             (&streaming.bands, streaming.wysiwyg_radius)
         } else {
             (LEGACY_PHYSICS_BANDS, 0.0)
@@ -1317,14 +1291,14 @@ fn update_lod_requests(
     }
 
     // Near-field collider targets mirror the loaded render set (WYSIWYG) on
-    // the streaming-selection paths (v2 and v3); the banded walk covers
-    // everything beyond the radius, and the two are disjoint by construction
-    // (the walk treats every region whose near distance is inside the radius as
-    // covered). On the legacy path the banded walk above selects the whole near
-    // field, so there is no separate mirror set and `collider_targets` is just
-    // the walk result.
-    let mut collider_targets = if COLLIDER_PIPELINE.uses_streaming_selection() {
-        collider_v2::compute_physics_targets(
+    // the streaming-selection paths; the banded walk covers everything beyond
+    // the radius, and the two are disjoint by construction (the walk treats
+    // every region whose near distance is inside the radius as covered). On the
+    // raw-tiles path the banded walk above selects the whole near field, so
+    // there is no separate mirror set and `collider_targets` is just the walk
+    // result.
+    let mut collider_targets = if COLLIDER.uses_streaming_selection() {
+        collider::osm_roads::compute_physics_targets(
             &lod_state,
             lod_metrics.camera_position,
             motion.lead(),
@@ -1736,232 +1710,6 @@ fn cull_meshes(
             .is_some_and(|m| m.extension.octant_mask.x != u32::from(mask));
         if needs_update && let Some(material) = materials.get_mut(&material_handle.0) {
             material.extension.octant_mask.x = u32::from(mask);
-        }
-    }
-}
-
-/// Update physics colliders to match the physics BFS's current selection.
-///
-/// The `(path, octant mask)` pairs that should host colliders right now
-/// live in `lod_state.physics_target_paths`, written by
-/// `update_lod_requests` after running the physics BFS. This system
-/// reconciles spawned collider entities against that target: spawn for
-/// newly-selected paths, rebuild when a path's mask changed, despawn paths
-/// no longer selected.
-///
-/// Ordering rules that keep every transition hole-free:
-/// - Builds go deepest-first, so when a parent's rebuilt collider masks an
-///   octant out, the children covering that octant are already live.
-/// - A parent's mask is intersected with its *live* descendant coverage
-///   ([`LodState::live_descendant_bits`]), so a child whose build failed or
-///   is still pending can't punch a hole in the parent.
-/// - Despawns only happen once every overlapping target path is live with
-///   its current mask.
-///
-/// Build cost is throttled (see
-/// [`PhysicsStreamingConfig::max_collider_builds_per_frame`] and
-/// [`PhysicsStreamingConfig::collider_spawn_persistence_secs`]): builds are
-/// capped per frame, and newly selected paths whose region already has live
-/// coverage must stay selected for a dwell time before paying a trimesh
-/// build. The despawn rules above are what make deferring builds safe.
-fn update_physics_colliders(
-    mut commands: Commands,
-    time: Res<Time>,
-    mut lod_state: ResMut<LodState>,
-    physics_state: Res<PhysicsState>,
-    streaming: Res<PhysicsStreamingConfig>,
-    camera_query: Query<&FloatingOriginCamera>,
-) {
-    use veldera_physics::terrain::create_terrain_collider;
-
-    let Ok(camera) = camera_query.single() else {
-        return;
-    };
-
-    // Spawn relative to the origin-shift bookkeeping, not the live camera:
-    // the camera advances every frame (interpolated sub-tick motion included)
-    // while physics positions are only re-based when a shift is applied.
-    // Using the live camera bakes the difference into the collider as a
-    // permanent offset — centimetres while walking, metres while falling fast.
-    let camera_pos = physics_state
-        .origin_camera_position()
-        .unwrap_or(camera.position);
-    let target_paths = lod_state.physics_target_paths.clone();
-    let now = time.elapsed_secs_f64();
-
-    // Track when each path entered the target set; the timestamp resets the
-    // moment a path drops out, so re-selections start a fresh wait.
-    lod_state
-        .collider_candidate_since
-        .retain(|p, _| target_paths.contains_key(p));
-    for path in target_paths.keys() {
-        lod_state
-            .collider_candidate_since
-            .entry(*path)
-            .or_insert(now);
-    }
-
-    // Collect spawns and rebuilds: paths with no entity, or whose live
-    // entity was built with a different mask. Deepest first, so children
-    // are live before any parent rebuild masks their octants out; nearest
-    // first within a depth so the ground under the player wins the build
-    // budget.
-    let mut pending: Vec<(OctreePath, u8, f64)> = target_paths
-        .iter()
-        .filter(|(path, mask)| match lod_state.physics_colliders.get(path) {
-            None => true,
-            Some((_, built_mask)) => built_mask != *mask,
-        })
-        .filter_map(|(path, mask)| {
-            // BFS-selected paths whose data hasn't fully loaded yet are
-            // skipped; we'll catch them in a later frame.
-            let node_data = lod_state.node_data.get(path)?;
-            let distance = (node_data.world_position - camera_pos).length();
-            Some((*path, *mask, distance))
-        })
-        .collect();
-    pending.sort_by(|a, b| {
-        std::cmp::Reverse(a.0.depth())
-            .cmp(&std::cmp::Reverse(b.0.depth()))
-            .then(a.2.total_cmp(&b.2))
-    });
-
-    // Trimesh construction is the expensive part of collider streaming;
-    // capping builds per frame bounds the frame cost during fast flight
-    // when the band boundaries sweep the world.
-    let max_builds = match streaming.max_collider_builds_per_frame {
-        0 => usize::MAX,
-        n => n,
-    };
-    let mut builds = 0usize;
-
-    for (path, target_mask, _) in pending {
-        if builds >= max_builds {
-            break;
-        }
-
-        // Spawn-persistence gate for brand-new paths: selections must
-        // survive a config-set dwell time before paying a trimesh build, so
-        // selections that flicker during fast movement never build at all.
-        // Regions with no live coverage bypass the gate — first coverage is
-        // never delayed. Mask rebuilds of live entities skip the gate too:
-        // they refine existing coverage and the despawn rules depend on
-        // them converging.
-        if !lod_state.physics_colliders.contains_key(&path) {
-            let since = lod_state
-                .collider_candidate_since
-                .get(&path)
-                .copied()
-                .unwrap_or(now);
-            let waited = now - since >= streaming.collider_spawn_persistence_secs;
-            if !waited && lod_state.collider_region_covered(path) {
-                continue;
-            }
-        }
-
-        let Some(node_data) = lod_state.node_data.get(&path) else {
-            continue;
-        };
-
-        // Only mask out octants that actually have live collider coverage
-        // below: a committed child whose build failed (or is still pending)
-        // must not leave a hole in the parent. Extra coverage from an unmasked
-        // octant overlaps the late child briefly — jitter, not a fall.
-        let mask = target_mask & lod_state.live_descendant_bits(path);
-
-        match lod_state.physics_colliders.get(&path) {
-            Some((_, built_mask)) if *built_mask == mask => continue,
-            _ => {}
-        }
-
-        builds += 1;
-
-        // Radial down at the node; the direction varies negligibly across a
-        // single tile, so one vector serves the whole collider's skirts.
-        let down = (-node_data.world_position.normalize()).as_vec3();
-        let Some(collider) = create_terrain_collider(
-            &node_data.meshes,
-            &node_data.transform,
-            streaming.min_collider_triangle_height as f32,
-            down,
-            streaming.collider_skirt_depth as f32,
-            mask,
-        ) else {
-            tracing::debug!("Skipping invalid mesh for physics collider: '{}'", path);
-            continue;
-        };
-
-        // Camera-relative position so the floating origin shift keeps it
-        // in f32 range.
-        let relative_pos = node_data.world_position - camera_pos;
-        let physics_pos = Vec3::new(
-            relative_pos.x as f32,
-            relative_pos.y as f32,
-            relative_pos.z as f32,
-        );
-
-        let entity = commands
-            .spawn((
-                RigidBody::Static,
-                collider,
-                Position(physics_pos),
-                // Rotation is identity since rotation is baked into the
-                // collider vertices.
-                Rotation::default(),
-                // Transform is needed for Avian's debug rendering (it
-                // reads GlobalTransform).
-                Transform::from_translation(physics_pos),
-                WorldPosition::from_dvec3(node_data.world_position),
-                TerrainCollider {
-                    path,
-                    octant_mask: mask,
-                },
-                CollisionLayers::new(
-                    [GameLayer::Ground],
-                    [GameLayer::Ground, GameLayer::Vehicle, GameLayer::Ragdoll],
-                ),
-            ))
-            .id();
-
-        // Replace any previous entity for this path (mask rebuild) in the
-        // same frame, so the swap is atomic from physics's point of view.
-        if let Some((old_entity, _)) = lod_state.physics_colliders.insert(path, (entity, mask)) {
-            commands.entity(old_entity).despawn();
-        }
-        tracing::debug!(
-            "Created physics collider for node '{}' (depth {}, mask {:#04x})",
-            path,
-            path.depth(),
-            mask,
-        );
-    }
-
-    // Despawn colliders no longer in the target set — but only once every
-    // overlapping target path (ancestor or descendant — the replacement
-    // coverage for this region) is live with its current mask, so a
-    // deferred or failed replacement build never leaves the region bare.
-    let obsolete: Vec<OctreePath> = lod_state
-        .physics_colliders
-        .keys()
-        .filter(|p| !target_paths.contains_key(*p))
-        .copied()
-        .collect();
-
-    for path in obsolete {
-        let replacements_live = target_paths.iter().all(|(t, m)| {
-            let overlaps = t.starts_with(path) || path.starts_with(*t);
-            !overlaps
-                || lod_state
-                    .physics_colliders
-                    .get(t)
-                    .is_some_and(|(_, built)| built == m)
-        });
-        if !replacements_live {
-            continue;
-        }
-        if let Some((entity, _)) = lod_state.physics_colliders.remove(&path) {
-            commands.entity(entity).despawn();
-            tracing::debug!("Removed physics collider for node '{}'", path);
         }
     }
 }

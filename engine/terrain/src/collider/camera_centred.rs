@@ -1,19 +1,21 @@
-//! The v4 terrain-collider reconcile: one camera-centred 2.5D drivable-height
-//! surface whose resolution coarsens with distance.
+//! The camera-centred terrain-collider reconcile: one camera-centred
+//! drivable-surface collider whose resolution coarsens with distance.
 //!
-//! Used only when the v4 collider pipeline is selected (see
-//! [`crate::roads::COLLIDER_PIPELINE`]). Unlike v3 (one collider per displayed
-//! tile, fighting to make adjacent tiles' borders agree), v4 maintains a *single*
-//! camera-centred collider, rebuilt off-thread as the camera moves. It is built by
-//! gathering the displayed composite tiles around the camera
-//! ([`LodState::physics_target_paths`] — the same non-overlapping WYSIWYG set v3
-//! builds per tile) into one soup and extracting a distance-graded drivable-height
-//! surface from it ([`veldera_physics::terrain_v4::create_height_collider`]): a
-//! quadtree over the ground, fine near the camera and coarse far out, sampled by a
-//! robust drivable height so overhead clutter (signs, canopies) is rejected, with
-//! building faces re-emerging as the vertical cliffs between cells. The new
-//! collider replaces the old in one frame (double buffer), so there is never a
-//! frame without coverage.
+//! Used by both camera-centred algorithms (see [`crate::collider::COLLIDER`]):
+//! [`HeightField`](crate::collider::ColliderAlgorithm::HeightField) extracts a
+//! 2.5D drivable-height surface
+//! ([`veldera_physics::terrain_v4::create_height_collider`]), and
+//! [`Octree`](crate::collider::ColliderAlgorithm::Octree) extracts a full-3D
+//! octree surface ([`veldera_physics::terrain_v4::create_octree_collider`]); the
+//! reconcile is otherwise identical, so the extractor is chosen from [`COLLIDER`]
+//! at the dispatch site. Unlike the voxel wrap (one collider per displayed tile,
+//! fighting to make adjacent tiles' borders agree), this maintains a *single*
+//! camera-centred collider, rebuilt off-thread as the camera moves. It is built
+//! by gathering the displayed composite tiles around the camera
+//! ([`LodState::physics_target_paths`] — the same non-overlapping WYSIWYG set the
+//! voxel wrap builds per tile) into one soup and extracting the surface from it.
+//! The new collider replaces the old in one frame (double buffer), so there is
+//! never a frame without coverage.
 
 use std::sync::Arc;
 
@@ -32,7 +34,10 @@ use veldera_physics::{
     },
 };
 
-use crate::lod::{ColliderReconcile, LodState, poll_lod_node_tasks};
+use crate::{
+    collider::{COLLIDER, ColliderAlgorithm},
+    lod::{ColliderReconcile, LodState, poll_lod_node_tasks},
+};
 
 /// Settings for the single camera-centred 2.5D drivable-height surface: a quadtree
 /// over the ground, `near_voxel` fine near the camera, coarsening to `far_voxel`
@@ -64,13 +69,8 @@ const HEIGHTFIELD: HeightfieldSettings = HeightfieldSettings {
     flatness_tolerance: 0.2,
 };
 
-/// Select the experimental full-3D octree extractor instead of the 2.5D height
-/// field. The octree gives real building walls with no clutter classification, at
-/// higher build cost (~1.5–2 s / ~300k tris at 500 m, off-thread); the height field
-/// is lighter and is the proven default. Flip to drive-test the octree.
-const USE_OCTREE: bool = false;
-
-/// Settings for the 3D octree extractor (used when [`USE_OCTREE`]). Near voxel 0.5 m
+/// Settings for the 3D octree extractor (used when [`COLLIDER`] is
+/// [`Octree`](ColliderAlgorithm::Octree)). Near voxel 0.5 m
 /// (cubic cell-count → ~9× cheaper than 0.3 m, and 0.5 m is fine collider detail for
 /// driving), coarsening to 8 m by `ring_m`, out to the same reach. `collapse_error`
 /// merges coplanar cells; `seal_cells` opens thin air pockets; a light smooth takes
@@ -104,10 +104,10 @@ const COLLIDER_COLOUR: Color = Color::srgb(0.4, 0.9, 0.45);
 /// far past it.
 const REBUILD_DISTANCE: f32 = 18.0;
 
-/// Register the v4 collider reconcile and its state/build channel. Called from
-/// [`crate::lod::LodPlugin::build`] when [`crate::roads::COLLIDER_PIPELINE`]
-/// selects v4. v4 colliders carry their own [`DebugRender`], so the shared
-/// per-tile wireframe overlay is not registered here.
+/// Register the camera-centred collider reconcile and its state/build channel.
+/// Called from [`crate::lod::LodPlugin::build`] when [`COLLIDER`] selects either
+/// camera-centred algorithm. These colliders carry their own [`DebugRender`], so
+/// the shared per-tile wireframe overlay is not registered here.
 pub(crate) fn register(app: &mut App) {
     app.init_resource::<ColliderV4State>()
         .init_resource::<ColliderV4BuildChannel>()
@@ -119,45 +119,11 @@ pub(crate) fn register(app: &mut App) {
         );
 
     // The dump writer needs filesystem access; the request resource is shared
-    // (initialised in `LodPlugin::build`), so the "Dump nearby tiles" button works
-    // on the v4 path too. v4 carries no v2 carve/road state, so the capture passes
-    // `None` — `sub_cut` is zero and roads are empty, exactly what a v4 wrap uses.
+    // (initialised in `LodPlugin::build`), so the "Dump nearby tiles" button
+    // works on this path too. The camera-centred wrap carries no carve state, so
+    // the shared carve-less dump system serves it.
     #[cfg(not(target_arch = "wasm32"))]
-    app.add_systems(Update, process_tile_dump_requests);
-}
-
-/// Capture and write a tile dump when requested (the shared "Dump nearby tiles"
-/// button). Mirrors the v3 handler: v4 carries no v2 carve/road state, so the
-/// capture passes `None`.
-#[cfg(not(target_arch = "wasm32"))]
-fn process_tile_dump_requests(
-    mut request: ResMut<crate::collider_v2::TileDumpRequest>,
-    lod_state: Res<LodState>,
-    streaming: Res<PhysicsStreamingConfig>,
-    road_overlay: Res<crate::roads::RoadOverlay>,
-    viz_filter: Res<crate::viz::ColliderVizFilter>,
-    camera_query: Query<&FloatingOriginCamera>,
-) {
-    if !request.wanted {
-        return;
-    }
-    request.wanted = false;
-    let Ok(camera) = camera_query.single() else {
-        return;
-    };
-
-    // Capture what the user is inspecting: the collider-wireframe radius, with a
-    // floor so a tight wireframe view still grabs the neighbourhood.
-    let radius = f64::from(viz_filter.radius_m).max(50.0);
-    let dump = crate::collider_v2::capture_tile_dump(
-        &lod_state,
-        None,
-        &streaming,
-        &road_overlay,
-        camera.position,
-        radius,
-    );
-    crate::collider_v2::write_tile_dump(&dump, radius);
+    app.add_systems(Update, crate::collider::shared::process_tile_dump_requests);
 }
 
 /// v4 reconcile state: the single live collider's entity, the world centre it was
@@ -258,10 +224,12 @@ fn update_physics_colliders_v4(
             .iter()
             .map(|(m, mask)| (m.as_tile_meshes(), *mask))
             .collect();
-        let collider = if USE_OCTREE {
-            create_octree_collider(&tile_refs, down, &OCTREE)
-        } else {
-            create_height_collider(&tile_refs, down, &HEIGHTFIELD)
+        let collider = match COLLIDER {
+            ColliderAlgorithm::Octree => create_octree_collider(&tile_refs, down, &OCTREE),
+            // The two camera-centred algorithms share this reconcile; everything
+            // that isn't the octree uses the height field (the dispatch only
+            // routes HeightField and Octree here).
+            _ => create_height_collider(&tile_refs, down, &HEIGHTFIELD),
         };
         let _ = tx
             .send(ColliderV4BuildResult {

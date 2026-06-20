@@ -9,7 +9,7 @@
 use bevy::{ecs::system::SystemParam, prelude::*};
 use bevy_egui::egui;
 
-use veldera_terrain::viz::RenderMeshVizFilter;
+use veldera_terrain::collider::viz::RenderMeshVizFilter;
 
 /// Resources for the rendering tab.
 #[derive(SystemParam)]

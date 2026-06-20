@@ -11,9 +11,11 @@ use rocktree_decode::OctreePath;
 use veldera_game_roads::RoadsDiagnostics;
 use veldera_physics::{is_physics_debug_enabled, terrain::TerrainCollider, toggle_physics_debug};
 use veldera_terrain::{
+    collider::{
+        RoadOverlay,
+        viz::{ColliderVizFilter, RoadVizSettings},
+    },
     lod::{LodState, TileDumpRequest},
-    roads::RoadOverlay,
-    viz::{ColliderVizFilter, RoadVizSettings},
 };
 
 /// Radius (m) for the nearby-collider diagnostics table.

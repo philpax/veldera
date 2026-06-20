@@ -18,9 +18,9 @@ use rocktree_decode::OctreePath;
 use veldera_geo::coords::RadialFrame;
 use veldera_physics::PhysicsStreamingConfig;
 use veldera_terrain::{
+    collider::viz::LodVizSettings,
     lod::{FreezeLod, LodSnapshot, LodSnapshotRequest, LodTuning, SnapshotNode, SnapshotNodeState},
     mesh::RocktreeMeshMarker,
-    viz::LodVizSettings,
 };
 
 /// Resources for the streaming tab.
@@ -326,10 +326,10 @@ fn draw_top_down_map(
 }
 
 /// Map an octree depth to a color along a cool-→-warm gradient. Defers to the
-/// engine's [`veldera_terrain::viz::depth_color`] so the top-down map and the
-/// in-world overlay use the same colour language.
+/// engine's [`veldera_terrain::collider::viz::depth_color`] so the top-down map
+/// and the in-world overlay use the same colour language.
 fn depth_color(depth: usize) -> egui::Color32 {
-    let [r, g, b, _] = veldera_terrain::viz::depth_color(depth)
+    let [r, g, b, _] = veldera_terrain::collider::viz::depth_color(depth)
         .to_srgba()
         .to_u8_array();
     egui::Color32::from_rgb(r, g, b)

@@ -1,10 +1,10 @@
-//! The v2 terrain-collider reconcile: WYSIWYG mirror selection, off-thread
-//! fusion/simplification builds, sub-octant carving, and OSM road carve-and-emit.
+//! The OSM-road terrain-collider reconcile: WYSIWYG mirror selection,
+//! off-thread fusion/simplification builds, sub-octant carving, and OSM road
+//! carve-and-emit.
 //!
-//! Used only when the v2 collider pipeline is selected (see
-//! [`crate::roads::COLLIDER_PIPELINE`]); the pre-branch synchronous reconcile
-//! that runs on the legacy path lives in
-//! [`crate::lod::update_physics_colliders`].
+//! Used only when the OSM-road algorithm is selected (see
+//! [`crate::collider::COLLIDER`]); the pre-branch synchronous reconcile that
+//! runs on the raw-tiles path lives in [`crate::collider::raw_tiles`].
 //!
 //! The selection itself is computed in [`crate::lod`]: the banded octree walk
 //! handles everything beyond the WYSIWYG radius, and [`compute_physics_targets`]
@@ -12,14 +12,14 @@
 //! [`crate::lod::LodState::physics_target_paths`]. This module reconciles the
 //! spawned collider entities against that target off-thread.
 //!
-//! The v2 collider bookkeeping — the rich per-collider record
+//! The OSM-road collider bookkeeping — the rich per-collider record
 //! ([`LiveCollider`]: octant mask, fused adjacency, sub-octant carve, road
 //! fingerprint), the prefix refcounts that power O(1) coverage queries, the
 //! in-flight build set, and the reconcile generation — lives in
-//! [`ColliderV2State`], a v2-only resource. The shared
+//! [`ColliderV2State`], an algorithm-local resource. The shared
 //! [`LodState::physics_colliders`](crate::lod::LodState) `(entity, mask)` map
 //! is kept mirrored so the diagnostics UI, the in-world overlay, and the
-//! retention/unload path work identically on both collider paths.
+//! retention/unload path work identically on every collider path.
 
 use std::{
     collections::{HashMap, HashSet},
@@ -41,17 +41,19 @@ use veldera_physics::{
 };
 
 use crate::{
+    collider::{
+        COLLIDER,
+        shared::{RoadIndex, RoadOverlay, tile_bounding_radius},
+        viz::{draw_collider_wireframes, draw_road_overlay},
+    },
     lod::{ColliderReconcile, LoadedNodeData, LodState, poll_lod_node_tasks},
-    roads::{COLLIDER_PIPELINE, RoadIndex, RoadOverlay, TerrainTileSnapshot, tile_bounding_radius},
-    viz_v2::{draw_collider_wireframes, draw_road_overlay},
 };
 
-/// Register the v2 collider reconcile, its state and channels, and the v2
-/// in-world overlays. Called from [`crate::lod::LodPlugin::build`] when
-/// [`COLLIDER_PIPELINE`] selects v2; the shared plugin build already
-/// initialises the resources the diagnostics UI reads on both paths
-/// ([`RoadOverlay`], [`RenderMeshVizFilter`], [`RoadVizSettings`],
-/// [`TileDumpRequest`]).
+/// Register the OSM-road collider reconcile, its state and channels, and the
+/// OSM-road in-world overlays. Called from [`crate::lod::LodPlugin::build`] when
+/// [`COLLIDER`] selects the OSM-road algorithm; the shared overlay wiring
+/// ([`crate::collider::shared::register_shared`]) already initialises the
+/// resources the diagnostics UI reads on every path.
 pub(crate) fn register(app: &mut App) {
     app.init_resource::<ColliderV2State>()
         .init_resource::<ColliderBuildChannel>()
@@ -586,7 +588,7 @@ fn update_physics_colliders(
     // their follow-up work flows through the normal reconcile. A *discarded*
     // result (stale parameters) bumps nothing, so it forces a reconcile
     // directly to get the path re-dispatched.
-    let roads_enabled = COLLIDER_PIPELINE.is_v2() && streaming.road_colliders;
+    let roads_enabled = COLLIDER.is_osm_roads() && streaming.road_colliders;
     let road_carve = CarveSettings {
         margin: streaming.road_carve_margin as f32,
         vertical_gate: streaming.road_vertical_gate as f32,
@@ -1263,168 +1265,22 @@ fn adjacency_fingerprint(
 }
 
 // ============================================================================
-// Terrain snapshots and tile dumps
+// Tile dumps
 // ============================================================================
 
-/// Snapshot the raw build inputs of every loaded terrain tile within
-/// `radius` of `center` (ECEF), for off-thread road fitting. The fit must
-/// sample this *raw* photogrammetry, never the road-modified colliders.
-#[must_use]
-pub(crate) fn loaded_terrain_snapshot(
-    lod_state: &LodState,
-    center: DVec3,
-    radius: f64,
-) -> Vec<TerrainTileSnapshot> {
-    lod_state
-        .node_data
-        .iter()
-        .filter(|(_, data)| (data.world_position - center).length() <= radius)
-        .map(|(path, data)| TerrainTileSnapshot {
-            meshes: Arc::clone(&data.meshes),
-            rotation: data.transform.rotation,
-            scale: data.transform.scale,
-            world_position: data.world_position,
-            depth: path.depth(),
-        })
-        .collect()
-}
-
-/// UI → streaming request: when `wanted` is set, the next frame captures
-/// the nearby selected tiles to `dumps/tiles-<unix-secs>.json` for offline
-/// fusion experiments (`tools/fuse_lab`). Native only; a no-op on wasm.
-#[derive(Resource, Default)]
-pub struct TileDumpRequest {
-    pub wanted: bool,
-}
-
-/// Capture the selected tiles within `radius` of `camera_pos` (plus any
-/// lateral neighbours they fuse against) as a serializable dump, for offline
-/// fusion experiments in `tools/fuse_lab`. Native only: the only caller is
-/// the filesystem-backed dump writer.
-#[cfg(not(target_arch = "wasm32"))]
-#[must_use]
-pub(crate) fn capture_tile_dump(
-    lod_state: &LodState,
-    v2: Option<&ColliderV2State>,
-    streaming: &PhysicsStreamingConfig,
-    road_overlay: &RoadOverlay,
-    camera_pos: DVec3,
-    radius: f64,
-) -> veldera_terrain_collider::dump::TileSetDump {
-    use veldera_terrain_collider::dump::{
-        DumpMesh, DumpRibbon, DumpSettings, DumpTile, TileSetDump,
-    };
-
-    // Sub-octant carve cells are a v2-only concept; v3 wraps each tile whole.
-    let coverage = v2.map(|v2| v2.selected_coverage(lod_state));
-    let road_index = RoadIndex::build(
-        road_overlay,
-        COLLIDER_PIPELINE.is_v2() && streaming.road_colliders,
-    );
-    let road_margin = streaming.road_carve_margin as f32;
-    let capture = |path: OctreePath, mask: u8| -> Option<DumpTile> {
-        let node_data = lod_state.node_data.get(&path)?;
-        let tile_radius = tile_bounding_radius(node_data.transform.scale);
-        Some(DumpTile {
-            path: path.to_string(),
-            depth: path.depth(),
-            world_position: node_data.world_position.to_array(),
-            rotation: node_data.transform.rotation.to_array(),
-            scale: node_data.transform.scale.to_array(),
-            octant_mask: mask,
-            sub_cut: match (v2, coverage.as_ref()) {
-                (Some(v2), Some(coverage)) if streaming.collider_carve => {
-                    v2.sub_cut_cells(coverage, path)
-                }
-                _ => 0,
-            },
-            laterals: lateral_neighbour_paths(lod_state, path)
-                .iter()
-                .map(OctreePath::to_string)
-                .collect(),
-            roads: road_index
-                .baked(
-                    road_overlay,
-                    node_data.world_position,
-                    tile_radius,
-                    road_margin,
-                )
-                .iter()
-                .map(DumpRibbon::from_ribbon)
-                .collect(),
-            meshes: node_data.meshes.iter().map(DumpMesh::from_mesh).collect(),
-        })
-    };
-
-    // The selected tiles in radius, then one ring of referenced laterals so
-    // every captured tile's adjacency is materialized.
-    let mut captured: HashSet<OctreePath> = HashSet::new();
-    let mut tiles = Vec::new();
-    for (path, mask) in &lod_state.physics_target_paths {
-        let Some(node_data) = lod_state.node_data.get(path) else {
-            continue;
-        };
-        if (node_data.world_position - camera_pos).length() > radius {
-            continue;
-        }
-        if let Some(tile) = capture(*path, *mask)
-            && captured.insert(*path)
-        {
-            tiles.push(tile);
-        }
-    }
-    let referenced: Vec<OctreePath> = tiles
-        .iter()
-        .flat_map(|t| {
-            // Resolve lateral display strings back through the live
-            // selection (string round-trips would need parsing).
-            lod_state
-                .physics_target_paths
-                .keys()
-                .filter(|p| t.laterals.contains(&p.to_string()))
-                .copied()
-                .collect::<Vec<_>>()
-        })
-        .collect();
-    for path in referenced {
-        if captured.contains(&path) {
-            continue;
-        }
-        let mask = lod_state
-            .physics_target_paths
-            .get(&path)
-            .copied()
-            .unwrap_or(0);
-        if let Some(tile) = capture(path, mask)
-            && captured.insert(path)
-        {
-            tiles.push(tile);
-        }
-    }
-
-    TileSetDump {
-        camera_position: camera_pos.to_array(),
-        settings: DumpSettings {
-            min_triangle_height: streaming.min_collider_triangle_height as f32,
-            skirt_depth: streaming.collider_skirt_depth as f32,
-            skirt_slope: streaming.collider_skirt_slope as f32,
-            fusion_range: streaming.edge_fusion_range as f32,
-            simplify_tolerance: streaming.collider_simplify_tolerance as f32,
-            wysiwyg_radius: streaming.wysiwyg_radius,
-        },
-        tiles,
-    }
-}
-
-/// Capture and write a tile dump when requested.
+/// Capture and write a tile dump when requested (the shared "Dump nearby tiles"
+/// button), folding the OSM-road path's live ∩ selected sub-octant carve into
+/// the capture — its own variant of the shared
+/// [`process_tile_dump_requests`](crate::collider::shared::process_tile_dump_requests),
+/// which the carve-less algorithms use.
 #[cfg(not(target_arch = "wasm32"))]
 fn process_tile_dump_requests(
-    mut request: ResMut<TileDumpRequest>,
+    mut request: ResMut<crate::collider::shared::TileDumpRequest>,
     lod_state: Res<LodState>,
     v2: Res<ColliderV2State>,
     streaming: Res<PhysicsStreamingConfig>,
     road_overlay: Res<RoadOverlay>,
-    viz_filter: Res<crate::viz::ColliderVizFilter>,
+    viz_filter: Res<crate::collider::viz::ColliderVizFilter>,
     camera_query: Query<&FloatingOriginCamera>,
 ) {
     if !request.wanted {
@@ -1435,41 +1291,27 @@ fn process_tile_dump_requests(
         return;
     };
 
+    // Sub-octant carve cells are an OSM-road concept; the other algorithms wrap
+    // each tile whole and pass a no-op carve provider.
+    let coverage = streaming
+        .collider_carve
+        .then(|| v2.selected_coverage(&lod_state));
+    let sub_cut = |path: OctreePath| -> u64 {
+        coverage
+            .as_ref()
+            .map_or(0, |coverage| v2.sub_cut_cells(coverage, path))
+    };
+
     // Capture what the user is inspecting: the collider-wireframe radius,
     // with a floor so a tight wireframe view still grabs the neighbourhood.
     let radius = f64::from(viz_filter.radius_m).max(50.0);
-    let dump = capture_tile_dump(
+    let dump = crate::collider::shared::capture_tile_dump(
         &lod_state,
-        Some(&v2),
+        &sub_cut,
         &streaming,
         &road_overlay,
         camera.position,
         radius,
     );
-
-    write_tile_dump(&dump, radius);
-}
-
-/// Write a captured tile dump to `dumps/tiles-<unix>.json`, logging the result.
-/// Shared by the v2 and v3 dump systems.
-#[cfg(not(target_arch = "wasm32"))]
-pub(crate) fn write_tile_dump(dump: &veldera_terrain_collider::dump::TileSetDump, radius: f64) {
-    let path = format!(
-        "dumps/tiles-{}.json",
-        std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map_or(0, |d| d.as_secs())
-    );
-    let write = || -> std::io::Result<()> {
-        std::fs::create_dir_all("dumps")?;
-        let file = std::fs::File::create(&path)?;
-        serde_json::to_writer(std::io::BufWriter::new(file), dump).map_err(std::io::Error::other)
-    };
-    match write() {
-        Ok(()) => tracing::info!(
-            "dumped {} tile(s) within {radius:.0} m to {path}",
-            dump.tiles.len()
-        ),
-        Err(e) => tracing::warn!("failed to write tile dump to {path}: {e}"),
-    }
+    crate::collider::shared::write_tile_dump(&dump, radius);
 }
