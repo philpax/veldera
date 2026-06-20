@@ -55,6 +55,14 @@ pub struct Octree3d {
     /// flood is confined to the footprint (margins are treated as solid).
     foot_min: glam::Vec2,
     foot_max: glam::Vec2,
+    /// Lowest surface height (z) per coarse xy column, keyed at `near_voxel`. A
+    /// flat road is a thin photogrammetry sheet over empty space, so the sky-flood
+    /// reaches *under* it from its edges and the road extracts as a holey two-sided
+    /// shell. Marking everything below the lowest surface in each column as solid
+    /// (non-floodable) gives the ground a solid underside — the road comes out
+    /// clean — without filling the road→sign gap (that sits *above* the floor, so
+    /// overhead clutter still stays air and you still drive under it).
+    floor_z: FxHashMap<(i32, i32), f32>,
 }
 
 /// Up-aligned orthonormal frame the octree is built in (z = up).
@@ -165,10 +173,12 @@ impl Octree3d {
             ftris: Vec::new(),
             foot_min,
             foot_max,
+            floor_z: FxHashMap::default(),
         };
         // Recursive subdivide, partitioning triangle indices down the tree.
         let all: Vec<u32> = (0..ftris.len() as u32).collect();
         octree.subdivide((0, 0, 0, 0), &ftris, &all, settings);
+        octree.compute_floor();
         octree.flood();
         if settings.seal_cells > 0 {
             octree.seal(settings.seal_cells);
@@ -329,10 +339,52 @@ impl Octree3d {
             return false;
         }
         let (min, size) = self.cell_box(key);
-        min.x + size > self.foot_min.x
+        let in_footprint = min.x + size > self.foot_min.x
             && min.x < self.foot_max.x
             && min.y + size > self.foot_min.y
-            && min.y < self.foot_max.y
+            && min.y < self.foot_max.y;
+        if !in_footprint {
+            return false;
+        }
+        // Below the lowest surface in this column is solid ground, not floodable —
+        // so the flood can't slip under a thin road sheet from its edges.
+        if let Some(&floor) = self
+            .floor_z
+            .get(&self.floor_key(min.x + size * 0.5, min.y + size * 0.5))
+            && min.z + size <= floor
+        {
+            return false;
+        }
+        true
+    }
+
+    /// Coarse xy-column key (at `near_voxel`) for the floor map.
+    fn floor_key(&self, x: f32, y: f32) -> (i32, i32) {
+        (
+            (x / self.near_voxel).floor() as i32,
+            (y / self.near_voxel).floor() as i32,
+        )
+    }
+
+    /// Record the lowest surface height per xy column: for every surface leaf,
+    /// stamp its bottom z into the floor map over its footprint, keeping the min.
+    fn compute_floor(&mut self) {
+        let surface: Vec<(Vec3, f32)> = self
+            .nodes
+            .iter()
+            .filter(|(_, n)| !n.internal && n.has_surface)
+            .map(|(&k, _)| self.cell_box(k))
+            .collect();
+        for (min, size) in surface {
+            let (kx0, ky0) = self.floor_key(min.x, min.y);
+            let (kx1, ky1) = self.floor_key(min.x + size, min.y + size);
+            for ky in ky0..=ky1 {
+                for kx in kx0..=kx1 {
+                    let e = self.floor_z.entry((kx, ky)).or_insert(f32::INFINITY);
+                    *e = e.min(min.z);
+                }
+            }
+        }
     }
 
     /// Leaf neighbours across a face (0:-x 1:+x 2:-y 3:+y 4:-z 5:+z), at any size.
