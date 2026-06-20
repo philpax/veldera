@@ -150,8 +150,8 @@ mod tests {
         let bounds = unpack_octant_mask_and_layer_bounds(&packed, &indices, &mut vertices).unwrap();
 
         // Each vertex should have w = its index (mod 8).
-        for i in 0..8 {
-            assert_eq!(vertices[i].w, i as u8);
+        for (i, vertex) in vertices.iter().enumerate() {
+            assert_eq!(vertex.w, i as u8);
         }
 
         // First layer bound at 0, second at 8.

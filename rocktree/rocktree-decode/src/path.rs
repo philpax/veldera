@@ -41,6 +41,10 @@ pub fn unpack_path_and_flags(path_and_flags: u32) -> PathAndFlags {
 
 #[cfg(test)]
 mod tests {
+    // The packed test values group their binary digits by the documented bit
+    // layout (path digits in threes, the level in twos), not in uniform nibbles.
+    #![allow(clippy::unusual_byte_groupings)]
+
     use super::*;
 
     fn p(s: &str) -> OctreePath {
@@ -88,8 +92,9 @@ mod tests {
 
     #[test]
     fn test_unpack_path_and_flags_with_flags() {
-        // Level 1, path = 0, flags = 5.
-        let packed = (5 << 5) | (0 << 2);
+        // Level 1, path = 0, flags = 5 — flags occupy bits 5+, path 0 contributes
+        // nothing.
+        let packed = 5 << 5;
         let result = unpack_path_and_flags(packed);
 
         assert_eq!(result.level, 1);
